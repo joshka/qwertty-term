@@ -1,0 +1,16 @@
+[package]
+name = "ghostty-rs"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = [".", "xtask"]
+default-members = ["."]
+
+[dependencies]
+base64 = "0.22.1"
+crossterm = "0.29.0"
+eframe = "0.34.2"
+portable-pty = "0.9.0"
+ttf-parser = "0.25.1"
+unicode-width = "0.2.2"
