@@ -16,7 +16,7 @@ Status legend: `—` not started · `WIP` · `done`
 | Differential harness (`ghostty-vt` vs libghostty-vt) | done (scaffold) | `crates/vt-diff`, feature `reference` (off by default; trunk green without Zig artifact); `Oracle` trait ready for the Rust side; 7/7 tests incl. 3 spike fixtures matching the reference; analysis: `docs/analysis/libghostty-vt-c-api.md` |
 | Fuzz targets (parser/stream) | — | after parser skeleton exists |
 | Criterion bench skeleton | — | |
-| Unicode table codegen (xtask) | WIP | verify against ghostty `props_table.zig` semantics |
+| Unicode table codegen (xtask) | done | `cargo xtask gen-unicode` (UCD 17.0.0 pinned, downloads gitignored); 3-stage LUT matching ghostty's format; **exact parity: 0 mismatches vs ghostty's generated table over all 1,114,112 codepoints**; analysis: `docs/analysis/unicode.md` |
 
 ## Phase 1 — VT core (`src/terminal/` → `crates/ghostty-vt`)
 
@@ -40,7 +40,7 @@ Status legend: `—` not started · `WIP` · `done`
 | Selection.zig / SelectionGesture.zig | — | — | — | |
 | formatter.zig | — | — | — | |
 | UTF8Decoder.zig | — | — | — | |
-| unicode/ (grapheme, tables) | — | — | — | codegen'd tables via xtask |
+| unicode/ (grapheme, tables) | done | done | 13 | ghostty `2da015cd6`; `grapheme_break` FSM (const-evaluated 8 KiB table), `codepoint_width`, VS15/VS16 effects; all inline tests from grapheme.zig/main.zig/c/unicode.zig ported; oracle cross-checks: 188 width + 3,915 break divergences, all classified (terminal tailorings); symbols table deferred to renderer phase |
 | bitmap_allocator.zig / ref_counted_set.zig / hash_map.zig | — | — | — | page-internal structures |
 
 Later phases: add tables as the phase opens (termio, font, renderer, input, config, core,
