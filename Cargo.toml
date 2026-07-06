@@ -2,6 +2,9 @@
 resolver = "3"
 members = ["crates/*", "xtask"]
 default-members = ["crates/*"]
+# cargo-fuzz target is its own workspace (needs nightly); keep it out so
+# `cargo check --workspace` stays green on stable.
+exclude = ["crates/ghostty-vt/fuzz"]
 
 [workspace.package]
 edition = "2024"

@@ -12,3 +12,12 @@ publish = false
 [dev-dependencies]
 unicode-segmentation = "1"
 unicode-width = "0.2"
+# Differential oracle only. Where semantics overlap, ghostty-vt is compared
+# against vte; documented divergences (see tests/parser_vte_differential.rs)
+# are intentional and not forced to parity.
+vte = "0.15"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "parser"
+harness = false
