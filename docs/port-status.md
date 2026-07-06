@@ -12,8 +12,8 @@ Status legend: `—` not started · `WIP` · `done`
 |---|---|---|
 | jj workspace restructure (`work/default` + chunks) | done | 2026-07-06 |
 | Cargo workspace skeleton (`crates/ghostty-vt`, `crates/spike`, `xtask`) | done | spike renamed `ghostty-spike`, all 67 tests green |
-| libghostty-vt reference build (Zig) | WIP | needed by differential harness |
-| Differential harness (`ghostty-vt` vs libghostty-vt) | WIP | scaffold in progress |
+| libghostty-vt reference build (Zig) | done | ghostty `2da015cd6`; `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` → `zig-out/lib/libghostty-vt.a`; note: header docs `max_scrollback` as lines but it is BYTES of page memory |
+| Differential harness (`ghostty-vt` vs libghostty-vt) | done (scaffold) | `crates/vt-diff`, feature `reference` (off by default; trunk green without Zig artifact); `Oracle` trait ready for the Rust side; 7/7 tests incl. 3 spike fixtures matching the reference; analysis: `docs/analysis/libghostty-vt-c-api.md` |
 | Fuzz targets (parser/stream) | — | after parser skeleton exists |
 | Criterion bench skeleton | — | |
 | Unicode table codegen (xtask) | WIP | verify against ghostty `props_table.zig` semantics |
