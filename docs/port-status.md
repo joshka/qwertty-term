@@ -22,7 +22,7 @@ Status legend: `—` not started · `WIP` · `done`
 
 | Zig file | Analysis | Port | Tests | Notes |
 |---|---|---|---|---|
-| page.zig | — | — | — | port FIRST (everything sits on it) |
+| page.zig | done | done | 26 (Zig 46, consolidated) | Miri clean (85 lib tests, caught+fixed a Stacked Borrows bug); deferred to PageList chunk: verifyIntegrity, clone/cloneBuf+mmap pool, swapCells, Style::bg plumbing; analysis: `docs/analysis/page-memory.md`; **verify consolidation coverage during PageList chunk** |
 | PageList.zig | — | — | — | signature design; pins, offsets |
 | Parser.zig | done | done | 25/25 | + table test; 14 vte differential tests, 4 divergences pinned (empty params, colon-non-m, param-overflow policy, utf8 ownership); analysis: `docs/analysis/vt-parser.md` |
 | stream.zig / stream_terminal.zig | — | — | — | |
@@ -32,16 +32,16 @@ Status legend: `—` not started · `WIP` · `done`
 | csi.zig | — | — | — | |
 | osc.zig + osc/parsers/ | — | — | — | parallelizable per-parser |
 | dcs.zig / apc.zig | — | — | — | |
-| style.zig / color.zig | — | — | — | |
+| style.zig / color.zig | done | partial | 8 (Zig 37, consolidated) | StyleSet done; color.rs basic (Rgb/Palette/Name); full color.zig deferred |
 | modes.zig / charsets.zig / Tabstops.zig | — | — | — | |
-| hyperlink.zig | — | — | — | |
+| hyperlink.zig | done | done | 0 (matches Zig) | PageEntry/HyperlinkSet data model |
 | kitty/graphics_*.zig | — | — | — | extraction candidate (protocol model) |
 | kitty/key.zig | — | — | — | |
 | Selection.zig / SelectionGesture.zig | — | — | — | |
 | formatter.zig | — | — | — | |
 | UTF8Decoder.zig | done | done | 3/3 | |
 | unicode/ (grapheme, tables) | done | done | 13 | ghostty `2da015cd6`; `grapheme_break` FSM (const-evaluated 8 KiB table), `codepoint_width`, VS15/VS16 effects; all inline tests from grapheme.zig/main.zig/c/unicode.zig ported; oracle cross-checks: 188 width + 3,915 break divergences, all classified (terminal tailorings); symbols table deferred to renderer phase |
-| bitmap_allocator.zig / ref_counted_set.zig / hash_map.zig | — | — | — | page-internal structures |
+| bitmap_allocator.zig / ref_counted_set.zig / hash_map.zig | done | done | 22/0/12 (Zig 21/0/22) | hash_map tests consolidated; unsafe boundaries documented per module |
 
 Later phases: add tables as the phase opens (termio, font, renderer, input, config, core,
 ffi, macOS).
