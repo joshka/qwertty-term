@@ -11,6 +11,7 @@ pub mod charsets;
 pub mod color;
 pub mod csi;
 pub mod modes;
+pub mod osc;
 pub mod page;
 pub mod pagelist;
 pub mod parser;
