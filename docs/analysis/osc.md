@@ -284,6 +284,11 @@ ported into `crates/ghostty-vt/src/osc/rgb.rs`: an `Rgb::parse` covering the
 `#rgb`/`#rrggbb`/`#rrrgggbbb`/`#rrrrggggbbbb`, bare `rgb`/`rrggbb`, and
 `rgb:h/hh/hhh/hhhh` / `rgbi:<float>/<float>/<float>` forms (`color.zig:642-
 699` in the Zig original), plus `Special`/`Dynamic` enums with `Dynamic::next`.
+> **RESOLVED (2026-07-06, osc-color-dedup chunk):** the divergences below about X11
+> named colors are obsolete. `osc` now delegates to `crate::color::Rgb::parse`
+> (full upstream grammar incl. X11 names from embedded `res/rgb.txt`); the local
+> `osc::rgb` parser was removed and named-color test cases restored.
+
 **X11 named colors are explicitly NOT ported** — `Rgb::parse` returns
 `Err` for a bare name like `"red"` for now, with a `// TODO(color chunk)`
 marker, since `x11_color.zig`'s ~700-entry `rgb.txt`-derived table is

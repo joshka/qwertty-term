@@ -1,181 +1,15 @@
-//! Minimal RGB color-spec parser, ported from `src/terminal/color.zig`
-//! (`RGB.parse`, `color.zig:642-699`, plus the tiny `Special`/`Dynamic`
-//! enums at `color.zig:416-464`).
+//! OSC-owned color support enums, ported from the tiny `Special`/`Dynamic`
+//! enums at `src/terminal/color.zig:416-464`.
 //!
-//! This is a support type from another chunk's file (`src/terminal/
-//! color.zig` belongs to the terminal-state/Screen area), ported minimally
-//! here because the OSC color parsers (4/5/10-19/21/104/110-119) need it to
-//! produce meaningful [`Rgb`] values in their `Command` payloads. Per
-//! `docs/analysis/osc.md`, only the hex and `rgb:`/`rgbi:` forms are ported;
-//! X11 named colors (`src/terminal/x11_color.zig`, a ~700-entry generated
-//! table) are explicitly NOT ported — that table is squarely the color.zig
-//! chunk's data file. `Rgb::parse("red")` therefore returns `Err` in this
-//! crate today; every OSC test in the Zig source that used a named color
-//! has been rewritten here to use the equivalent `#RRGGBB` literal, with a
-//! comment noting the substitution.
-
-/// A 24-bit RGB color spec, as produced by OSC 4/5/10-19/21 color requests.
-///
-/// This is intentionally a separate, minimal type from
-/// [`crate::color::Rgb`] (the page-memory color type) to keep this chunk's
-/// dependency surface small; the two have identical layout and a future
-/// integration pass can unify them (or `From`-convert) once the color.zig
-/// chunk lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl Rgb {
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    /// Parse a color specification. Port of `color.zig` `RGB.parse`
-    /// (`color.zig:642-699`).
-    ///
-    /// Leading and trailing spaces/tabs are ignored. Accepted forms:
-    ///
-    /// 1. `rgb:<red>/<green>/<blue>` where each component is 1-4 hex digits.
-    /// 2. `rgbi:<red>/<green>/<blue>` where each component is a float in
-    ///    `[0.0, 1.0]`.
-    /// 3. `#rgb`, `#rrggbb`, `rgb`, `rrggbb`, `#rrrgggbbb`, `#rrrrggggbbbb`.
-    /// 4. X11 color names — **not implemented**, see module docs.
-    pub fn parse(value: &str) -> Result<Rgb, InvalidFormat> {
-        let input = value.trim_matches(|c| c == ' ' || c == '\t');
-        if input.is_empty() {
-            return Err(InvalidFormat);
-        }
-
-        if let Some(hex) = input.strip_prefix('#') {
-            return match hex.len() {
-                3 => Ok(Rgb::new(
-                    from_hex(&hex[0..1])?,
-                    from_hex(&hex[1..2])?,
-                    from_hex(&hex[2..3])?,
-                )),
-                6 => Ok(Rgb::new(
-                    from_hex(&hex[0..2])?,
-                    from_hex(&hex[2..4])?,
-                    from_hex(&hex[4..6])?,
-                )),
-                9 => Ok(Rgb::new(
-                    from_hex(&hex[0..3])?,
-                    from_hex(&hex[3..6])?,
-                    from_hex(&hex[6..9])?,
-                )),
-                12 => Ok(Rgb::new(
-                    from_hex(&hex[0..4])?,
-                    from_hex(&hex[4..8])?,
-                    from_hex(&hex[8..12])?,
-                )),
-                _ => Err(InvalidFormat),
-            };
-        }
-
-        // Bare hex forms (no leading '#'), accepted for compatibility with
-        // Ghostty config/theme color values.
-        match input.len() {
-            3 => {
-                return Ok(Rgb::new(
-                    from_hex(&input[0..1])?,
-                    from_hex(&input[1..2])?,
-                    from_hex(&input[2..3])?,
-                ));
-            }
-            6 => {
-                return Ok(Rgb::new(
-                    from_hex(&input[0..2])?,
-                    from_hex(&input[2..4])?,
-                    from_hex(&input[4..6])?,
-                ));
-            }
-            _ => {}
-        }
-
-        if input.len() < "rgb:a/a/a".len() || &input[0..3] != "rgb" {
-            return Err(InvalidFormat);
-        }
-
-        let mut i = 3;
-        let use_intensity = if input.as_bytes().get(i) == Some(&b'i') {
-            i += 1;
-            true
-        } else {
-            false
-        };
-
-        if input.as_bytes().get(i) != Some(&b':') {
-            return Err(InvalidFormat);
-        }
-        i += 1;
-
-        let (r, next) = parse_component(input, i, use_intensity)?;
-        i = next;
-        let (g, next) = parse_component(input, i, use_intensity)?;
-        i = next;
-        let b = if use_intensity {
-            from_intensity(&input[i..])?
-        } else {
-            from_hex(&input[i..])?
-        };
-
-        Ok(Rgb::new(r, g, b))
-    }
-}
-
-/// Parse one `/`-delimited `rgb:`/`rgbi:` component starting at byte offset
-/// `start`, returning the component and the offset just past its trailing
-/// `/`.
-fn parse_component(
-    input: &str,
-    start: usize,
-    use_intensity: bool,
-) -> Result<(u8, usize), InvalidFormat> {
-    let rest = &input[start..];
-    let end = rest.find('/').ok_or(InvalidFormat)?;
-    let slice = &rest[..end];
-    let value = if use_intensity {
-        from_intensity(slice)?
-    } else {
-        from_hex(slice)?
-    };
-    Ok((value, start + end + 1))
-}
-
-/// Port of `color.zig` `RGB.fromHex`: parse 1-4 hex digits and scale to a
-/// full 8-bit channel value.
-fn from_hex(value: &str) -> Result<u8, InvalidFormat> {
-    if value.is_empty() || value.len() > 4 {
-        return Err(InvalidFormat);
-    }
-    let color = u16::from_str_radix(value, 16).map_err(|_| InvalidFormat)?;
-    let divisor: u32 = match value.len() {
-        1 => 0xF,
-        2 => 0xFF,
-        3 => 0xFFF,
-        4 => 0xFFFF,
-        _ => unreachable!(),
-    };
-    Ok(((color as u32) * 255 / divisor) as u8)
-}
-
-/// Port of `color.zig` `RGB.fromIntensity`: parse a float in `[0.0, 1.0]`
-/// and scale to a full 8-bit channel value.
-fn from_intensity(value: &str) -> Result<u8, InvalidFormat> {
-    let f: f64 = value.parse().map_err(|_| InvalidFormat)?;
-    if !(0.0..=1.0).contains(&f) {
-        return Err(InvalidFormat);
-    }
-    Ok((f * 255.0).round() as u8)
-}
-
-/// Error returned by [`Rgb::parse`]. Port of `color.zig`'s
-/// `error{InvalidFormat}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidFormat;
+//! The RGB color-spec parser itself (`RGB.parse`, `color.zig:642-699`,
+//! including X11 named colors) now lives in [`crate::color::Rgb::parse`] —
+//! it was ported there in full (hex forms, `rgb:`/`rgbi:`, and the X11
+//! name table) once the terminal-state/Screen chunk's `color.zig` port
+//! landed. This module previously carried its own minimal, X11-name-less
+//! `Rgb`/`Rgb::parse` (a stand-in ported ahead of that chunk); it has been
+//! removed in favor of the shared type now that both exist, restoring
+//! upstream's single-parser design (`color.zig:642`, used by every OSC
+//! color parser). See `docs/analysis/osc.md` divergence #1 (now resolved).
 
 /// The "special" colors addressable via OSC 5/104/105 and the kitty color
 /// protocol. Port of `color.zig` `Special` (`color.zig:416-437`).
@@ -245,41 +79,12 @@ impl Dynamic {
 mod tests {
     use super::*;
 
-    // Zig: color.zig "RGB.parse" (partial; only the forms this chunk
-    // ported are re-checked here as a sanity cross-check of `Rgb::parse`
-    // itself, ahead of the OSC-level tests in `osc/parsers/color.rs` that
-    // exercise it through the parser).
-    #[test]
-    fn parse_hex_forms() {
-        assert_eq!(Rgb::parse("#AABBCC").unwrap(), Rgb::new(170, 187, 204));
-        assert_eq!(Rgb::parse("aabbcc").unwrap(), Rgb::new(170, 187, 204));
-        assert_eq!(Rgb::parse("#abc").unwrap(), Rgb::new(0xAA, 0xBB, 0xCC));
-    }
-
-    #[test]
-    fn parse_rgb_colon_forms() {
-        assert_eq!(Rgb::parse("rgb:7f/a0a0/0").unwrap(), Rgb::new(127, 160, 0));
-        assert_eq!(Rgb::parse("rgb:f/ff/fff").unwrap(), Rgb::new(255, 255, 255));
-    }
-
-    #[test]
-    fn parse_rgbi_colon_forms() {
-        assert_eq!(
-            Rgb::parse("rgbi:1.0/1.0/1.0").unwrap(),
-            Rgb::new(255, 255, 255)
-        );
-        assert_eq!(Rgb::parse("rgbi:0.0/0.0/0.0").unwrap(), Rgb::new(0, 0, 0));
-    }
-
-    #[test]
-    fn parse_invalid() {
-        assert!(Rgb::parse("").is_err());
-        assert!(Rgb::parse("rgb:").is_err());
-        assert!(Rgb::parse("rgb:a/a/a/").is_err());
-        assert!(Rgb::parse("rgb:00000///").is_err());
-        assert!(Rgb::parse("rgb:000/").is_err());
-        assert!(Rgb::parse("not/hex/zz").is_err());
-    }
+    // `Rgb::parse` cross-check tests formerly here (parse_hex_forms,
+    // parse_rgb_colon_forms, parse_rgbi_colon_forms, parse_invalid) moved
+    // to `crate::color::mod`'s `rgb_parse` test alongside the rest of
+    // `Rgb::parse`'s coverage (including X11 names), now that this module
+    // no longer defines its own `Rgb` type. See docs/analysis/osc.md
+    // divergence #1.
 
     #[test]
     fn dynamic_next_chain() {

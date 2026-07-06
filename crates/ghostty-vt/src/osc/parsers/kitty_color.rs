@@ -2,7 +2,7 @@
 //! (parser) + `src/terminal/kitty/color.zig` (the `OSC`/`Kind` support
 //! type, ported minimally as it's tiny and OSC-owned in spirit).
 
-use crate::osc::rgb::Rgb;
+use crate::color::Rgb;
 use crate::osc::{Command, Terminator};
 
 /// A color-protocol key: either a named special slot or a palette index.

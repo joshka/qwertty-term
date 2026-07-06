@@ -1,7 +1,8 @@
 //! OSC 4,5,10-19,104,105,110-119: color get/set/reset operations. Port of
 //! `osc/parsers/color.zig`.
 
-use crate::osc::rgb::{Dynamic, InvalidFormat, Rgb, Special};
+use crate::color::{ParseColorError, Rgb};
+use crate::osc::rgb::{Dynamic, Special};
 use crate::osc::{Command, Terminator};
 
 /// The OSC number a color request came in on. Port of `color.zig`
@@ -135,22 +136,26 @@ fn parse_color(op: Op, buf: &str) -> ColorList {
     }
 }
 
-fn ansi_target(op: Op, color: u32) -> Result<ColorTarget, InvalidFormat> {
+fn ansi_target(op: Op, color: u32) -> Result<ColorTarget, ParseColorError> {
     match op {
         Op::Osc5 => {
-            let idx: u8 = color.try_into().map_err(|_| InvalidFormat)?;
+            let idx: u8 = color
+                .try_into()
+                .map_err(|_| ParseColorError::InvalidFormat)?;
             Special::from_u8(idx)
                 .map(ColorTarget::Special)
-                .ok_or(InvalidFormat)
+                .ok_or(ParseColorError::InvalidFormat)
         }
         Op::Osc4 => {
             if let Ok(idx) = u8::try_from(color) {
                 Ok(ColorTarget::Palette(idx))
             } else {
-                let idx: u8 = (color - 256).try_into().map_err(|_| InvalidFormat)?;
+                let idx: u8 = (color - 256)
+                    .try_into()
+                    .map_err(|_| ParseColorError::InvalidFormat)?;
                 Special::from_u8(idx)
                     .map(ColorTarget::Special)
-                    .ok_or(InvalidFormat)
+                    .ok_or(ParseColorError::InvalidFormat)
             }
         }
         _ => unreachable!(),
