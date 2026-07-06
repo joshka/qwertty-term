@@ -13,7 +13,7 @@ use crossterm::{
     },
     terminal::{self as term, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ghostty_rs::{AnsiColor, Color, CursorShape, Style, Terminal};
+use ghostty_spike::{AnsiColor, Color, CursorShape, Style, Terminal};
 
 mod pty;
 mod window;

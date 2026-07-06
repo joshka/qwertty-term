@@ -1,5 +1,5 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
-use ghostty_rs::{Cell, CursorShape, Style, Terminal};
+use ghostty_spike::{Cell, CursorShape, Style, Terminal};
 use unicode_width::UnicodeWidthChar;
 
 use crate::window::{
@@ -377,7 +377,7 @@ fn paint_text_decorations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghostty_rs::{AnsiColor, Color};
+    use ghostty_spike::{AnsiColor, Color};
 
     #[test]
     fn render_plan_skips_wide_continuations() {

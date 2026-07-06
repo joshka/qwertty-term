@@ -1289,7 +1289,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghostty-rs"
+name = "ghostty-spike"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -1299,6 +1299,10 @@ dependencies = [
  "ttf-parser",
  "unicode-width",
 ]
+
+[[package]]
+name = "ghostty-vt"
+version = "0.0.0"
 
 [[package]]
 name = "gl_generator"

@@ -1,31 +1,42 @@
 # Agent Guidance
 
-Use this file as the repo-local map. Keep project-specific rules here and route to
-`docs/development/` for shared guidance instead of expanding this file into a full manual.
+**Start here: `docs/rewrite-prompt.md`** — the driving prompt for this project (a full Rust
+rewrite of Ghostty). Read it, then `docs/roadmap.md` and `docs/handoff.md` for current state,
+then continue from the next incomplete milestone. This file only covers repo mechanics.
+
+## Repo layout and version control
+
+- Version control is **jj** (colocated git). The repo root (`~/local/ghostty-rs`) holds only
+  `.git`, `.jj`, and `work/`. All checkouts live under `work/`:
+  - `work/default` — the integration workspace (trunk). Integrate and commit here.
+  - `work/<chunk>` — one jj workspace per parallel work chunk (see the parallel execution
+    model in the rewrite prompt). Created/retired by the orchestrating session.
+  - `work/qwertty/` — shared drop-box with the qwertty project. NOT a jj workspace; never
+    `jj workspace add` over it, never track its files.
+- Advance `main` with `jj bookmark move main --to <rev>` after landing work on trunk.
+- Cargo workspace: `crates/*` + `xtask`. `crates/ghostty-vt` is the terminal core (Phase 1);
+  `crates/spike` is the pre-rewrite prototype kept as scaffolding and Phase-2 debug frontend.
 
 ## Local Project Rules
 
-- This is a Rust binary crate using Cargo and edition 2024.
-- Follow existing Rust style and keep changes small, atomic, and reviewable.
+- Rust, edition 2024. Follow existing style; keep changes small, atomic, and reviewable.
+- Keep trunk compilable: `cargo check --workspace` must pass at every integration point.
+- The Zig source at `~/local/ghostty` is the spec; port its inline tests with each module.
+- Track port/test/analysis status in `docs/port-status.md`; deviations from ghostty's design
+  get ADRs in `docs/adr/`.
 - Preserve unowned human or agent work.
 - Report validation evidence in handoffs instead of confidence language.
-- Use the validation commands below before handoff.
 
 ## Validation
 
-Run the checks that match the files changed. For normal Rust changes, run:
-
 ```bash
-cargo check
+cargo check --workspace
 cargo fmt --check
-cargo test
+cargo clippy --workspace
+cargo test --workspace
 ```
 
-For Markdown changes, run:
-
-```bash
-markdownlint-cli2 "**/*.md"
-```
+For Markdown changes: `markdownlint-cli2 "**/*.md"`.
 
 ## Shared Development Preferences
 

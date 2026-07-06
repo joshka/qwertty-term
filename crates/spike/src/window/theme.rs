@@ -1,5 +1,5 @@
 use eframe::egui::Color32;
-use ghostty_rs::{AnsiColor, Color, Style};
+use ghostty_spike::{AnsiColor, Color, Style};
 
 pub(super) fn colors(style: Style) -> (Color32, Color32) {
     let mut fg = style

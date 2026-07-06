@@ -4,7 +4,7 @@ use eframe::egui::{
     self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Vec2,
     ViewportCommand,
 };
-use ghostty_rs::{Cell, MouseTracking, Terminal};
+use ghostty_spike::{Cell, MouseTracking, Terminal};
 
 use crate::pty::{PtyResult, PtySession};
 

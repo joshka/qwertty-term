@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use ghostty_rs::Terminal;
+use ghostty_spike::Terminal;
 
 #[test]
 fn replay_fixtures_match_expected_screen() {
