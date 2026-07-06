@@ -23,7 +23,7 @@ Status legend: `—` not started · `WIP` · `done`
 | Zig file | Analysis | Port | Tests | Notes |
 |---|---|---|---|---|
 | page.zig | done | done | 26 (Zig 46, consolidated) | Miri clean (85 lib tests, caught+fixed a Stacked Borrows bug); deferred to PageList chunk: verifyIntegrity, clone/cloneBuf+mmap pool, swapCells, Style::bg plumbing; analysis: `docs/analysis/page-memory.md`; **verify consolidation coverage during PageList chunk** |
-| PageList.zig | — | — | — | signature design; pins, offsets |
+| PageList.zig | done | done | 102 (Zig 205; 17 highlight tests → highlight chunk, tripwire-alloc N/A, resize permutations covered by 25 representative) | pools/pins/viewport/scroll/erase/clone/split/compact + full reflow; Miri: pagelist 92/92 + page 73/73 scoped (10 pathological tests normal-runner-only); Page verify_integrity completed (was no-op) — consolidated Page tests held up; analysis: `docs/analysis/pagelist.md` |
 | Parser.zig | done | done | 25/25 | + table test; 14 vte differential tests, 4 divergences pinned (empty params, colon-non-m, param-overflow policy, utf8 ownership); analysis: `docs/analysis/vt-parser.md` |
 | stream.zig / stream_terminal.zig | — | — | — | |
 | Terminal.zig | — | — | — | 50+ inline tests |
