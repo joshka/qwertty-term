@@ -7,6 +7,7 @@
 //! Port order and design constraints are defined in `docs/rewrite-prompt.md` (Phase 1).
 //! The Zig source is the spec; every ported module ports its inline tests.
 
+pub mod color;
 pub mod page;
 pub mod parser;
 pub mod unicode;
