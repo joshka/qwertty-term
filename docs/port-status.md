@@ -30,7 +30,7 @@ Status legend: `—` not started · `WIP` · `done`
 | Screen.zig | — | — | — | |
 | sgr.zig | done | done | 30 (Zig 31; 1 C-ABI-only N/A) | colon/semicolon rules only for params 4/38/48/58; fuzzer crash case `ESC[58:4:m` pinned |
 | csi.zig | done | done | 5 (Zig 0) | net-new tests |
-| osc.zig + osc/parsers/ | — | — | — | parallelizable per-parser |
+| osc.zig + osc/parsers/ | done | done | 269/269 (+12 new) | all 25 Command variants; zero parser changes (seam held); prefix trie flattened to string match (equivalent); X11-name unification in flight (dedup chunk); analysis: `docs/analysis/osc.md` |
 | dcs.zig / apc.zig | — | — | — | |
 | style.zig / color.zig | done | done | 8 + 26 | StyleSet done; full color port (X11 names via embedded rgb.txt, CIELAB 256-cube light/dark logic, RGB.parse grammar); analysis: `docs/analysis/terminal-state.md` |
 | modes.zig / charsets.zig / Tabstops.zig | done | done | 12/3/5 (Zig 12/1/5) | modes table via macro_rules!; bitsets → plain arrays (not load-bearing) |
