@@ -14,8 +14,8 @@ Status legend: `—` not started · `WIP` · `done`
 | Cargo workspace skeleton (`crates/ghostty-vt`, `crates/spike`, `xtask`) | done | spike renamed `ghostty-spike`, all 67 tests green |
 | libghostty-vt reference build (Zig) | done | ghostty `2da015cd6`; `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` → `zig-out/lib/libghostty-vt.a`; note: header docs `max_scrollback` as lines but it is BYTES of page memory |
 | Differential harness (`ghostty-vt` vs libghostty-vt) | done (scaffold) | `crates/vt-diff`, feature `reference` (off by default; trunk green without Zig artifact); `Oracle` trait ready for the Rust side; 7/7 tests incl. 3 spike fixtures matching the reference; analysis: `docs/analysis/libghostty-vt-c-api.md` |
-| Fuzz targets (parser/stream) | — | after parser skeleton exists |
-| Criterion bench skeleton | — | |
+| Fuzz targets (parser/stream) | done (target) | `crates/ghostty-vt/fuzz` (own workspace); parser+utf8 no-panic target compiles on nightly; campaign pending `cargo install cargo-fuzz`, then `cargo +nightly fuzz run parser -- -max_total_time=60` |
+| Criterion bench skeleton | done | baselines: ascii ~108 MiB/s, sgr ~104 MiB/s, utf8_mixed ~437 MiB/s (untuned) |
 | Unicode table codegen (xtask) | done | `cargo xtask gen-unicode` (UCD 17.0.0 pinned, downloads gitignored); 3-stage LUT matching ghostty's format; **exact parity: 0 mismatches vs ghostty's generated table over all 1,114,112 codepoints**; analysis: `docs/analysis/unicode.md` |
 
 ## Phase 1 — VT core (`src/terminal/` → `crates/ghostty-vt`)
@@ -24,7 +24,7 @@ Status legend: `—` not started · `WIP` · `done`
 |---|---|---|---|---|
 | page.zig | — | — | — | port FIRST (everything sits on it) |
 | PageList.zig | — | — | — | signature design; pins, offsets |
-| Parser.zig | — | — | — | |
+| Parser.zig | done | done | 25/25 | + table test; 14 vte differential tests, 4 divergences pinned (empty params, colon-non-m, param-overflow policy, utf8 ownership); analysis: `docs/analysis/vt-parser.md` |
 | stream.zig / stream_terminal.zig | — | — | — | |
 | Terminal.zig | — | — | — | 50+ inline tests |
 | Screen.zig | — | — | — | |
@@ -39,7 +39,7 @@ Status legend: `—` not started · `WIP` · `done`
 | kitty/key.zig | — | — | — | |
 | Selection.zig / SelectionGesture.zig | — | — | — | |
 | formatter.zig | — | — | — | |
-| UTF8Decoder.zig | — | — | — | |
+| UTF8Decoder.zig | done | done | 3/3 | |
 | unicode/ (grapheme, tables) | done | done | 13 | ghostty `2da015cd6`; `grapheme_break` FSM (const-evaluated 8 KiB table), `codepoint_width`, VS15/VS16 effects; all inline tests from grapheme.zig/main.zig/c/unicode.zig ported; oracle cross-checks: 188 width + 3,915 break divergences, all classified (terminal tailorings); symbols table deferred to renderer phase |
 | bitmap_allocator.zig / ref_counted_set.zig / hash_map.zig | — | — | — | page-internal structures |
 
