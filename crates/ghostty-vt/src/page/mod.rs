@@ -22,6 +22,29 @@ pub mod style;
 mod page_impl;
 
 pub use page_impl::{
-    Capacity, Cell, CloneFromError, ContentTag, GraphemeError, InsertHyperlinkError, OutOfMemory,
-    Page, Row, SemanticContent, SemanticPrompt, Size, Wide,
+    Capacity, Cell, CloneFromError, ContentTag, GraphemeError, InsertHyperlinkError,
+    IntegrityError, OutOfMemory, Page, ReflowManagedError, Row, SemanticContent, SemanticPrompt,
+    Size, Wide,
 };
+
+/// The byte size of a standard-capacity page's layout. Used by PageList to size its
+/// pool item and decide pooled-vs-non-standard pages. Port of `PageList.std_size`.
+pub fn size_of_std_page() -> usize {
+    page_impl::Layout::compute(Capacity::std()).total_size
+}
+
+/// The byte length of a page's backing memory. Used by PageList byte accounting.
+pub fn page_byte_len(page: &Page) -> usize {
+    page.byte_len()
+}
+
+/// The total layout byte size for a capacity. Used by PageList's `increaseCapacity`
+/// to detect capacities that overflow the max page size.
+pub fn layout_total_size(cap: Capacity) -> usize {
+    page_impl::Layout::compute(cap).total_size
+}
+
+/// The default style ID (0). Re-exported for PageList reflow.
+pub fn style_default_id() -> style::Id {
+    style::DEFAULT_ID
+}

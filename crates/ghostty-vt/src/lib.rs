@@ -9,7 +9,9 @@
 
 pub mod color;
 pub mod page;
+pub mod pagelist;
 pub mod parser;
+pub mod point;
 pub mod unicode;
 pub mod utf8_decoder;
 

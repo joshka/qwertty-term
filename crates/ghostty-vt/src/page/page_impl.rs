@@ -441,6 +441,13 @@ impl Cell {
     pub fn has_grapheme(self) -> bool {
         self.content_tag() == ContentTag::CodepointGrapheme
     }
+
+    /// True if any cell in the slice has text. Port of `Cell.hasTextAny`
+    /// (`page.zig`). Used by PageList's trailing-blank-row trimming.
+    #[inline]
+    pub fn has_text_any(cells: &[Cell]) -> bool {
+        cells.iter().any(|c| c.has_text())
+    }
 }
 
 // ---- Size / Capacity (page.zig:1791-1905) ----
@@ -689,6 +696,39 @@ impl From<GraphemeError> for CloneFromError {
     }
 }
 
+/// The capacity dimension exhausted during a reflow cell copy, so the caller
+/// (`ReflowCursor`) knows which capacity to grow before retrying. Mirrors the
+/// `IncreaseCapacity` cases used in `writeCell` plus `Rehash` (grow with no
+/// dimension change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflowManagedError {
+    Styles,
+    GraphemeBytes,
+    HyperlinkBytes,
+    StringBytes,
+    Rehash,
+}
+
+/// Page integrity violations. Port of `page.zig` `IntegrityError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityError {
+    ZeroRowCount,
+    ZeroColCount,
+    MissingGraphemeData,
+    UnmarkedGraphemeCell,
+    UnmarkedStyleRow,
+    MissingHyperlinkData,
+    UnmarkedHyperlinkRow,
+    UnmarkedHyperlinkCell,
+    InvalidSpacerTailLocation,
+    InvalidSpacerHeadLocation,
+    UnwrappedSpacerHead,
+    UnmarkedGraphemeRow,
+    InvalidGraphemeCount,
+    MismatchedStyleRef,
+    MismatchedHyperlinkRef,
+}
+
 // ---- Page ----
 
 /// A page: one contiguous, offset-addressed block holding a grid and its side
@@ -718,6 +758,12 @@ pub struct Page {
 
     pub size: Size,
     pub capacity: Capacity,
+
+    /// Debug-only suspend counter for [`Page::assert_integrity`]. Incremented
+    /// while an operation temporarily leaves the page inconsistent (e.g. reflow
+    /// clone). Zero in release builds (the field costs a word but keeps the API
+    /// uniform). Port of `page.zig` `pause_integrity_checks`.
+    pause_integrity: usize,
 }
 
 impl Drop for Page {
@@ -745,6 +791,12 @@ impl Page {
     #[inline]
     pub fn memory_mut(&mut self) -> *mut u8 {
         self.mem
+    }
+
+    /// The byte length of this page's backing memory (its layout total size).
+    #[inline]
+    pub fn byte_len(&self) -> usize {
+        self.mem_len
     }
 
     /// Allocate a new page with page-aligned zeroed backing memory. Port of
@@ -827,6 +879,7 @@ impl Page {
                 rows: cap.rows,
             },
             capacity: cap,
+            pause_integrity: 0,
         }
     }
 
@@ -848,14 +901,146 @@ impl Page {
         }
     }
 
-    /// Debug-only integrity assertion. Port of `assertIntegrity`.
-    ///
-    /// The full `verify_integrity` port is deferred to the PageList chunk (it is
-    /// debug-only and needs the row/cell/map/set cross-checks); this is the
-    /// hook operations call.
+    /// Debug-only integrity assertion. Port of `assertIntegrity`. Runs
+    /// [`Page::verify_integrity`] under `debug_assertions` and panics on
+    /// violation; a no-op in release builds.
     #[inline]
-    fn assert_integrity(&self) {
-        // Deferred: full verify_integrity. No-op keeps the call sites in place.
+    pub(crate) fn assert_integrity(&self) {
+        #[cfg(debug_assertions)]
+        {
+            if self.pause_integrity > 0 {
+                return;
+            }
+            if let Err(e) = self.verify_integrity() {
+                panic!("page integrity check failed: {e:?}");
+            }
+        }
+    }
+
+    /// Suspend/resume integrity checks across a multi-step mutation. Port of
+    /// `pauseIntegrityChecks`.
+    #[inline]
+    pub(crate) fn pause_integrity_checks(&mut self, pause: bool) {
+        #[cfg(debug_assertions)]
+        {
+            if pause {
+                self.pause_integrity += 1;
+            } else {
+                self.pause_integrity -= 1;
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = pause;
+        }
+    }
+
+    /// Full page integrity verification. Port of `page.zig` `verifyIntegrity`.
+    ///
+    /// Checks grapheme flag ⇔ map presence, style presence + row.styled flag +
+    /// ref-count floor, hyperlink flag ⇔ map + row flag + live set entry,
+    /// spacer_tail/spacer_head placement, and per-row grapheme flag. The zombie
+    /// style check is disabled upstream (fast paths can leave them) so we omit
+    /// it. Debug/test only.
+    pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
+        use std::collections::HashMap;
+
+        if self.size.rows == 0 {
+            return Err(IntegrityError::ZeroRowCount);
+        }
+        if self.size.cols == 0 {
+            return Err(IntegrityError::ZeroColCount);
+        }
+
+        let mut graphemes_seen: usize = 0;
+        let mut styles_seen: HashMap<style::Id, usize> = HashMap::new();
+        let mut hyperlinks_seen: HashMap<hyperlink::Id, usize> = HashMap::new();
+        let grapheme_count = self.grapheme_count();
+
+        // SAFETY: rows/cells regions valid; we read within size bounds.
+        unsafe {
+            let rows = self.rows.ptr(self.mem);
+            for y in 0..self.size.rows as usize {
+                let row = rows.add(y);
+                let graphemes_start = graphemes_seen;
+                let cells = (*row).cells().ptr(self.mem);
+                for x in 0..self.size.cols as usize {
+                    let cell = cells.add(x);
+
+                    if (*cell).has_grapheme() {
+                        if self.lookup_grapheme(cell).is_none() {
+                            return Err(IntegrityError::MissingGraphemeData);
+                        }
+                        graphemes_seen += 1;
+                    } else if grapheme_count > 0 && self.lookup_grapheme(cell).is_some() {
+                        return Err(IntegrityError::UnmarkedGraphemeCell);
+                    }
+
+                    if (*cell).style_id() != style::DEFAULT_ID {
+                        // `get` asserts the id is live.
+                        let _ = self.styles.get(self.mem, (*cell).style_id());
+                        if !(*row).styled() {
+                            return Err(IntegrityError::UnmarkedStyleRow);
+                        }
+                        *styles_seen.entry((*cell).style_id()).or_insert(0) += 1;
+                    }
+
+                    if (*cell).hyperlink() {
+                        let id = self
+                            .lookup_hyperlink(cell)
+                            .ok_or(IntegrityError::MissingHyperlinkData)?;
+                        if !(*row).hyperlink() {
+                            return Err(IntegrityError::UnmarkedHyperlinkRow);
+                        }
+                        *hyperlinks_seen.entry(id).or_insert(0) += 1;
+                        let _ = self.hyperlink_set.get(self.mem, id);
+                    } else if self.lookup_hyperlink(cell).is_some() {
+                        return Err(IntegrityError::UnmarkedHyperlinkCell);
+                    }
+
+                    match (*cell).wide() {
+                        Wide::Narrow | Wide::Wide => {}
+                        Wide::SpacerTail => {
+                            if x == 0 {
+                                return Err(IntegrityError::InvalidSpacerTailLocation);
+                            }
+                            if (*cells.add(x - 1)).wide() != Wide::Wide {
+                                return Err(IntegrityError::InvalidSpacerTailLocation);
+                            }
+                        }
+                        Wide::SpacerHead => {
+                            if x != self.size.cols as usize - 1 {
+                                return Err(IntegrityError::InvalidSpacerHeadLocation);
+                            }
+                            if !(*row).wrap() {
+                                return Err(IntegrityError::UnwrappedSpacerHead);
+                            }
+                        }
+                    }
+                }
+
+                if graphemes_seen > graphemes_start && !(*row).grapheme() {
+                    return Err(IntegrityError::UnmarkedGraphemeRow);
+                }
+            }
+
+            if graphemes_seen > self.grapheme_count() {
+                return Err(IntegrityError::InvalidGraphemeCount);
+            }
+
+            for (&id, &seen) in &styles_seen {
+                if (self.styles.ref_count(self.mem, id) as usize) < seen {
+                    return Err(IntegrityError::MismatchedStyleRef);
+                }
+            }
+            for (&id, &seen) in &hyperlinks_seen {
+                if (self.hyperlink_set.ref_count(self.mem, id) as usize) < seen {
+                    return Err(IntegrityError::MismatchedHyperlinkRef);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // ---- accessors (page.zig:1030-1061) ----
@@ -1761,6 +1946,116 @@ impl Page {
     unsafe fn styles_get(&self, id: style::Id) -> *const Style {
         // SAFETY: id valid per caller.
         unsafe { self.styles.get(self.mem, id) as *const Style }
+    }
+
+    /// Copy the managed memory (grapheme / hyperlink / style) of a source cell
+    /// into an already-basic-initialized destination cell, for reflow. Port of
+    /// the managed-memory section of `PageList.zig` `ReflowCursor.writeCell`
+    /// (`:1552-1802`).
+    ///
+    /// The destination cell must already have its unmanaged bits set and its
+    /// managed markers cleared (content_tag=codepoint, hyperlink=false,
+    /// style_id=default) — the caller does this. This copies only the managed
+    /// side tables. On capacity exhaustion it returns the exhausted dimension so
+    /// the caller can grow the page and retry the whole cell; it does NOT modify
+    /// capacity itself. Partial managed writes on error are left in a valid state
+    /// (the caller's page-grow reinit discards uncommitted managed memory).
+    ///
+    /// # Safety
+    ///
+    /// `src_page` valid; `src_cell` a cell of `src_page`; `dst_row`/`dst_cell`
+    /// valid cells of `self`.
+    pub unsafe fn reflow_copy_managed(
+        &mut self,
+        src_page: *const Page,
+        src_cell: *const Cell,
+        dst_row: *mut Row,
+        dst_cell: *mut Cell,
+    ) -> Result<(), ReflowManagedError> {
+        // SAFETY: pointers valid per caller contract.
+        unsafe {
+            let mem = self.mem;
+            let src_mem = (*src_page).mem;
+
+            // Grapheme data.
+            if (*src_cell).content_tag() == ContentTag::CodepointGrapheme {
+                let cps = &*(*src_page).lookup_grapheme(src_cell).unwrap();
+
+                if self.grapheme_count() >= self.grapheme_capacity() {
+                    return Err(ReflowManagedError::GraphemeBytes);
+                }
+                // Probe that we can allocate the grapheme bytes.
+                match self.grapheme_alloc.alloc::<u32>(mem, cps.len()) {
+                    Ok(slice) => self.grapheme_alloc.free(mem, slice),
+                    Err(_) => return Err(ReflowManagedError::GraphemeBytes),
+                }
+                // This must succeed now; on failure degrade to replacement char.
+                if self.set_graphemes(dst_row, dst_cell, cps).is_err() {
+                    (*dst_cell).set_content_tag(ContentTag::Codepoint);
+                    (*dst_cell).set_codepoint(0xFFFD);
+                }
+            }
+
+            // Hyperlink data.
+            if (*src_cell).hyperlink() {
+                let src_id = (*src_page).lookup_hyperlink(src_cell).unwrap();
+                let src_link = *(*src_page).hyperlink_set_get(src_id);
+
+                if self.hyperlink_count() >= self.hyperlink_capacity() {
+                    return Err(ReflowManagedError::HyperlinkBytes);
+                }
+
+                let additional = src_link.uri.len
+                    + match src_link.id {
+                        EntryId::Explicit(s) => s.len,
+                        EntryId::Implicit(_) => 0,
+                    };
+                match self.string_alloc.alloc::<u8>(mem, additional) {
+                    Ok(slice) => self.string_alloc.free(mem, slice),
+                    Err(_) => return Err(ReflowManagedError::StringBytes),
+                }
+
+                let dst_alloc: *mut StringAlloc = &raw mut self.string_alloc;
+                let dst_link = match src_link.dupe(src_mem, mem, dst_alloc) {
+                    Ok(l) => l,
+                    Err(_) => return Err(ReflowManagedError::StringBytes),
+                };
+
+                self.bind_hyperlink_ctx();
+                let dst_id = match self.hyperlink_set.add_with_id(mem, dst_link, src_id) {
+                    Ok(Some(i)) => i,
+                    Ok(None) => src_id,
+                    Err(AddError::OutOfMemory) => {
+                        dst_link.free(mem, dst_alloc);
+                        return Err(ReflowManagedError::HyperlinkBytes);
+                    }
+                    Err(AddError::NeedsRehash) => {
+                        dst_link.free(mem, dst_alloc);
+                        return Err(ReflowManagedError::Rehash);
+                    }
+                };
+
+                if self.set_hyperlink(dst_row, dst_cell, dst_id).is_err() {
+                    self.bind_hyperlink_ctx();
+                    self.hyperlink_set.release(mem, dst_id);
+                    (*dst_cell).set_hyperlink(false);
+                }
+            }
+
+            // Style data.
+            if (*src_cell).has_styling() {
+                let style = *(*src_page).styles_get((*src_cell).style_id());
+                let id = match self.styles.add_with_id(mem, style, (*src_cell).style_id()) {
+                    Ok(Some(i)) => i,
+                    Ok(None) => (*src_cell).style_id(),
+                    Err(AddError::OutOfMemory) => return Err(ReflowManagedError::Styles),
+                    Err(AddError::NeedsRehash) => return Err(ReflowManagedError::Rehash),
+                };
+                (*dst_row).set_styled(true);
+                (*dst_cell).set_style_id(id);
+            }
+        }
+        Ok(())
     }
 }
 
