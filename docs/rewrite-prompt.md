@@ -438,13 +438,19 @@ Rules:
   just at the end. Prefer landing compiling stubs over long-lived broken branches. Each
   workspace has its own `target/` (don't share `CARGO_TARGET_DIR` across parallel builds —
   lock contention); disk is the accepted cost.
-- **Right-size the model per chunk.** Mechanical, well-specified work (porting an enumerated
-  list of OSC parsers, transcribing inline tests, codegen plumbing, doc write-ups from an
-  existing analysis) → smaller/cheaper models (haiku/sonnet-class). Design-heavy or
-  invariant-heavy work (PageList/page memory model, renderer swap chain, threading, FFI
-  boundary, anything with `unsafe`) → the strongest available model. When in doubt, or when a
-  cheap-model chunk fails its gate twice, escalate one tier. The orchestrator (integration,
-  conflict resolution, ADRs, phase decisions) always runs on the strong model.
+- **Right-size the model per chunk — default DOWN, escalate on evidence.** Concrete tiers:
+  **Sonnet** for mechanical, well-specified work (porting an enumerated list of OSC parsers,
+  transcribing inline tests, codegen plumbing, doc write-ups from an existing analysis,
+  exploration/survey agents). **Opus** is the default for ordinary porting chunks, including
+  design-y ones (parser, stream, selection, config, most of the renderer). **Top-tier
+  (Fable-class) only by exception**, for the small set of chunks where subtle invariants
+  make failure expensive (page/PageList unsafe memory core, FFI boundary design, threading
+  redesign) — and even there, prefer Opus-first with a top-tier *verification* pass over
+  top-tier doing the whole chunk. When a cheaper chunk fails its gate twice, escalate one
+  tier. The orchestrating session does integration, conflict resolution, ADRs, and phase
+  decisions itself; it should not burn top-tier budget on work a delegated Opus/Sonnet
+  agent can do. Rationale: top-tier session budget is the scarce resource — spend it on
+  judgment, not transcription.
 
 ## Working rules for agents
 
