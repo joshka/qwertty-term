@@ -68,7 +68,11 @@ impl SepList {
     /// The empty separator list (all semicolons).
     pub const EMPTY: SepList = SepList(0);
 
-    fn set(&mut self, index: usize) {
+    /// Mark the separator after param `index` as a colon. `pub(crate)`
+    /// because sibling modules (e.g. `sgr`) construct `SepList`s directly in
+    /// their own tests to mirror the Zig `sgr.zig` tests, which build
+    /// `Action.CSI.SepList` values by hand the same way.
+    pub(crate) fn set(&mut self, index: usize) {
         debug_assert!(index < MAX_PARAMS);
         self.0 |= 1 << index;
     }
