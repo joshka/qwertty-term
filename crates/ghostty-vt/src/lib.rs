@@ -8,6 +8,7 @@
 //! The Zig source is the spec; every ported module ports its inline tests.
 
 pub mod page;
+pub mod unicode;
 
 /// Crate version, exposed for the differential harness's report headers.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

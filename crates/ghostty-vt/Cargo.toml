@@ -8,3 +8,7 @@ description = "Terminal emulation core ported from Ghostty: VT parser, terminal 
 publish = false
 
 [dependencies]
+
+[dev-dependencies]
+unicode-segmentation = "1"
+unicode-width = "0.2"

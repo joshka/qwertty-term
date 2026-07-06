@@ -1,3 +1,5 @@
+mod gen_unicode;
+
 use std::{
     env,
     error::Error,
@@ -14,8 +16,9 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("bundle") => bundle(args.any(|arg| arg == "--release")),
+        Some("gen-unicode") => gen_unicode::run(),
         _ => {
-            eprintln!("usage: cargo run -p xtask -- bundle [--release]");
+            eprintln!("usage: cargo run -p xtask -- <bundle [--release] | gen-unicode>");
             Ok(())
         }
     }
