@@ -8,8 +8,13 @@ description = "Terminal emulation core ported from Ghostty: VT parser, terminal 
 publish = false
 
 [dependencies]
+base64 = "0.22"
 
 [dev-dependencies]
+# Codec backends for the kitty graphics image tests only — the kitty model keeps codecs
+# behind the `ImageDecoder` seam so the crate itself stays codec-free.
+flate2 = "1"
+png = "0.17"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 # Differential oracle only. Where semantics overlap, ghostty-vt is compared

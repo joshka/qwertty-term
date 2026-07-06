@@ -1423,7 +1423,10 @@ dependencies = [
 name = "ghostty-vt"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "criterion",
+ "flate2",
+ "png 0.17.16",
  "unicode-segmentation",
  "unicode-width",
  "vte",

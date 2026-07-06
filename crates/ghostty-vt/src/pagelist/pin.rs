@@ -285,6 +285,19 @@ impl Pin {
         }
     }
 
+    /// Move down `n` rows, clamping to the last row of the final page on overflow (rather than
+    /// returning `None`). This is the `switch (downOverflow(n)) { .offset => |v| v, .overflow =>
+    /// |v| v.end }` idiom used by `graphics_storage.zig`'s `Placement.rect`.
+    ///
+    /// # Safety
+    /// Node chain live.
+    pub(crate) unsafe fn down_overflow_clamped(self, n: usize) -> Pin {
+        match unsafe { self.down_overflow(n) } {
+            Overflow::Offset(p) => p,
+            Overflow::Overflow { end, .. } => end,
+        }
+    }
+
     /// Move up `n` rows, returning overflow if past the start. Port of `upOverflow`.
     ///
     /// # Safety
