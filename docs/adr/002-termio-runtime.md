@@ -1,6 +1,6 @@
 # ADR 002: termio writer-thread runtime — OS threads vs tokio
 
-- Status: **PROPOSED** (pending maintainer review)
+- Status: **ACCEPTED** (ratified by Josh, 2026-07-08)
 - Date: 2026-07-07
 - Chunk: M2-C (`docs/plans/m2-termio.md`, decision 2)
 - Spike code: `crates/spike-runtime/` (workspace member; benchmark bin `bench`)
@@ -102,7 +102,7 @@ Real terminal traffic (`seq 1 100000`, `cat` of a large file) produces **far
 fewer, larger** messages than the 1 M tiny-message flood — the reader batches
 bytes into `write_alloc` chunks. Neither runtime is remotely a bottleneck.
 
-## Decision (PROPOSED)
+## Decision (ACCEPTED)
 
 **Recommendation: OS thread + `polling` + a small hand-rolled timer wheel
 (implementation (a)).** Adopt tokio only if a *later* need (async pty I/O

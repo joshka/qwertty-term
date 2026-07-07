@@ -8,7 +8,9 @@ Sizing detail lives in the termio/input discovery report (2026-07-07); key excer
 1. **PTY via rustix** (`rustix::pty` + `rustix::termios`), not portable-pty — we need
    termios polling (200ms password detection), IUTF8, and exact resize semantics. The spike
    keeps portable-pty until chunk E swaps it out.
-2. **The tokio question is settled by chunk C, not by taste.** Build Thread.zig's exact
+2. **SETTLED (ADR-002 ACCEPTED 2026-07-08): OS thread + `polling` + timer wheel; no tokio.**
+   Original framing follows for context; the mailbox API contract in the ADR is binding.
+   Historical: Build Thread.zig's exact
    semantics twice — (a) OS thread + mio/polling + timer wheel, (b) tokio current-thread —
    drive both with the same synthetic load (mailbox floods, resize-coalesce 25ms timer,
    sync-output 1s timeout), measure wakeup latency p50/p99 + idle CPU, write the ADR.
