@@ -1582,6 +1582,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-termio"
+version = "0.0.0"
+dependencies = [
+ "ghostty-vt",
+ "libc",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "ghostty-vt"
 version = "0.0.0"
 dependencies = [
