@@ -56,6 +56,17 @@ impl RustTerminal {
     fn terminal(&self) -> &Terminal {
         &self.stream.handler.terminal
     }
+
+    /// Plain-text dump produced by the **ported formatter**
+    /// ([`ghostty_vt::formatter`]) with `trim = true`, whole active screen —
+    /// the Rust mirror of [`ReferenceTerminal::raw_text`](crate::ReferenceTerminal::raw_text)
+    /// (`ghostty_formatter_terminal_*`, PLAIN). Used by the formatter
+    /// differential test.
+    pub fn formatter_raw_text(&self) -> String {
+        use ghostty_vt::formatter::{Options, TerminalExtra};
+        self.terminal()
+            .format(&Options::plain(), &TerminalExtra::none())
+    }
 }
 
 impl Oracle for RustTerminal {

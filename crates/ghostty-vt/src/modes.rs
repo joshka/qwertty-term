@@ -48,11 +48,9 @@ macro_rules! define_modes {
                 }
             }
 
-            /// All modes, in table order. Used by tests; mirrors iterating
-            /// `entries` in Zig. Only referenced under `#[cfg(test)]` today,
-            /// hence the allow.
-            #[allow(dead_code)]
-            const ALL: &'static [Mode] = &[$(Mode::$variant),*];
+            /// All modes, in table order. Mirrors iterating `entries` in Zig;
+            /// used by the formatter's `modes` extra and by tests.
+            pub const ALL: &'static [Mode] = &[$(Mode::$variant),*];
         }
 
         /// A packed struct of all the settable modes. Port of `modes.zig`
@@ -234,6 +232,13 @@ impl ModeState {
     /// Get the value of a mode. Port of `ModeState.get`.
     pub fn get(&self, mode: Mode) -> bool {
         self.values.get(mode)
+    }
+
+    /// Get a mode's default value. Mirrors Zig's access of
+    /// `self.terminal.modes.default` in the formatter's `modes` extra, which
+    /// emits only modes that differ from their default.
+    pub fn default_value(&self, mode: Mode) -> bool {
+        self.default.get(mode)
     }
 
     /// Save the state of the given mode; see [`ModeState::restore`]. Port of

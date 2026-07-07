@@ -12,6 +12,7 @@ pub mod charsets;
 pub mod color;
 pub mod csi;
 pub mod dcs;
+pub mod formatter;
 pub mod highlight;
 pub mod kitty;
 pub mod modes;
