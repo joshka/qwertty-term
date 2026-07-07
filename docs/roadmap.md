@@ -100,7 +100,9 @@ existing row-dirty flags.
 - [ ] C ABI mirroring include/ghostty.h (~1.2k header; c/ bindings 14.8k Zig as reference)
 - [ ] Adapt macos/Sources Swift (37k; single-window subset first: SurfaceView, window,
       clipboard, secure input)
-- [ ] Quick terminal, tabs/splits, menu sync — after single window works
+- [ ] Quick terminal, splits, full menu-keybind sync, OSC-synced tab titles — after single
+      window works (NOTE: basic native NSWindow tabs + minimal menu land EARLY, in M3's R5
+      window swap — see docs/plans/m3-first-pixels.md)
 
 ## M6 — Long tail & deferred
 
