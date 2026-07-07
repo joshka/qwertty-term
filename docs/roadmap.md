@@ -25,22 +25,22 @@ into chunks below. `work/default` is the integration point: always green, gate b
 
 Dependency spine: A → B/C → D → E → M/N; input track H → I/J/K/L independent, joins at M.
 
-| #   | Chunk                                                   | Zig LoC | Cx  | Status / notes                                       |
-| --- | ------------------------------------------------------- | ------- | --- | ---------------------------------------------------- |
-| A   | PTY primitive (pty.zig+pty.c → rustix)                  | 546     | M   | quick-win class                                      |
-| B   | termio plumbing (Options/message/mailbox/backend)       | 384     | S   | preserve mailbox backpressure-unlock trick           |
-| C   | **threads-vs-tokio spike + ADR** (Thread.zig semantics) | 531     | M   | gates D; timeboxed                                   |
-| D   | Exec: fork/exec, 2-stage read pipeline, termios poll    | 2,143   | XL  | highest-stakes concurrency                           |
-| E   | Termio integration hub                                  | 800     | L   | after B+D                                            |
-| F   | stream_handler glue (VT actions → mailboxes)            | 1,577   | L   | much already ported in ghostty-vt stream; delta only |
-| G   | shell integration (bash/zsh/fish RC injection)          | 1,032   | M   | scripts copy verbatim; soon-after                    |
-| H   | input models (key/mods/keycodes/KeymapDarwin/…)         | 3,745   | M/L | — IN FLIGHT (partial, input-encode chunk)            |
-| I   | kitty keyboard encode                                   | ~400    | S   | — IN FLIGHT (input-encode)                           |
-| K   | mouse reporting encode (5 formats)                      | 781     | M   | — IN FLIGHT (input-encode)                           |
-| L   | bracketed paste                                         | 228     | M   | — IN FLIGHT (input-encode)                           |
-| J   | legacy key encode (remainder of key_encode.zig)         | ~2,100  | XL  | after I; seam designed                               |
-| M   | Surface.zig single-surface core                         | 6,036   | XL  | the join point; last                                 |
-| N   | App single-surface slice + surface_mouse                | ~860    | S/M | parallel with M                                      |
+| #   | Chunk                                                   | Zig LoC | Cx  | Status / notes                                                                                                       |
+| --- | ------------------------------------------------------- | ------- | --- | -------------------------------------------------------------------------------------------------------------------- |
+| A   | PTY primitive (pty.zig+pty.c → rustix)                  | 546     | M   | quick-win class                                                                                                      |
+| B   | termio plumbing (Options/message/mailbox/backend)       | 384     | S   | preserve mailbox backpressure-unlock trick                                                                           |
+| C   | **threads-vs-tokio spike + ADR** (Thread.zig semantics) | 531     | M   | gates D; timeboxed                                                                                                   |
+| D   | Exec: fork/exec, 2-stage read pipeline, termios poll    | 2,143   | XL  | highest-stakes concurrency                                                                                           |
+| E   | Termio integration hub                                  | 800     | L   | after B+D                                                                                                            |
+| F   | stream_handler glue (VT actions → mailboxes)            | 1,577   | L   | much already ported in ghostty-vt stream; delta only                                                                 |
+| G   | shell integration (bash/zsh/fish RC injection)          | 1,032   | M   | scripts copy verbatim; soon-after                                                                                    |
+| H   | input models (key/mods/keycodes/…)                      | 3,745   | M/L | **partial DONE 2026-07-07** (ghostty-input crate: key/mods/mouse/function-keys models; keycodes/KeymapDarwin remain) |
+| I   | kitty keyboard encode                                   | ~400    | S   | **DONE 2026-07-07** (window emits kitty sequences when apps enable them)                                             |
+| K   | mouse reporting encode (5 formats)                      | 781     | M   | **DONE 2026-07-07** (wired into window)                                                                              |
+| L   | bracketed paste                                         | 228     | M   | **DONE 2026-07-07** (control-byte stripping now active)                                                              |
+| J   | legacy key encode (remainder of key_encode.zig)         | ~2,100  | XL  | after I; seam designed                                                                                               |
+| M   | Surface.zig single-surface core                         | 6,036   | XL  | the join point; last                                                                                                 |
+| N   | App single-surface slice + surface_mouse                | ~860    | S/M | parallel with M                                                                                                      |
 
 Exit artifact: you use the window as your terminal for an hour. Deferred: Binding.zig
 keybinds (4.9k XL), multi-surface App, tmux control mode.
