@@ -26,7 +26,7 @@ Status legend: `—` not started · `WIP` · `done`
 | PageList.zig | done | done | 102 (Zig 205; 17 highlight tests → highlight chunk, tripwire-alloc N/A, resize permutations covered by 25 representative) | pools/pins/viewport/scroll/erase/clone/split/compact + full reflow; Miri: pagelist 92/92 + page 73/73 scoped (10 pathological tests normal-runner-only); Page verify_integrity completed (was no-op) — consolidated Page tests held up; analysis: `docs/analysis/pagelist.md` |
 | Parser.zig | done | done | 25/25 | + table test; 14 vte differential tests, 4 divergences pinned (empty params, colon-non-m, param-overflow policy, utf8 ownership); analysis: `docs/analysis/vt-parser.md` |
 | stream.zig / stream_terminal.zig | — | — | — | |
-| Terminal.zig | — | — | — | 50+ inline tests |
+| Terminal.zig | done | WIP (tier-1 + print path) | 27 (Zig 381) | pass 1: cursor ops/margins/tabs/charsets/print (non-clustering), reconciled Screen stubs, Style::bg_cell done; Miri clean; tiers deferred w/ named seams: erase/scroll, alt-screen, reset, SGR apply, mode-2027 clustering; PROGRESS note in `docs/analysis/terminal.md` |
 | Screen.zig | done | done | 93 (Zig 188+5 kitty/key; ~85 deferred by category: Selection ~45, SGR ~13, hyperlink-query 9, promptClickMove 17, cursorCopy) | Miri clean on all screen:: tests; testWriteString+dumpString harness ported; placeholders pending: charset stub (unify with charsets.rs), semantic types (unify with osc), Selection scaffold; analysis: `docs/analysis/screen.md` |
 | sgr.zig | done | done | 30 (Zig 31; 1 C-ABI-only N/A) | colon/semicolon rules only for params 4/38/48/58; fuzzer crash case `ESC[58:4:m` pinned |
 | csi.zig | done | done | 5 (Zig 0) | net-new tests |
