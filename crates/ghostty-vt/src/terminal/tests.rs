@@ -3801,7 +3801,7 @@ fn erase_chars_wide_char_boundary_conditions() {
     unsafe {
         let node = t.screen().cursor.page_pin;
         let page = t.screen().pages.node_data((*node).node);
-        page.assert_integrity();
+        page.verify_integrity().expect("page integrity");
     }
 
     assert_eq!(t.plain_string(), "     b\u{1f600}");
@@ -3823,7 +3823,7 @@ fn erase_chars_wide_char_splits_proper_cell_boundaries() {
     unsafe {
         let node = t.screen().cursor.page_pin;
         let page = t.screen().pages.node_data((*node).node);
-        page.assert_integrity();
+        page.verify_integrity().expect("page integrity");
     }
 
     assert_eq!(t.plain_string(), "x\u{98df}べ    さい");
@@ -3845,7 +3845,7 @@ fn erase_chars_wide_char_wrap_boundary_conditions() {
     unsafe {
         let node = t.screen().cursor.page_pin;
         let page = t.screen().pages.node_data((*node).node);
-        page.assert_integrity();
+        page.verify_integrity().expect("page integrity");
     }
 
     assert_eq!(t.plain_string(), ".......\n    cde\n\u{1f600}......");
@@ -6033,7 +6033,7 @@ fn delete_chars_wide_char_boundary_conditions() {
     unsafe {
         let node = t.screen().cursor.page_pin;
         let page = t.screen().pages.node_data((*node).node);
-        page.assert_integrity();
+        page.verify_integrity().expect("page integrity");
     }
 
     assert_eq!(t.plain_string(), "  b\u{1f600}");
@@ -6078,7 +6078,7 @@ fn delete_chars_wide_char_wrap_boundary_conditions() {
     unsafe {
         let node = t.screen().cursor.page_pin;
         let page = t.screen().pages.node_data((*node).node);
-        page.assert_integrity();
+        page.verify_integrity().expect("page integrity");
     }
 
     assert_eq!(t.plain_string(), ".......\n cde\n\u{1f600}......");
@@ -6118,7 +6118,7 @@ fn delete_chars_wide_char_across_right_margin() {
     unsafe {
         let node = t.screen().cursor.page_pin;
         let page = t.screen().pages.node_data((*node).node);
-        page.assert_integrity();
+        page.verify_integrity().expect("page integrity");
     }
 
     assert_eq!(t.plain_string(), "13456");
@@ -6307,7 +6307,7 @@ fn restore_cursor_uses_default_style_on_out_of_space() {
         }
 
         (*page).pause_integrity_checks(false);
-        (*page).assert_integrity();
+        (*page).verify_integrity().expect("page integrity");
     }
 
     // Restore cursor - should fall back to default style since the page
@@ -6990,18 +6990,16 @@ fn print_slice_differential_fuzz_vs_print() {
     // margin bound), so degenerate 1-column terminals are out of scope here,
     // same as upstream.
     //
-    // NOTE(M1 backfill): upstream calls this with (500, 80, 24), (500, 10,
-    // 4), (500, 5, 2), (200, 2, 2). We use smaller op counts here --
-    // `Page::assert_integrity`'s O(rows*cols) verification scan (which
-    // upstream Zig only runs under an opt-in `slow_runtime_safety` build
-    // flag, see `page.zig`'s `assertIntegrity`) currently runs
-    // unconditionally on every debug/test build in this port
-    // (`#[cfg(debug_assertions)]` on `Page::assert_integrity`, called from
-    // every `append_grapheme`). That makes grapheme-heavy print workloads
-    // ~500x slower than plain-ASCII ones here, so upstream's op counts would
-    // take minutes. Flagged separately for a proper fix (gate behind a
-    // feature matching Zig's opt-in model); scaled down here so this test
-    // still exercises the same code paths without an excessive runtime.
+    // NOTE: upstream calls this with (500, 80, 24), (500, 10, 4), (500, 5,
+    // 2), (200, 2, 2). The original blocker for those counts — the
+    // per-mutation `Page::assert_integrity` scan — is now behind the opt-in
+    // `slow_runtime_safety` feature (see ADR 0001), but the counts still
+    // can't be restored: at higher op counts the hyperlink op reliably
+    // triggers a pre-existing infinite loop in `Screen::start_hyperlink`'s
+    // `SetNeedsRehash` retry path (the same-capacity `increase_capacity(node,
+    // None)` clone never compacts dead hyperlink-set IDs, so the error
+    // repeats forever — the third unique implicit hyperlink on a page can
+    // hang). Restore upstream counts once that bug is fixed.
     let mut rng = SplitMix64::new(0xC0FFEE);
     print_slice_differential(&mut rng, 15, 80, 24);
     print_slice_differential(&mut rng, 15, 10, 4);
