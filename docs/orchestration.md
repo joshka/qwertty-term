@@ -89,7 +89,13 @@ committing** — the recurring orchestrator mistake is commit-then-check.
    workspace (`jj st`, `cargo check/test`), then launch a CONTINUATION agent (fresh, usually
    one tier cheaper) whose prompt lists exactly what's on disk, what compiles, what remains.
    The analysis doc is the recovery map — this is why analysis-first is non-negotiable.
-4. **Phantom root workspace**: if jj reports stale/divergent state mentioning the repo root,
+4. **SendMessage cross-delivery**: messages sent to one agent id can leak to unrelated
+   sessions (observed 2026-07-07: a stand-down + technical-answer chain reached a session
+   that owned none of it, which read the stream as attempted manipulation - correctly).
+   Scope every SendMessage defensively: open with "If you are not the agent doing TASK in
+   workspace PATH, disregard this message entirely." Never escalate instructions to an
+   agent that reports not recognizing the task - stop messaging it instead.
+5. **Phantom root workspace**: if jj reports stale/divergent state mentioning the repo root,
    someone ran jj/git at `~/local/ghostty-rs` (editors do this). The bad snapshot looks like
    "everything deleted + work/ files added". `jj abandon` it; never run jj at the root.
 
