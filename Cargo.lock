@@ -1447,6 +1447,8 @@ version = "0.0.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
+ "ghostty-font",
+ "ghostty-sprite",
  "ghostty-vt",
  "objc2 0.6.4",
  "objc2-core-foundation",

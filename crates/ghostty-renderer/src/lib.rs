@@ -33,6 +33,19 @@
 //!   backend-agnostic [`shaders::PipelineDescription`] table pinned to the
 //!   frozen [`wire`] struct layouts.
 //!
+//! Chunk R4 adds the cell engine — the first pixels:
+//!
+//! - [`cells`]: the [`cells::Contents`] cell store (flat bg array + per-row
+//!   fg lists, cursor at `fg[0]`) plus the codepoint-classification helpers
+//!   (`is_symbol`/`is_covering`/`no_min_contrast`/`constraint_width`), a port
+//!   of `src/renderer/cell.zig`.
+//! - [`engine`] (macOS only): [`engine::Engine`], which turns a
+//!   [`snapshot::RenderSnapshot`] + a `ghostty-font` `Grid` into GPU buffers
+//!   ([`engine::Engine::update_frame`]) and draws them through the R2/R3
+//!   pipelines ([`engine::Engine::draw_frame`]) — a port of the load-bearing
+//!   subset of `generic.zig`'s `updateFrame`/`drawFrame`/`rebuildCells`/
+//!   `addGlyph`/`addCursor`/`syncAtlasTexture`.
+//!
 //! This crate depends on `ghostty-vt` (read-only use of its snapshot APIs)
 //! and never the reverse.
 //!
@@ -42,6 +55,7 @@
 //! `docs/analysis/renderer-r3.md` for the R3 shader-port survey.
 
 pub mod backend;
+pub mod cells;
 pub mod cursor;
 pub mod gpu;
 pub mod options;
@@ -59,3 +73,10 @@ pub mod wire;
 /// slot in later.
 #[cfg(target_os = "macos")]
 pub mod metal;
+
+/// The cell engine: builds GPU buffers from a [`snapshot::RenderSnapshot`] and
+/// a `ghostty-font` `Grid`, and draws them via the Metal backend. Chunk R4
+/// (first pixels). macOS only (it drives the Metal backend and the CoreText
+/// font stack).
+#[cfg(target_os = "macos")]
+pub mod engine;

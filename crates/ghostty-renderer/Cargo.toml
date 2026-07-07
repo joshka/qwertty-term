@@ -55,5 +55,13 @@ dispatch2 = { version = "0.3.1", default-features = false, features = [
     "std",
     "objc2",
 ] }
+# The font substrate the cell engine (R4) drives: shaping + glyph→atlas render
+# cache (`Grid`), and sprite dispatch for cursors/decorations/box-drawing.
+# Both are macOS-only in the reduced cut (CoreText face + rasterization).
+ghostty-font = { path = "../ghostty-font" }
+ghostty-sprite = { path = "../ghostty-sprite" }
 
 [dev-dependencies]
+# The acceptance test (R4) drives a real ghostty-vt Terminal through a Stream to
+# produce the snapshot the engine renders.
+ghostty-vt = { path = "../ghostty-vt" }

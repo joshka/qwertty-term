@@ -221,6 +221,20 @@ impl<B: GpuBackend> SwapChain<B> {
         self.slots.len()
     }
 
+    /// The index [`SwapChain::next_frame`] would hand out next, without
+    /// advancing or acquiring a permit. Used by the cell engine to sync the
+    /// upcoming slot's atlas texture before drawing into it.
+    pub fn peek_next_index(&self) -> usize {
+        (self.frame_index + 1) % self.slots.len()
+    }
+
+    /// Mutable access to a slot by index (for out-of-band per-slot resource
+    /// updates like atlas-texture sync). Callers must not hold this across a
+    /// [`SwapChain::next_frame`] that hands out the same slot.
+    pub fn slot_mut(&mut self, index: usize) -> &mut FrameSlot<B> {
+        &mut self.slots[index]
+    }
+
     /// Acquire the next frame slot, blocking on the semaphore until one is
     /// free. Port of `SwapChain.nextFrame`. Must be paired with releasing the
     /// returned [`FrameGuard`] (directly in sync mode, or from the frame's
