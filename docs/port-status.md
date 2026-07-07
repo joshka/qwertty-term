@@ -46,7 +46,7 @@ Status legend: `—` not started · `WIP` · `done`
 | kitty/graphics_*.zig | done (model) | done (model) | 63/63 (command 22, image 16, storage 25) | pin-tracked placements (eviction deliberately skips untrack, matches upstream); PNG via `png` crate; exec/render/unicode-placeholder deferred (Terminal/Phase-4/Screen-iter); extraction-ready except Pin/Rect leak; analysis: `docs/analysis/kitty-graphics.md` |
 | kitty/key.zig | done | done | 5/5 | FlagStack in screen/kitty_key.rs |
 | Selection.zig / SelectionGesture.zig | — | — | — | |
-| formatter.zig | — | — | — | |
+| formatter.zig | done | done | 49 (Zig 100; consolidation justified: no raw-Page test builder — each behavior asserted at Terminal/Screen level, VT/HTML/plain byte assertions verbatim) | plain/vt/html + Extra re-emission; **formatter differential vs ghostty_formatter_*: no divergences**; deferred: pin_map, rect-selection subsets, HTML anchors; analysis: `docs/analysis/formatter.md` |
 | highlight.zig + PageList highlightSemanticContent | done | done | 0/0 + 17/17 | upstream bug found: Flattened.init writes nonexistent field (lazily compiled, no callers); pagelist now 119 tests; analysis: `docs/analysis/highlight.md` |
 | UTF8Decoder.zig | done | done | 3/3 | |
 | unicode/ (grapheme, tables) | done | done | 13 | ghostty `2da015cd6`; `grapheme_break` FSM (const-evaluated 8 KiB table), `codepoint_width`, VS15/VS16 effects; all inline tests from grapheme.zig/main.zig/c/unicode.zig ported; oracle cross-checks: 188 width + 3,915 break divergences, all classified (terminal tailorings); symbols table deferred to renderer phase |
