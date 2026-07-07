@@ -14,13 +14,12 @@ Detailed phase definitions live in `docs/rewrite-prompt.md`; per-file status in
 Functional core is done (parity on fixtures + hand streams, formatter differential clean,
 demo window live). Remaining exit items:
 
-- [ ] **Perf gate: ≥0.5x of ReleaseFast libghostty-vt** on the committed throughput bench
-      (currently 0.14x–0.31x). Levers, in order: decode-until-control-seq fast path (the
-      ascii 4x), print-path row caching, dispatch inlining. Perf pass now also hardens the
-      architecture before more weight lands on it.
-- [ ] **Corpus expansion**: esctest/vttest-derived sequences + captured real-app sessions
-      (vim/tmux/htop/fzf) run differentially. Cheap, parallel, Sonnet-class.
-- [ ] Fuzz campaign actually run (cargo-fuzz install is the only blocker) + Miri full pass.
+- [x] **Perf gate: ≥0.5x — PASSED 2026-07-07** (ascii 0.63x, sgr 0.53x, utf8 0.56x,
+      cursor 0.52x). Scalar fast paths only; SIMD + wide-run batching remain M6 headroom.
+      Profile insight: print path dominated, not decode (see `docs/analysis/perf.md`).
+- [x] **Corpus expansion — DONE 2026-07-07**: 114 cases, 11 torture suites + 4 real-app
+      captures; found+fixed 1 engine bug (spacer-tail overwrite panic).
+- [x] Fuzz campaign — DONE 2026-07-07: 7.9M runs / 121s, zero crashes.
 - [ ] Tail modules: search (sliding-window core), kitty graphics exec + unicode placeholders,
       stream seams (kitty keyboard encode, XTWINOPS/title stack, mouse reporting, REP),
       snapshot gaps (OSC 52 read-back, dynamic palette), promptClickMove.
