@@ -1,14 +1,14 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ghostty_spike::{
     CellStyle, CellWidth, CursorStyle, Engine, Snapshot, SnapshotCell, SnapshotColor, SnapshotRow,
-    SnapshotUnderline,
+    SnapshotUnderline, SnapshotWindow,
 };
 use unicode_width::UnicodeWidthChar;
 
 use crate::window::{
     CellCoord, Selection,
     font::{self, TerminalFont},
-    theme::{colors, default_bg as default_bg_color},
+    theme::{ColorSource, colors, default_bg as default_bg_color},
 };
 
 const CELL_WIDTH: f32 = 8.5;
@@ -36,18 +36,26 @@ impl CellMetrics {
     }
 }
 
+/// Paint one rendered frame from a windowed snapshot.
+///
+/// Takes a [`SnapshotWindow`] (only the visible rows, not the whole
+/// scrollback) rather than a full [`Snapshot`] — see
+/// [`ghostty_vt::snapshot::Screen::snapshot_window`] — since this runs once
+/// per rendered frame and a full snapshot's cost grows with total history
+/// length, not with what's actually painted.
 pub(super) fn paint_terminal(
     ui: &mut egui::Ui,
     rect: Rect,
     metrics: &CellMetrics,
-    snapshot: &Snapshot,
+    window: &SnapshotWindow,
     scrollback_offset: usize,
     selection: Option<Selection>,
+    focused: bool,
 ) {
     let painter = ui.painter_at(rect);
-    let backdrop = default_bg_color(snapshot);
+    let backdrop = default_bg_color(window);
     painter.rect_filled(rect, 0.0, backdrop);
-    let plan = RenderPlan::from_snapshot(snapshot, scrollback_offset, selection);
+    let plan = RenderPlan::from_window(window, selection);
 
     for row in &plan.rows {
         for cell in &row.cells {
@@ -56,7 +64,7 @@ pub(super) fn paint_terminal(
                 rect.top() + row.visible_row as f32 * metrics.height,
             );
             let cell_rect = Rect::from_min_size(pos, Vec2::new(metrics.width, metrics.height));
-            let (_, bg) = colors(snapshot, &cell.style);
+            let (_, bg) = colors(window, &cell.style);
             if bg != backdrop {
                 painter.rect_filled(cell_rect, 0.0, bg);
             }
@@ -67,6 +75,22 @@ pub(super) fn paint_terminal(
                     Color32::from_rgba_unmultiplied(75, 120, 210, 150),
                 );
             }
+
+            // Paint this cell's glyph pinned to its own grid column
+            // (`origin + col * cell_width`) rather than laying out a whole
+            // run of text in one `painter.text` call. egui's text layout
+            // uses each glyph's own (possibly fractional / non-uniform)
+            // advance, which drifts from the fixed `metrics.width` grid over
+            // a multi-character run — the more characters before a given
+            // column, the further that column's rendered position strays
+            // from `col * metrics.width`. Painting one glyph per cell at an
+            // explicitly grid-pinned position keeps every cell (and the
+            // cursor, which uses the same `col * metrics.width` formula)
+            // aligned to the same grid regardless of line length.
+            if cell.ch != ' ' {
+                let (fg, _) = colors(window, &cell.style);
+                painter.text(pos, Align2::LEFT_TOP, cell.ch, metrics.font.clone(), fg);
+            }
         }
 
         for run in &row.runs {
@@ -74,19 +98,18 @@ pub(super) fn paint_terminal(
                 rect.left() + run.start_col as f32 * metrics.width,
                 rect.top() + row.visible_row as f32 * metrics.height,
             );
-            let (fg, _) = colors(snapshot, &run.style);
-            painter.text(pos, Align2::LEFT_TOP, &run.text, metrics.font.clone(), fg);
-            paint_text_decorations(snapshot, &painter, pos, metrics, run, fg);
+            let (fg, _) = colors(window, &run.style);
+            paint_text_decorations(window, &painter, pos, metrics, run, fg);
         }
     }
 
-    if scrollback_offset == 0 && snapshot.cursor.visible {
-        let cursor = snapshot.cursor;
+    if scrollback_offset == 0 && window.cursor.visible {
+        let cursor = window.cursor;
         let pos = Pos2::new(
             rect.left() + cursor.col as f32 * metrics.width,
             rect.top() + cursor.row as f32 * metrics.height,
         );
-        paint_cursor(&painter, pos, metrics, cursor.style);
+        paint_cursor(&painter, pos, metrics, cursor.style, focused);
     }
 }
 
@@ -118,6 +141,27 @@ struct RenderPlan {
 }
 
 impl RenderPlan {
+    /// Build a render plan from a windowed snapshot (the live render path —
+    /// see [`paint_terminal`]). `window.window_top` is already the absolute
+    /// logical row of `window.window[0]`, so no extra offset arithmetic is
+    /// needed here (unlike the old full-`Snapshot` path, which had to derive
+    /// that from `all_rows.len()`).
+    fn from_window(window: &SnapshotWindow, selection: Option<Selection>) -> Self {
+        let rows = window
+            .window
+            .iter()
+            .enumerate()
+            .map(|(visible_row, row)| {
+                RenderRow::from_row(row, window.window_top + visible_row, visible_row, selection)
+            })
+            .collect();
+        Self { rows }
+    }
+
+    /// Build a render plan from a full snapshot's already-sliced visible
+    /// window (used by the render probe / tests, which construct a full
+    /// [`Snapshot`] directly rather than going through the engine's
+    /// per-frame windowed path).
     fn from_snapshot(
         snapshot: &Snapshot,
         scrollback_offset: usize,
@@ -264,13 +308,13 @@ fn char_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
 }
 
-/// The `all_rows` index of the visible row `row`, given a scrollback offset.
-pub(super) fn visible_logical_row(
-    snapshot: &Snapshot,
-    scrollback_offset: usize,
-    row: usize,
-) -> usize {
-    logical_start_row(snapshot, scrollback_offset) + row
+/// The absolute logical row index of visible row `row` within a windowed
+/// snapshot. `window.window_top` is already the absolute index of
+/// `window.window[0]` (see [`SnapshotWindow`]), so this is just an offset —
+/// no need to know total scrollback length here, unlike the full-`Snapshot`
+/// version above.
+pub(super) fn visible_logical_row_in_window(window: &SnapshotWindow, row: usize) -> usize {
+    window.window_top + row
 }
 
 /// The character in a logical (all-rows) cell, or `None` if out of range.
@@ -304,14 +348,23 @@ fn coord_key(coord: CellCoord) -> (usize, usize) {
     (coord.logical_row, coord.col)
 }
 
+/// Paint the cursor per ghostty semantics: a `Block` cursor is a filled
+/// square when the window is focused and a hollow (stroked) square when it
+/// isn't; `BlockHollow` is always hollow regardless of focus (it's an
+/// explicit DECSCUSR request for a hollow block, orthogonal to focus state).
+/// `Underline`/`Bar` are unaffected by focus.
 fn paint_cursor(
     painter: &egui::Painter,
     pos: Pos2,
     metrics: &CellMetrics,
     cursor_style: CursorStyle,
+    focused: bool,
 ) {
     let rect = Rect::from_min_size(pos, Vec2::new(metrics.width, metrics.height));
     match cursor_style {
+        CursorStyle::Block if focused => {
+            painter.rect_filled(rect, 0.0, Color32::WHITE);
+        }
         CursorStyle::Block | CursorStyle::BlockHollow => {
             painter.rect_stroke(
                 rect,
@@ -340,7 +393,7 @@ fn paint_cursor(
 }
 
 fn paint_text_decorations(
-    snapshot: &Snapshot,
+    color_source: &impl ColorSource,
     painter: &egui::Painter,
     pos: Pos2,
     metrics: &CellMetrics,
@@ -353,7 +406,7 @@ fn paint_text_decorations(
         // behavior: an unset underline color tracks fg), matching
         // `CellStyle::underline_color`'s `SnapshotColor::Default` seam.
         let (color, _) = colors(
-            snapshot,
+            color_source,
             &CellStyle {
                 fg: run.style.underline_color,
                 ..CellStyle::default()
@@ -583,5 +636,51 @@ mod tests {
                 "row=1 col=0 cells=11 text=Devicons: \\u{e700}",
             ]
         );
+    }
+
+    /// `paint_terminal` paints each [`RenderCell`]'s glyph at
+    /// `origin + cell.col as f32 * metrics.width` (one `painter.text` call
+    /// per cell — see the comment at that call site). That means the planned
+    /// x position of any column `N` is always exactly `N * cell_width`,
+    /// regardless of what characters (narrow/wide/mixed) came before it on
+    /// the row — there is no accumulated per-glyph advance to drift from
+    /// that grid. This test pins that invariant at the `RenderPlan` level so
+    /// a future change can't reintroduce whole-run text layout (which used
+    /// egui's own glyph advances, not `col * cell_width`, for anything after
+    /// the first character of a run).
+    #[test]
+    fn render_plan_cell_columns_are_grid_pinned_for_mixed_ascii_and_wide_line() {
+        let cell_width = 8.5_f32;
+        let snapshot = snapshot_of(10, 1, "ab好cd".as_bytes());
+        let plan = RenderPlan::from_snapshot(&snapshot, 0, None);
+
+        let planned_x: Vec<_> = plan.rows[0]
+            .cells
+            .iter()
+            .map(|cell| (cell.ch, cell.col, cell.col as f32 * cell_width))
+            .collect();
+
+        // "ab好cd": a=0, b=1, 好=2 (wide, occupies cols 2-3), c=4, d=5, then
+        // blanks. Each planned x is exactly `col * cell_width` — column 4
+        // (after a 2-cell-wide glyph) lands at `4 * cell_width`, not at
+        // whatever x a cumulative text-layout advance for "ab好" would give.
+        assert_eq!(
+            planned_x,
+            vec![
+                ('a', 0, 0.0 * cell_width),
+                ('b', 1, 1.0 * cell_width),
+                ('好', 2, 2.0 * cell_width),
+                ('c', 4, 4.0 * cell_width),
+                ('d', 5, 5.0 * cell_width),
+                (' ', 6, 6.0 * cell_width),
+                (' ', 7, 7.0 * cell_width),
+                (' ', 8, 8.0 * cell_width),
+                (' ', 9, 9.0 * cell_width),
+            ]
+        );
+        // The wide glyph's spacer (col 3) is skipped, exactly like a normal
+        // cell would be if it were adjacent — confirming wide chars occupy
+        // exactly 2 grid columns and nothing more.
+        assert!(!planned_x.iter().any(|&(_, col, _)| col == 3));
     }
 }

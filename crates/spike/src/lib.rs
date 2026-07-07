@@ -11,6 +11,7 @@ mod engine;
 
 pub use engine::{
     CellStyle, CellWidth, CursorStyle, Engine, MouseTracking, SnapshotCell, SnapshotColor,
-    SnapshotCursor, SnapshotRow, SnapshotUnderline,
+    SnapshotCursor, SnapshotRow, SnapshotUnderline, SnapshotWindow,
 };
+pub use ghostty_vt::color::Rgb;
 pub use ghostty_vt::snapshot::Snapshot;

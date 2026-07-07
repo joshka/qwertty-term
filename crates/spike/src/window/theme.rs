@@ -1,14 +1,48 @@
 use eframe::egui::Color32;
-use ghostty_spike::{CellStyle, Snapshot, SnapshotColor};
+use ghostty_spike::{CellStyle, Rgb, Snapshot, SnapshotColor, SnapshotWindow};
+
+/// The dynamic color state a snapshot variant carries (256-color palette +
+/// optional OSC 10/11 default fg/bg overrides). Both the full [`Snapshot`]
+/// and the windowed [`SnapshotWindow`] carry the same three fields, so color
+/// resolution doesn't need to care which one rendered a given frame.
+pub(super) trait ColorSource {
+    fn palette_color(&self, index: u8) -> Rgb;
+    fn default_fg(&self) -> Option<Rgb>;
+    fn default_bg(&self) -> Option<Rgb>;
+}
+
+impl ColorSource for Snapshot {
+    fn palette_color(&self, index: u8) -> Rgb {
+        self.palette[index as usize]
+    }
+    fn default_fg(&self) -> Option<Rgb> {
+        self.default_fg
+    }
+    fn default_bg(&self) -> Option<Rgb> {
+        self.default_bg
+    }
+}
+
+impl ColorSource for SnapshotWindow {
+    fn palette_color(&self, index: u8) -> Rgb {
+        self.palette[index as usize]
+    }
+    fn default_fg(&self) -> Option<Rgb> {
+        self.default_fg
+    }
+    fn default_bg(&self) -> Option<Rgb> {
+        self.default_bg
+    }
+}
 
 /// Resolve a cell's style into `(foreground, background)` egui colors,
 /// looking indexed/default colors up through the snapshot's *dynamic* color
-/// state (`snapshot.palette`/`default_fg`/`default_bg`, mutated by OSC
+/// state (`palette`/`default_fg`/`default_bg`, mutated by OSC
 /// 4/10/11/104/110/111/112) rather than a fixed xterm table, so palette and
 /// default-color changes made by the running program are reflected live.
-pub(super) fn colors(snapshot: &Snapshot, style: &CellStyle) -> (Color32, Color32) {
-    let mut fg = to_egui_color(snapshot, style.fg).unwrap_or(default_fg(snapshot));
-    let mut bg = to_egui_color(snapshot, style.bg).unwrap_or(default_bg(snapshot));
+pub(super) fn colors(source: &impl ColorSource, style: &CellStyle) -> (Color32, Color32) {
+    let mut fg = to_egui_color(source, style.fg).unwrap_or(default_fg(source));
+    let mut bg = to_egui_color(source, style.bg).unwrap_or(default_bg(source));
     if style.inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -18,8 +52,8 @@ pub(super) fn colors(snapshot: &Snapshot, style: &CellStyle) -> (Color32, Color3
     (fg, bg)
 }
 
-fn default_fg(snapshot: &Snapshot) -> Color32 {
-    match snapshot.default_fg {
+fn default_fg(source: &impl ColorSource) -> Color32 {
+    match source.default_fg() {
         Some(rgb) => Color32::from_rgb(rgb.r, rgb.g, rgb.b),
         None => Color32::LIGHT_GRAY,
     }
@@ -30,18 +64,18 @@ fn default_fg(snapshot: &Snapshot) -> Color32 {
 /// fallback. Also used as the whole-viewport backdrop color (see
 /// `renderer::paint_terminal`) so a program that sets a light background
 /// doesn't paint on top of a black canvas.
-pub(super) fn default_bg(snapshot: &Snapshot) -> Color32 {
-    match snapshot.default_bg {
+pub(super) fn default_bg(source: &impl ColorSource) -> Color32 {
+    match source.default_bg() {
         Some(rgb) => Color32::from_rgb(rgb.r, rgb.g, rgb.b),
         None => Color32::BLACK,
     }
 }
 
-fn to_egui_color(snapshot: &Snapshot, color: SnapshotColor) -> Option<Color32> {
+fn to_egui_color(source: &impl ColorSource, color: SnapshotColor) -> Option<Color32> {
     match color {
         SnapshotColor::Default => None,
         SnapshotColor::Palette(value) => {
-            let rgb = snapshot.palette[value as usize];
+            let rgb = source.palette_color(value);
             Some(Color32::from_rgb(rgb.r, rgb.g, rgb.b))
         }
         SnapshotColor::Rgb { r, g, b } => Some(Color32::from_rgb(r, g, b)),

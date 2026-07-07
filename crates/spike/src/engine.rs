@@ -18,7 +18,7 @@ use ghostty_vt::terminal::{Options, Terminal};
 pub use ghostty_vt::screen::cursor::CursorStyle;
 pub use ghostty_vt::snapshot::{
     CellStyle, CellWidth, SnapshotCell, SnapshotColor, SnapshotCursor, SnapshotRow,
-    SnapshotUnderline,
+    SnapshotUnderline, SnapshotWindow,
 };
 
 /// Which mouse-tracking mode the running program has requested, if any. Derived
@@ -101,8 +101,20 @@ impl Engine {
     }
 
     /// An owned snapshot of the visible grid + scrollback for rendering.
+    ///
+    /// Prefer [`Engine::snapshot_window`] on a per-rendered-frame call site:
+    /// this materializes *every* scrollback row, so its cost grows with
+    /// total history length, not with what's actually on screen.
     pub fn snapshot(&self) -> Snapshot {
         self.terminal().snapshot()
+    }
+
+    /// A cheap, windowed snapshot containing only the rows needed to render
+    /// a viewport `scrollback_offset` rows up from the bottom (0 = the live
+    /// active area). Cost is proportional to the visible row count, not to
+    /// total scrollback length — use this on the per-frame render path.
+    pub fn snapshot_window(&self, scrollback_offset: usize) -> SnapshotWindow {
+        self.terminal().snapshot_window(scrollback_offset)
     }
 
     /// The number of scrollback (history) rows above the active area.

@@ -122,6 +122,16 @@ pub struct SnapshotRow {
     pub cells: Vec<SnapshotCell>,
 }
 
+impl SnapshotRow {
+    /// An all-blank row of `cols` cells (used to pad a window that's shorter
+    /// than the requested row count, e.g. just after startup).
+    fn blank(cols: usize) -> Self {
+        Self {
+            cells: vec![SnapshotCell::blank(); cols],
+        }
+    }
+}
+
 /// The cursor position and appearance at snapshot time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotCursor {
@@ -131,6 +141,38 @@ pub struct SnapshotCursor {
     pub row: usize,
     pub style: CursorStyle,
     pub visible: bool,
+}
+
+/// A cheap, windowed counterpart to [`Snapshot`]: only the rows needed to
+/// render a `rows`-tall viewport are materialized, instead of the whole
+/// scrollback history.
+///
+/// A frontend that snapshots once per rendered frame (rather than once per
+/// history row written) should use [`Screen::snapshot_window`] /
+/// [`Terminal::snapshot_window`] for that per-frame render path, so cost
+/// stays proportional to the *visible* window, not to total scrollback
+/// length. The full [`Snapshot`] / `snapshot()` API remains for tests,
+/// embedding, and anything that needs random access into scrollback (e.g.
+/// extracting selected text that may reach above the current window).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotWindow {
+    pub cols: usize,
+    /// Exactly `rows` rows (blank-padded if the terminal has fewer rows of
+    /// history than requested, e.g. just after startup).
+    pub window: Vec<SnapshotRow>,
+    /// The absolute logical row index (as in a full [`Snapshot`]'s
+    /// `all_rows`) of `window[0]`. Add a visible row index to this to
+    /// recover the same absolute row numbering a full snapshot would use —
+    /// needed to keep selection coordinates stable across frames regardless
+    /// of which snapshot variant rendered them.
+    pub window_top: usize,
+    /// The number of scrollback (history) rows above the active area, same
+    /// meaning as [`Snapshot::scrollback_len`].
+    pub scrollback_len: usize,
+    pub cursor: SnapshotCursor,
+    pub palette: Palette,
+    pub default_fg: Option<Rgb>,
+    pub default_bg: Option<Rgb>,
 }
 
 /// A complete, owned, read-only view of the visible + scrollback grid.
@@ -235,48 +277,23 @@ impl Screen {
         let cols = self.cols() as usize;
         let rows = self.rows() as usize;
 
-        let mut all_rows: Vec<SnapshotRow> = Vec::new();
-
         // Walk every screen row (history + active), oldest first.
-        let mut it = self.pages.row_iterator(
+        let it = self.pages.row_iterator(
             Direction::RightDown,
             Point::new(Tag::Screen, Default::default()),
             None,
         );
-        // SAFETY: the iterator yields valid pins into live pages for the
-        // lifetime of `&self`; we never retain a pin past its use.
-        unsafe {
-            while let Some(pin) = it.next() {
-                let (row, _) = pin.row_and_cell();
-                let page = self.pages.node_data(pin.node);
-                let base = page.get_cells(row);
-                let base = base as *const crate::page::Cell;
-
-                let mut cells = Vec::with_capacity(cols);
-                for x in 0..cols {
-                    let cell = *base.add(x);
-                    cells.push(snapshot_cell(page, base.add(x), &cell));
-                }
-                all_rows.push(SnapshotRow { cells });
-            }
-        }
+        let all_rows = copy_rows(&self.pages, it, cols);
 
         // The active area is the last `rows` rows.
         let active_start = all_rows.len().saturating_sub(rows);
-
-        let cursor = SnapshotCursor {
-            col: self.cursor.x as usize,
-            row: self.cursor.y as usize,
-            style: self.cursor.cursor_style,
-            visible: true,
-        };
 
         Snapshot {
             cols,
             rows,
             all_rows,
             active_start,
-            cursor,
+            cursor: self.snapshot_cursor(),
             // A bare `Screen` doesn't own the terminal's dynamic color
             // state (see `Terminal::colors`); default to the built-in
             // palette / no dynamic override here. `Terminal::snapshot`
@@ -286,6 +303,110 @@ impl Screen {
             default_bg: None,
         }
     }
+
+    /// Build an owned [`SnapshotWindow`] containing only the `rows` rows
+    /// needed to render a viewport `scrollback_offset` rows up from the
+    /// bottom (0 = the live active area), instead of the whole screen.
+    ///
+    /// This is the cheap, additive counterpart to [`Screen::snapshot`] meant
+    /// for a per-rendered-frame call site: finding the window's top row walks
+    /// *backward* from the bottom of the page list (cost proportional to the
+    /// window height, hopping pages as needed), never forward from the top of
+    /// scrollback, so this stays cheap regardless of total history length.
+    pub fn snapshot_window(&self, scrollback_offset: usize) -> SnapshotWindow {
+        let cols = self.cols() as usize;
+        let rows = self.rows() as usize;
+        let total_rows = self.pages.total_rows();
+        let scrollback_len = total_rows.saturating_sub(rows);
+        let offset = scrollback_offset.min(scrollback_len);
+
+        // The window is exactly `rows` rows ending `offset` rows up from the
+        // bottom of the screen.
+        //
+        // SAFETY: `get_bottom_right` returns a pin into a live page (or
+        // `None` for an empty list); `up` only walks `prev` pointers within
+        // the same live page list.
+        let bottom_right = self
+            .pages
+            .get_bottom_right(Tag::Screen)
+            .and_then(|p| unsafe { p.up(offset) });
+
+        let window = bottom_right.and_then(|bl_pin| {
+            let window_len = rows.min(total_rows.saturating_sub(offset));
+            let tl_pin = if window_len == 0 {
+                None
+            } else {
+                // SAFETY: see above; `bl_pin` addresses a live page.
+                unsafe { bl_pin.up(window_len - 1) }
+            };
+            tl_pin.map(|tl_pin| {
+                // SAFETY: `tl_pin`/`bl_pin` were both derived above by
+                // walking `prev` pointers from the live bottom-right pin, so
+                // both address live pages; the iterator is only used for the
+                // duration of this call.
+                let it = unsafe { tl_pin.row_iterator(Direction::RightDown, Some(bl_pin)) };
+                copy_rows(&self.pages, it, cols)
+            })
+        });
+        let mut window = window.unwrap_or_default();
+
+        // Pad at the top if the window is shorter than `rows` (e.g. just
+        // after startup, before enough rows have been written) so callers
+        // can always assume exactly `rows` entries.
+        while window.len() < rows {
+            window.insert(0, SnapshotRow::blank(cols));
+        }
+
+        SnapshotWindow {
+            cols,
+            window_top: total_rows.saturating_sub(offset + rows),
+            window,
+            scrollback_len,
+            cursor: self.snapshot_cursor(),
+            palette: DEFAULT_PALETTE,
+            default_fg: None,
+            default_bg: None,
+        }
+    }
+
+    fn snapshot_cursor(&self) -> SnapshotCursor {
+        SnapshotCursor {
+            col: self.cursor.x as usize,
+            row: self.cursor.y as usize,
+            style: self.cursor.cursor_style,
+            visible: true,
+        }
+    }
+}
+
+/// Copy every row an iterator yields into owned [`SnapshotRow`]s.
+///
+/// # Safety
+/// `it` must only yield pins into `pages`'s live pages.
+fn copy_rows(
+    pages: &crate::pagelist::PageList,
+    mut it: crate::pagelist::RowIterator,
+    cols: usize,
+) -> Vec<SnapshotRow> {
+    let mut rows = Vec::new();
+    // SAFETY: the iterator yields valid pins into live pages for the
+    // lifetime of `pages`; we never retain a pin past its use.
+    unsafe {
+        while let Some(pin) = it.next() {
+            let (row, _) = pin.row_and_cell();
+            let page = pages.node_data(pin.node);
+            let base = page.get_cells(row);
+            let base = base as *const crate::page::Cell;
+
+            let mut cells = Vec::with_capacity(cols);
+            for x in 0..cols {
+                let cell = *base.add(x);
+                cells.push(snapshot_cell(page, base.add(x), &cell));
+            }
+            rows.push(SnapshotRow { cells });
+        }
+    }
+    rows
 }
 
 /// Extract one owned cell from a live page cell.
@@ -375,6 +496,24 @@ impl Terminal {
             });
         }
         snap.active_start = snap.all_rows.len().saturating_sub(snap.rows);
+        snap.palette = self.colors.palette.current;
+        snap.default_fg = self.colors.foreground.get();
+        snap.default_bg = self.colors.background.get();
+        snap
+    }
+
+    /// Build an owned [`SnapshotWindow`] of just the rows needed to render a
+    /// viewport `scrollback_offset` rows up from the bottom. Convenience
+    /// wrapper over [`Screen::snapshot_window`] that also reports the real
+    /// cursor visibility and live dynamic color state, matching
+    /// [`Terminal::snapshot`]'s behavior over [`Screen::snapshot`].
+    ///
+    /// Prefer this over [`Terminal::snapshot`] on a per-rendered-frame call
+    /// site (e.g. a UI redraw loop): cost is proportional to `rows`, not to
+    /// total scrollback length.
+    pub fn snapshot_window(&self, scrollback_offset: usize) -> SnapshotWindow {
+        let mut snap = self.screen().snapshot_window(scrollback_offset);
+        snap.cursor.visible = self.modes.get(crate::modes::Mode::CursorVisible);
         snap.palette = self.colors.palette.current;
         snap.default_fg = self.colors.foreground.get();
         snap.default_bg = self.colors.background.get();
@@ -536,5 +675,66 @@ mod tests {
         let snap = term.snapshot();
         assert_eq!(snap.default_fg, None);
         assert_eq!(snap.default_bg, None);
+    }
+
+    #[test]
+    fn snapshot_window_matches_full_snapshot_active_area() {
+        let term = feed(10, 3, b"Hello");
+        let full = term.snapshot();
+        let window = term.snapshot_window(0);
+
+        assert_eq!(window.cols, full.cols);
+        assert_eq!(window.window.len(), full.rows);
+        assert_eq!(window.window, full.all_rows[full.active_start..].to_vec());
+        assert_eq!(window.cursor, full.cursor);
+        assert_eq!(window.scrollback_len, full.scrollback_len());
+    }
+
+    #[test]
+    fn snapshot_window_matches_full_snapshot_when_scrolled_into_history() {
+        // 4 cols, 2 rows; push several rows into scrollback.
+        let term = feed(4, 2, b"aaaabbbbccccddddeeee");
+        let full = term.snapshot();
+        assert!(full.scrollback_len() >= 2);
+
+        for offset in 0..=full.scrollback_len() {
+            let window = term.snapshot_window(offset);
+            let expected = full.visible_window(offset);
+            assert_eq!(
+                window.window, expected,
+                "window mismatch at offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_window_top_is_absolute_logical_row() {
+        let term = feed(4, 2, b"aaaabbbbccccddddeeee");
+        let full = term.snapshot();
+        let window = term.snapshot_window(0);
+
+        // window[0] should be the same row as `all_rows[window_top]` in a
+        // full snapshot, preserving absolute row numbering for selection.
+        assert_eq!(window.window[0], full.all_rows[window.window_top]);
+    }
+
+    #[test]
+    fn snapshot_window_always_has_exactly_rows_entries() {
+        // A fresh terminal's active area always has exactly `rows` rows (the
+        // page list is initialized with `rows` rows up front), so the window
+        // is always fully populated, never padded.
+        let term = feed(10, 5, b"hi");
+        let window = term.snapshot_window(0);
+        assert_eq!(window.window.len(), 5);
+        assert_eq!(row_text(&window.window[0]), "hi");
+    }
+
+    #[test]
+    fn snapshot_window_clamps_offset_beyond_scrollback() {
+        let term = feed(4, 2, b"aaaabbbbcccc");
+        let full = term.snapshot();
+        let clamped = term.snapshot_window(full.scrollback_len() + 100);
+        let unclamped = term.snapshot_window(full.scrollback_len());
+        assert_eq!(clamped.window, unclamped.window);
     }
 }

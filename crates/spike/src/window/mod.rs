@@ -5,7 +5,7 @@ use eframe::egui::{
     self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Vec2,
     ViewportCommand,
 };
-use ghostty_spike::{Engine, MouseTracking, Snapshot};
+use ghostty_spike::{Engine, MouseTracking, Snapshot, SnapshotWindow};
 
 use crate::pty::{PtyResult, PtySession};
 
@@ -19,7 +19,7 @@ use font::TerminalFont;
 use input::{encode_key, mouse_button_code};
 use renderer::{
     CellMetrics, is_nonblank, logical_cell, paint_exit_status, paint_terminal, selection_range,
-    visible_logical_row,
+    visible_logical_row_in_window,
 };
 
 pub(crate) fn run_window() -> PtyResult<()> {
@@ -145,7 +145,6 @@ impl WindowTerminal {
 
     fn handle_events(
         &mut self,
-        snapshot: &Snapshot,
         ctx: &egui::Context,
         rect: Rect,
         metrics: &CellMetrics,
@@ -218,7 +217,14 @@ impl WindowTerminal {
                     }
                 }
                 Event::Copy => {
-                    if let Some(text) = self.selected_text(snapshot) {
+                    // A full (not windowed) snapshot is needed here: the
+                    // selection may reach above the currently visible
+                    // window, into scrollback. This is a rare, user-
+                    // initiated event (not the per-frame render path), so
+                    // its O(history) cost doesn't matter the way it would if
+                    // paid on every frame.
+                    let snapshot = self.engine.snapshot();
+                    if let Some(text) = self.selected_text(&snapshot) {
                         ctx.copy_text(text);
                     }
                 }
@@ -275,7 +281,7 @@ impl WindowTerminal {
 
     fn handle_pointer_selection(
         &mut self,
-        snapshot: &Snapshot,
+        window: &SnapshotWindow,
         response: &egui::Response,
         rect: Rect,
         metrics: &CellMetrics,
@@ -287,7 +293,7 @@ impl WindowTerminal {
 
         if response.drag_started_by(PointerButton::Primary)
             && let Some(pos) = response.interact_pointer_pos()
-            && let Some(coord) = self.coord_at_pos(snapshot, rect, metrics, pos)
+            && let Some(coord) = self.coord_at_pos(window, rect, metrics, pos)
         {
             self.selection = Some(Selection {
                 anchor: coord,
@@ -298,7 +304,7 @@ impl WindowTerminal {
         if response.dragged_by(PointerButton::Primary)
             && let Some(pos) = response.interact_pointer_pos()
             && let (Some(coord), Some(selection)) = (
-                self.coord_at_pos(snapshot, rect, metrics, pos),
+                self.coord_at_pos(window, rect, metrics, pos),
                 self.selection.as_mut(),
             )
         {
@@ -409,7 +415,7 @@ impl WindowTerminal {
 
     fn coord_at_pos(
         &self,
-        snapshot: &Snapshot,
+        window: &SnapshotWindow,
         rect: Rect,
         metrics: &CellMetrics,
         pos: Pos2,
@@ -417,7 +423,7 @@ impl WindowTerminal {
         self.screen_coord_at_pos(rect, metrics, pos)
             .map(|(col, row)| CellCoord {
                 col,
-                logical_row: visible_logical_row(snapshot, self.scrollback_offset, row),
+                logical_row: visible_logical_row_in_window(window, row),
             })
     }
 
@@ -511,16 +517,24 @@ impl eframe::App for WindowTerminal {
             response.request_focus();
         }
         let _ = self.resize_to_rect(rect, &metrics);
-        let snapshot = self.engine.snapshot();
-        self.handle_pointer_selection(&snapshot, &response, rect, &metrics);
-        let _ = self.handle_events(&snapshot, ui.ctx(), rect, &metrics);
+        // Windowed, not a full `Snapshot`: this runs once per rendered
+        // frame, so its cost must stay proportional to the visible rows,
+        // not to total scrollback length (see `Engine::snapshot_window`).
+        // Anything that needs to reach into scrollback beyond the window
+        // (e.g. copying a selection) fetches a full snapshot separately,
+        // lazily, only when that rare event actually happens.
+        let window = self.engine.snapshot_window(self.scrollback_offset);
+        let focused = ui.ctx().input(|input| input.focused);
+        self.handle_pointer_selection(&window, &response, rect, &metrics);
+        let _ = self.handle_events(ui.ctx(), rect, &metrics);
         paint_terminal(
             ui,
             rect,
             &metrics,
-            &snapshot,
+            &window,
             self.scrollback_offset,
             self.selection,
+            focused,
         );
         self.paint_preferences(ui.ctx());
         if let Some(message) = &self.exit_status {
