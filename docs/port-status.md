@@ -39,6 +39,7 @@ Status legend: `—` not started · `WIP` · `done`
 | kitty/key.zig | done | done | 5/5 | FlagStack in screen/kitty_key.rs |
 | Selection.zig / SelectionGesture.zig | — | — | — | |
 | formatter.zig | — | — | — | |
+| highlight.zig + PageList highlightSemanticContent | done | done | 0/0 + 17/17 | upstream bug found: Flattened.init writes nonexistent field (lazily compiled, no callers); pagelist now 119 tests; analysis: `docs/analysis/highlight.md` |
 | UTF8Decoder.zig | done | done | 3/3 | |
 | unicode/ (grapheme, tables) | done | done | 13 | ghostty `2da015cd6`; `grapheme_break` FSM (const-evaluated 8 KiB table), `codepoint_width`, VS15/VS16 effects; all inline tests from grapheme.zig/main.zig/c/unicode.zig ported; oracle cross-checks: 188 width + 3,915 break divergences, all classified (terminal tailorings); symbols table deferred to renderer phase |
 | bitmap_allocator.zig / ref_counted_set.zig / hash_map.zig | done | done | 22/0/12 (Zig 21/0/22) | hash_map tests consolidated; unsafe boundaries documented per module |
