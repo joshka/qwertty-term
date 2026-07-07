@@ -1690,6 +1690,18 @@ impl Terminal {
         }
     }
 
+    /// Repeat the previously-printed character `count` times (REP, `CSI b`).
+    /// A no-op if nothing has been printed yet. `count` is clamped to a minimum
+    /// of 1. Port of `printRepeat`.
+    pub fn print_repeat(&mut self, count_req: usize) {
+        if let Some(c) = self.previous_char {
+            let count = count_req.max(1);
+            for _ in 0..count {
+                self.print(c);
+            }
+        }
+    }
+
     /// The active viewport as plain text (soft-wrap boundaries kept as newlines).
     /// Port of `plainString` (via `Screen::dump_string`, `unwrap=false`).
     pub fn plain_string(&self) -> String {

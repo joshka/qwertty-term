@@ -20,7 +20,7 @@ documented at the end.
 | `graphics_command.zig`  | 1333     | APC command grammar: KV parser + command tree + `Response`             | **yes** → `command.rs`                     |
 | `graphics_image.zig`    | 1050     | `Image`, `LoadingImage` (chunked transfer, decode), `Rect`             | **yes** → `image.rs`                       |
 | `graphics_storage.zig`  | 1601     | `ImageStorage`: image map, placement map, eviction, generation, delete | **yes (model)** → `storage.rs`             |
-| `graphics_exec.zig`     | 658      | `execute(alloc, *Terminal, *Command)` → `Response`; needs `Terminal`   | deferred (Phase 1 trunk / Screen)          |
+| `graphics_exec.zig`     | 658      | `execute(alloc, *Terminal, *Command)` → `Response`; needs `Terminal`   | **yes** → `exec.rs`                        |
 | `graphics_render.zig`   | 27       | `render.Placement`: renderer-facing placement struct                   | deferred (Phase 4)                         |
 | `graphics_unicode.zig`  | 1347     | unicode placeholder (`U+10EEEE`) placement resolution                  | deferred (needs Screen row/cell iteration) |
 | `color.zig` / `key.zig` | 77 / 169 | kitty color protocol / keyboard flags                                  | out of scope (other chunks)                |
@@ -268,9 +268,7 @@ against a `PageList` directly (via a small test helper mirroring `trackPin`) plu
 `TerminalGeometry` and explicit cursor coords, so they port 1:1 semantically without a
 `Terminal` type existing yet.
 
-## Deferred interfaces (documented, not ported)
-
-### exec (`graphics_exec.zig`, needs `Terminal`)
+## exec (`graphics_exec.zig`) — PORTED (`kitty/exec.rs`)
 
 `execute(alloc, *Terminal, *Command) ?Response` (`:23-91`) is the top of the subsystem. It
 checks `storage.enabled()`, dispatches on `cmd.control`:
@@ -285,9 +283,26 @@ checks `storage.enabled()`, dispatches on `cmd.control`:
 - `delete` (d): `storage.delete`.
 
 The quiet filter (`:78-88`) decides whether to actually emit the `Response`. Exec is where the
-cursor advances and where `trackPin` happens against the live screen — it belongs with the
-Screen/trunk integration chunk. The DCS/APC sibling delivers the raw APC payload to a seam
-that will call `CommandParser` then `execute`.
+cursor advances and where `trackPin` happens against the live screen.
+
+**Rust port** (`crates/ghostty-vt/src/kitty/exec.rs`, all 10 inline tests ported 1:1):
+`kitty::exec::execute(&mut Terminal, &Command) -> Option<Response>` mirrors the dispatch
+exactly. The in-progress `loading` state (which the Rust `ImageStorage` model deliberately
+omits) lives on `Screen.kitty_loading: Option<LoadingImage>`, alongside the new
+`Screen.kitty_images: ImageStorage`. Placement pins are tracked against the active screen's
+`PageList` (`track_pin(*cursor.page_pin)`); the delete path split-borrows the `Screen` so
+`ImageStorage::delete` can hold `&mut PageList` + geometry + cursor at once. Cursor advance for
+`T`/`p` uses `Terminal::index` (scroll-region-aware) then `set_cursor_pos`. The stream's
+`TerminalHandler::apc_end` delivers the raw `apc::Command::KittyRaw` payload to
+`kitty::CommandParser::parse_string` → `execute`, pushing `Response::encode()` onto the reply
+queue (port of `stream_terminal.Handler.apcEnd` + `Terminal.kittyGraphics`).
+
+Two seams remain inside exec: file/shm/png/zlib media (the default `image_limits = .direct` +
+`NoDecoder` restrict it to direct-medium uncompressed non-png transfers; `execute_with` accepts
+a real decoder + medium reader), and animation actions (`f`/`a`/`c`, which return
+`"ERROR: unimplemented action"` exactly as upstream).
+
+## Deferred interfaces (documented, not ported)
 
 ### render (`graphics_render.zig`, Phase 4)
 

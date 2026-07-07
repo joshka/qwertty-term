@@ -132,8 +132,21 @@ pub struct Screen {
     /// Dirty flags for the renderer.
     pub dirty: Dirty,
 
-    /// Kitty graphics image storage is a separate chunk; a single dirty bool
-    /// stands in for `kitty_images.dirty`.
+    /// Kitty graphics image storage for this screen. Port of
+    /// `Screen.kitty_images` (`ImageStorage`, one per screen). The exec layer
+    /// (`kitty::exec`) mutates this in response to APC graphics commands.
+    pub kitty_images: crate::kitty::ImageStorage,
+
+    /// In-progress chunked kitty graphics transfer, if any. Port of
+    /// `ImageStorage.loading` (which in Zig lives on the storage but which the
+    /// Rust `ImageStorage` model deliberately leaves to the exec layer, see
+    /// `docs/analysis/kitty-graphics.md`). `None` when no `m=1` chunked
+    /// transmission is mid-flight.
+    pub kitty_loading: Option<crate::kitty::LoadingImage>,
+
+    /// Legacy stand-in dirty flag for `kitty_images.dirty`, kept because the
+    /// screen erase/scroll paths set it directly; the real dirty bit now lives
+    /// on `kitty_images`.
     pub kitty_images_dirty: bool,
 }
 
@@ -166,6 +179,8 @@ impl Screen {
             kitty_keyboard: FlagStack::default(),
             semantic_prompt: SemanticPrompt::default(),
             dirty: Dirty::default(),
+            kitty_images: crate::kitty::ImageStorage::new(),
+            kitty_loading: None,
             kitty_images_dirty: false,
         }
     }
@@ -210,6 +225,10 @@ impl Screen {
         self.charset = CharsetState::default();
         self.kitty_keyboard = FlagStack::default();
         self.semantic_prompt = SemanticPrompt::default();
+        // Tear down any kitty graphics state (untracking placement pins).
+        self.kitty_images.deinit(&mut self.pages);
+        self.kitty_images = crate::kitty::ImageStorage::new();
+        self.kitty_loading = None;
         self.clear_selection();
     }
 
@@ -344,6 +363,10 @@ impl Screen {
             kitty_keyboard: FlagStack::default(),
             semantic_prompt: SemanticPrompt::default(),
             dirty: self.dirty,
+            // Clone does not copy kitty images (matches Zig `Screen.clone`,
+            // which is for read-only ops and omits image storage).
+            kitty_images: crate::kitty::ImageStorage::new(),
+            kitty_loading: None,
             kitty_images_dirty: false,
         };
         result.assert_integrity();
@@ -2444,6 +2467,9 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        // Untrack any kitty graphics placement pins before the PageList tears
+        // down (mirrors Zig `ImageStorage.deinit` running in `Screen.deinit`).
+        self.kitty_images.deinit(&mut self.pages);
         // The cursor pin is untracked as part of PageList teardown; the heap
         // hyperlink (if any) frees with the cursor. Nothing else to do — Box and
         // Vec drops handle the owned state.

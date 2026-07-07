@@ -34,8 +34,10 @@
 //! fast paths are omitted because `Parser::next` already produces identical
 //! actions.
 
+use crate::apc;
 use crate::csi::{EraseDisplay, EraseLine, TabClear};
 use crate::dcs;
+use crate::kitty;
 use crate::modes::{self, Mode};
 use crate::osc;
 use crate::parser::{Action, MAX_INTERMEDIATE, MAX_PARAMS, Parser, State};
@@ -277,6 +279,43 @@ pub trait Handler {
     // ---- reset / alignment ---------------------------------------------
     fn decaln(&mut self) {}
     fn full_reset(&mut self) {}
+
+    // ---- REP (repeat previous char, CSI b) ------------------------------
+    /// Repeat the previously printed character `count` times. Port of
+    /// `Terminal::printRepeat` dispatch (`.print_repeat`).
+    fn print_repeat(&mut self, count: u16) {}
+
+    // ---- kitty keyboard protocol (CSI … u) ------------------------------
+    /// `CSI ? u` — report the current kitty keyboard flags.
+    fn kitty_keyboard_query(&mut self) {}
+    /// `CSI > flags u` — push flags onto the stack.
+    fn kitty_keyboard_push(&mut self, flags: crate::screen::kitty_key::Flags) {}
+    /// `CSI < count u` — pop `count` entries off the stack.
+    fn kitty_keyboard_pop(&mut self, count: u16) {}
+    /// `CSI = flags ; mode u` — set/or/not the current flags.
+    fn kitty_keyboard_set(
+        &mut self,
+        mode: crate::screen::kitty_key::SetMode,
+        flags: crate::screen::kitty_key::Flags,
+    ) {
+    }
+
+    // ---- XTWINOPS (CSI t) title stack -----------------------------------
+    /// `CSI 22 ; Ps [ ; index ] t` — push the current window title onto the
+    /// title stack. `index` defaults to 0. Port of `.title_push`. Upstream's
+    /// concrete handler treats this as a no-op (the title stack lives in the
+    /// apprt/surface layer, not the terminal core); the dispatch is kept so an
+    /// embedder can wire it.
+    fn title_push(&mut self, index: u16) {}
+    /// `CSI 23 ; Ps [ ; index ] t` — pop a window title off the title stack.
+    /// Port of `.title_pop`.
+    fn title_pop(&mut self, index: u16) {}
+
+    // ---- XTSHIFTESCAPE / mouse-tracking setters (state only) ------------
+    /// `CSI > Ps s` — set whether the terminal captures shift for mouse
+    /// events. State only; the input layer interprets it. Port of
+    /// `.mouse_shift_capture`.
+    fn mouse_shift_capture(&mut self, capture: bool) {}
 
     // ---- cursor style ---------------------------------------------------
     fn cursor_style(&mut self, style: CursorStyle) {}
@@ -921,10 +960,19 @@ impl<H: Handler> Stream<H> {
                     self.handler.cursor_col_relative(v);
                 }
             }
-            // REP (repeat previous char) — not modeled here (needs
-            // previous_char state; matches spike's minimal path). Upstream
-            // routes to print_repeat; we no-op since fixtures don't use it.
-            b'b' => {}
+            // REP (repeat previous char). Port of the `'b'` prong.
+            b'b' => {
+                if intermediates.is_empty() {
+                    let count = match params.len() {
+                        0 => Some(1),
+                        1 => Some(params[0]),
+                        _ => None,
+                    };
+                    if let Some(count) = count {
+                        self.handler.print_repeat(count);
+                    }
+                }
+            }
             // DA
             b'c' => {
                 let req = match intermediates.len() {
@@ -1014,7 +1062,14 @@ impl<H: Handler> Stream<H> {
                     }
                 }
             }
-            // DECRQM
+            // DECRQM. Upstream (`stream.zig`, both commit 2da015cd6 and current)
+            // only reaches this dispatch for `intermediates.len == 2`, i.e. the
+            // private form `CSI ? $ p` (ansi = false). The ANSI form `CSI $ p`
+            // (one intermediate) is *dead code* in upstream: its inner
+            // `len == 1 => $` branch sits under an outer `2 =>` arm that a
+            // single-intermediate sequence never matches, so `CSI $ p` falls to
+            // the `else` (log-and-ignore). We match that reachable behavior
+            // exactly — only `? $ p` is answered.
             b'p' => {
                 if intermediates.len() == 2
                     && intermediates[0] == b'?'
@@ -1025,13 +1080,6 @@ impl<H: Handler> Stream<H> {
                     match modes::mode_from_int(raw, false) {
                         Some(m) => self.handler.request_mode(m),
                         None => self.handler.request_mode_unknown(raw, false),
-                    }
-                } else if intermediates.len() == 1 && intermediates[0] == b'$' && params.len() == 1
-                {
-                    let raw = params[0];
-                    match modes::mode_from_int(raw, true) {
-                        Some(m) => self.handler.request_mode(m),
-                        None => self.handler.request_mode_unknown(raw, true),
                     }
                 }
             }
@@ -1085,7 +1133,7 @@ impl<H: Handler> Stream<H> {
                 }
                 _ => {}
             },
-            // DECSLRM / DECSC-save-mode
+            // DECSLRM / DECSC-save-mode / XTSHIFTESCAPE
             b's' => match intermediates.len() {
                 0 => match params.len() {
                     0 => self.handler.left_and_right_margin_ambiguous(),
@@ -1100,18 +1148,106 @@ impl<H: Handler> Stream<H> {
                         }
                     }
                 }
+                // XTSHIFTESCAPE (`CSI > Ps s`). State only; interpreted by the
+                // input layer. Port of the `'>'` capture prong.
+                1 if intermediates[0] == b'>' => {
+                    let capture = match params.len() {
+                        0 => Some(false),
+                        1 => match params[0] {
+                            0 => Some(false),
+                            1 => Some(true),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(capture) = capture {
+                        self.handler.mouse_shift_capture(capture);
+                    }
+                }
                 _ => {}
             },
-            // XTWINOPS (size reports) — seam; fixtures don't use it. Kept as
-            // a no-op tail matching upstream's `t` prong shape.
-            b't' => {}
-            // DECRC (u with no intermediate)
-            b'u' => {
-                if intermediates.is_empty() {
-                    self.handler.restore_cursor();
+            // XTWINOPS (`CSI … t`). We implement the title push/pop ops (22/23)
+            // that upstream backs with terminal state; the size-report ops
+            // (14/16/18/21) route to a pixel-geometry effect callback upstream
+            // and remain a documented seam here (they need a size effect this
+            // chunk's `Terminal` does not own — see docs/analysis/stream.md).
+            // Port of the `'t'` prong.
+            b't' => {
+                if intermediates.is_empty() && !params.is_empty() {
+                    match params[0] {
+                        // 14/16/18/21: size reports — seam (need pixel geometry).
+                        14 | 16 | 18 | 21 => {}
+                        // 22/23: push/pop title. We only support window title
+                        // (param[1] must be 0 or 2); when present, param[2] is
+                        // the stack index. Port of the inline `22, 23 => …`
+                        // block.
+                        n @ (22 | 23)
+                            if (params.len() == 2 || params.len() == 3)
+                                && (params[1] == 0 || params[1] == 2) =>
+                        {
+                            let index = if params.len() == 3 { params[2] } else { 0 };
+                            if n == 22 {
+                                self.handler.title_push(index);
+                            } else {
+                                self.handler.title_pop(index);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                // Kitty keyboard protocol forms are a seam.
             }
+            // DECRC (u, no intermediate) / kitty keyboard protocol (`? > < =`)
+            b'u' => match intermediates.len() {
+                0 => self.handler.restore_cursor(),
+                1 => match intermediates[0] {
+                    // Query current flags.
+                    b'?' => self.handler.kitty_keyboard_query(),
+                    // Push flags (a u5; out-of-range is ignored).
+                    b'>' => {
+                        let flags = match params.len() {
+                            0 => Some(0u8),
+                            1 if params[0] <= 0b1_1111 => Some(params[0] as u8),
+                            _ => None,
+                        };
+                        if let Some(flags) = flags {
+                            self.handler.kitty_keyboard_push(
+                                crate::screen::kitty_key::Flags::from_int(flags),
+                            );
+                        }
+                    }
+                    // Pop `count` entries (default 1).
+                    b'<' => {
+                        let count = if params.len() == 1 { params[0] } else { 1 };
+                        self.handler.kitty_keyboard_pop(count);
+                    }
+                    // Set flags with a mode (1=set, 2=or, 3=not; default set).
+                    b'=' => {
+                        let flags = if !params.is_empty() {
+                            if params[0] <= 0b1_1111 {
+                                Some(params[0] as u8)
+                            } else {
+                                None
+                            }
+                        } else {
+                            Some(0u8)
+                        };
+                        let mode = match params.get(1).copied().unwrap_or(1) {
+                            1 => Some(crate::screen::kitty_key::SetMode::Set),
+                            2 => Some(crate::screen::kitty_key::SetMode::Or),
+                            3 => Some(crate::screen::kitty_key::SetMode::Not),
+                            _ => None,
+                        };
+                        if let (Some(flags), Some(mode)) = (flags, mode) {
+                            self.handler.kitty_keyboard_set(
+                                mode,
+                                crate::screen::kitty_key::Flags::from_int(flags),
+                            );
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            },
             // ICH
             b'@' => {
                 if intermediates.is_empty() {
@@ -1313,6 +1449,13 @@ pub struct TerminalHandler {
     /// base64-encoded) bytes — decoding is a host/embedder decision (e.g.
     /// `Surface.clipboardWrite` in Zig), not a terminal-core one.
     pending_clipboard: Option<(u8, String)>,
+    /// The APC sub-protocol handler (kitty graphics / glyph). Port of
+    /// `stream_terminal.Handler.apc_handler`. The stream's `apc_start`/
+    /// `apc_put`/`apc_end` events drive it; on `end` a completed
+    /// [`apc::Command::KittyRaw`] is parsed by [`kitty::CommandParser`] and
+    /// executed against the terminal ([`kitty::execute`]), with any response
+    /// pushed onto `output`. Glyph commands are a documented seam.
+    apc_handler: apc::Handler,
 }
 
 impl TerminalHandler {
@@ -1321,6 +1464,7 @@ impl TerminalHandler {
             terminal,
             output: Vec::new(),
             pending_clipboard: None,
+            apc_handler: apc::Handler::new(),
         }
     }
 
@@ -1755,6 +1899,98 @@ impl Handler for TerminalHandler {
     }
     fn xtversion(&mut self) {
         self.write_pty(b"\x1bP>|libghostty\x1b\\");
+    }
+
+    // ---- REP ------------------------------------------------------------
+    fn print_repeat(&mut self, count: u16) {
+        self.terminal.print_repeat(count as usize);
+    }
+
+    // ---- kitty keyboard protocol ----------------------------------------
+    fn kitty_keyboard_query(&mut self) {
+        // Port of `queryKittyKeyboard`: `CSI ? <flags> u` with the current
+        // stack value (a u5).
+        let flags = self.terminal.screen().kitty_keyboard.current().int();
+        let resp = format!("\x1b[?{flags}u");
+        self.write_pty(resp.as_bytes());
+    }
+    fn kitty_keyboard_push(&mut self, flags: crate::screen::kitty_key::Flags) {
+        self.terminal.screen_mut().kitty_keyboard.push(flags);
+    }
+    fn kitty_keyboard_pop(&mut self, count: u16) {
+        self.terminal
+            .screen_mut()
+            .kitty_keyboard
+            .pop(count as usize);
+    }
+    fn kitty_keyboard_set(
+        &mut self,
+        mode: crate::screen::kitty_key::SetMode,
+        flags: crate::screen::kitty_key::Flags,
+    ) {
+        self.terminal.screen_mut().kitty_keyboard.set(mode, flags);
+    }
+
+    // ---- XTWINOPS title stack (no terminal-core effect) -----------------
+    fn title_push(&mut self, _index: u16) {
+        // Port of upstream's `.title_push => {}`: the title stack lives in the
+        // apprt/surface layer, not the terminal core.
+    }
+    fn title_pop(&mut self, _index: u16) {
+        // Port of upstream's `.title_pop => {}`.
+    }
+
+    // ---- XTSHIFTESCAPE (state only) -------------------------------------
+    fn mouse_shift_capture(&mut self, capture: bool) {
+        // Port of `.mouse_shift_capture => self.terminal.flags.mouse_shift_capture = …`.
+        self.terminal.flags.mouse_shift_capture = if capture {
+            crate::terminal::MouseShiftCapture::True
+        } else {
+            crate::terminal::MouseShiftCapture::False
+        };
+    }
+
+    // ---- APC (kitty graphics / glyph) -----------------------------------
+    fn apc_start(&mut self) {
+        self.apc_handler.start();
+    }
+    fn apc_put(&mut self, byte: u8) {
+        self.apc_handler.feed(byte);
+    }
+    fn apc_end(&mut self) {
+        // Port of `stream_terminal.Handler.apcEnd`. Finalize the APC handler;
+        // a completed kitty-graphics command is parsed and executed against the
+        // terminal, and any response is written back out the reply queue. Glyph
+        // commands remain a documented seam (`TODO(chunk:font-glyph-protocol)`).
+        let Some(cmd) = self.apc_handler.end() else {
+            return;
+        };
+        match cmd {
+            apc::Command::KittyRaw(raw) => {
+                // The seam hands us the raw APC payload bytes (everything after
+                // the identifying `G`). Parse them with the kitty command
+                // grammar, then execute. A parse failure is silently dropped
+                // (matches upstream, where a malformed kitty command yields no
+                // response).
+                let Ok(kitty_cmd) = kitty::CommandParser::parse_string(&raw) else {
+                    return;
+                };
+                if let Some(resp) = kitty::execute(&mut self.terminal, &kitty_cmd) {
+                    // Encode the response as a complete APC sequence and write
+                    // it. `Response::encode` returns the empty string when there
+                    // is nothing to say (no id/number), in which case we write
+                    // nothing.
+                    let encoded = resp.encode();
+                    if !encoded.is_empty() {
+                        self.write_pty(encoded.as_bytes());
+                    }
+                }
+            }
+            // Glyph protocol needs the font subsystem (not yet ported); the APC
+            // handler already recognizes and buffers it, but there is no
+            // consumer, so it is dropped here. `TODO(chunk:font-glyph-protocol)`.
+            apc::Command::GlyphRaw(_) => {}
+        }
     }
 }
 

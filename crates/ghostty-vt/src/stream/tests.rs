@@ -28,6 +28,17 @@ struct Spy {
     tab_set: u32,
     tab_reset: u32,
     sgr_count: usize,
+    print_repeat: Option<u16>,
+    kitty_keyboard_pop: Option<u16>,
+    kitty_keyboard_push: Option<crate::screen::kitty_key::Flags>,
+    kitty_keyboard_set: Option<(
+        crate::screen::kitty_key::SetMode,
+        crate::screen::kitty_key::Flags,
+    )>,
+    kitty_keyboard_query: u32,
+    title_push: Option<u16>,
+    title_pop: Option<u16>,
+    mouse_shift_capture: Option<bool>,
 }
 
 impl Handler for Spy {
@@ -73,6 +84,34 @@ impl Handler for Spy {
     }
     fn set_attribute(&mut self, _attr: sgr::Attribute) {
         self.sgr_count += 1;
+    }
+    fn print_repeat(&mut self, count: u16) {
+        self.print_repeat = Some(count);
+    }
+    fn kitty_keyboard_query(&mut self) {
+        self.kitty_keyboard_query += 1;
+    }
+    fn kitty_keyboard_push(&mut self, flags: crate::screen::kitty_key::Flags) {
+        self.kitty_keyboard_push = Some(flags);
+    }
+    fn kitty_keyboard_pop(&mut self, count: u16) {
+        self.kitty_keyboard_pop = Some(count);
+    }
+    fn kitty_keyboard_set(
+        &mut self,
+        mode: crate::screen::kitty_key::SetMode,
+        flags: crate::screen::kitty_key::Flags,
+    ) {
+        self.kitty_keyboard_set = Some((mode, flags));
+    }
+    fn title_push(&mut self, index: u16) {
+        self.title_push = Some(index);
+    }
+    fn title_pop(&mut self, index: u16) {
+        self.title_pop = Some(index);
+    }
+    fn mouse_shift_capture(&mut self, capture: bool) {
+        self.mouse_shift_capture = Some(capture);
     }
 }
 
@@ -737,4 +776,207 @@ fn fastpath_esc_at_run_boundary() {
     // ESC immediately after a printable run (the common case): scan stops on
     // ESC without consuming it, feed drives the escape via the scalar path.
     assert_fastpath_equiv(20, 5, b"hello\x1bMworld\x1b7save\x1b8");
+}
+
+// -------------------------------------------------------------------------
+// M1 seam closure: kitty keyboard, XTWINOPS title, XTSHIFTESCAPE, REP.
+// Spy-routing tests ported from `stream.zig`; integration tests exercise the
+// concrete `TerminalHandler`.
+// -------------------------------------------------------------------------
+
+// Zig: "stream: pop kitty keyboard with no params defaults to 1".
+#[test]
+fn kitty_keyboard_pop_defaults_to_1() {
+    let s = spy(b"\x1B[<u");
+    assert_eq!(s.kitty_keyboard_pop, Some(1));
+}
+
+// Kitty keyboard push routes flags (dispatch-routing coverage; upstream has no
+// dedicated push spy test but the dispatch mirrors `stream.zig`'s `'>' u` arm).
+#[test]
+fn kitty_keyboard_push_routes_flags() {
+    let s = spy(b"\x1B[>1u");
+    assert_eq!(
+        s.kitty_keyboard_push,
+        Some(crate::screen::kitty_key::Flags::from_int(1))
+    );
+    // Default (no params) pushes empty flags.
+    let s = spy(b"\x1B[>u");
+    assert_eq!(
+        s.kitty_keyboard_push,
+        Some(crate::screen::kitty_key::Flags::from_int(0))
+    );
+    // Out-of-range (> u5) is ignored.
+    let s = spy(b"\x1B[>99u");
+    assert_eq!(s.kitty_keyboard_push, None);
+}
+
+// Kitty keyboard set: mode 1=set, 2=or, 3=not (default set).
+#[test]
+fn kitty_keyboard_set_routes_mode_and_flags() {
+    use crate::screen::kitty_key::{Flags, SetMode};
+    let s = spy(b"\x1B[=1;1u");
+    assert_eq!(
+        s.kitty_keyboard_set,
+        Some((SetMode::Set, Flags::from_int(1)))
+    );
+    let s = spy(b"\x1B[=3;2u");
+    assert_eq!(
+        s.kitty_keyboard_set,
+        Some((SetMode::Or, Flags::from_int(3)))
+    );
+    let s = spy(b"\x1B[=5;3u");
+    assert_eq!(
+        s.kitty_keyboard_set,
+        Some((SetMode::Not, Flags::from_int(5)))
+    );
+    // No mode param defaults to set.
+    let s = spy(b"\x1B[=7u");
+    assert_eq!(
+        s.kitty_keyboard_set,
+        Some((SetMode::Set, Flags::from_int(7)))
+    );
+}
+
+// Kitty keyboard query routes.
+#[test]
+fn kitty_keyboard_query_routes() {
+    let s = spy(b"\x1B[?u");
+    assert_eq!(s.kitty_keyboard_query, 1);
+}
+
+// Zig: "stream: XTSHIFTESCAPE".
+#[test]
+fn xtshiftescape() {
+    // Invalid (>=2) is ignored by the handler.
+    let s = spy(b"\x1B[>2s");
+    assert_eq!(s.mouse_shift_capture, None);
+    // No param and 0 both mean false.
+    let s = spy(b"\x1B[>s");
+    assert_eq!(s.mouse_shift_capture, Some(false));
+    let s = spy(b"\x1B[>0s");
+    assert_eq!(s.mouse_shift_capture, Some(false));
+    // 1 means true.
+    let s = spy(b"\x1B[>1s");
+    assert_eq!(s.mouse_shift_capture, Some(true));
+    // `CSI 1 SP s` is not XTSHIFTESCAPE (intermediate is a space, not `>`); it
+    // does not route to mouse_shift_capture.
+    let s = spy(b"\x1B[1 s");
+    assert_eq!(s.mouse_shift_capture, None);
+}
+
+// Zig: "stream: CSI t push title" / "… with explicit window" / "… explicit
+// icon" / "… with index".
+#[test]
+fn csi_t_push_title() {
+    // `22;0` → push, index 0.
+    assert_eq!(spy(b"\x1b[22;0t").title_push, Some(0));
+    // `22;2` (explicit window) → push, index 0.
+    assert_eq!(spy(b"\x1b[22;2t").title_push, Some(0));
+    // `22;1` (explicit icon only) → NOT dispatched.
+    assert_eq!(spy(b"\x1b[22;1t").title_push, None);
+    // `22;0;5` → push, index 5.
+    assert_eq!(spy(b"\x1b[22;0;5t").title_push, Some(5));
+}
+
+// Zig: "stream: CSI t pop title" / "… with explicit window" / "… explicit
+// icon" / "… with index".
+#[test]
+fn csi_t_pop_title() {
+    assert_eq!(spy(b"\x1b[23;0t").title_pop, Some(0));
+    assert_eq!(spy(b"\x1b[23;2t").title_pop, Some(0));
+    assert_eq!(spy(b"\x1b[23;1t").title_pop, None);
+    assert_eq!(spy(b"\x1b[23;0;5t").title_pop, Some(5));
+}
+
+// Zig: "stream: invalid CSI t" — an unimplemented op (19) routes nowhere. Also
+// covers the size-report ops (14/16/18/21) which are a documented seam here
+// (they need a pixel-geometry size effect this chunk's Terminal does not own).
+#[test]
+fn csi_t_seam_ops_route_nowhere() {
+    for input in [
+        &b"\x1b[19t"[..],
+        &b"\x1b[14t"[..],
+        &b"\x1b[16t"[..],
+        &b"\x1b[18t"[..],
+        &b"\x1b[21t"[..],
+    ] {
+        let s = spy(input);
+        assert_eq!(s.title_push, None);
+        assert_eq!(s.title_pop, None);
+    }
+}
+
+// REP (CSI b) routes the repeat count (default 1).
+#[test]
+fn rep_routes_count() {
+    assert_eq!(spy(b"\x1b[b").print_repeat, Some(1));
+    assert_eq!(spy(b"\x1b[5b").print_repeat, Some(5));
+}
+
+// -------------------------------------------------------------------------
+// Integration: TerminalHandler drives real terminal state.
+// -------------------------------------------------------------------------
+
+// REP repeats the previously-printed char against the real terminal.
+#[test]
+fn rep_integration() {
+    let mut s = term(10, 5);
+    s.feed(b"a\x1b[3b");
+    assert_eq!(s.handler.terminal.plain_string(), "aaaa");
+}
+
+// Zig: "kitty_keyboard_query" (stream_terminal.zig).
+#[test]
+fn kitty_keyboard_query_integration() {
+    let mut s = term(80, 24);
+    // Default flags should be 0.
+    s.feed(b"\x1b[?u");
+    assert_eq!(s.handler.take_output(), b"\x1b[?0u");
+    // Push with the disambiguate flag and query again.
+    s.feed(b"\x1b[>1u");
+    s.feed(b"\x1b[?u");
+    assert_eq!(s.handler.take_output(), b"\x1b[?1u");
+}
+
+// XTSHIFTESCAPE records the tri-state on terminal flags.
+#[test]
+fn xtshiftescape_integration() {
+    use crate::terminal::MouseShiftCapture;
+    let mut s = term(10, 5);
+    s.feed(b"\x1B[>1s");
+    assert_eq!(
+        s.handler.terminal.flags.mouse_shift_capture,
+        MouseShiftCapture::True
+    );
+    s.feed(b"\x1B[>0s");
+    assert_eq!(
+        s.handler.terminal.flags.mouse_shift_capture,
+        MouseShiftCapture::False
+    );
+}
+
+// Zig: "kitty graphics APC response" (stream_terminal.zig).
+#[test]
+fn kitty_graphics_apc_response() {
+    let mut s = term(10, 10);
+    // Transmit a 1x2 RGB image with id=1 via APC; expect an OK response.
+    s.feed(b"\x1b_Ga=t,t=d,f=24,i=1,s=1,v=2,c=10,r=1;////////\x1b\\");
+    assert_eq!(s.handler.take_output(), b"\x1b_Gi=1;OK\x1b\\");
+}
+
+// Zig: "kitty graphics via APC" (stream_terminal.zig) — the image lands in the
+// active screen's storage with the right format.
+#[test]
+fn kitty_graphics_via_apc() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b_Ga=t,t=d,f=24,i=1,s=1,v=2,c=10,r=1;////////\x1b\\");
+    let img = s
+        .handler
+        .terminal
+        .screen()
+        .kitty_images
+        .image_by_id(1)
+        .expect("image stored");
+    assert_eq!(img.format, crate::kitty::command::Format::Rgb);
 }

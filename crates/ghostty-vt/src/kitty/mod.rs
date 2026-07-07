@@ -11,8 +11,13 @@
 //! - [`storage`]: [`ImageStorage`] — the per-screen image map, placement map, byte-limit
 //!   eviction, dirty/generation tracking, and the delete dispatch.
 //!
-//! Deferred (documented in `docs/analysis/kitty-graphics.md`): `graphics_exec.zig` (needs
-//! `Terminal`), `graphics_render.zig` (Phase 4), `graphics_unicode.zig` (needs `Screen`).
+//! - [`exec`]: [`execute`] — applies a parsed [`Command`] to a live
+//!   [`crate::terminal::Terminal`] (cursor-tracked placements, chunked-transfer
+//!   `q` inheritance, delete against the real cursor, quiet-mode reply filter).
+//!
+//! Deferred (documented in `docs/analysis/kitty-graphics.md`): `graphics_render.zig`
+//! (Phase 4), `graphics_unicode.zig` (`U=1` unicode placeholders, needs Screen
+//! row/cell iteration).
 //!
 //! # Extraction
 //!
@@ -23,10 +28,12 @@
 //! minimal. See the analysis doc for the recommended trait-based split.
 
 pub mod command;
+pub mod exec;
 pub mod image;
 pub mod storage;
 
 pub use command::{Command, Parser as CommandParser, Response};
+pub use exec::{execute, execute_with};
 pub use image::{Image, LoadingImage, Rect};
 pub use storage::{
     AddImageError, ImageStorage, Location, Placement, PlacementId, PlacementKey, PlacementTag,

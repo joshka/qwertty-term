@@ -200,9 +200,20 @@ impl Parser {
         if self.data.is_empty() {
             return Ok(Vec::new());
         }
-        base64::engine::general_purpose::STANDARD_NO_PAD
-            .decode(&self.data)
-            .map_err(|_| Error::InvalidData)
+        // Zig uses `std.base64.standard.Decoder`, which does not validate the
+        // trailing bits of the final partial group (it simply shifts them out).
+        // The `base64` crate's `STANDARD_NO_PAD` engine rejects a non-zero
+        // trailing-bit remainder by default, which would reject valid kitty
+        // payloads such as an 8-byte RGBA image encoded as 11 `/` characters
+        // (`graphics_exec.zig` "default format is rgba" test). Configure the
+        // engine to permit trailing bits so the decode matches Zig exactly.
+        use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+        let config = GeneralPurposeConfig::new()
+            .with_encode_padding(false)
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true);
+        let engine = GeneralPurpose::new(&base64::alphabet::STANDARD, config);
+        engine.decode(&self.data).map_err(|_| Error::InvalidData)
     }
 
     /// Accumulate a byte into `kv_temp`; on overflow drop to `overflow_state`. Port of

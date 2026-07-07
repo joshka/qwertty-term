@@ -89,7 +89,7 @@ dispatch prong is a no-op, matching upstream's "log and ignore").
 | `Z`         | CBT tab back                                   | implemented                                                         |
 | `@`         | ICH insert blanks                              | implemented                                                         |
 | `a`         | HPR col relative                               | implemented                                                         |
-| `b`         | REP repeat previous char                       | **not modeled** (needs `previous_char`; fixtures/diff don't use it) |
+| `b`         | REP repeat previous char                       | implemented (`Terminal::print_repeat` over `previous_char`)         |
 | `c`         | DA1/DA2/DA3 device attributes                  | implemented (reply)                                                 |
 | `d`         | VPA cursor row                                 | implemented                                                         |
 | `e`         | VPR row relative                               | implemented                                                         |
@@ -97,23 +97,38 @@ dispatch prong is a no-op, matching upstream's "log and ignore").
 | `h`/`l`     | SM/RM set/reset mode (ansi + `?` private)      | implemented                                                         |
 | `m`         | SGR (via `sgr::Parser`)                        | implemented; `>` XTMODKEYS form **not modeled**                     |
 | `n`         | DSR / CPR (+ `?`)                              | implemented (reply); `>` modify-key form not modeled                |
-| `p`         | DECRQM request mode (`$` / `?$`)               | implemented (reply)                                                 |
+| `p`         | DECRQM request mode (`?$` only)                | implemented (reply); `$` ANSI form is upstream dead code (below)    |
 | `q` (space) | DECSCUSR cursor style                          | implemented (blink mode only; style rendering is a screen concern)  |
 | `q` (`"`)   | DECSCA protected mode                          | implemented                                                         |
 | `q` (`>`)   | XTVERSION                                      | implemented (reply)                                                 |
 | `r`         | DECSTBM margins / `?` restore-mode             | implemented                                                         |
-| `s`         | DECSLRM margins / `?` save-mode / SC-ambiguous | implemented                                                         |
-| `t`         | XTWINOPS size reports / title push-pop         | **seam** (no-op tail; fixtures/diff don't use it)                   |
-| `u`         | DECRC (no intermediate)                        | implemented; kitty-keyboard forms are a **seam**                    |
+| `s`         | DECSLRM margins / `?` save-mode / SC-ambiguous | implemented; `s >` XTSHIFTESCAPE records `mouse_shift_capture`      |
+| `t`         | XTWINOPS size reports / title push-pop         | title push/pop (22/23) routed; size reports (14/16/18/21) **seam**  |
+| `u`         | DECRC (no intermediate)                        | implemented; kitty-keyboard forms (`?`/`>`/`<`/`=`) routed          |
 | `}` (`$`)   | DECSASD active status display                  | implemented                                                         |
 | others      | —                                              | ignored (matches upstream `log.warn` + return)                      |
 
-Kitty-keyboard (`u` with `?`/`>`/`<`/`=`), XTSHIFTESCAPE (`s >`), and XTWINOPS
-title push/pop are **seams** — the stream doesn't route them (they touch state
-this chunk's `Terminal` doesn't own: `kitty_keyboard`, `mouse_shift_capture`,
-a title stack). They are the same seams upstream keeps in
-`stream_terminal.zig` (`.kitty_keyboard_*`, `.mouse_shift_capture`,
-`.title_push`/`.title_pop`).
+**Kitty-keyboard** (`u` with `?`/`>`/`<`/`=`) is now routed to the ported
+[`Screen::kitty_keyboard`](screen.md) `FlagStack` (`push`/`pop`/`set`/`current`),
+with the `? u` query answered as `CSI ? <flags> u` via the reply queue. **Encoding
+key *events*** into kitty sequences is input-phase (`chunk:input`), not here.
+
+**XTSHIFTESCAPE** (`s >`) records `Terminal.flags.mouse_shift_capture` (a
+tri-state); the mouse-tracking mode setters likewise record state only —
+interpretation is the input phase's job.
+
+**XTWINOPS title push/pop** (`CSI 22/23 … t`) is *routed* (with the stack index),
+but the concrete `TerminalHandler` treats it as a no-op, exactly matching
+upstream's `stream_terminal.zig` (`.title_push`/`.title_pop => {}`): the title
+stack lives in the apprt/surface layer, not the terminal core. The **size-report**
+ops (`14`/`16`/`18`/`21 t`) remain a seam — they route to a pixel-geometry size
+effect upstream that this chunk's `Terminal` does not own.
+
+**DECRQM `$` (ANSI) form.** Upstream's `stream.zig` `'p'` prong only reaches its
+dispatch for `intermediates.len == 2` (the private `? $ p` form); the inner
+`len == 1 => $` branch is unreachable dead code, so `CSI $ p` is silently
+ignored. The port matches this reachable behavior exactly — only `? $ p` is
+answered (documented at the `b'p'` arm).
 
 ## ESC dispatch table (`escDispatch`, `stream.zig:2312-2582`)
 
@@ -138,10 +153,15 @@ protected; `Z` DECID; `c` RIS; `n`/`o` LS2/LS3; `~`/`}`/`|` LS1R/LS2R/LS3R;
   `Terminal::print_attributes`; DECSTBM/DECSLRM answered from the scrolling
   region; XTGETTCAP/tmux are seams). Matches upstream, which ignores
   `dcs_hook`/`put`/`unhook` for terminal state.
-- **APC**: `Action::ApcStart/ApcPut/ApcEnd` route to `Handler::apc_*`; the
-  concrete `TerminalHandler` leaves them as the kitty-graphics / glyph **seam**
-  (the raw-buffer `apc::Handler` exists but its exec glue into kitty storage is
-  `TODO(chunk:kitty-gfx)`).
+- **APC**: `Action::ApcStart/ApcPut/ApcEnd` route to `Handler::apc_*`, which the
+  concrete `TerminalHandler` drives through its own `apc::Handler`. On `apc_end`
+  a completed `apc::Command::KittyRaw` is parsed by `kitty::CommandParser` and
+  applied via `kitty::execute` (`kitty/exec.rs`, port of `graphics_exec.zig`)
+  against the active screen's `ImageStorage`; the encoded `Response` (if any) is
+  pushed onto the reply queue. Glyph-protocol payloads (`apc::Command::GlyphRaw`)
+  are dropped — they need the unported font subsystem (`TODO(chunk:font-glyph-
+  protocol)`). This is the port of `stream_terminal.Handler.apcEnd` +
+  `Terminal.kittyGraphics`.
 
 ## Replies (DSR/DA/CPR/DECRQSS) — output-queue design
 
@@ -160,16 +180,21 @@ exactly as upstream (`deviceStatus`, `stream_terminal.zig:325-359`).
 
 `Terminal::resize`, `deccolm` (mode-3-gated 80/132 switch), `semantic_prompt`
 (OSC 133 dispatch, ported from `Terminal.semanticPrompt` incl.
-`semantic_prompt_fresh_line`), `cursor_is_at_prompt`, and `print_attributes`
-(DECRQSS SGR reply body, port of `printAttributes`).
+`semantic_prompt_fresh_line`), `cursor_is_at_prompt`, `print_attributes`
+(DECRQSS SGR reply body, port of `printAttributes`), and `print_repeat` (REP,
+port of `printRepeat`). The active `Screen` gained a `kitty_images: ImageStorage`
+plus a `kitty_loading: Option<LoadingImage>` (the exec layer's chunked-transfer
+state, deinited on reset/drop/clone), and `kitty::exec::execute` (port of
+`graphics_exec.execute`, wiring the model to a live `Terminal`).
 
 ## Zig-vs-Rust test counts
 
 | Source                    | Zig tests | Rust port                           | Notes                                                                                                                                                                                                                                                                        |
 | ------------------------- | --------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stream.zig`              | 38        | 18 dispatch-routing (spy) + 2 print | Ported the portable subset (cursor/mode/erase/DECSCUSR/DECSCA/insert/SCORC/tab/SGR/print/invalid-utf8). Skipped: `test Action` (C-ABI meta), 2 SIMD-path tests (perf path not ported), and the kitty-keyboard / XTWINOPS-title-push-pop / XTSHIFTESCAPE prong tests (seams). |
-| `stream_terminal.zig`     | 65        | 13 integration (`TerminalHandler`)  | Ported the color (OSC 4/104/10/11/12), query-ignore, title/pwd, and reply (CPR/DECRQSS/DA) tests. Skipped: kitty-graphics/glyph-APC exec tests, kitty-keyboard, mouse, and title-stack tests (all seams).                                                                    |
-| **stream/tests.rs total** | —         | **33**                              | + 3 fixture replays against the Rust engine (`fixture_*`).                                                                                                                                                                                                                   |
+| `stream.zig`              | 38        | 27 dispatch-routing (spy) + 2 print | Ported the portable subset plus the now-closed seams: REP, kitty-keyboard (pop/push/set/query), XTSHIFTESCAPE, and the 8 CSI-t title push/pop prong tests + the CSI-t seam-op (14/16/18/19/21) routing check. Skipped: `test Action` (C-ABI meta), 2 SIMD-path perf tests.   |
+| `stream_terminal.zig`     | 65        | 18 integration (`TerminalHandler`)  | Ported the color/query/title/pwd/reply tests plus REP, `kitty_keyboard_query`, XTSHIFTESCAPE, and both kitty-graphics-via-APC tests (response + storage). Skipped: glyph-APC (font subsystem unported), mouse, and title-stack persistence tests (apprt-layer state).        |
+| `kitty/exec.rs`           | 10        | 10 (`graphics_exec.zig`, 1:1)       | more-chunks q=0/q=1/increasing-q, default-format-rgba, valid-u32/i32 (ENOENT), no-response no-id/number (t/T), retransmit-generation, delete-then-retransmit-generation.                                                                                                     |
+| **stream/tests.rs total** | —         | **59**                              | Spy + integration + 3 fixture replays (`fixture_*`) + fast-path equivalence.                                                                                                                                                                                                 |
 | vt-diff `rust_engine.rs`  | —         | 3                                   | Rust oracle standalone (hello/empty/3 fixtures).                                                                                                                                                                                                                             |
 | vt-diff `differential.rs` | —         | 9                                   | Rust-vs-reference (fixtures + 8 hand streams), `--features reference`.                                                                                                                                                                                                       |
 
@@ -193,22 +218,43 @@ No deliberate divergences. The three fixtures also pass identically against the
 Rust engine alone (`cargo test -p ghostty-vt --lib stream`) and the reference
 (`cargo test -p vt-diff --features reference tests::smoke`).
 
+## Seams closed this chunk (M1)
+
+- **Kitty graphics APC exec** — `TerminalHandler` drives an `apc::Handler`;
+  `apc_end` parses the `KittyRaw` payload with `kitty::CommandParser` and applies
+  it via `kitty::exec::execute` against the active screen's `ImageStorage`
+  (placement-at-cursor with tracked pins, cursor advance for `T`/`p`, `q`
+  inheritance across chunks, quiet-mode reply filter, delete against the real
+  cursor). Responses go out the reply queue.
+- **Kitty keyboard protocol** (`CSI … u` `?`/`>`/`<`/`=`) — routed to
+  `Screen.kitty_keyboard` (`FlagStack`); `? u` query answered via the reply
+  queue. (Key-event *encoding* is input-phase, not here.)
+- **XTWINOPS title push/pop** (`CSI 22/23 … t`) — routed (with stack index);
+  `TerminalHandler` no-ops it exactly as upstream (title stack is apprt-layer).
+- **XTSHIFTESCAPE** (`CSI > Ps s`) — records `Terminal.flags.mouse_shift_capture`.
+- **REP** (`CSI b`) — `Terminal::print_repeat` over `previous_char`.
+
 ## Remaining seams
 
-1. **Kitty graphics / glyph APC exec** — `apc::Handler` buffers raw payloads; the
-   glue into kitty storage is `TODO(chunk:kitty-gfx)`. `Handler::apc_*` default
-   no-op in `TerminalHandler`.
-2. **Kitty keyboard protocol** (`CSI … u` push/pop/set/query) — not routed;
-   needs `Screen.kitty_keyboard`.
-3. **XTWINOPS size reports + title push/pop** (`CSI … t`) — no-op tail; needs a
-   size effect + title stack.
-4. **XTSHIFTESCAPE / mouse shift capture / mouse event+format** — stored on
-   `flags` upstream; interpreted by the input layer (`chunk:input`).
-5. **DCS XTGETTCAP + tmux control mode** — parsed by `dcs::Handler` but produce
+1. **Glyph APC protocol** (`ESC _ 25a1;…`) — `apc::Handler` recognizes and
+   buffers it (`apc::Command::GlyphRaw`), but there is no consumer: it needs the
+   font subsystem (`TODO(chunk:font-glyph-protocol)`), so `apc_end` drops it.
+2. **Kitty graphics unicode placeholders** (`U=1`, `graphics_unicode.zig`) — not
+   ported; needs Screen row/cell iteration over `U+10EEEE` placeholder cells.
+3. **Kitty graphics file/shm/png/zlib media** — `kitty::exec::execute` uses the
+   default `image_limits = .direct` and `NoDecoder`, so only direct-medium,
+   uncompressed, non-png transfers land (matching the model's default limits).
+   `execute_with` takes a real decoder + medium reader for a future integration.
+4. **XTWINOPS size reports** (`CSI 14/16/18/21 t`) — need a pixel-geometry size
+   effect this chunk's `Terminal` does not own; still a routed-nowhere seam.
+5. **Mouse event/format mode setters** — recorded on `flags` upstream; the
+   interpretation is input-phase (`chunk:input`). (Shift capture is done above.)
+6. **DCS XTGETTCAP + tmux control mode** — parsed by `dcs::Handler` but produce
    no terminal-state effect (matches upstream); tmux client is `chunk:tmux`.
-6. **REP** (`CSI b`) — needs `previous_char` repeat plumbing.
 7. **Kitty color protocol** (OSC 21) set/query effects — no-op; mirrors
    `color_operation` when landed.
+8. **Animation** (kitty `f`/`a`/`c` actions) — parsed but exec returns
+   `"ERROR: unimplemented action"`, exactly as upstream.
 
 ## PROGRESS (pass 1 — stream dispatch + differential oracle DONE)
 
