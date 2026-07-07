@@ -1684,9 +1684,18 @@ impl Terminal {
     }
 
     /// Print a string (sequence of codepoints). Port of `printString`.
+    ///
+    /// `\n` is special-cased to carriage-return + linefeed, matching Zig's
+    /// `printString` (it is not simply passed through to `print`, which
+    /// would treat it as a printable codepoint).
     pub fn print_string(&mut self, s: &str) {
         for c in s.chars() {
-            self.print(c as u32);
+            if c == '\n' {
+                self.carriage_return();
+                self.linefeed();
+            } else {
+                self.print(c as u32);
+            }
         }
     }
 

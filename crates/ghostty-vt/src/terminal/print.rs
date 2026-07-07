@@ -586,8 +586,20 @@ impl Terminal {
                 }
             }
 
-            let page = self.screen().cursor_page();
-            let _ = (*page).append_grapheme(self.screen().cursor.page_row, prev, c);
+            // ENGINE BUG FIX (M1 backfill): this previously called the raw
+            // `Page::append_grapheme` directly, bypassing
+            // `Screen::append_grapheme`'s grow-and-retry-on-OOM logic (and
+            // silently discarding the error). Upstream's zero-width path
+            // (`Terminal.zig:1107`, `printCell`) goes through
+            // `self.screens.active.appendGrapheme`, same as the other two
+            // call sites in this file (`print_grapheme` / print.rs:483,543).
+            // Without growth, a page whose grapheme allocator fills up (e.g.
+            // long Zalgo-style combining-mark runs) would just silently stop
+            // attaching further combining codepoints forever. Caught by
+            // porting "Terminal: input glitch text" (Terminal.zig), which
+            // hangs forever waiting for grapheme capacity to grow if the
+            // append is dropped on OOM instead of retried after growing.
+            let _ = self.screen_mut().append_grapheme(prev, c);
         }
     }
 

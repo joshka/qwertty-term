@@ -1006,6 +1006,24 @@ impl Screen {
             unsafe { self.refresh_cursor_pointers() };
             self.cursor_mark_dirty();
         }
+
+        // The newly created line needs to be styled per the bg color if set.
+        // ENGINE BUG FIX (M1 backfill): this trailing block was missing
+        // entirely in the Rust port, so `index`/scroll at the bottom of a
+        // scrollback-enabled screen silently dropped the cursor's bg color
+        // on the newly-created row. Port of the unconditional
+        // `if (self.cursor.style_id != style.default_id) { ... }` block at
+        // the end of Zig's `cursorDownScroll` (Screen.zig).
+        if self.cursor.style_id != style::DEFAULT_ID
+            && let Some(blank) = self.cursor.style.bg_cell()
+        {
+            // SAFETY: cursor page/row live; fill the whole row.
+            unsafe {
+                let page = self.cursor_page();
+                let cols = (*page).size.cols as usize;
+                (*page).fill_cells(self.cursor.page_row, 0, cols, blank);
+            }
+        }
         self.assert_integrity();
     }
 
@@ -2395,13 +2413,32 @@ impl Screen {
 
 impl Screen {
     /// Dump the region `[tl, br]` (inclusive) as plain text, one row per line.
-    /// A restricted port of `dumpString` (`.plain` emit): concatenates each
-    /// row's cell codepoints, optionally unwrapping soft-wrap. Used by both the
-    /// test harness and `Terminal::plain_string`.
+    /// A restricted port of `dumpString` (`.plain` emit, `trim: false`):
+    /// concatenates each row's cell codepoints, optionally unwrapping
+    /// soft-wrap. Used by both the test harness and `Terminal::plain_string`.
+    ///
+    /// Blank (untexted) cells are accumulated in a running counter and only
+    /// flushed as spaces once a non-blank cell is found — this mirrors
+    /// `formatter.zig`'s `blank_cells` accumulator (formatter.zig ~line
+    /// 1090-1184), which resets only at a hard row boundary (`!row.wrap ||
+    /// !unwrap`), NOT at a soft-wrap join. This matters: it means trailing
+    /// blank cells at the end of a wrapped row are carried across the join
+    /// and re-emitted once a later non-blank cell appears in the merged run,
+    /// rather than being silently trimmed away at the row boundary.
+    ///
+    /// ENGINE BUG FIX (M1 backfill): a previous version of this function
+    /// trimmed each row's trailing blanks independently before
+    /// concatenating, which silently dropped exactly the blank cells this
+    /// accumulator is meant to preserve across soft-wrap joins. Caught by
+    /// porting "Terminal: eraseChars wide char wrap boundary conditions" and
+    /// the "Terminal: deleteLines wide character spacer head *" scroll-margin
+    /// family (Terminal.zig), whose expected `plainStringUnwrapped` output
+    /// literals only matched once this was fixed.
     pub fn dump_string(&self, tag: Tag, unwrap: bool) -> String {
         use crate::page::Wide;
         let mut out = String::new();
         let mut first = true;
+        let mut blank_cells = 0usize;
         let mut it = self.pages.row_iterator(
             Direction::RightDown,
             Point::new(tag, Default::default()),
@@ -2412,26 +2449,28 @@ impl Screen {
             while let Some(pin) = it.next() {
                 let (row, _) = pin.row_and_cell();
                 let wrap_cont = (*row).wrap_continuation();
-                if !(first || unwrap && wrap_cont) {
+                let hard_boundary = !(unwrap && wrap_cont);
+                if !first && hard_boundary {
                     out.push('\n');
+                    // A hard row boundary drops any accumulated trailing
+                    // blanks from the previous row (they'd just be
+                    // whitespace right before a newline).
+                    blank_cells = 0;
                 }
                 first = false;
+
+                // Also reset if this row doesn't continue a wrap (mirrors
+                // the same condition in formatter.zig).
+                if hard_boundary {
+                    blank_cells = 0;
+                }
 
                 let page = self.pages.node_data(pin.node);
                 let cols = page.size.cols as usize;
                 let cells = page.get_cells(row);
                 let base = cells.cast::<Cell>();
 
-                // Trailing-blank trim per row (matches formatter trim=false but
-                // visually stable: we still trim trailing empty cells so row
-                // comparisons match Zig's plain dump).
-                let mut last_text = 0usize;
                 for x in 0..cols {
-                    if (*base.add(x)).has_text() {
-                        last_text = x + 1;
-                    }
-                }
-                for x in 0..last_text {
                     let cell = *base.add(x);
                     match cell.wide() {
                         Wide::SpacerTail | Wide::SpacerHead => continue,
@@ -2439,8 +2478,16 @@ impl Screen {
                     }
                     let cp = cell.codepoint();
                     if cp == 0 {
-                        out.push(' ');
-                    } else if let Some(ch) = char::from_u32(cp) {
+                        blank_cells += 1;
+                        continue;
+                    }
+                    if blank_cells > 0 {
+                        for _ in 0..blank_cells {
+                            out.push(' ');
+                        }
+                        blank_cells = 0;
+                    }
+                    if let Some(ch) = char::from_u32(cp) {
                         out.push(ch);
                         // Append graphemes if present.
                         let has_grapheme =
@@ -2457,8 +2504,9 @@ impl Screen {
                 }
             }
         }
-        // Trim trailing blank lines (matches the plain formatter, which does not
-        // emit trailing empty rows).
+        // Trailing accumulated blanks at the very end of output are dropped
+        // (matches the plain formatter, which does not emit trailing
+        // whitespace/empty rows).
         while out.ends_with('\n') {
             out.pop();
         }
