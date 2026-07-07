@@ -6,7 +6,17 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-06 (end of autonomous run)
+## State as of 2026-07-08
+
+**M1 CERTIFIED** (see port-status Milestones). **M3 essentially complete**: `ghostty-app`
+runs — native AppKit window, Metal via the full ported stack, native tabs with OSC7 pwd
+inheritance, menu, kitty+legacy key encoding, IME. All three de-risk spike decisions
+RATIFIED (ADR-002 threads+polling; FFI Swift-adaptation GO; raw AppKit). In flight:
+app theme+selection chunk; termio A+B (ghostty-termio). Next: M2 spine (Exec D, hub E),
+M3 completeness (emoji/color atlas, kitty image render R6, links R7, CVDisplayLink,
+F5-full discovery), then M5 via the proven FFI path.
+
+## Historical: state as of 2026-07-06
 
 **Phase 1 core loop CLOSED and demo live**: parser → stream → Terminal → Screen → PageList all
 ported; differential parity proven (zero divergences vs libghostty-vt across fixtures + 8

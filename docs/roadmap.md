@@ -40,7 +40,7 @@ Dependency spine: A → B/C → D → E → M/N; input track H → I/J/K/L indep
 | I   | kitty keyboard encode                                   | ~400    | S   | **DONE 2026-07-07** (window emits kitty sequences when apps enable them)                                             |
 | K   | mouse reporting encode (5 formats)                      | 781     | M   | **DONE 2026-07-07** (wired into window)                                                                              |
 | L   | bracketed paste                                         | 228     | M   | **DONE 2026-07-07** (control-byte stripping now active)                                                              |
-| J   | legacy key encode (remainder of key_encode.zig)         | ~2,100  | XL  | after I; seam designed                                                                                               |
+| J   | legacy key encode (remainder of key_encode.zig)         | ~2,100  | XL  | **DONE 2026-07-08 (full legacy encoder + 117-entry keymap; 172 input tests)**                                        |
 | M   | Surface.zig single-surface core                         | 6,036   | XL  | the join point; last                                                                                                 |
 | N   | App single-surface slice + surface_mouse                | ~860    | S/M | parallel with M                                                                                                      |
 
@@ -74,8 +74,8 @@ Renderer chunks (13.9k total; Metal-first):
 | R1  | GpuBackend trait + Metal context (objc2-metal deletes 452-LoC bindings)                         | ~1,470  | L   | **DONE 2026-07-08 (objc2-metal; wire structs FROZEN; IOSurface readback proven; fixed upstream buffer over-alloc)** |
 | R2  | frame/present/pacing (IOSurface-on-CALayer, NOT CAMetalLayer; CVDisplayLink later, timer first) | ~1,050  | L   | **DONE 2026-07-08 (Frame/RenderPass/Pipeline/IOSurfaceLayer/SwapChain; clear+triangle readback proven)**            |
 | R3  | shaders: cell_text/cell_bg/bg_color MSL + wire structs bit-exact                                | ~1,300  | L   | **DONE 2026-07-08 (MSL verbatim, compiles on Metal; layouts pinned to wire offsets; color-math goldens)**           |
-| R4  | cell engine (rebuildCells family; full-redraw mode day one)                                     | ~2,600  | XL  | critical path                                                                                                       |
-| R5  | render thread + mailbox (replace egui shell)                                                    | ~840    | L   | after pixels; sync loop OK first                                                                                    |
+| R4  | cell engine (rebuildCells family; full-redraw mode day one)                                     | ~2,600  | XL  | **DONE 2026-07-08 (first pixels: offscreen readback acceptance, all 5 assertions)**                                 |
+| R5  | render thread + mailbox (replace egui shell)                                                    | ~840    | L   | **DONE 2026-07-08 (ghostty-app: native window, tabs w/ pwd inheritance, menu, IME; smoke green)**                   |
 | R6  | kitty image + bg-image rendering                                                                | ~1,400  | L   | completeness                                                                                                        |
 | R7  | links (regex crate) + overlay + min-contrast polish                                             | ~740    | M   | completeness                                                                                                        |
 | R8  | shadertoy custom shaders (naga/shaderc)                                                         | ~1,100  | M   | completeness                                                                                                        |
