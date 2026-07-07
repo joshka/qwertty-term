@@ -5,6 +5,8 @@ use eframe::egui::{
     self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Vec2,
     ViewportCommand,
 };
+use ghostty_input::mouse_encode::{self, Event as MouseEncodeEvent, Options as MouseEncodeOptions};
+use ghostty_input::paste;
 use ghostty_spike::{Engine, MouseTracking, Snapshot, SnapshotWindow};
 
 use crate::pty::{PtyResult, PtySession};
@@ -73,6 +75,11 @@ struct WindowTerminal {
     shown_title: String,
     selection: Option<Selection>,
     pressed_mouse_button: Option<u8>,
+    /// Last cell reported for a motion event, for `mouse_encode`'s
+    /// motion-dedup logic (skip identical consecutive same-cell motion
+    /// reports, except in SGR-pixels format). See
+    /// `ghostty_input::mouse_encode::encode`'s `last_cell` parameter.
+    last_mouse_cell: Option<(i64, i64)>,
     close_requested: bool,
     exit_status: Option<String>,
     terminal_font: TerminalFont,
@@ -117,6 +124,7 @@ impl WindowTerminal {
             shown_title: "ghostty-rs".to_string(),
             selection: None,
             pressed_mouse_button: None,
+            last_mouse_cell: None,
             close_requested: false,
             exit_status: None,
             terminal_font,
@@ -187,18 +195,21 @@ impl WindowTerminal {
                 Event::Paste(text) => {
                     self.scrollback_offset = 0;
                     self.selection = None;
-                    if self.engine.bracketed_paste() {
-                        self.pty.write_all(b"\x1b[200~")?;
-                        self.pty.write_all(text.as_bytes())?;
-                        self.pty.write_all(b"\x1b[201~")?;
-                    } else {
-                        self.pty.write_all(text.as_bytes())?;
-                    }
+                    let (prefix, body, suffix) = paste::encode(
+                        &text,
+                        paste::Options {
+                            bracketed: self.engine.bracketed_paste(),
+                        },
+                    );
+                    self.pty.write_all(prefix.as_bytes())?;
+                    self.pty.write_all(body.as_bytes())?;
+                    self.pty.write_all(suffix.as_bytes())?;
                 }
                 Event::Key {
                     key,
                     pressed: true,
                     modifiers,
+                    repeat,
                     ..
                 } => {
                     if app_shell::handle_shortcut(ctx, key, modifiers, &mut self.show_preferences)?
@@ -208,9 +219,8 @@ impl WindowTerminal {
                     if self.handle_scrollback_key(key, modifiers) {
                         continue;
                     }
-                    if let Some(bytes) =
-                        encode_key(key, modifiers, self.engine.application_cursor_keys())
-                    {
+                    let opts = self.engine.key_encode_options();
+                    if let Some(bytes) = encode_key(key, modifiers, repeat, &opts) {
                         self.scrollback_offset = 0;
                         self.selection = None;
                         self.pty.write_all(&bytes)?;
@@ -234,13 +244,13 @@ impl WindowTerminal {
                 Event::PointerMoved(pos)
                     if self.engine.mouse_tracking() == Some(MouseTracking::Any) =>
                 {
-                    self.report_mouse_motion(rect, metrics, pos, 35)?;
+                    self.report_mouse_motion(rect, metrics, pos)?;
                 }
                 Event::PointerMoved(pos)
                     if self.engine.mouse_tracking() == Some(MouseTracking::Drag) =>
                 {
-                    if let Some(button_code) = self.pressed_mouse_button {
-                        self.report_mouse_motion(rect, metrics, pos, button_code + 32)?;
+                    if self.pressed_mouse_button.is_some() {
+                        self.report_mouse_motion(rect, metrics, pos)?;
                     }
                 }
                 Event::Copy => {
@@ -357,6 +367,41 @@ impl WindowTerminal {
         self.engine.mouse_tracking().is_some() && !modifiers.shift
     }
 
+    /// Build the `mouse_encode::Size` for the terminal's current on-screen
+    /// rectangle, so pixel positions convert to the same grid cells
+    /// `screen_coord_at_pos`'s manual math would produce.
+    fn mouse_encode_size(&self, metrics: &CellMetrics) -> mouse_encode::Size {
+        mouse_encode::Size {
+            screen_width: self.engine.cols() as f64 * metrics.width as f64,
+            screen_height: self.engine.rows() as f64 * metrics.height as f64,
+            cell_width: metrics.width as f64,
+            cell_height: metrics.height as f64,
+        }
+    }
+
+    /// Encode and send a mouse event through `ghostty_input::mouse_encode`.
+    /// `pos` is in window (egui) coordinates; `rect` is the terminal's
+    /// on-screen rectangle, so `pos - rect.min` gives the surface-space
+    /// position `mouse_encode` expects (origin at the terminal's top-left).
+    fn write_mouse_event(
+        &mut self,
+        metrics: &CellMetrics,
+        event: MouseEncodeEvent,
+    ) -> PtyResult<()> {
+        let opts = MouseEncodeOptions {
+            event: self.engine.mouse_event(),
+            format: self.engine.mouse_format(),
+            size: self.mouse_encode_size(metrics),
+            any_button_pressed: self.pressed_mouse_button.is_some()
+                || event.action == ghostty_input::mouse::Action::Press,
+        };
+        let bytes = mouse_encode::encode(event, &opts, &mut self.last_mouse_cell);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.pty.write_all(&bytes)
+    }
+
     fn report_mouse_button(
         &mut self,
         rect: Rect,
@@ -365,22 +410,29 @@ impl WindowTerminal {
         button: PointerButton,
         pressed: bool,
     ) -> PtyResult<()> {
-        let Some(button_code) = mouse_button_code(button) else {
-            return Ok(());
-        };
-        let Some((col, row)) = self.screen_coord_at_pos(rect, metrics, pos) else {
+        let Some(mouse_button) = map_pointer_button(button) else {
             return Ok(());
         };
 
         self.scrollback_offset = 0;
         self.selection = None;
-        if pressed {
-            self.pressed_mouse_button = Some(button_code);
-            self.write_mouse_report(button_code, col, row, true)
+        self.pressed_mouse_button = if pressed {
+            mouse_button_code(button)
         } else {
-            self.pressed_mouse_button = None;
-            self.write_mouse_report(button_code, col, row, false)
-        }
+            None
+        };
+
+        let event = MouseEncodeEvent {
+            action: if pressed {
+                ghostty_input::mouse::Action::Press
+            } else {
+                ghostty_input::mouse::Action::Release
+            },
+            button: Some(mouse_button),
+            mods: ghostty_input::key_mods::Mods::default(),
+            pos: surface_pos(rect, pos),
+        };
+        self.write_mouse_event(metrics, event)
     }
 
     fn report_mouse_motion(
@@ -388,14 +440,17 @@ impl WindowTerminal {
         rect: Rect,
         metrics: &CellMetrics,
         pos: Pos2,
-        code: u8,
     ) -> PtyResult<()> {
-        let Some((col, row)) = self.screen_coord_at_pos(rect, metrics, pos) else {
-            return Ok(());
-        };
         self.scrollback_offset = 0;
         self.selection = None;
-        self.write_mouse_report(code, col, row, true)
+        let button = self.pressed_mouse_button.and_then(mouse_button_from_code);
+        let event = MouseEncodeEvent {
+            action: ghostty_input::mouse::Action::Motion,
+            button,
+            mods: ghostty_input::key_mods::Mods::default(),
+            pos: surface_pos(rect, pos),
+        };
+        self.write_mouse_event(metrics, event)
     }
 
     fn report_mouse_wheel(
@@ -408,38 +463,20 @@ impl WindowTerminal {
         let Some(pos) = ctx.input(|input| input.pointer.hover_pos()) else {
             return Ok(());
         };
-        let Some((col, row)) = self.screen_coord_at_pos(rect, metrics, pos) else {
-            return Ok(());
+        let button = if delta.y > 0.0 {
+            ghostty_input::mouse::Button::Four
+        } else {
+            ghostty_input::mouse::Button::Five
         };
-        let code = if delta.y > 0.0 { 64 } else { 65 };
         self.scrollback_offset = 0;
         self.selection = None;
-        self.write_mouse_report(code, col, row, true)
-    }
-
-    fn write_mouse_report(
-        &mut self,
-        code: u8,
-        col: usize,
-        row: usize,
-        pressed: bool,
-    ) -> PtyResult<()> {
-        if self.engine.sgr_mouse() {
-            let suffix = if pressed { 'M' } else { 'm' };
-            let report = format!("\x1b[<{};{};{}{}", code, col + 1, row + 1, suffix);
-            self.pty.write_all(report.as_bytes())
-        } else {
-            let release_code = if pressed { code } else { 3 };
-            let report = [
-                0x1b,
-                b'[',
-                b'M',
-                release_code.saturating_add(32),
-                (col as u8).saturating_add(33),
-                (row as u8).saturating_add(33),
-            ];
-            self.pty.write_all(&report)
-        }
+        let event = MouseEncodeEvent {
+            action: ghostty_input::mouse::Action::Press,
+            button: Some(button),
+            mods: ghostty_input::key_mods::Mods::default(),
+            pos: surface_pos(rect, pos),
+        };
+        self.write_mouse_event(metrics, event)
     }
 
     fn sync_title(&mut self, ctx: &egui::Context) {
@@ -653,5 +690,35 @@ fn exit_status_message(status: &portable_pty::ExitStatus) -> String {
         format!("Process exited from signal: {signal}")
     } else {
         format!("Process exited with status {}", status.exit_code())
+    }
+}
+
+/// Map an egui pointer button to `ghostty_input::mouse::Button`.
+fn map_pointer_button(button: PointerButton) -> Option<ghostty_input::mouse::Button> {
+    match button {
+        PointerButton::Primary => Some(ghostty_input::mouse::Button::Left),
+        PointerButton::Middle => Some(ghostty_input::mouse::Button::Middle),
+        PointerButton::Secondary => Some(ghostty_input::mouse::Button::Right),
+        _ => None,
+    }
+}
+
+/// Inverse of [`mouse_button_code`]: recover the `mouse::Button` held during
+/// a drag from the legacy button code cached in `pressed_mouse_button`.
+fn mouse_button_from_code(code: u8) -> Option<ghostty_input::mouse::Button> {
+    match code {
+        0 => Some(ghostty_input::mouse::Button::Left),
+        1 => Some(ghostty_input::mouse::Button::Middle),
+        2 => Some(ghostty_input::mouse::Button::Right),
+        _ => None,
+    }
+}
+
+/// Convert a window (egui) pointer position into the surface-space position
+/// `mouse_encode` expects: pixels from the terminal rect's top-left corner.
+fn surface_pos(rect: Rect, pos: Pos2) -> mouse_encode::Pos {
+    mouse_encode::Pos {
+        x: pos.x - rect.left(),
+        y: pos.y - rect.top(),
     }
 }

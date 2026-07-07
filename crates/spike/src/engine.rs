@@ -10,6 +10,8 @@
 //! re-mapping into the spike's legacy cell/style types, which are no longer used
 //! on the live path.
 
+use ghostty_input::key_encode::KittyFlags;
+use ghostty_input::mouse_encode::{MouseEvent, MouseFormat};
 use ghostty_vt::modes::Mode;
 use ghostty_vt::snapshot::Snapshot;
 use ghostty_vt::stream::{Stream, TerminalHandler};
@@ -168,6 +170,67 @@ impl Engine {
             Some(MouseTracking::Button)
         } else {
             None
+        }
+    }
+
+    /// The kitty keyboard protocol flags currently active on the active
+    /// screen, in `ghostty-input`'s freestanding [`KittyFlags`] shape. A
+    /// narrow accessor over `Screen::kitty_keyboard` (itself engine/screen
+    /// state) so the window can route key events through
+    /// `ghostty_input::key_encode` without the encoding crate depending on
+    /// `ghostty-vt`.
+    pub fn kitty_flags(&self) -> KittyFlags {
+        let flags = self.terminal().screen().kitty_keyboard.current();
+        KittyFlags::from_bits(flags.int())
+    }
+
+    /// Key-encoding options derived from current terminal mode state, for use
+    /// with `ghostty_input::key_encode::encode`. `macos_option_as_alt` is left
+    /// at its default (`OptionAsAlt::False`): that setting isn't terminal
+    /// state, it's a user config knob the spike doesn't expose yet.
+    pub fn key_encode_options(&self) -> ghostty_input::key_encode::Options {
+        ghostty_input::key_encode::Options {
+            cursor_key_application: self.mode(Mode::CursorKeys),
+            keypad_key_application: self.mode(Mode::KeypadKeys),
+            backarrow_key_mode: self.mode(Mode::BackarrowKeyMode),
+            ignore_keypad_with_numlock: self.mode(Mode::IgnoreKeypadWithNumlock),
+            alt_esc_prefix: self.mode(Mode::AltEscPrefix),
+            modify_other_keys_state_2: self.terminal().flags.modify_other_keys_2,
+            kitty_flags: self.kitty_flags(),
+            ..Default::default()
+        }
+    }
+
+    /// The terminal's requested mouse reporting mode, in `ghostty-input`'s
+    /// freestanding [`MouseEvent`] shape (`None` if mouse reporting is off).
+    pub fn mouse_event(&self) -> MouseEvent {
+        if self.mode(Mode::MouseEventAny) {
+            MouseEvent::Any
+        } else if self.mode(Mode::MouseEventButton) {
+            MouseEvent::Button
+        } else if self.mode(Mode::MouseEventNormal) {
+            MouseEvent::Normal
+        } else if self.mode(Mode::MouseEventX10) {
+            MouseEvent::X10
+        } else {
+            MouseEvent::None
+        }
+    }
+
+    /// The terminal's requested mouse report format, in `ghostty-input`'s
+    /// freestanding [`MouseFormat`] shape. Precedence matches upstream
+    /// Ghostty: SGR-pixels, then SGR, then urxvt, then UTF-8, else X10.
+    pub fn mouse_format(&self) -> MouseFormat {
+        if self.mode(Mode::MouseFormatSgrPixels) {
+            MouseFormat::SgrPixels
+        } else if self.mode(Mode::MouseFormatSgr) {
+            MouseFormat::Sgr
+        } else if self.mode(Mode::MouseFormatUrxvt) {
+            MouseFormat::Urxvt
+        } else if self.mode(Mode::MouseFormatUtf8) {
+            MouseFormat::Utf8
+        } else {
+            MouseFormat::X10
         }
     }
 

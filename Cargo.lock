@@ -1408,12 +1408,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-input"
+version = "0.0.0"
+
+[[package]]
 name = "ghostty-spike"
 version = "0.1.0"
 dependencies = [
  "base64",
  "crossterm",
  "eframe",
+ "ghostty-input",
  "ghostty-vt",
  "portable-pty",
  "serde",
