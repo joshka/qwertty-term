@@ -147,8 +147,7 @@ dump uses **none**. Emission order:
   +` with final `B`/`A`/`0`; GL/GR invocations SO/LS2/LS3/LS1R/LS3R), cursor CUP
   (`\x1b[<y+1>;<x+1>H`).
 - Terminal-level **after content** (`:345-419`): DECSTBM/DECSLRM scrolling
-  region (only if not full screen), tabstops (`\x1b[3g` then per-stop `CSI
-  <col>G` + `\x1bH` HTS), keyboard `\x1b[>4;2m` if `modify_other_keys_2`, pwd
+  region (only if not full screen), tabstops (`\x1b[3g` then per-stop `CSI <col>G` + `\x1bH` HTS), keyboard `\x1b[>4;2m` if `modify_other_keys_2`, pwd
   `OSC 7`.
 
 ### `pin_map` / `point_map` (NOT ported — deferral)
