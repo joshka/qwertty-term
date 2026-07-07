@@ -398,11 +398,12 @@ impl PageList {
 
     // ---- integrity ----
 
-    /// Assert PageList integrity (debug only). Panics on violation. Port of
-    /// `assertIntegrity`.
+    /// Assert PageList integrity (opt-in via the `slow_runtime_safety`
+    /// feature; walks every page and tracked pin). Panics on violation.
+    /// Port of `assertIntegrity`.
     #[inline]
     pub(crate) fn assert_integrity(&self) {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "slow_runtime_safety")]
         {
             if let Err(e) = self.verify_integrity() {
                 panic!("PageList integrity check failed: {e:?}");
@@ -411,7 +412,7 @@ impl PageList {
     }
 
     /// Verify integrity. Port of `verifyIntegrity`.
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "slow_runtime_safety")]
     fn verify_integrity(&self) -> Result<(), IntegrityError> {
         // total_rows matches actual, and no serial below min.
         let mut actual_total: usize = 0;
@@ -624,7 +625,7 @@ fn init_pages(
 }
 
 /// Integrity violations. Port of `PageList.IntegrityError`.
-#[cfg(debug_assertions)]
+#[cfg(feature = "slow_runtime_safety")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IntegrityError {
     PageSerialInvalid,

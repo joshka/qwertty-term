@@ -186,13 +186,14 @@ impl Screen {
     }
 
     /// Assert screen-local consistency (cursor pin vs. cached x/y). Port of
-    /// `assertIntegrity`. Only compiled in debug builds.
+    /// `assertIntegrity`. Opt-in via the `slow_runtime_safety` feature,
+    /// matching upstream's build option of the same name.
     #[inline]
     pub fn assert_integrity(&self) {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "slow_runtime_safety")]
         {
-            debug_assert!(self.cursor.x < self.pages.cols());
-            debug_assert!(self.cursor.y < self.pages.rows());
+            assert!(self.cursor.x < self.pages.cols());
+            assert!(self.cursor.y < self.pages.rows());
 
             // SAFETY: cursor pin is a live tracked pin.
             let pin = unsafe { *self.cursor.page_pin };
@@ -200,8 +201,8 @@ impl Screen {
                 .pages
                 .point_from_pin(Tag::Active, pin)
                 .expect("cursor pin outside active area");
-            debug_assert_eq!(self.cursor.x, pt.coord.x);
-            debug_assert_eq!(self.cursor.y as u32, pt.coord.y);
+            assert_eq!(self.cursor.x, pt.coord.x);
+            assert_eq!(self.cursor.y as u32, pt.coord.y);
         }
     }
 

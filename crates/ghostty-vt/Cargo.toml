@@ -7,6 +7,14 @@ repository.workspace = true
 description = "Terminal emulation core ported from Ghostty: VT parser, terminal state machine, page-based scrollback"
 publish = false
 
+[features]
+# Run the full integrity verification (O(rows*cols) page scan, page-list walk)
+# after every mutating page/screen operation. Port of upstream's
+# `slow_runtime_safety` build option; off by default because the scan makes
+# grapheme-heavy workloads orders of magnitude slower. `verify_integrity` stays
+# available unconditionally for tests that want an explicit check.
+slow_runtime_safety = []
+
 [dependencies]
 base64 = "0.22"
 

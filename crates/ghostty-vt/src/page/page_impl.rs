@@ -808,10 +808,12 @@ pub struct Page {
     pub size: Size,
     pub capacity: Capacity,
 
-    /// Debug-only suspend counter for [`Page::assert_integrity`]. Incremented
-    /// while an operation temporarily leaves the page inconsistent (e.g. reflow
-    /// clone). Zero in release builds (the field costs a word but keeps the API
-    /// uniform). Port of `page.zig` `pause_integrity_checks`.
+    /// Suspend counter for [`Page::assert_integrity`], used only with the
+    /// `slow_runtime_safety` feature. Incremented while an operation
+    /// temporarily leaves the page inconsistent (e.g. reflow clone). Always
+    /// zero otherwise (the field costs a word but keeps the layout uniform).
+    /// Port of `page.zig` `pause_integrity_checks`.
+    #[cfg_attr(not(feature = "slow_runtime_safety"), allow(dead_code))]
     pause_integrity: usize,
 }
 
@@ -957,12 +959,15 @@ impl Page {
         }
     }
 
-    /// Debug-only integrity assertion. Port of `assertIntegrity`. Runs
-    /// [`Page::verify_integrity`] under `debug_assertions` and panics on
-    /// violation; a no-op in release builds.
+    /// Opt-in integrity assertion. Port of `assertIntegrity`. Runs
+    /// [`Page::verify_integrity`] under the `slow_runtime_safety` feature
+    /// (upstream's build option of the same name) and panics on violation;
+    /// a no-op otherwise. The full scan is far too slow to run after every
+    /// mutation in ordinary debug/test builds — use
+    /// [`Page::verify_integrity`] directly for explicit checks.
     #[inline]
     pub(crate) fn assert_integrity(&self) {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "slow_runtime_safety")]
         {
             if self.pause_integrity > 0 {
                 return;
@@ -977,7 +982,7 @@ impl Page {
     /// `pauseIntegrityChecks`.
     #[inline]
     pub(crate) fn pause_integrity_checks(&mut self, pause: bool) {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "slow_runtime_safety")]
         {
             if pause {
                 self.pause_integrity += 1;
@@ -985,7 +990,7 @@ impl Page {
                 self.pause_integrity -= 1;
             }
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(feature = "slow_runtime_safety"))]
         {
             let _ = pause;
         }
