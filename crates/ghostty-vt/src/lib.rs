@@ -22,6 +22,7 @@ pub mod parser;
 pub mod point;
 pub mod screen;
 pub mod sgr;
+pub mod stream;
 pub mod tabstops;
 pub mod terminal;
 pub mod unicode;

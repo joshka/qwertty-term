@@ -15,3 +15,6 @@ publish = false
 reference = []
 
 [dependencies]
+# The pure-Rust port. Always available so the Rust oracle can run without the
+# Zig reference artifact (`cargo check --workspace` stays green).
+ghostty-vt = { path = "../ghostty-vt" }

@@ -23,6 +23,11 @@ mod screen_set;
 
 pub use screen_set::{ScreenKey, ScreenSet};
 
+// Re-export so the stream/dispatch layer can name these without reaching
+// into `crate::screen`. `ProtectedMode` originates in `screen` (it is a
+// Screen-owned enum in the Zig source too).
+pub use crate::screen::ProtectedMode;
+
 use crate::charsets::{self, ActiveSlot, Charset, Slots};
 use crate::color::{DynamicPalette, DynamicRgb};
 use crate::csi::TabClear;
@@ -33,7 +38,7 @@ use crate::page::style::{self, Style};
 use crate::page::{Cell, Page};
 use crate::pagelist::Pin;
 use crate::screen::semantic::Redraw;
-use crate::screen::{ProtectedMode, Screen};
+use crate::screen::{Resize, Screen};
 use crate::tabstops::Tabstops;
 
 /// Default tab stop interval. Port of `TABSTOP_INTERVAL`.
@@ -1696,6 +1701,272 @@ impl Terminal {
     /// `plainStringUnwrapped` (`unwrap=true`).
     pub fn plain_string_unwrapped(&self) -> String {
         self.screen().dump_string(crate::point::Tag::Viewport, true)
+    }
+
+    // ---- resize / deccolm ---------------------------------------------------
+
+    /// Resize the underlying terminal. Port of `resize`.
+    pub fn resize(&mut self, cols: CellCountInt, rows: CellCountInt) {
+        // If our cols/rows didn't change then we're done.
+        if self.cols == cols && self.rows == rows {
+            return;
+        }
+
+        // Resize our tabstops.
+        if self.cols != cols {
+            self.tabstops = Tabstops::new(cols as usize, TABSTOP_INTERVAL);
+        }
+
+        let redraw = self.flags.shell_redraws_prompt;
+        let reflow = self.modes.get(Mode::Wraparound);
+
+        // Resize primary screen, which supports reflow.
+        self.screens.get_init(ScreenKey::Primary).resize(Resize {
+            cols,
+            rows,
+            reflow,
+            prompt_redraw: redraw,
+        });
+
+        // Alternate screen, if it exists, doesn't reflow.
+        if self.screens.get(ScreenKey::Alternate).is_some() {
+            self.screens.get_init(ScreenKey::Alternate).resize(Resize {
+                cols,
+                rows,
+                reflow: false,
+                prompt_redraw: redraw,
+            });
+        }
+
+        // Whenever we resize we just mark it as a screen clear.
+        self.flags.dirty.clear = true;
+
+        // Set our size.
+        self.cols = cols;
+        self.rows = rows;
+
+        // Reset the scrolling region.
+        self.scrolling_region = ScrollingRegion {
+            top: 0,
+            bottom: rows - 1,
+            left: 0,
+            right: cols - 1,
+        };
+    }
+
+    /// DECCOLM: switch between 80 and 132 columns. Port of `deccolm`.
+    ///
+    /// `cols132` selects 132-column mode when true, 80-column when false.
+    pub fn deccolm(&mut self, cols132: bool) {
+        // If DEC mode 40 (enable_mode_3) isn't enabled, then this is
+        // ignored. We also make sure we don't have deccolm set because we
+        // want to fully ignore set mode.
+        if !self.modes.get(Mode::EnableMode3) {
+            self.modes.set(Mode::Column132, false);
+            return;
+        }
+
+        // Enable it.
+        self.modes.set(Mode::Column132, cols132);
+
+        // Resize to the requested size.
+        let new_cols: CellCountInt = if cols132 { 132 } else { 80 };
+        self.resize(new_cols, self.rows);
+
+        // Erase our display and move our cursor.
+        self.erase_display(crate::csi::EraseDisplay::Complete, false);
+        self.set_cursor_pos(1, 1);
+    }
+
+    // ---- OSC 133 semantic prompt --------------------------------------------
+
+    /// OSC 133 dispatch. Port of `semanticPrompt`.
+    pub fn semantic_prompt(&mut self, cmd: &crate::osc::SemanticPrompt) {
+        use crate::osc::SemanticPromptAction as A;
+        use crate::screen::SemanticContentSet;
+
+        match cmd.action {
+            A::FreshLine => self.semantic_prompt_fresh_line(),
+
+            A::FreshLineNewPrompt => {
+                // "First do a fresh-line."
+                self.semantic_prompt_fresh_line();
+
+                // "Subsequent text is a prompt string."
+                let kind = cmd.prompt_kind().unwrap_or(crate::osc::PromptKind::Initial);
+                self.screen_mut()
+                    .cursor_set_semantic_content(SemanticContentSet::Prompt(kind));
+
+                // Kitty extension: the shell may not be capable of redraw.
+                if let Some(v) = cmd.redraw() {
+                    self.flags.shell_redraws_prompt = v;
+                }
+
+                // Handle click_events as priority over cl.
+                use crate::screen::semantic::SemanticClick;
+                if let Some(v) = cmd.click_events() {
+                    self.screen_mut().semantic_prompt.click = SemanticClick::ClickEvents(v);
+                } else if let Some(v) = cmd.cl() {
+                    self.screen_mut().semantic_prompt.click = SemanticClick::Cl(v);
+                }
+            }
+
+            A::NewCommand => {
+                // Same as `A` for our purposes (no explicit command tracking).
+                self.semantic_prompt(&crate::osc::SemanticPrompt {
+                    action: A::FreshLineNewPrompt,
+                    options_unvalidated: cmd.options_unvalidated.clone(),
+                });
+            }
+
+            A::PromptStart => {
+                let kind = cmd.prompt_kind().unwrap_or(crate::osc::PromptKind::Initial);
+                self.screen_mut()
+                    .cursor_set_semantic_content(SemanticContentSet::Prompt(kind));
+            }
+
+            A::EndPromptStartInput => {
+                self.screen_mut()
+                    .cursor_set_semantic_content(SemanticContentSet::Input { clear_eol: false });
+            }
+
+            A::EndPromptStartInputTerminateEol => {
+                self.screen_mut()
+                    .cursor_set_semantic_content(SemanticContentSet::Input { clear_eol: true });
+            }
+
+            A::EndInputStartOutput => {
+                self.screen_mut()
+                    .cursor_set_semantic_content(SemanticContentSet::Output);
+
+                // fish heuristic: if the current row is a prompt and we're at
+                // col 0, assume we're overwriting the prompt.
+                let screen = self.screen_mut();
+                let at_col0 = screen.cursor.x == 0;
+                let row_is_prompt = unsafe {
+                    (*screen.cursor.page_row).semantic_prompt() != crate::page::SemanticPrompt::None
+                };
+                if row_is_prompt && at_col0 {
+                    unsafe {
+                        (*screen.cursor.page_row)
+                            .set_semantic_prompt(crate::page::SemanticPrompt::None);
+                    }
+                }
+            }
+
+            A::EndCommand => {
+                self.screen_mut()
+                    .cursor_set_semantic_content(SemanticContentSet::Output);
+            }
+        }
+    }
+
+    /// OSC 133;L. Port of `semanticPromptFreshLine`.
+    fn semantic_prompt_fresh_line(&mut self) {
+        let left_margin = if self.screen().cursor.x < self.scrolling_region.left {
+            0
+        } else {
+            self.scrolling_region.left
+        };
+
+        if self.screen().cursor.x == left_margin {
+            return;
+        }
+
+        self.carriage_return();
+        self.index();
+    }
+
+    /// Returns true if the cursor is currently at a prompt. Port of
+    /// `cursorIsAtPrompt`.
+    pub fn cursor_is_at_prompt(&self) -> bool {
+        // On the alternate screen we're never at a prompt.
+        if self.screens.active_key() == ScreenKey::Alternate {
+            return false;
+        }
+
+        let cursor = &self.screen().cursor;
+        if unsafe { (*cursor.page_row).semantic_prompt() != crate::page::SemanticPrompt::None } {
+            return true;
+        }
+
+        matches!(
+            cursor.semantic_content,
+            crate::page::SemanticContent::Input | crate::page::SemanticContent::Prompt
+        )
+    }
+
+    // ---- DECRQSS (printAttributes) ------------------------------------------
+
+    /// DECRQSS SGR-request reply body. Port of `printAttributes`: returns the
+    /// numeric SGR parameter string (the part between `\eP1$r` and `m\e\\`)
+    /// describing the current cursor style. Always starts with `0`
+    /// (see <https://vt100.net/docs/vt510-rm/DECRPSS>).
+    pub fn print_attributes(&self) -> String {
+        use crate::page::style::{Color, Underline};
+        use std::fmt::Write;
+
+        let pen = self.screen().cursor.style;
+        // The SGR response always starts with a 0.
+        let mut out = String::from("0");
+
+        if pen.flags.bold {
+            out.push_str(";1");
+        }
+        if pen.flags.faint {
+            out.push_str(";2");
+        }
+        if pen.flags.italic {
+            out.push_str(";3");
+        }
+        if pen.flags.underline != Underline::None {
+            out.push_str(";4");
+        }
+        if pen.flags.blink {
+            out.push_str(";5");
+        }
+        if pen.flags.inverse {
+            out.push_str(";7");
+        }
+        if pen.flags.invisible {
+            out.push_str(";8");
+        }
+        if pen.flags.strikethrough {
+            out.push_str(";9");
+        }
+
+        match pen.fg_color {
+            Color::None => {}
+            Color::Palette(idx) if idx >= 16 => {
+                let _ = write!(out, ";38:5:{idx}");
+            }
+            Color::Palette(idx) if idx >= 8 => {
+                let _ = write!(out, ";9{}", idx - 8);
+            }
+            Color::Palette(idx) => {
+                let _ = write!(out, ";3{idx}");
+            }
+            Color::Rgb(rgb) => {
+                let _ = write!(out, ";38:2::{}:{}:{}", rgb.r, rgb.g, rgb.b);
+            }
+        }
+        match pen.bg_color {
+            Color::None => {}
+            Color::Palette(idx) if idx >= 16 => {
+                let _ = write!(out, ";48:5:{idx}");
+            }
+            Color::Palette(idx) if idx >= 8 => {
+                let _ = write!(out, ";10{}", idx - 8);
+            }
+            Color::Palette(idx) => {
+                let _ = write!(out, ";4{idx}");
+            }
+            Color::Rgb(rgb) => {
+                let _ = write!(out, ";48:2::{}:{}:{}", rgb.r, rgb.g, rgb.b);
+            }
+        }
+
+        out
     }
 }
 
