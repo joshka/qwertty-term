@@ -18,6 +18,7 @@
 //! offset from the bottom" and slices a window of `rows` out of `all_rows`
 //! without ever mutating the engine's viewport.
 
+use crate::color::{DEFAULT as DEFAULT_PALETTE, Palette, Rgb};
 use crate::page::{ContentTag, Wide};
 use crate::pagelist::Direction;
 use crate::point::{Point, Tag};
@@ -138,6 +139,16 @@ pub struct SnapshotCursor {
 /// area. `active_start` is the index of the first active-area row, so
 /// `all_rows[active_start..]` is exactly the live grid and everything before it
 /// is scrollback. `cursor.row`/`col` are relative to the active area.
+///
+/// Cells stay *symbolic*: a [`SnapshotCell`]'s style carries [`SnapshotColor`]
+/// values (`Default`/`Palette(u8)`/`Rgb`), not resolved pixels. `palette` /
+/// `default_fg` / `default_bg` are the terminal's *current* dynamic color
+/// state (as of snapshot time — reflecting any OSC 4/10/11/104/110/111/112
+/// mutations) that a renderer resolves `SnapshotColor::Palette`/`Default`
+/// through. This keeps a copy of the 256-entry palette per snapshot (cheap:
+/// `256 * 3` bytes, `Copy`), rather than resolving colors eagerly per cell, so
+/// a renderer that wants to special-case `Default` (e.g. to skip painting a
+/// bg-colored rect) still can.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub cols: usize,
@@ -145,6 +156,17 @@ pub struct Snapshot {
     pub all_rows: Vec<SnapshotRow>,
     pub active_start: usize,
     pub cursor: SnapshotCursor,
+    /// The current 256-color palette (indices 0-255), including any OSC
+    /// 4/104 (+ kitty OSC 21, once wired) modifications. Resolve
+    /// [`SnapshotColor::Palette`] through this rather than a fixed table.
+    pub palette: Palette,
+    /// The dynamic default foreground (OSC 10/110), if the terminal has one
+    /// set (either a config default or an OSC override). `None` means the
+    /// renderer should fall back to its own default.
+    pub default_fg: Option<Rgb>,
+    /// The dynamic default background (OSC 11/111), if set. `None` means the
+    /// renderer should fall back to its own default.
+    pub default_bg: Option<Rgb>,
 }
 
 impl Snapshot {
@@ -255,6 +277,13 @@ impl Screen {
             all_rows,
             active_start,
             cursor,
+            // A bare `Screen` doesn't own the terminal's dynamic color
+            // state (see `Terminal::colors`); default to the built-in
+            // palette / no dynamic override here. `Terminal::snapshot`
+            // (below) overwrites these three fields with the live state.
+            palette: DEFAULT_PALETTE,
+            default_fg: None,
+            default_bg: None,
         }
     }
 }
@@ -332,7 +361,9 @@ unsafe fn snapshot_cell(
 impl Terminal {
     /// Build an owned [`Snapshot`] of the active screen. Convenience wrapper
     /// over [`Screen::snapshot`] that also reports the real cursor visibility
-    /// (DEC mode 25) from terminal mode state.
+    /// (DEC mode 25) from terminal mode state and the live dynamic color
+    /// state (`self.colors`, mutated by OSC 4/5/10-19/104/105/110-119 via
+    /// `TerminalHandler::color_operation`) rather than a fixed default.
     pub fn snapshot(&self) -> Snapshot {
         let mut snap = self.screen().snapshot();
         snap.cursor.visible = self.modes.get(crate::modes::Mode::CursorVisible);
@@ -344,6 +375,9 @@ impl Terminal {
             });
         }
         snap.active_start = snap.all_rows.len().saturating_sub(snap.rows);
+        snap.palette = self.colors.palette.current;
+        snap.default_fg = self.colors.foreground.get();
+        snap.default_bg = self.colors.background.get();
         snap
     }
 }
@@ -444,5 +478,63 @@ mod tests {
         let up = snap.visible_window(1);
         assert_eq!(up.len(), 2);
         assert_ne!(row_text(&up[0]), row_text(&window[0]));
+    }
+
+    #[test]
+    fn default_snapshot_uses_default_palette_and_no_dynamic_overrides() {
+        let term = feed(10, 2, b"");
+        let snap = term.snapshot();
+        assert_eq!(snap.palette, crate::color::DEFAULT);
+        assert_eq!(snap.default_fg, None);
+        assert_eq!(snap.default_bg, None);
+    }
+
+    #[test]
+    fn osc_4_set_color_is_reflected_in_snapshot_palette() {
+        // OSC 4: set palette index 1 (normally red) to a custom color.
+        let term = feed(10, 2, b"\x1b]4;1;#112233\x1b\\");
+        let snap = term.snapshot();
+        assert_eq!(snap.palette[1], crate::color::Rgb::new(0x11, 0x22, 0x33));
+        // Untouched entries keep their default value.
+        assert_eq!(snap.palette[2], crate::color::DEFAULT[2]);
+    }
+
+    #[test]
+    fn osc_104_reset_restores_default_palette() {
+        // Set index 1, then reset just that index (OSC 104;1) and confirm it
+        // reverts; then set again and reset-all (bare OSC 104).
+        let term = feed(10, 2, b"\x1b]4;1;#112233\x1b\\\x1b]104;1\x1b\\");
+        let snap = term.snapshot();
+        assert_eq!(snap.palette[1], crate::color::DEFAULT[1]);
+
+        let term = feed(10, 2, b"\x1b]4;1;#112233\x1b]4;2;#445566\x1b]104\x1b\\");
+        let snap = term.snapshot();
+        assert_eq!(snap.palette[1], crate::color::DEFAULT[1]);
+        assert_eq!(snap.palette[2], crate::color::DEFAULT[2]);
+    }
+
+    #[test]
+    fn osc_10_11_set_default_fg_bg_and_osc_110_111_reset() {
+        // OSC 10 = fg, OSC 11 = bg.
+        let term = feed(10, 2, b"\x1b]10;#aabbcc\x1b\\\x1b]11;#001122\x1b\\");
+        let snap = term.snapshot();
+        assert_eq!(
+            snap.default_fg,
+            Some(crate::color::Rgb::new(0xaa, 0xbb, 0xcc))
+        );
+        assert_eq!(
+            snap.default_bg,
+            Some(crate::color::Rgb::new(0x00, 0x11, 0x22))
+        );
+
+        // OSC 110/111 reset fg/bg back to unset.
+        let term = feed(
+            10,
+            2,
+            b"\x1b]10;#aabbcc\x1b\\\x1b]11;#001122\x1b\\\x1b]110\x1b\\\x1b]111\x1b\\",
+        );
+        let snap = term.snapshot();
+        assert_eq!(snap.default_fg, None);
+        assert_eq!(snap.default_bg, None);
     }
 }

@@ -151,6 +151,16 @@ fn sgr_color_output_is_reflected_in_snapshot() {
 }
 
 #[test]
+fn osc52_clipboard_write_from_real_pty_is_drainable() {
+    // printf a raw OSC 52 clipboard-set sequence (base64 of "hi") through a
+    // real PTY/shell round trip, exercising the same
+    // pty-bytes -> engine.write -> take_clipboard path the egui frontend's
+    // `drain_clipboard` uses (see `window::WindowTerminal::drain_clipboard`).
+    let mut engine = run_script(20, 4, "printf '\\033]52;c;aGk=\\033\\\\'");
+    assert_eq!(engine.take_clipboard(), Some((b'c', "aGk=".to_string())));
+}
+
+#[test]
 fn cursor_addressing_places_text() {
     // Move cursor to row 3, col 5 (1-based) and print a marker.
     let engine = run_script(20, 6, "printf '\\033[3;5HMARK'");

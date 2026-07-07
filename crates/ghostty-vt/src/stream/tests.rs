@@ -429,6 +429,55 @@ fn osc12_cursor() {
     assert_eq!((cur.r, cur.g, cur.b), (0x00, 0x00, 0xff));
 }
 
+// OSC 52 clipboard write: surfaced as a drainable event, raw (still
+// base64-encoded) per upstream's `clipboardContents` policy (decode is an
+// apprt/embedder decision, not a terminal-core one).
+#[test]
+fn osc52_write_is_drainable() {
+    let mut s = term(10, 10);
+    // "aGVsbG8=" is base64 for "hello"; the terminal-core layer doesn't
+    // decode it, just hands it up raw alongside the kind byte.
+    s.feed(b"\x1b]52;c;aGVsbG8=\x1b\\");
+    assert_eq!(
+        s.handler.take_clipboard(),
+        Some((b'c', "aGVsbG8=".to_string()))
+    );
+    // Drained; a second take is empty until another OSC 52 write arrives.
+    assert_eq!(s.handler.take_clipboard(), None);
+}
+
+// OSC 52 clear (empty data) is still a write event (empty payload), matching
+// `clipboard_operation.zig`'s "clear clipboard" case (kind defaults to 'c').
+#[test]
+fn osc52_clear_is_a_write_with_empty_data() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b]52;;\x1b\\");
+    assert_eq!(s.handler.take_clipboard(), Some((b'c', String::new())));
+}
+
+// OSC 52 query (`?`) is a *read* request, not a write: upstream dispatches a
+// distinct `clipboard_read` apprt message and never calls into a write path,
+// so this crate's write-event queue stays empty.
+#[test]
+fn osc52_query_is_not_a_write_event() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b]52;s;?\x1b\\");
+    assert_eq!(s.handler.take_clipboard(), None);
+}
+
+// The clipboard event queue only keeps the most recent write (a UI-facing
+// side effect, not a reply queue that must preserve every entry).
+#[test]
+fn osc52_write_keeps_only_the_latest() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b]52;c;Zmlyc3Q=\x1b\\"); // "first"
+    s.feed(b"\x1b]52;c;c2Vjb25k\x1b\\"); // "second"
+    assert_eq!(
+        s.handler.take_clipboard(),
+        Some((b'c', "c2Vjb25k".to_string()))
+    );
+}
+
 // Zig: "kitty color protocol set palette" — OSC 21 is a seam in this chunk
 // (the kitty_color handler is a no-op); assert it doesn't corrupt state.
 #[test]

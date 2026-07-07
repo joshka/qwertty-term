@@ -1,6 +1,6 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ghostty_spike::{
-    CellStyle, CellWidth, CursorStyle, Engine, Snapshot, SnapshotCell, SnapshotRow,
+    CellStyle, CellWidth, CursorStyle, Engine, Snapshot, SnapshotCell, SnapshotColor, SnapshotRow,
     SnapshotUnderline,
 };
 use unicode_width::UnicodeWidthChar;
@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::window::{
     CellCoord, Selection,
     font::{self, TerminalFont},
-    theme::colors,
+    theme::{colors, default_bg as default_bg_color},
 };
 
 const CELL_WIDTH: f32 = 8.5;
@@ -45,7 +45,8 @@ pub(super) fn paint_terminal(
     selection: Option<Selection>,
 ) {
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, Color32::BLACK);
+    let backdrop = default_bg_color(snapshot);
+    painter.rect_filled(rect, 0.0, backdrop);
     let plan = RenderPlan::from_snapshot(snapshot, scrollback_offset, selection);
 
     for row in &plan.rows {
@@ -55,8 +56,8 @@ pub(super) fn paint_terminal(
                 rect.top() + row.visible_row as f32 * metrics.height,
             );
             let cell_rect = Rect::from_min_size(pos, Vec2::new(metrics.width, metrics.height));
-            let (_, bg) = colors(&cell.style);
-            if bg != Color32::BLACK {
+            let (_, bg) = colors(snapshot, &cell.style);
+            if bg != backdrop {
                 painter.rect_filled(cell_rect, 0.0, bg);
             }
             if cell.selected {
@@ -73,9 +74,9 @@ pub(super) fn paint_terminal(
                 rect.left() + run.start_col as f32 * metrics.width,
                 rect.top() + row.visible_row as f32 * metrics.height,
             );
-            let (fg, _) = colors(&run.style);
+            let (fg, _) = colors(snapshot, &run.style);
             painter.text(pos, Align2::LEFT_TOP, &run.text, metrics.font.clone(), fg);
-            paint_text_decorations(&painter, pos, metrics, run, fg);
+            paint_text_decorations(snapshot, &painter, pos, metrics, run, fg);
         }
     }
 
@@ -339,26 +340,114 @@ fn paint_cursor(
 }
 
 fn paint_text_decorations(
+    snapshot: &Snapshot,
     painter: &egui::Painter,
     pos: Pos2,
     metrics: &CellMetrics,
     run: &RenderRun,
-    color: Color32,
+    fg: Color32,
 ) {
     let width = run.cells as f32 * metrics.width;
     if run.style.underline != SnapshotUnderline::None {
-        let y = pos.y + metrics.height - 2.0;
-        painter.line_segment(
-            [Pos2::new(pos.x, y), Pos2::new(pos.x + width, y)],
-            Stroke::new(1.0, color),
+        // `underline_color` defaults to the glyph's own foreground (upstream
+        // behavior: an unset underline color tracks fg), matching
+        // `CellStyle::underline_color`'s `SnapshotColor::Default` seam.
+        let (color, _) = colors(
+            snapshot,
+            &CellStyle {
+                fg: run.style.underline_color,
+                ..CellStyle::default()
+            },
         );
+        let color = if run.style.underline_color == SnapshotColor::Default {
+            fg
+        } else {
+            color
+        };
+        paint_underline(painter, pos, metrics, width, run.style.underline, color);
     }
     if run.style.strikethrough {
         let y = pos.y + metrics.height * 0.55;
         painter.line_segment(
             [Pos2::new(pos.x, y), Pos2::new(pos.x + width, y)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0, fg),
         );
+    }
+}
+
+/// Approximate egui renderings of each underline style. Double draws two
+/// parallel lines; curly/dotted/dashed are approximated with simple wave /
+/// segmented strokes rather than a custom shader — sufficient for the demo
+/// to visually distinguish the styles from a plain single underline.
+fn paint_underline(
+    painter: &egui::Painter,
+    pos: Pos2,
+    metrics: &CellMetrics,
+    width: f32,
+    style: SnapshotUnderline,
+    color: Color32,
+) {
+    let base_y = pos.y + metrics.height - 2.0;
+    match style {
+        SnapshotUnderline::None => {}
+        SnapshotUnderline::Single => {
+            painter.line_segment(
+                [Pos2::new(pos.x, base_y), Pos2::new(pos.x + width, base_y)],
+                Stroke::new(1.0, color),
+            );
+        }
+        SnapshotUnderline::Double => {
+            let top_y = base_y - 2.0;
+            painter.line_segment(
+                [Pos2::new(pos.x, top_y), Pos2::new(pos.x + width, top_y)],
+                Stroke::new(1.0, color),
+            );
+            painter.line_segment(
+                [Pos2::new(pos.x, base_y), Pos2::new(pos.x + width, base_y)],
+                Stroke::new(1.0, color),
+            );
+        }
+        SnapshotUnderline::Curly => {
+            let amplitude = 1.5;
+            let period = 4.0;
+            let steps = (width / period).ceil().max(1.0) as usize;
+            let mut points = Vec::with_capacity(steps * 2 + 1);
+            for step in 0..=steps * 2 {
+                let x = pos.x + step as f32 * (period / 2.0);
+                if x > pos.x + width {
+                    break;
+                }
+                let y = base_y + if step % 2 == 0 { amplitude } else { -amplitude };
+                points.push(Pos2::new(x, y));
+            }
+            painter.line(points, Stroke::new(1.0, color));
+        }
+        SnapshotUnderline::Dotted => {
+            let dot = 2.0;
+            let gap = 2.0;
+            let mut x = pos.x;
+            while x < pos.x + width {
+                let end = (x + dot).min(pos.x + width);
+                painter.line_segment(
+                    [Pos2::new(x, base_y), Pos2::new(end, base_y)],
+                    Stroke::new(1.0, color),
+                );
+                x += dot + gap;
+            }
+        }
+        SnapshotUnderline::Dashed => {
+            let dash = 4.0;
+            let gap = 2.0;
+            let mut x = pos.x;
+            while x < pos.x + width {
+                let end = (x + dash).min(pos.x + width);
+                painter.line_segment(
+                    [Pos2::new(x, base_y), Pos2::new(end, base_y)],
+                    Stroke::new(1.0, color),
+                );
+                x += dash + gap;
+            }
+        }
     }
 }
 

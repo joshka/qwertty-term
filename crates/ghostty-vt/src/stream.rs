@@ -210,6 +210,16 @@ pub trait Handler {
     fn color_operation(&mut self, requests: &osc::ColorList) {}
     fn kitty_color(&mut self, cmd: &osc::KittyColorProtocol) {}
     fn mouse_shape(&mut self, value: &str) {}
+    /// OSC 52 clipboard get/set. `kind` is the clipboard-selection char
+    /// (`'c'` standard, `'s'` selection, `'p'` primary; upstream ignores the
+    /// distinction and always uses the standard clipboard, but the value is
+    /// preserved for a future policy). `data` is the raw OSC body: either
+    /// `"?"` (a read request) or a base64 payload (write; empty means
+    /// clear). Port of `stream_terminal.Handler.clipboardContents` — upstream
+    /// hands this raw, undecoded data up to the apprt surface and lets *that*
+    /// layer decode base64 / perform the actual clipboard I/O; this trait
+    /// method is the same seam.
+    fn clipboard(&mut self, kind: u8, data: &str) {}
 
     // ---- reports (queue-emitting) --------------------------------------
     fn device_attributes(&mut self, req: DeviceAttributesReq) {}
@@ -961,12 +971,15 @@ impl<H: Handler> Stream<H> {
             C::MouseShape { value } => self.handler.mouse_shape(&value),
             C::ColorOperation { requests, .. } => self.handler.color_operation(&requests),
             C::KittyColorProtocol(k) => self.handler.kitty_color(&k),
+            C::ClipboardContents { kind, data } => self.handler.clipboard(kind, &data),
             C::HyperlinkStart { .. } | C::HyperlinkEnd => {
                 // Hyperlink start/end are Screen effects (seam); not needed
                 // for the differential screen-text comparison.
             }
-            // Everything else has no terminal-modifying effect (clipboard,
-            // notifications, conemu, kitty text/dnd/clipboard, context signal).
+            // Everything else has no terminal-modifying effect (kitty
+            // clipboard protocol (5522, a NON-goal — parsed but not applied,
+            // see module docs), notifications, conemu, kitty text/dnd,
+            // context signal).
             _ => {}
         }
     }
@@ -1027,6 +1040,21 @@ pub struct TerminalHandler {
     pub terminal: Terminal,
     /// Accumulated replies destined for the pty, in order.
     pub output: Reply,
+    /// The most recent OSC 52 clipboard *write* request, if one hasn't been
+    /// drained yet. Port of the spike/architecture-doc's
+    /// `Terminal::take_clipboard()` side-effect queue, now sitting on
+    /// `TerminalHandler` alongside the reply queue. Only write requests are
+    /// queued here (`data != "?"`); a read request (`data == "?"`) has no
+    /// terminal-state effect to surface — upstream's `clipboardContents`
+    /// turns it into a distinct `clipboard_read` apprt message instead of a
+    /// `clipboard_write`, and this crate doesn't model the read-reply path
+    /// (embedder-specific; a future chunk can add a `take_clipboard_read()`
+    /// analogue if a frontend needs to answer OSC 52 queries).
+    ///
+    /// Matches upstream's policy of handing the apprt *raw* (still
+    /// base64-encoded) bytes — decoding is a host/embedder decision (e.g.
+    /// `Surface.clipboardWrite` in Zig), not a terminal-core one.
+    pending_clipboard: Option<(u8, String)>,
 }
 
 impl TerminalHandler {
@@ -1034,12 +1062,24 @@ impl TerminalHandler {
         Self {
             terminal,
             output: Vec::new(),
+            pending_clipboard: None,
         }
     }
 
     /// Drain the accumulated reply bytes.
     pub fn take_output(&mut self) -> Reply {
         std::mem::take(&mut self.output)
+    }
+
+    /// Drain the most recent OSC 52 clipboard write request, if any. Returns
+    /// `(kind, raw_data)` where `raw_data` is the still-base64-encoded OSC
+    /// body (empty string means "clear the clipboard"), matching upstream's
+    /// policy of not decoding at the terminal-core layer. Only the most
+    /// recent write is kept (matches how a reply queue would coalesce a
+    /// rapid burst into "latest wins" for a UI-facing side effect; screen
+    /// text and query replies are unaffected).
+    pub fn take_clipboard(&mut self) -> Option<(u8, String)> {
+        self.pending_clipboard.take()
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
@@ -1351,6 +1391,17 @@ impl Handler for TerminalHandler {
     }
     fn mouse_shape(&mut self, _value: &str) {
         // Stored on flags in upstream; not interpreted by Terminal.
+    }
+    fn clipboard(&mut self, kind: u8, data: &str) {
+        // Port of `stream_terminal.Handler.clipboardContents`: a lone `?`
+        // is a *read* request (upstream dispatches a `clipboard_read`
+        // apprt message and returns, writing nothing) — no terminal-state
+        // effect to queue here. Anything else (including empty, i.e.
+        // "clear") is a write request the embedder should drain and act on.
+        if data == "?" {
+            return;
+        }
+        self.pending_clipboard = Some((kind, data.to_string()));
     }
 
     // ---- reports: build the reply bytes and push onto `output` ----------

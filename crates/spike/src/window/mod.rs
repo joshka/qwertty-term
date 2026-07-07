@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use base64::Engine as _;
 use eframe::egui::{
     self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Vec2,
     ViewportCommand,
@@ -109,6 +110,26 @@ impl WindowTerminal {
         }
         self.clamp_scrollback_offset();
         Ok(())
+    }
+
+    /// Drain any OSC 52 clipboard write requests the engine queued and copy
+    /// them to the system clipboard via egui. Per upstream's
+    /// `clipboardContents` policy, `ghostty-vt` hands the request up raw
+    /// (still base64-encoded) — decoding is this frontend's job. An invalid
+    /// base64 payload is silently dropped (matches upstream logging-and-
+    /// ignoring an OSC 52 decode failure rather than treating it as fatal).
+    fn drain_clipboard(&mut self, ctx: &egui::Context) {
+        while let Some((_kind, data)) = self.engine.take_clipboard() {
+            if data.is_empty() {
+                ctx.copy_text(String::new());
+                continue;
+            }
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data)
+                && let Ok(text) = String::from_utf8(bytes)
+            {
+                ctx.copy_text(text);
+            }
+        }
     }
 
     fn resize_to_rect(&mut self, rect: Rect, metrics: &CellMetrics) -> PtyResult<()> {
@@ -465,6 +486,7 @@ impl WindowTerminal {
 impl eframe::App for WindowTerminal {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let _ = self.drain_pty();
+        self.drain_clipboard(ctx);
         self.sync_title(ctx);
         if !self.close_requested
             && self.exit_status.is_none()

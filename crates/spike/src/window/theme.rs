@@ -1,10 +1,14 @@
 use eframe::egui::Color32;
-use ghostty_spike::{CellStyle, SnapshotColor};
+use ghostty_spike::{CellStyle, Snapshot, SnapshotColor};
 
-/// Resolve a cell's style into `(foreground, background)` egui colors.
-pub(super) fn colors(style: &CellStyle) -> (Color32, Color32) {
-    let mut fg = to_egui_color(style.fg).unwrap_or(Color32::LIGHT_GRAY);
-    let mut bg = to_egui_color(style.bg).unwrap_or(Color32::BLACK);
+/// Resolve a cell's style into `(foreground, background)` egui colors,
+/// looking indexed/default colors up through the snapshot's *dynamic* color
+/// state (`snapshot.palette`/`default_fg`/`default_bg`, mutated by OSC
+/// 4/10/11/104/110/111/112) rather than a fixed xterm table, so palette and
+/// default-color changes made by the running program are reflected live.
+pub(super) fn colors(snapshot: &Snapshot, style: &CellStyle) -> (Color32, Color32) {
+    let mut fg = to_egui_color(snapshot, style.fg).unwrap_or(default_fg(snapshot));
+    let mut bg = to_egui_color(snapshot, style.bg).unwrap_or(default_bg(snapshot));
     if style.inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -14,68 +18,80 @@ pub(super) fn colors(style: &CellStyle) -> (Color32, Color32) {
     (fg, bg)
 }
 
-fn to_egui_color(color: SnapshotColor) -> Option<Color32> {
+fn default_fg(snapshot: &Snapshot) -> Color32 {
+    match snapshot.default_fg {
+        Some(rgb) => Color32::from_rgb(rgb.r, rgb.g, rgb.b),
+        None => Color32::LIGHT_GRAY,
+    }
+}
+
+/// The resolved default background: the OSC 11/111-controlled dynamic
+/// background if the terminal has set one, else the frontend's black
+/// fallback. Also used as the whole-viewport backdrop color (see
+/// `renderer::paint_terminal`) so a program that sets a light background
+/// doesn't paint on top of a black canvas.
+pub(super) fn default_bg(snapshot: &Snapshot) -> Color32 {
+    match snapshot.default_bg {
+        Some(rgb) => Color32::from_rgb(rgb.r, rgb.g, rgb.b),
+        None => Color32::BLACK,
+    }
+}
+
+fn to_egui_color(snapshot: &Snapshot, color: SnapshotColor) -> Option<Color32> {
     match color {
         SnapshotColor::Default => None,
-        SnapshotColor::Palette(value) => Some(indexed_color(value)),
+        SnapshotColor::Palette(value) => {
+            let rgb = snapshot.palette[value as usize];
+            Some(Color32::from_rgb(rgb.r, rgb.g, rgb.b))
+        }
         SnapshotColor::Rgb { r, g, b } => Some(Color32::from_rgb(r, g, b)),
     }
-}
-
-fn indexed_color(value: u8) -> Color32 {
-    match value {
-        0..=15 => ansi_color(value),
-        16..=231 => {
-            let value = value - 16;
-            let r = cube_component(value / 36);
-            let g = cube_component((value / 6) % 6);
-            let b = cube_component(value % 6);
-            Color32::from_rgb(r, g, b)
-        }
-        232..=255 => {
-            let gray = 8 + (value - 232) * 10;
-            Color32::from_rgb(gray, gray, gray)
-        }
-    }
-}
-
-fn ansi_color(value: u8) -> Color32 {
-    match value {
-        0 => Color32::BLACK,
-        1 => Color32::from_rgb(205, 49, 49),
-        2 => Color32::from_rgb(13, 188, 121),
-        3 => Color32::from_rgb(229, 229, 16),
-        4 => Color32::from_rgb(36, 114, 200),
-        5 => Color32::from_rgb(188, 63, 188),
-        6 => Color32::from_rgb(17, 168, 205),
-        7 => Color32::from_rgb(229, 229, 229),
-        8 => Color32::from_rgb(102, 102, 102),
-        9 => Color32::from_rgb(241, 76, 76),
-        10 => Color32::from_rgb(35, 209, 139),
-        11 => Color32::from_rgb(245, 245, 67),
-        12 => Color32::from_rgb(59, 142, 234),
-        13 => Color32::from_rgb(214, 112, 214),
-        14 => Color32::from_rgb(41, 184, 219),
-        _ => Color32::WHITE,
-    }
-}
-
-fn cube_component(value: u8) -> u8 {
-    if value == 0 { 0 } else { 55 + value * 40 }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ghostty_spike::Engine;
+
+    fn snapshot_of(bytes: &[u8]) -> Snapshot {
+        let mut engine = Engine::new(10, 2);
+        engine.write(bytes);
+        engine.snapshot()
+    }
 
     #[test]
-    fn indexed_colors_follow_xterm_palette() {
-        assert_eq!(indexed_color(1), Color32::from_rgb(205, 49, 49));
-        assert_eq!(indexed_color(16), Color32::from_rgb(0, 0, 0));
-        assert_eq!(indexed_color(21), Color32::from_rgb(0, 0, 255));
-        assert_eq!(indexed_color(196), Color32::from_rgb(255, 0, 0));
-        assert_eq!(indexed_color(231), Color32::from_rgb(255, 255, 255));
-        assert_eq!(indexed_color(232), Color32::from_rgb(8, 8, 8));
-        assert_eq!(indexed_color(255), Color32::from_rgb(238, 238, 238));
+    fn indexed_colors_follow_default_palette() {
+        let snapshot = snapshot_of(b"");
+        assert_eq!(
+            to_egui_color(&snapshot, SnapshotColor::Palette(1)),
+            Some(Color32::from_rgb(
+                ghostty_vt::color::DEFAULT[1].r,
+                ghostty_vt::color::DEFAULT[1].g,
+                ghostty_vt::color::DEFAULT[1].b,
+            ))
+        );
+    }
+
+    #[test]
+    fn osc_4_palette_override_is_reflected_in_resolved_color() {
+        // OSC 4: palette index 1 (normally red) set to a custom color.
+        let snapshot = snapshot_of(b"\x1b]4;1;#112233\x1b\\");
+        assert_eq!(
+            to_egui_color(&snapshot, SnapshotColor::Palette(1)),
+            Some(Color32::from_rgb(0x11, 0x22, 0x33))
+        );
+    }
+
+    #[test]
+    fn osc_10_11_default_fg_bg_override_resolved_colors() {
+        let snapshot = snapshot_of(b"\x1b]10;#aabbcc\x1b\\\x1b]11;#001122\x1b\\");
+        let style = CellStyle::default();
+        assert_eq!(
+            colors(&snapshot, &style),
+            (
+                Color32::from_rgb(0xaa, 0xbb, 0xcc),
+                Color32::from_rgb(0x00, 0x11, 0x22)
+            )
+        );
     }
 }

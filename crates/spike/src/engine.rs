@@ -70,6 +70,15 @@ impl Engine {
         self.stream.handler.take_output()
     }
 
+    /// Drain the most recent OSC 52 clipboard write request, if any.
+    /// Returns `(kind, raw_base64_data)` — `ghostty-vt` hands this up raw
+    /// (still base64-encoded, per upstream's apprt-decodes-it policy); the
+    /// frontend is responsible for base64-decoding and performing the actual
+    /// clipboard I/O. An empty `raw_base64_data` means "clear the clipboard".
+    pub fn take_clipboard(&mut self) -> Option<(u8, String)> {
+        self.stream.handler.take_clipboard()
+    }
+
     /// Resize the grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let cols = clamp_dim(cols);
@@ -213,5 +222,45 @@ mod tests {
         engine.resize(100, 30);
         assert_eq!(engine.cols(), 100);
         assert_eq!(engine.rows(), 30);
+    }
+
+    #[test]
+    fn takes_osc52_clipboard_write_raw() {
+        let mut engine = Engine::new(80, 24);
+        // "aGVsbG8=" is base64 for "hello"; the engine hands it up
+        // undecoded (decoding is the frontend's job, per upstream policy).
+        engine.write(b"\x1b]52;c;aGVsbG8=\x1b\\");
+        assert_eq!(
+            engine.take_clipboard(),
+            Some((b'c', "aGVsbG8=".to_string()))
+        );
+        // Drained; nothing left until another OSC 52 write arrives.
+        assert_eq!(engine.take_clipboard(), None);
+    }
+
+    #[test]
+    fn osc52_query_does_not_produce_a_clipboard_write() {
+        let mut engine = Engine::new(80, 24);
+        engine.write(b"\x1b]52;c;?\x1b\\");
+        assert_eq!(engine.take_clipboard(), None);
+    }
+
+    #[test]
+    fn snapshot_reflects_dynamic_palette_and_default_colors() {
+        let mut engine = Engine::new(10, 2);
+        engine.write(b"\x1b]4;1;#112233\x1b\\\x1b]10;#aabbcc\x1b\\\x1b]11;#001122\x1b\\");
+        let snap = engine.snapshot();
+        assert_eq!(
+            snap.palette[1],
+            ghostty_vt::color::Rgb::new(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            snap.default_fg,
+            Some(ghostty_vt::color::Rgb::new(0xaa, 0xbb, 0xcc))
+        );
+        assert_eq!(
+            snap.default_bg,
+            Some(ghostty_vt::color::Rgb::new(0x00, 0x11, 0x22))
+        );
     }
 }
