@@ -1,0 +1,67 @@
+[package]
+name = "ghostty-renderer"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Renderer core ported from Ghostty: geometry, cursor style resolution, row heuristics, and the RenderSnapshot contract between ghostty-vt and any renderer backend"
+publish = false
+
+[dependencies]
+ghostty-vt = { path = "../ghostty-vt" }
+
+# Metal backend (chunk R1). All versions already present in the workspace
+# lockfile (transitively via eframe/winit), so these add no new lock entries.
+# objc2-io-surface is chosen over the servo `io-surface` crate because its
+# `IOSurfaceRef` is the exact parameter type of objc2-metal's
+# `newTextureWithDescriptor:iosurface:plane:` binding — zero conversion glue —
+# and it shares the objc2 memory-management model (`CFRetained`).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+# `objc2-io-surface` feature enables `newTextureWithDescriptor:iosurface:plane:`
+# (IOSurface-backed render targets, Target.zig); it's opt-in, not in the
+# default feature set. objc2-metal's default feature set already includes the
+# render-pipeline/pass/encoder/library types (Frame/RenderPass/Pipeline, R2)
+# and `block2` (the `addCompletedHandler:` completion block).
+objc2-metal = { version = "0.3.2", features = ["objc2-io-surface"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSRange",
+    # NSNull: returned from the IOSurfaceLayer `actionForKey:` override to
+    # disable implicit CALayer animations (IOSurfaceLayer.zig).
+    "NSNull",
+    # NSString: shader-function/library names passed to Metal (Pipeline.zig)
+    # and R3's runtime shader-compile smoke test.
+    "NSString",
+] }
+objc2-io-surface = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+# CALayer (presentation target) + CATransaction (disable implicit animations),
+# plus the `kCAGravityTopLeft` contents-gravity constant, for IOSurfaceLayer.
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "CALayer",
+    "CATransaction",
+] }
+# block2: the completion handler passed to `addCompletedHandler:` (Frame.zig)
+# and the surface-assignment closure dispatched to the main thread
+# (IOSurfaceLayer.zig).
+block2 = "0.6.2"
+# dispatch2: `DispatchQueue::main().exec_async(...)` for main-thread `contents`
+# assignment (IOSurfaceLayer.setSurface).
+dispatch2 = { version = "0.3.1", default-features = false, features = [
+    "std",
+    "objc2",
+] }
+# The font substrate the cell engine (R4) drives: shaping + glyph→atlas render
+# cache (`Grid`), and sprite dispatch for cursors/decorations/box-drawing.
+# Both are macOS-only in the reduced cut (CoreText face + rasterization).
+ghostty-font = { path = "../ghostty-font" }
+ghostty-sprite = { path = "../ghostty-sprite" }
+
+[dev-dependencies]
+# The acceptance test (R4) drives a real ghostty-vt Terminal through a Stream to
+# produce the snapshot the engine renders.
+ghostty-vt = { path = "../ghostty-vt" }

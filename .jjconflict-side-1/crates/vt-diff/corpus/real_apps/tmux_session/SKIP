@@ -1,0 +1,1 @@
+Same underlying divergence as reply_diffing/da2_secondary_version: tmux issues a DA2 (CSI > c) query on startup, and the Rust engine's hardcoded firmware/patch-version field (10) disagrees with the reference/upstream default (0). See regression_da2_firmware_version_mismatch in tests/corpus.rs.

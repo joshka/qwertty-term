@@ -1,0 +1,39 @@
+[package]
+name = "spike-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# M2-C runtime spike: threads-vs-tokio measurement for the termio writer thread.
+# See docs/adr/002-termio-runtime.md. Not a shipping crate.
+
+[lib]
+name = "spike_runtime"
+
+# Benchmark harness lives behind a bin so `cargo check --workspace` stays green
+# without pulling bench frameworks into the default build. Run with:
+#   cargo run -p spike-runtime --release --bin bench -- all
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+# (a) threads impl: `polling` gives us a cross-platform epoll/kqueue/IOCP
+# edge/level poller with an explicit event-fd style waker (Poller::notify),
+# which is exactly the xev.Async wakeup semantics we need. `mio` would also
+# work but its Waker + Registry API is heavier and its timer story is nil;
+# `polling` is smaller and its notify() maps 1:1 to xev.Async.notify().
+polling = "3"
+
+# (b) tokio impl: current-thread runtime only. We deliberately avoid the
+# multi-thread scheduler — the termio writer is a single logical thread.
+tokio = { version = "1", features = [
+    "rt",
+    "net",
+    "time",
+    "sync",
+    "macros",
+    "io-util",
+] }
+
+[dev-dependencies]

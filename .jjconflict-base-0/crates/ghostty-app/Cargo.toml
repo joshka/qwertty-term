@@ -1,0 +1,94 @@
+[package]
+name = "ghostty-app"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native macOS AppKit host for the ghostty-rs terminal: NSApplication/NSWindow with native tabs, a Metal-rendered NSView, an NSTextInputClient input path, and a menu bar"
+publish = false
+
+[lib]
+name = "ghostty_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ghostty-app"
+path = "src/main.rs"
+
+[dependencies]
+ghostty-vt = { path = "../ghostty-vt" }
+ghostty-input = { path = "../ghostty-input" }
+ghostty-font = { path = "../ghostty-font" }
+ghostty-renderer = { path = "../ghostty-renderer" }
+# The real terminal IO stack (M2 chunk E): rustix PTY + the two-stage read
+# pipeline + the ADR-002 mailbox writer loop. Replaces the interim
+# `portable-pty` path (`src/pty.rs`, now deleted).
+ghostty-termio = { path = "../ghostty-termio" }
+# Small TOML config (theme / copy-on-select / font-size), a trimmed copy of the
+# spike's config module (the spike's is `pub(crate)`, so it can't be reused via
+# a path dep without modifying the spike).
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+base64 = "0.22.1"
+
+[dev-dependencies]
+# Read-back decoder for the frame-dump PNG unit test (verifies our tiny
+# dependency-free PNG encoder produces valid, correctly-swizzled output).
+# Already in the workspace lock (eframe/spike pull it in), so no new fetch.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# The AppKit host proper. objc2 family pinned to the workspace-standard versions
+# (objc2 0.6 / objc2-* 0.3.2), matching ghostty-renderer and ghostty-font so the
+# whole app shares one toolchain.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSWindowTabGroup",
+    "NSToolbar",
+    "NSView",
+    "NSEvent",
+    "NSCursor",
+    "NSBezierPath",
+    "NSText",
+    "NSTextInputClient",
+    "NSMenu",
+    "NSMenuItem",
+    "NSColor",
+    "NSColorSpace",
+    "NSRunningApplication",
+    "NSPasteboard",
+    "NSGraphics",
+    "objc2-quartz-core",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSString",
+    "NSAttributedString",
+    "NSGeometry",
+    "NSRange",
+    "NSValue",
+    "NSArray",
+    "NSNotification",
+    "NSThread",
+    "NSObjCRuntime",
+    "NSProcessInfo",
+    "NSDate",
+    "NSTimer",
+    "NSRunLoop",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "CALayer",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFRunLoop",
+] }

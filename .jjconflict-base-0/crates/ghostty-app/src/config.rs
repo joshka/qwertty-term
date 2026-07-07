@@ -1,0 +1,255 @@
+//! Minimal TOML user config: `theme`, `copy-on-select`, and optional
+//! `font-size`/`font-family` overrides.
+//!
+//! This is a trimmed copy of the spike's `config.rs` (`crates/spike/src/config.rs`).
+//! The spike's version is `pub(crate)`, so it can't be reused through a path
+//! dependency without modifying the spike (which is read-only reference material
+//! for R5); this copy keeps the same TOML shape, keys, and load semantics so a
+//! user's `~/.config/ghostty-rs/config.toml` works identically under both
+//! binaries. It is intentionally *not* the eventual `ghostty-config` crate — see
+//! `docs/rewrite-prompt.md`'s config decision table.
+//!
+//! Load order: `$GHOSTTY_RS_CONFIG_DIR/config.toml` if set, else
+//! `~/.config/ghostty-rs/config.toml` (created with a commented example on first
+//! run if missing). Parsing is lenient — unknown keys are ignored and a
+//! malformed file falls back to defaults rather than failing startup.
+
+use std::{env, fs, path::PathBuf};
+
+use serde::Deserialize;
+
+/// The config keys the app understands. Field names are the TOML keys directly
+/// (hyphenated, matching ghostty's own option-name convention).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Config {
+    /// A ghostty theme name (or absolute path to a theme file), resolved via
+    /// [`crate::theme::load_theme`] into the engine's startup palette + fg/bg/
+    /// cursor/selection colors (see `crate::app::Controller::new`).
+    pub theme: Option<String>,
+    /// When true, finishing a mouse-drag selection immediately copies it to
+    /// the system clipboard (see `crate::app::Controller::mouse_to_tab`).
+    #[serde(rename = "copy-on-select")]
+    pub copy_on_select: bool,
+    #[serde(rename = "font-size")]
+    pub font_size: Option<f32>,
+    #[serde(rename = "font-family")]
+    pub font_family: Option<String>,
+    /// Per-axis wheel-scroll multipliers (`precision` for trackpad/pixel
+    /// deltas, `discrete` for mouse-wheel ticks). Mirrors ghostty's
+    /// `mouse-scroll-multiplier` (defaults precision 1.0, discrete 3.0). A TOML
+    /// table: `[mouse-scroll-multiplier]` with `precision`/`discrete` keys.
+    #[serde(rename = "mouse-scroll-multiplier")]
+    pub mouse_scroll_multiplier: MouseScrollMultiplier,
+    /// User keybindings, each `"<trigger>=text:<value>"` — a TOML-array-friendly
+    /// spelling of ghostty's repeatable `keybind = <trigger>=<action>` config
+    /// key. Only the `text:` action subset is supported (see
+    /// [`crate::keybind`]); the trigger is `+`-joined modifiers + a key name,
+    /// and the `text:` value uses ghostty's escape sequences (`\x1b`, `\r`, `\e`,
+    /// `\\`, …). The maintainer's real binding is
+    /// `"shift+enter=text:\\x1b\\r"`. Unknown actions/keys are logged and
+    /// skipped, never fatal. Parsed into a [`crate::keybind::KeybindTable`] at
+    /// startup (`crate::app::Controller::new`).
+    #[serde(default)]
+    pub keybind: Vec<String>,
+}
+
+/// The `[mouse-scroll-multiplier]` config table. Field defaults match
+/// upstream `Config.MouseScrollMultiplier` (precision 1.0, discrete 3.0).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MouseScrollMultiplier {
+    pub precision: f64,
+    pub discrete: f64,
+}
+
+impl Default for MouseScrollMultiplier {
+    fn default() -> Self {
+        MouseScrollMultiplier {
+            precision: 1.0,
+            discrete: 3.0,
+        }
+    }
+}
+
+const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
+#
+# This file is created automatically on first run. Uncomment and edit any of
+# the lines below; unknown keys are ignored.
+
+# Theme name, looked up in ~/.config/ghostty/themes/ then the shared ghostty
+# themes directory (or an absolute path to a theme file).
+# theme = "GruvboxDarkHard"
+
+# Copy the mouse selection to the clipboard as soon as the drag finishes.
+# copy-on-select = false
+
+# Terminal font size in points.
+# font-size = 14.0
+
+# Substring to prefer when picking among discovered terminal fonts.
+# font-family = "JetBrainsMono Nerd Font Mono"
+
+# Wheel-scroll multipliers. `precision` scales trackpad (pixel) deltas;
+# `discrete` scales mouse-wheel ticks (rows per detent).
+# [mouse-scroll-multiplier]
+# precision = 1.0
+# discrete = 3.0
+
+# Keybindings. Each entry is "<trigger>=text:<value>": a `+`-joined chord
+# (modifiers shift/ctrl/alt/cmd + a key name like enter/tab/escape/space, a
+# letter, a digit, f1-f12, or an arrow) that sends literal <value> bytes to the
+# focused pane, BEFORE the normal key encoder. Only the `text:` action is
+# supported. The value uses ghostty's escapes: \x1b (ESC), \r, \n, \t, \e (ESC),
+# \\ (backslash). Unknown triggers/actions are ignored with a warning.
+# Example (send ESC+CR on Shift+Enter — many TUIs read this as "soft newline"):
+# keybind = ["shift+enter=text:\\x1b\\r"]
+"#;
+
+/// Load the config, creating the file with a commented example if it does not
+/// exist. Returns [`Config::default`] if `$HOME` (and `$GHOSTTY_RS_CONFIG_DIR`)
+/// are unset, the file can't be read, or it fails to parse.
+pub fn load() -> Config {
+    let Some(path) = config_path() else {
+        return Config::default();
+    };
+
+    if !path.exists() {
+        create_default_config(&path);
+        return Config::default();
+    }
+
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Config::default();
+    };
+
+    parse(&contents).unwrap_or_else(|err| {
+        eprintln!("failed to parse {}: {err}", path.display());
+        Config::default()
+    })
+}
+
+/// Parse a TOML string into a [`Config`]. Split out so it is unit-testable
+/// without touching the filesystem.
+pub fn parse(contents: &str) -> Result<Config, toml::de::Error> {
+    toml::from_str(contents)
+}
+
+fn create_default_config(path: &PathBuf) {
+    if let Some(parent) = path.parent()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        eprintln!("failed to create {}: {err}", parent.display());
+        return;
+    }
+    if let Err(err) = fs::write(path, EXAMPLE_CONFIG) {
+        eprintln!("failed to write {}: {err}", path.display());
+    }
+}
+
+fn config_path() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("GHOSTTY_RS_CONFIG_DIR") {
+        return Some(PathBuf::from(dir).join("config.toml"));
+    }
+    let home = env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(".config")
+            .join("ghostty-rs")
+            .join("config.toml"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_empty() {
+        let config = Config::default();
+        assert!(!config.copy_on_select);
+        assert_eq!(config.theme, None);
+        assert_eq!(config.font_size, None);
+        assert_eq!(config.font_family, None);
+        assert_eq!(
+            config.mouse_scroll_multiplier,
+            MouseScrollMultiplier::default()
+        );
+        assert_eq!(config.mouse_scroll_multiplier.precision, 1.0);
+        assert_eq!(config.mouse_scroll_multiplier.discrete, 3.0);
+        assert!(config.keybind.is_empty());
+    }
+
+    #[test]
+    fn parses_keybind_array_including_maintainer_binding() {
+        // TOML-friendly array spelling; the maintainer's real binding needs the
+        // backslashes escaped in the TOML string, so `\\x1b\\r` in the file is
+        // the two-token `\x1b\r` value the keybind parser then unescapes.
+        let toml = r#"keybind = ["shift+enter=text:\\x1b\\r", "ctrl+a=text:\\e[H"]"#;
+        let config = parse(toml).unwrap();
+        assert_eq!(
+            config.keybind,
+            vec![
+                "shift+enter=text:\\x1b\\r".to_string(),
+                "ctrl+a=text:\\e[H".to_string()
+            ]
+        );
+        // End-to-end: the array parses into a live table with the right bytes.
+        let table = crate::keybind::KeybindTable::parse(&config.keybind);
+        assert_eq!(table.len(), 2);
+        assert_eq!(
+            table.resolve(
+                ghostty_input::key::Key::Enter,
+                crate::tabkeys::TabMods {
+                    shift: true,
+                    ..Default::default()
+                }
+            ),
+            Some(&b"\x1b\r"[..])
+        );
+    }
+
+    #[test]
+    fn parses_mouse_scroll_multiplier_table() {
+        let toml = "[mouse-scroll-multiplier]\nprecision = 1.5\ndiscrete = 2.5\n";
+        let config = parse(toml).unwrap();
+        assert_eq!(config.mouse_scroll_multiplier.precision, 1.5);
+        assert_eq!(config.mouse_scroll_multiplier.discrete, 2.5);
+    }
+
+    #[test]
+    fn mouse_scroll_multiplier_partial_table_keeps_defaults() {
+        let config = parse("[mouse-scroll-multiplier]\ndiscrete = 5.0\n").unwrap();
+        assert_eq!(config.mouse_scroll_multiplier.precision, 1.0);
+        assert_eq!(config.mouse_scroll_multiplier.discrete, 5.0);
+    }
+
+    #[test]
+    fn parses_all_known_keys() {
+        let toml = r#"
+            theme = "Nord"
+            copy-on-select = true
+            font-size = 16.5
+            font-family = "JetBrainsMono Nerd Font Mono"
+        "#;
+        let config = parse(toml).unwrap();
+        assert_eq!(config.theme.as_deref(), Some("Nord"));
+        assert!(config.copy_on_select);
+        assert_eq!(config.font_size, Some(16.5));
+        assert_eq!(
+            config.font_family.as_deref(),
+            Some("JetBrainsMono Nerd Font Mono")
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let config = parse("theme = \"Nord\"\nsome-future-option = \"x\"\n").unwrap();
+        assert_eq!(config.theme.as_deref(), Some("Nord"));
+    }
+
+    #[test]
+    fn malformed_toml_is_an_error_not_a_panic() {
+        assert!(parse("theme = [this is not valid").is_err());
+    }
+}
