@@ -26,18 +26,27 @@
 //!   context, IOSurface-backed render target, textures, samplers, growable
 //!   buffers.
 //!
+//! Chunk R3 adds the first-pixels shader set:
+//!
+//! - [`shaders`]: the embedded MSL source for `bg_color`/`cell_bg`/
+//!   `cell_text` (ported verbatim from `shaders.metal`) plus a
+//!   backend-agnostic [`shaders::PipelineDescription`] table pinned to the
+//!   frozen [`wire`] struct layouts.
+//!
 //! This crate depends on `ghostty-vt` (read-only use of its snapshot APIs)
 //! and never the reverse.
 //!
 //! See `docs/analysis/renderer-r0.md` for the survey of the R0 Zig source,
-//! and `docs/analysis/renderer-r1.md` for the R1 GPU-backend survey
-//! (`src/renderer/Metal.zig` + `src/renderer/metal/`, commit `2da015cd6`).
+//! `docs/analysis/renderer-r1.md` for the R1 GPU-backend survey
+//! (`src/renderer/Metal.zig` + `src/renderer/metal/`, commit `2da015cd6`), and
+//! `docs/analysis/renderer-r3.md` for the R3 shader-port survey.
 
 pub mod backend;
 pub mod cursor;
 pub mod gpu;
 pub mod options;
 pub mod row;
+pub mod shaders;
 pub mod size;
 pub mod snapshot;
 pub mod wire;

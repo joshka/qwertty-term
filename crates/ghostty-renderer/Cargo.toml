@@ -25,6 +25,9 @@ objc2-metal = { version = "0.3.2", features = ["objc2-io-surface"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSRange",
+    # NSString: needed by chunk R3's runtime shader-compile smoke test
+    # (`newLibraryWithSource:options:error:` takes an `&NSString`).
+    "NSString",
 ] }
 objc2-io-surface = "0.3.2"
 objc2-core-foundation = "0.3.2"
