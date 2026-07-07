@@ -698,9 +698,7 @@ impl Terminal {
                     // our left; the subsequent print overwrites this cell
                     // anyway. Mirrors Terminal.zig:1166's runtime_safety gate.
                     #[cfg(debug_assertions)]
-                    unsafe {
-                        (*self.screen_mut().cursor.page_cell).set_wide(Wide::Narrow);
-                    }
+                    (*self.screen_mut().cursor.page_cell).set_wide(Wide::Narrow);
                     let page = self.screen().cursor_page();
                     let row = self.screen().cursor.page_row;
                     let x = self.screen().cursor.x as usize - 1;
