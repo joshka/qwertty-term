@@ -95,7 +95,8 @@ existing row-dirty flags.
 - [ ] Thin ghostty-ffi spike (app/surface/key/draw round-trip) — can start after M2;
       de-risks the least-explored seam
 - [ ] C ABI mirroring include/ghostty.h (~1.2k header; c/ bindings 14.8k Zig as reference)
-- [ ] Adapt macos/Sources Swift (37k; single-window subset first: SurfaceView, window, clipboard, secure input)
+- [ ] Adapt macos/Sources Swift (37k; single-window subset first: SurfaceView, window,
+      clipboard, secure input)
 - [ ] Quick terminal, tabs/splits, menu sync — after single window works
 
 ## M6 — Long tail & deferred
@@ -104,7 +105,8 @@ existing row-dirty flags.
 - [ ] Search thread wrapper + window search UI
 - [ ] Glyph APC protocol (2.2k, needs F2) · kitty unicode placeholders (U=1) · file/shm media · animation
 - [ ] tmux control mode (4.3k) · XTGETTCAP/DECRQSS full · OSC 21 effects
-- [ ] Embeddability/betamax (DEPRIORITIZED per Josh): frame-capture example, injectable clock/fonts audit, betamax port spike, ghostty-sprite/vt crates.io publishing
+- [ ] Embeddability/betamax (DEPRIORITIZED per Josh): frame-capture example, injectable
+      clock/fonts audit, betamax port spike, ghostty-sprite/vt crates.io publishing
 - [ ] qwertty conformance target + fixture regeneration (their Phase-2 sketch pending)
 - [ ] Linux: GTK spike ADR, FreeType/fontconfig (F-deferred), OpenGL (R9)
 - [ ] Inspector · i18n · Sparkle · Sentry (per rewrite-prompt non-goals until wanted)
