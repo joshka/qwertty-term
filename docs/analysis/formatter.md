@@ -233,5 +233,3 @@ selection API is available, and otherwise noted as deferred (see below).
   ported and exercised within a single page's wrap rows; a fixture that forces a
   genuine page boundary mid-wrap is deferred (needs deterministic page-split
   control). `TODO(chunk:formatter-multipage)`.
-</content>
-</invoke>
