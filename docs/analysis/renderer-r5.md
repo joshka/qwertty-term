@@ -188,8 +188,8 @@ Then try:
   theme is configured or it fails to load.
 - **CVDisplayLink**: pacing is the timer-first path (plan decision 3). The
   `NSTimer` tick has the same "tick a draw" shape CVDisplayLink swaps into later.
-- **Full legacy key encoder**: `ghostty-input`'s legacy path is still a stub
-  (owned by the input-legacy chunk landing in parallel). R5 calls the existing
+- **Full legacy key encoder**: CLOSED 2026-07-08 — chunk M2-J landed the full
+  legacy encoder underneath the unchanged seam. R5 calls the existing
   `key_encode::encode` seam, which improves underneath it; under kitty-protocol
   apps (the common negotiated default) input is fully correct today.
 - **Damage tracking**: full redraw every frame (plan decision 4).
