@@ -9,14 +9,14 @@ search entry points that drive it. The async `Thread.zig` wrapper (Phase 2) and 
 
 The Rust port lands under `crates/ghostty-vt/src/search/`:
 
-| Zig file (lines)             | Rust file                        | Ported here? |
-| ---------------------------- | -------------------------------- | ------------ |
-| `sliding_window.zig` (1676)  | `search/sliding_window.rs`       | yes          |
-| `active.zig` (175)           | `search/active.rs`               | yes          |
-| `viewport.zig` (384)         | `search/viewport.rs`             | yes          |
-| `pagelist.zig` (441)         | `search/pagelist.rs`             | yes          |
-| `screen.zig` (1618)          | —                                | deferred (needs `Screen`) |
-| `Thread.zig` (905)           | —                                | deferred (Phase 2, async) |
+| Zig file (lines)            | Rust file                  | Ported here?              |
+| --------------------------- | -------------------------- | ------------------------- |
+| `sliding_window.zig` (1676) | `search/sliding_window.rs` | yes                       |
+| `active.zig` (175)          | `search/active.rs`         | yes                       |
+| `viewport.zig` (384)        | `search/viewport.rs`       | yes                       |
+| `pagelist.zig` (441)        | `search/pagelist.rs`       | yes                       |
+| `screen.zig` (1618)         | —                          | deferred (needs `Screen`) |
+| `Thread.zig` (905)          | —                          | deferred (Phase 2, async) |
 
 ## The key finding: search is **literal case-insensitive ASCII substring**, not regex
 
