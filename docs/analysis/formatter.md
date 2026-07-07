@@ -59,7 +59,7 @@ read-back seam used by:
 
 ## The four-level formatter hierarchy
 
-```
+```text
 TerminalFormatter  (terminal → active screen; palette/modes/region/tabstops/pwd/keyboard extras)
   └ ScreenFormatter (a single screen; selection content; cursor/SGR/hyperlink/protection/kitty/charset extras)
       └ PageListFormatter (a pin range across pages; rectangle; carries TrailingState between pages)
@@ -146,9 +146,9 @@ dump uses **none**. Emission order:
   kitty-keyboard (`\x1b[=<flags>;1u`), charsets (G0-G3 designations `ESC ( ) *
   +` with final `B`/`A`/`0`; GL/GR invocations SO/LS2/LS3/LS1R/LS3R), cursor CUP
   (`\x1b[<y+1>;<x+1>H`).
-- Terminal-level **after content** (`:345-419`): DECSTBM/DECSLRM scrolling
-  region (only if not full screen), tabstops (`\x1b[3g` then per-stop `CSI <col>G` + `\x1bH` HTS), keyboard `\x1b[>4;2m` if `modify_other_keys_2`, pwd
-  `OSC 7`.
+- Terminal-level **after content** (`:345-419`): DECSTBM/DECSLRM scrolling region (only if
+  not full screen), tabstops (`\x1b[3g` then per-stop `CSI <col>G` + `\x1bH` HTS), keyboard
+  `\x1b[>4;2m` if `modify_other_keys_2`, pwd `OSC 7`.
 
 ### `pin_map` / `point_map` (NOT ported — deferral)
 
