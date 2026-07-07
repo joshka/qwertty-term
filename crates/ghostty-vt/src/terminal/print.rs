@@ -114,6 +114,264 @@ impl Terminal {
         self.screen_mut().cursor_right(1);
     }
 
+    /// Print a run of codepoints at once. Semantically identical to calling
+    /// [`print`](Self::print) for each codepoint in order, but much faster
+    /// because it batches cell writes and hoists per-codepoint checks out of
+    /// the hot loop. Port of `printSlice`.
+    ///
+    /// The codepoints must all be printable (no C0 controls) — the VT stream
+    /// only ever hands printable ground-state codepoints here. Runs that need
+    /// special handling (wide chars, grapheme continuations, insert mode,
+    /// charset mapping, hyperlinks, complex cells) fall back to the per-cp
+    /// [`print`](Self::print) path.
+    ///
+    /// SCOPE: this port implements the **narrow** (width-1) fast path faithfully
+    /// (`printSliceFill(.narrow, ...)`) — which covers the entire ASCII run and
+    /// the narrow portion of mixed UTF-8 — and defers wide runs and every other
+    /// case to `print`. The narrow path is the dominant throughput case (see
+    /// `docs/analysis/perf.md`); wide runs remain correct via the fallback.
+    pub fn print_slice(&mut self, cps: &[u32]) {
+        let mut i = 0;
+        while i < cps.len() {
+            let consumed = self.print_slice_fast_narrow(&cps[i..]);
+            if consumed > 0 {
+                i += consumed;
+                continue;
+            }
+            // Fast path can't handle cps[i]; print it the slow way, then retry.
+            self.print(cps[i]);
+            i += 1;
+        }
+    }
+
+    /// Attempt to print a prefix of `cps` via the batched narrow fast path.
+    /// Returns the number of codepoints consumed (0 => caller must use `print`).
+    /// Port of the narrow portion of `printSliceFast` + `printSliceFill`.
+    fn print_slice_fast_narrow(&mut self, cps: &[u32]) -> usize {
+        // Only the main display is supported.
+        if self.status_display != super::StatusDisplay::Main {
+            return 0;
+        }
+        // Insert mode shifts cells per-print; wraparound must be on so the
+        // row-fill below can assume soft-wrap semantics (it's the default).
+        if self.modes.get(Mode::Insert) {
+            return 0;
+        }
+        if !self.modes.get(Mode::Wraparound) {
+            return 0;
+        }
+
+        let screen = self.screen();
+        // Charset must map ASCII/UTF-8 as-is (no active DEC special / SS).
+        if screen.charset.single_shift.is_some() {
+            return 0;
+        }
+        match screen.charset.charsets.get(screen.charset.gl) {
+            Charset::Utf8 | Charset::Ascii => {}
+            _ => return 0,
+        }
+        // Hyperlinks need per-cell map bookkeeping.
+        if screen.cursor.hyperlink_id != 0 {
+            return 0;
+        }
+
+        let grapheme_cluster = self.modes.get(Mode::GraphemeCluster);
+        // When clustering is on with a left margin, print() consults the cell
+        // left of the margin after wrapping; restrict to [0x10, 0xFF] then.
+        let allow_unicode = !grapheme_cluster || self.scrolling_region.left == 0;
+
+        let cp0 = cps[0];
+        if cp0 <= 0xFF {
+            // C0 controls aren't printable; the stream routes them to execute,
+            // but be safe (print_slice is a crate API).
+            if cp0 < 0x10 {
+                return 0;
+            }
+            // [0x10, 0xFF] is always narrow and never clusters.
+            return self.print_slice_fill_narrow(cps, grapheme_cluster, allow_unicode);
+        }
+
+        if !allow_unicode {
+            return 0;
+        }
+        // First cp > 0xFF needs care under clustering: print() examines the
+        // previous cell/pending-wrap state we can't cheaply reason about; only
+        // take it when the cursor is at column 0 with no pending wrap.
+        if grapheme_cluster && (self.screen().cursor.pending_wrap || self.screen().cursor.x != 0) {
+            return 0;
+        }
+        // Only narrow (width-1) codepoints are handled here; wide runs defer
+        // to `print`.
+        if crate::unicode::codepoint_width(cp0) != 1 {
+            return 0;
+        }
+        self.print_slice_fill_narrow(cps, grapheme_cluster, allow_unicode)
+    }
+
+    /// The row-filling narrow batch. The first codepoint is validated by the
+    /// caller. Port of `printSliceFill(.narrow, ...)`.
+    fn print_slice_fill_narrow(
+        &mut self,
+        cps: &[u32],
+        grapheme_cluster: bool,
+        allow_unicode: bool,
+    ) -> usize {
+        use crate::unicode::{BreakState, grapheme_break};
+
+        // Determine the run of narrow, batchable codepoints. For cps after the
+        // first, the previous cp in the run is always written as a fresh
+        // single-cp cell, so the grapheme-break check against it is exact.
+        let run_len: usize = {
+            let mut r = cps.len();
+            for idx in 1..cps.len() {
+                let cp = cps[idx];
+                if (0x10..=0xFF).contains(&cp) {
+                    continue;
+                }
+                if cp > 0xFF && allow_unicode && crate::unicode::codepoint_width(cp) == 1 {
+                    if !grapheme_cluster {
+                        continue;
+                    }
+                    let mut state = BreakState::Default;
+                    if grapheme_break(cps[idx - 1], cp, &mut state) {
+                        continue;
+                    }
+                }
+                r = idx;
+                break;
+            }
+            r
+        };
+        debug_assert!(run_len > 0);
+
+        let cp_shift = Cell::CONTENT_BIT_OFFSET;
+        let mut printed: usize = 0;
+
+        'outer: while printed < run_len {
+            // Soft-wrap first so the cursor is on the row/col to receive cps.
+            if self.screen().cursor.pending_wrap {
+                self.print_wrap();
+            }
+
+            let right_limit = if self.screen().cursor.x > self.scrolling_region.right {
+                self.cols
+            } else {
+                self.scrolling_region.right + 1
+            };
+
+            let cursor_x = self.screen().cursor.x;
+            let avail = (right_limit - cursor_x) as usize;
+            debug_assert!(avail > 0);
+
+            let style_id = self.screen().cursor.style_id;
+            // Build the narrow template bits (codepoint 0, will OR each cp in).
+            let template_bits: u64 = {
+                let mut t = Cell::default();
+                t.set_content_tag(ContentTag::Codepoint);
+                t.set_style_id(style_id);
+                t.set_wide(Wide::Narrow);
+                t.set_protected(self.screen().cursor.protected);
+                t.set_semantic_content(self.screen().cursor.semantic_content);
+                t.cval()
+            };
+            let check_expected = Cell::simple_check_expected(style_id);
+
+            // Cells we can write into this row.
+            let count = avail.min(run_len - printed);
+            debug_assert!(count > 0);
+            let cell_count = count;
+
+            // SAFETY: the cursor cell/page pointers are live and the run stays
+            // within [cursor.x, right_limit) of the current row.
+            let base_cell = self.screen().cursor.page_cell;
+            let page = unsafe { self.screen().cursor_page() };
+            let mem = unsafe { (*page).memory_mut() };
+
+            let mut k = 0usize; // cells written this row
+            'fill: while k < cell_count {
+                // Find the run of simple cells (branch-free store below).
+                let mut simple = k;
+                while simple < cell_count {
+                    let bits = unsafe { (*base_cell.add(simple)).cval() };
+                    if (bits & Cell::SIMPLE_MASK) != check_expected {
+                        break;
+                    }
+                    simple += 1;
+                }
+
+                for idx in k..simple {
+                    let bits = template_bits | ((cps[printed + idx] as u64) << cp_shift);
+                    unsafe {
+                        *base_cell.add(idx) = Cell::from_cval(bits);
+                    }
+                }
+                k = simple;
+                if k >= cell_count {
+                    break;
+                }
+
+                // General path for the cell that failed the masked check.
+                // Anything needing cleanup (wide/spacer, grapheme, hyperlink)
+                // falls back to print().
+                let cell = unsafe { &mut *base_cell.add(k) };
+                if cell.wide() != Wide::Narrow || cell.has_grapheme() || cell.hyperlink() {
+                    break 'fill;
+                }
+                // Style-only mismatch: adjust ref counts, then overwrite.
+                if cell.style_id() != style_id {
+                    if cell.style_id() != DEFAULT_ID {
+                        // SAFETY: mem is the owning page's base; id is live.
+                        unsafe {
+                            (*page).styles().release(mem, cell.style_id());
+                        }
+                    }
+                    if style_id != DEFAULT_ID {
+                        // SAFETY: same page base; style_id is the cursor's live id.
+                        unsafe {
+                            (*page).styles().use_id(mem, style_id);
+                        }
+                    }
+                }
+                let bits = template_bits | ((cps[printed + k] as u64) << cp_shift);
+                unsafe {
+                    *base_cell.add(k) = Cell::from_cval(bits);
+                }
+                k += 1;
+            }
+
+            if k > 0 {
+                // SAFETY: cursor row live.
+                unsafe {
+                    (*self.screen().cursor.page_row).set_dirty(true);
+                    if style_id != DEFAULT_ID {
+                        (*self.screen().cursor.page_row).set_styled(true);
+                    }
+                }
+                self.previous_char = Some(cps[printed + k - 1]);
+                printed += k;
+
+                // Advance the cursor. If we filled through the right limit, the
+                // cursor stays on the last cell with pending_wrap set.
+                if (cursor_x as usize + k) >= right_limit as usize {
+                    debug_assert_eq!(cursor_x as usize + k, right_limit as usize);
+                    self.screen_mut().cursor_right((k - 1) as CellCountInt);
+                    self.screen_mut().cursor.pending_wrap = true;
+                } else {
+                    self.screen_mut().cursor_right(k as CellCountInt);
+                }
+            }
+
+            // A cell needed the slow path: cursor is exactly on it; return so
+            // the caller prints the next cp via print().
+            if k < cell_count {
+                break 'outer;
+            }
+        }
+
+        self.screen().assert_integrity();
+        printed
+    }
+
     /// The mode-2027 grapheme-clustering branch of `print`. Returns `true` if
     /// `c` was consumed (attached to the previous grapheme cluster), `false` if
     /// the caller should fall through to the normal width path. Port of

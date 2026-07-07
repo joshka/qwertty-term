@@ -38,7 +38,7 @@ use crate::csi::{EraseDisplay, EraseLine, TabClear};
 use crate::dcs;
 use crate::modes::{self, Mode};
 use crate::osc;
-use crate::parser::{Action, Parser, State};
+use crate::parser::{Action, MAX_INTERMEDIATE, MAX_PARAMS, Parser, State};
 use crate::sgr;
 use crate::terminal::{SwitchScreenMode, Terminal};
 use crate::utf8_decoder::Utf8Decoder;
@@ -49,24 +49,76 @@ pub type Reply = Vec<u8>;
 
 /// Owned CSI dispatch payload (a copy of [`Csi`] so the parser borrow can be
 /// released before handler dispatch).
+///
+/// The parser's intermediates/params are small, fixed-capacity arrays
+/// (`MAX_INTERMEDIATE` / `MAX_PARAMS`), so this copies them into inline arrays
+/// rather than heap `Vec`s. That keeps the dispatch hot path allocation-free —
+/// which matters for control-sequence-dense streams (SGR, cursor-heavy), where
+/// a per-sequence `Vec` allocation dominated the dispatch cost (see
+/// `docs/analysis/perf.md`). Behavior is identical to the previous `Vec` copy.
 struct CsiOwned {
-    intermediates: Vec<u8>,
-    params: Vec<u16>,
+    intermediates: [u8; MAX_INTERMEDIATE],
+    intermediates_len: u8,
+    params: [u16; MAX_PARAMS],
+    params_len: u8,
     params_sep: crate::parser::SepList,
     final_byte: u8,
 }
 
-/// Owned ESC dispatch payload.
+impl CsiOwned {
+    #[inline]
+    fn intermediates(&self) -> &[u8] {
+        &self.intermediates[..self.intermediates_len as usize]
+    }
+    #[inline]
+    fn params(&self) -> &[u16] {
+        &self.params[..self.params_len as usize]
+    }
+}
+
+/// Owned ESC dispatch payload. See [`CsiOwned`] for the inline-array rationale.
 struct EscOwned {
-    intermediates: Vec<u8>,
+    intermediates: [u8; MAX_INTERMEDIATE],
+    intermediates_len: u8,
     final_byte: u8,
 }
 
-/// Owned DCS hook payload.
+impl EscOwned {
+    #[inline]
+    fn intermediates(&self) -> &[u8] {
+        &self.intermediates[..self.intermediates_len as usize]
+    }
+}
+
+/// Owned DCS hook payload. See [`CsiOwned`] for the inline-array rationale.
 struct DcsOwned {
-    intermediates: Vec<u8>,
-    params: Vec<u16>,
+    intermediates: [u8; MAX_INTERMEDIATE],
+    intermediates_len: u8,
+    params: [u16; MAX_PARAMS],
+    params_len: u8,
     final_byte: u8,
+}
+
+impl DcsOwned {
+    #[inline]
+    fn intermediates(&self) -> &[u8] {
+        &self.intermediates[..self.intermediates_len as usize]
+    }
+    #[inline]
+    fn params(&self) -> &[u16] {
+        &self.params[..self.params_len as usize]
+    }
+}
+
+/// Copy a bounded slice into a fixed-capacity array, returning the array and
+/// the length. The source is guaranteed by the parser to fit within `N`.
+#[inline]
+fn copy_bounded<T: Copy + Default, const N: usize>(src: &[T]) -> ([T; N], u8) {
+    let mut arr = [T::default(); N];
+    let n = src.len();
+    debug_assert!(n <= N);
+    arr[..n].copy_from_slice(src);
+    (arr, n as u8)
 }
 
 /// An owned copy of one [`Action`], detached from the parser borrow.
@@ -91,24 +143,40 @@ impl Emitted {
         match a {
             Action::Print(c) => Emitted::Print(c),
             Action::Execute(c) => Emitted::Execute(c),
-            Action::CsiDispatch(csi) => Emitted::Csi(CsiOwned {
-                intermediates: csi.intermediates.to_vec(),
-                params: csi.params.to_vec(),
-                params_sep: csi.params_sep,
-                final_byte: csi.final_byte,
-            }),
-            Action::EscDispatch(esc) => Emitted::Esc(EscOwned {
-                intermediates: esc.intermediates.to_vec(),
-                final_byte: esc.final_byte,
-            }),
+            Action::CsiDispatch(csi) => {
+                let (intermediates, intermediates_len) = copy_bounded(csi.intermediates);
+                let (params, params_len) = copy_bounded(csi.params);
+                Emitted::Csi(CsiOwned {
+                    intermediates,
+                    intermediates_len,
+                    params,
+                    params_len,
+                    params_sep: csi.params_sep,
+                    final_byte: csi.final_byte,
+                })
+            }
+            Action::EscDispatch(esc) => {
+                let (intermediates, intermediates_len) = copy_bounded(esc.intermediates);
+                Emitted::Esc(EscOwned {
+                    intermediates,
+                    intermediates_len,
+                    final_byte: esc.final_byte,
+                })
+            }
             Action::OscStart => Emitted::OscStart,
             Action::OscPut(b) => Emitted::OscPut(b),
             Action::OscEnd(b) => Emitted::OscEnd(b),
-            Action::DcsHook(d) => Emitted::DcsHook(DcsOwned {
-                intermediates: d.intermediates.to_vec(),
-                params: d.params.to_vec(),
-                final_byte: d.final_byte,
-            }),
+            Action::DcsHook(d) => {
+                let (intermediates, intermediates_len) = copy_bounded(d.intermediates);
+                let (params, params_len) = copy_bounded(d.params);
+                Emitted::DcsHook(DcsOwned {
+                    intermediates,
+                    intermediates_len,
+                    params,
+                    params_len,
+                    final_byte: d.final_byte,
+                })
+            }
             Action::DcsPut(b) => Emitted::DcsPut(b),
             Action::DcsUnhook => Emitted::DcsUnhook,
             Action::ApcStart => Emitted::ApcStart,
@@ -128,6 +196,16 @@ impl Emitted {
 pub trait Handler {
     // ---- printing -------------------------------------------------------
     fn print(&mut self, cp: u32) {}
+
+    /// Print a run of already-decoded printable codepoints at once. The
+    /// default loops [`Handler::print`]; the concrete [`TerminalHandler`]
+    /// overrides it with the batched [`Terminal::print_slice`] fast path. This
+    /// is the sink for the stream's decode-until-control-seq bulk-print path.
+    fn print_slice(&mut self, cps: &[u32]) {
+        for &cp in cps {
+            self.print(cp);
+        }
+    }
 
     // ---- C0 / simple motion --------------------------------------------
     fn backspace(&mut self) {}
@@ -289,7 +367,16 @@ pub struct Stream<H: Handler> {
     osc: osc::Parser,
     /// DCS handler (hook/put/unhook -> Command).
     dcs: dcs::Handler,
+    /// Scratch codepoint buffer for the decode-until-control-seq bulk path
+    /// (`feed`). Sized like upstream's 4096-codepoint `cp_buf`.
+    cp_buf: Box<[u32; CP_BUF_LEN]>,
+    /// Bytes consumed by the last [`Self::decode_until_control_seq`] scan.
+    scan_consumed: usize,
 }
+
+/// Bulk-decode codepoint buffer length (matches upstream's `cp_buf` in
+/// `nextSlice`). Boxed so the `Stream` struct stays small on the stack.
+const CP_BUF_LEN: usize = 4096;
 
 impl<H: Handler> Stream<H> {
     pub fn new(handler: H) -> Self {
@@ -301,13 +388,183 @@ impl<H: Handler> Stream<H> {
             // invalidate (matches ghostty's `osc.Parser` with an allocator).
             osc: osc::Parser::with_allocator(),
             dcs: dcs::Handler::new(),
+            cp_buf: Box::new([0u32; CP_BUF_LEN]),
+            scan_consumed: 0,
         }
     }
 
-    /// Feed a slice of bytes. Port of `nextSlice` (scalar path only).
+    /// Feed a slice of bytes. Port of `nextSlice` (scalar path).
+    ///
+    /// The hot path is the ground-state decode-until-control-seq scan: while
+    /// the parser is in ground state and the UTF-8 decoder has no pending
+    /// bytes, this bulk-decodes a run of codepoints into a scratch buffer and
+    /// hands each printable run to `Handler::print_slice` in one call, instead
+    /// of stepping the parser byte-by-byte. Non-ground bytes and partial UTF-8
+    /// fall back to the per-byte `next` path. This mirrors upstream's
+    /// `nextSlice`/`nextSliceCapped` structure (minus the SIMD decode and the
+    /// CSI-param bulk fast path, which are separate perf items).
     pub fn feed(&mut self, input: &[u8]) {
-        for &byte in input {
-            self.next(byte);
+        let mut offset = 0;
+
+        while offset < input.len() {
+            // Drain any partial UTF-8 sequence carried across a previous call
+            // or run: process byte-at-a-time until the decoder is idle.
+            while self.utf8.is_partial() {
+                if offset >= input.len() {
+                    return;
+                }
+                self.next_utf8(input[offset]);
+                offset += 1;
+            }
+
+            // If we're not in ground state (mid control sequence), process
+            // per-byte until we return to ground.
+            while self.parser.state() != State::Ground {
+                if offset >= input.len() {
+                    return;
+                }
+                // Bulk-consume CSI parameter bytes (digits/separators and the
+                // final byte) without stepping the parser byte-by-byte. This is
+                // the hot path for control-dense streams (SGR params, cursor
+                // moves). Port of `consumeUntilGround`'s `consumeCsiParams`
+                // call. On the final byte it yields the CSI dispatch directly.
+                if self.parser.state() == State::CsiParam {
+                    let (consumed, action) = self.parser.bulk_consume_csi_params(&input[offset..]);
+                    if let Some(action) = action {
+                        // Materialize the borrowed action before dispatch (the
+                        // parser borrow must end first), matching next_non_utf8.
+                        let emitted = Emitted::from_action(action);
+                        offset += consumed;
+                        if let Emitted::Csi(csi) = emitted {
+                            self.csi_dispatch(&csi);
+                        }
+                        continue;
+                    }
+                    offset += consumed;
+                    // Still in csi_param: the next byte isn't a parameter byte;
+                    // fall through to the per-byte path below to handle it.
+                    if offset >= input.len() {
+                        return;
+                    }
+                }
+
+                self.next_non_utf8(input[offset]);
+                offset += 1;
+            }
+
+            if offset >= input.len() {
+                return;
+            }
+
+            // Ground state + idle decoder: bulk-decode until a control byte.
+            let cp_count = self.decode_until_control_seq(&input[offset..]);
+            let consumed = self.scan_consumed;
+            self.dispatch_ground_run(cp_count);
+            offset += consumed;
+
+            // The scan stops *before* a control byte (ESC) without consuming
+            // it, so a scan can legitimately consume zero bytes (e.g. input
+            // starts with ESC). Guarantee forward progress and drive that byte
+            // through the scalar path, which performs the ground->escape
+            // transition (matching `handle_codepoint`). Any subsequent control
+            // sequence is finished by the non-ground loop at the top.
+            if consumed == 0 {
+                if offset >= input.len() {
+                    return;
+                }
+                self.next(input[offset]);
+                offset += 1;
+            }
+            // Loop: re-check decoder-partial / non-ground / more input.
+        }
+    }
+
+    /// Bulk-decode ground-state bytes into `self.cp_buf` until the next ESC
+    /// (0x1B) or until the decoder would need bytes not yet present (partial
+    /// UTF-8 at the end of `input`). Records the number of *bytes* consumed in
+    /// `self.scan_consumed` and returns the number of *codepoints* produced.
+    ///
+    /// Scalar analogue of `simd.vt.utf8DecodeUntilControlSeq`: it stops at ESC
+    /// so `feed` can hand the control sequence to the parser, and it leaves any
+    /// trailing incomplete UTF-8 sequence unconsumed (the decoder holds no
+    /// partial state on return unless the whole tail was a partial sequence, in
+    /// which case `feed`'s drain loop finishes it on the next chunk). C0
+    /// controls other than ESC are emitted into the buffer as their codepoints
+    /// (all <= 0xF), and split back out by `dispatch_ground_run`.
+    fn decode_until_control_seq(&mut self, input: &[u8]) -> usize {
+        let cap = self.cp_buf.len();
+        let mut n = 0; // codepoints produced
+        let mut i = 0; // bytes consumed
+        while i < input.len() && n < cap {
+            let byte = input[i];
+            // ESC breaks the run so the parser state machine can take over.
+            // (handle_codepoint would set escape state manually; we stop here
+            // and let feed's non-ground loop drive the escape sequence.)
+            if byte == 0x1B {
+                break;
+            }
+            // ASCII fast path: when the decoder is idle, a byte < 0x80 is a
+            // complete 1-byte codepoint equal to the byte itself (the Hoehrmann
+            // DFA emits exactly `byte` for char-class 0 in the ACCEPT state).
+            // Skip the table lookups for the common ASCII run. C0 controls
+            // (< 0x20) still land here as codepoints <= 0x1F and are split back
+            // out to `execute` by `dispatch_ground_run`, matching the general
+            // path. This mirrors what the SIMD decode-until-control-seq does in
+            // bulk; here it is a scalar branch.
+            if byte < 0x80 && !self.utf8.is_partial() {
+                self.cp_buf[n] = byte as u32;
+                n += 1;
+                i += 1;
+                continue;
+            }
+            let (cp, consumed) = self.utf8.next(byte);
+            if consumed {
+                i += 1;
+            }
+            match cp {
+                Some(c) => {
+                    self.cp_buf[n] = c as u32;
+                    n += 1;
+                }
+                None => {
+                    // Mid-sequence. If the input ended mid-sequence, stop; the
+                    // decoder keeps its partial state and feed's drain loop
+                    // finishes it next call. Otherwise keep decoding.
+                    if i >= input.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        self.scan_consumed = i;
+        n
+    }
+
+    /// Dispatch the first `cp_count` codepoints of `self.cp_buf` produced by
+    /// [`Self::decode_until_control_seq`]: split off C0 controls (`cp <= 0xF`)
+    /// as `execute`, and hand each maximal run of printable codepoints to
+    /// `Handler::print_slice` in one call. Port of the inner emit loop of
+    /// `nextSliceCapped`.
+    fn dispatch_ground_run(&mut self, cp_count: usize) {
+        let mut i = 0;
+        while i < cp_count {
+            let cp = self.cp_buf[i];
+            if cp <= 0xF {
+                self.execute(cp as u8);
+                i += 1;
+                continue;
+            }
+            let mut end = i + 1;
+            while end < cp_count && self.cp_buf[end] > 0xF {
+                end += 1;
+            }
+            // Disjoint borrow: `cp_buf` and `handler` are separate fields, so
+            // split the struct borrow to hand the run slice to the handler.
+            let Self {
+                cp_buf, handler, ..
+            } = self;
+            handler.print_slice(&cp_buf[i..end]);
+            i = end;
         }
     }
 
@@ -384,8 +641,8 @@ impl<H: Handler> Stream<H> {
 
                 Emitted::DcsHook(d) => {
                     if let Some(cmd) = self.dcs.hook(crate::parser::Dcs {
-                        intermediates: &d.intermediates,
-                        params: &d.params,
+                        intermediates: d.intermediates(),
+                        params: d.params(),
                         final_byte: d.final_byte,
                     }) {
                         self.dcs_command(cmd);
@@ -423,7 +680,8 @@ impl<H: Handler> Stream<H> {
         // C1 (8-bit) controls are equivalent to ESC + (c - 0x40).
         if c > 0x7F {
             self.esc_dispatch(&EscOwned {
-                intermediates: Vec::new(),
+                intermediates: [0; MAX_INTERMEDIATE],
+                intermediates_len: 0,
                 final_byte: c - 0x40,
             });
             return;
@@ -460,8 +718,8 @@ impl<H: Handler> Stream<H> {
 impl<H: Handler> Stream<H> {
     /// Port of `csiDispatch`. Routes on the final byte + intermediates.
     fn csi_dispatch(&mut self, input: &CsiOwned) {
-        let params: &[u16] = &input.params;
-        let intermediates: &[u8] = &input.intermediates;
+        let params: &[u16] = input.params();
+        let intermediates: &[u8] = input.intermediates();
 
         // Helper: single count param (default 1), reject 2+.
         let one = |p: &[u16]| -> Option<u16> {
@@ -885,7 +1143,7 @@ impl<H: Handler> Stream<H> {
     /// Port of `escDispatch`.
     fn esc_dispatch(&mut self, action: &EscOwned) {
         use crate::charsets::{ActiveSlot, Charset, Slots};
-        let intermediates: &[u8] = &action.intermediates;
+        let intermediates: &[u8] = action.intermediates();
         let no_inter = intermediates.is_empty();
         match action.final_byte {
             // Charset designations.
@@ -1125,6 +1383,9 @@ impl TerminalHandler {
 impl Handler for TerminalHandler {
     fn print(&mut self, cp: u32) {
         self.terminal.print(cp);
+    }
+    fn print_slice(&mut self, cps: &[u32]) {
+        self.terminal.print_slice(cps);
     }
 
     fn backspace(&mut self) {

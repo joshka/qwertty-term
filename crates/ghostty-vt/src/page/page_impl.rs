@@ -291,6 +291,37 @@ impl Cell {
         self.0
     }
 
+    /// Reconstruct a cell from its raw `u64` bit representation. The inverse
+    /// of [`Cell::cval`]. Used by the batched print fast path
+    /// (`Terminal::print_slice`), which builds cell bit patterns from a
+    /// template + codepoint shift exactly like upstream `printSliceFill`.
+    #[inline]
+    pub(crate) const fn from_cval(bits: u64) -> Self {
+        Cell(bits)
+    }
+
+    /// Bit offset of the 24-bit content field within a cell (`content_tag`
+    /// occupies the low 2 bits, content the next 24). Mirrors upstream's
+    /// `@bitOffsetOf(Cell, "content")` used to OR a codepoint into a template.
+    pub(crate) const CONTENT_BIT_OFFSET: u64 = Self::CONTENT_SHIFT;
+
+    /// The masked-field test for a "simple" cell in the batched print fast
+    /// path: content_tag == codepoint, wide == narrow, hyperlink == 0, and the
+    /// style_id matching the cursor's. Mirrors upstream's `simple_mask`
+    /// (`fieldMask(Cell, {content_tag, style_id, wide, hyperlink})`).
+    pub(crate) const SIMPLE_MASK: u64 = (0b11 << Self::TAG_SHIFT)          // content_tag
+        | (Self::STYLE_MASK << Self::STYLE_SHIFT)                          // style_id
+        | (0b11 << Self::WIDE_SHIFT)                                       // wide
+        | Self::HYPERLINK; // hyperlink
+
+    /// The expected masked bits of a simple cell already carrying `style_id`
+    /// (so no ref-count churn is needed to overwrite it). Port of
+    /// `printSliceCheckExpected`.
+    #[inline]
+    pub(crate) const fn simple_check_expected(style_id: StyleCountInt) -> u64 {
+        (style_id as u64) << Self::STYLE_SHIFT
+    }
+
     #[inline]
     pub fn content_tag(self) -> ContentTag {
         match (self.0 >> Self::TAG_SHIFT) & 0b11 {

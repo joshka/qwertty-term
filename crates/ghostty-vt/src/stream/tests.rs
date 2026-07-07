@@ -614,3 +614,127 @@ fn fixture_wide_text_and_resize() {
     let bytes = decode_escaped_stream("name: 好\\r\\n\\e[2;7Hok");
     assert_eq!(run_rust_engine(12, 4, &bytes), "name: 好\n      ok");
 }
+
+// -------------------------------------------------------------------------
+// Fast-path equivalence tests (M1 perf pass, docs/analysis/perf.md).
+//
+// The `feed` decode-until-control-seq bulk path, the batched narrow
+// `print_slice` fill, and the bulk CSI-param consume must all be
+// behavior-equivalent to feeding the same bytes one at a time (which forces
+// the scalar per-byte path). Each test feeds an input three ways and asserts
+// identical screen text + cursor:
+//   (a) the whole slice in one `feed` (exercises every fast path),
+//   (b) one byte per `feed` call (forces the scalar path throughout),
+//   (c) awkward chunk splits (exercises fast-path re-entry mid-sequence).
+// -------------------------------------------------------------------------
+
+fn snapshot(cols: u16, rows: u16, chunks: &[&[u8]]) -> (String, (u16, u16)) {
+    let mut s = term(cols, rows);
+    for c in chunks {
+        s.feed(c);
+    }
+    let cur = &s.handler.terminal.screen().cursor;
+    (
+        normalize(&s.handler.terminal.plain_string()),
+        (cur.x, cur.y),
+    )
+}
+
+fn assert_fastpath_equiv(cols: u16, rows: u16, input: &[u8]) {
+    // (a) one shot.
+    let whole = snapshot(cols, rows, &[input]);
+    // (b) byte-at-a-time.
+    let per_byte_chunks: Vec<&[u8]> = input.chunks(1).collect();
+    let per_byte = snapshot(cols, rows, &per_byte_chunks);
+    assert_eq!(whole, per_byte, "whole-vs-per-byte diverged");
+    // (c) a few awkward split sizes to stress fast-path re-entry. Miri is
+    // ~100x slower, so it runs one representative split (still exercising the
+    // unsafe cell-write path) while the normal runner sweeps several.
+    #[cfg(miri)]
+    let splits: &[usize] = &[7];
+    #[cfg(not(miri))]
+    let splits: &[usize] = &[2, 3, 5, 7, 13];
+    for &split in splits {
+        let chunks: Vec<&[u8]> = input.chunks(split).collect();
+        let chunked = snapshot(cols, rows, &chunks);
+        assert_eq!(whole, chunked, "whole-vs-chunk({split}) diverged");
+    }
+}
+
+#[test]
+fn fastpath_ascii_soft_wrap() {
+    // A run longer than the row width so the batched fill crosses several
+    // soft-wrap boundaries (and the pending-wrap column).
+    let line = b"The quick brown fox jumps over the lazy dog 0123456789 abcdefghij";
+    assert_fastpath_equiv(20, 8, line);
+}
+
+#[test]
+fn fastpath_ascii_with_c0_controls() {
+    // CR/LF/TAB/BS interleaved with printable runs: the ground scan must split
+    // C0 (execute) out of the print_slice runs.
+    assert_fastpath_equiv(24, 6, b"alpha\tbeta\r\ngamma\x08X delta\r\nend");
+}
+
+#[test]
+fn fastpath_mixed_utf8_narrow_and_wide() {
+    // Mixed narrow UTF-8 + wide CJK + emoji; the narrow batch must stop at
+    // wide chars and defer them to the per-cp path.
+    assert_fastpath_equiv(16, 6, "héllo wörld 好的 テスト ab🙂cd\r\nx".as_bytes());
+}
+
+#[test]
+fn fastpath_csi_params_dense() {
+    // Many multi-param CSI sequences (SGR + CUP) between short prints: the bulk
+    // CSI-param consume path is heavily exercised.
+    let chunk =
+        b"\x1b[1;31mred\x1b[0m \x1b[38;5;120mpal\x1b[0m \x1b[38;2;10;20;30mrgb\x1b[0m \x1b[4:3m~\x1b[0m\r\n";
+    let reps = if cfg!(miri) { 2 } else { 8 };
+    let mut input = Vec::new();
+    for _ in 0..reps {
+        input.extend_from_slice(chunk);
+    }
+    assert_fastpath_equiv(40, 10, &input);
+}
+
+#[test]
+fn fastpath_cursor_heavy_moves_and_erase() {
+    // CUP + short print + EL, like a full-screen app; exercises CSI-param bulk
+    // consume for the row;col params plus batched short prints.
+    let mut input = Vec::new();
+    let mut row = 1u32;
+    let mut col = 1u32;
+    let iters = if cfg!(miri) { 12 } else { 60 };
+    for _ in 0..iters {
+        input.extend_from_slice(format!("\x1b[{row};{col}Hcell\x1b[K").as_bytes());
+        row = row % 10 + 1;
+        col = (col + 7) % 24 + 1;
+    }
+    assert_fastpath_equiv(30, 12, &input);
+}
+
+#[test]
+fn fastpath_private_and_intermediate_csi() {
+    // Private-marker (`?`) and intermediate CSI forms must still parse when the
+    // bulk param path stops at the non-parameter byte and hands off.
+    assert_fastpath_equiv(
+        20,
+        6,
+        b"\x1b[?25lhi\x1b[?25h\x1b[?1049halt\x1b[?1049lmain\x1b[ 1 q done",
+    );
+}
+
+#[test]
+fn fastpath_incomplete_utf8_across_chunks() {
+    // A multi-byte codepoint split across a feed boundary: the decoder must
+    // carry partial state and the fast path re-enter cleanly. `assert_fastpath_
+    // equiv`'s split sizes cut through the 3-byte 好 and 4-byte 🙂.
+    assert_fastpath_equiv(12, 4, "ab好cd🙂ef\r\ngh".as_bytes());
+}
+
+#[test]
+fn fastpath_esc_at_run_boundary() {
+    // ESC immediately after a printable run (the common case): scan stops on
+    // ESC without consuming it, feed drives the escape via the scalar path.
+    assert_fastpath_equiv(20, 5, b"hello\x1bMworld\x1b7save\x1b8");
+}
