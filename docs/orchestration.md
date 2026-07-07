@@ -55,7 +55,9 @@ markdownlint-cli2 "**/*.md" "!target"          # when docs changed
 Conflict notes: `crates/ghostty-vt/src/lib.rs` module lists conflict often — resolve as the
 UNION of `pub mod` lines, sorted (a python one-liner extracting `^pub mod \w+;` and
 deduping is reliable). Ledger/table edits: aligned-table padding defeats naive string
-matching — edit by line prefix (`l.startswith('| kitty')`), then rerun
+matching — edit by REGEX row-key match (`re.match(r'^\| H +\|', line)` — padded columns defeat exact
+`startswith`), ASSERT the replacement count (an unconditional "ok" print has masked silent
+no-op edits twice), then rerun
 `python3 scripts/align_md_tables.py <file>` and lint. **Verify lint shows 0 errors BEFORE
 committing** — the recurring orchestrator mistake is commit-then-check.
 
