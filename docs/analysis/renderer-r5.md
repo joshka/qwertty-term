@@ -137,6 +137,15 @@ Then try:
 
 - **Typing / a shell**: run `ls`, `vim`, `htop` — text renders via Metal, theme
   colors show, the cursor draws.
+- **Theme**: with `theme = "Aardvark Ink"` (or any installed ghostty theme) in
+  `~/.config/ghostty-rs/config.toml`, the window opens with that theme's
+  background/foreground/palette instead of the built-in default.
+- **Selection + copy**: click-drag over text to select it (highlighted via
+  inverse video, or the theme's `selection-background`/`selection-foreground`
+  if it sets them); `Cmd-C` copies it; a plain click elsewhere clears the
+  selection. With `copy-on-select = true`, releasing the drag copies
+  immediately without `Cmd-C`. In `vim`/`htop` (mouse reporting on), hold
+  Shift while dragging to select instead of sending the drag to the program.
 - **Native tabs**: `Cmd-T` opens a new tab (in the current tab's working
   directory — `cd /tmp` then `Cmd-T` and check `pwd`). Drag a tab out of the tab
   bar → it becomes its own window. `Cmd-W` closes the tab/window; `Cmd-N` opens a
@@ -152,15 +161,31 @@ Then try:
 
 ## Deferrals (documented, not blocking)
 
-- **Selection** (and copy-on-select): the R5 brief permits deferring selection.
-  `Copy` is a bound no-op placeholder; `copy-on-select` config round-trips but
-  isn't acted on. Mouse *reporting* is wired (apps that enable it receive events).
+- **Selection rendering has no dedicated renderer surface.** `ghostty-vt`'s
+  `Screen::select`/`selection_string` (the engine-side selection model) is
+  wired end to end — left-button drag creates a selection, Cmd-C and
+  `copy-on-select` copy `selection_string` to the clipboard, a plain click
+  clears it — but neither `RenderSnapshot` nor `ghostty-renderer`'s cell
+  engine carry any selection state (no selection colors in `FrameOptions`, no
+  selection branch in `Contents::rebuild_row`). Rather than extend those two
+  additive-only crates for a single consumer, `crate::selection::tint_selection`
+  overlays the selection CPU-side on the app's own `SnapshotWindow` (swapping
+  each selected cell's fg/bg `SnapshotColor`s) before wrapping it in a
+  `FullSnapshot`. Shift-click-to-extend and rectangle selection are not wired
+  (the engine supports both; only the mouse-drag gesture that would drive them
+  isn't built) — bonus items, not required for the brief.
 - **Inline preedit rendering**: the preedit state machine is wired and stored;
   drawing the marked text over the cursor needs a `RenderSnapshot::preedit`
   producer (none exists yet) and IME-box geometry — a follow-on.
-- **Theme-file → colors**: the config `theme` key round-trips but isn't resolved
-  to a palette (the spike's theme-file parser wasn't lifted). The renderer honors
-  OSC 4/10/11 dynamic colors and its built-in default theme.
+- **Theme-file → colors**: now wired (`crate::theme`, a copy of the spike's
+  `theme_file.rs` parser — the spike's module is `pub(crate)` in a different
+  crate, so it can't be reused via a path dep without modifying read-only spike
+  material; flagged for a later dedup). `config.theme` resolves via
+  `~/.config/ghostty/themes/` then `$GHOSTTY_RS_THEMES_DIR`/a hardcoded shared
+  themes dir, seeding the engine's startup palette + default fg/bg/cursor
+  (`Engine::with_colors`) and the selection tint's colors. OSC 4/10/11 dynamic
+  colors and the renderer's built-in default theme remain the fallback when no
+  theme is configured or it fails to load.
 - **CVDisplayLink**: pacing is the timer-first path (plan decision 3). The
   `NSTimer` tick has the same "tick a draw" shape CVDisplayLink swaps into later.
 - **Full legacy key encoder**: `ghostty-input`'s legacy path is still a stub

@@ -14,9 +14,12 @@
 use ghostty_input::key_encode::{KittyFlags, Options as EncodeOptions};
 use ghostty_input::mouse_encode::{MouseEvent, MouseFormat};
 use ghostty_vt::modes::Mode;
+use ghostty_vt::pagelist::Pin;
+use ghostty_vt::point::Point;
+use ghostty_vt::screen::selection::Selection;
 use ghostty_vt::snapshot::SnapshotWindow;
 use ghostty_vt::stream::{Stream, TerminalHandler};
-use ghostty_vt::terminal::{Options, Terminal};
+use ghostty_vt::terminal::{Colors, Options, Terminal};
 
 /// The terminal engine, backed by `ghostty-vt`.
 pub struct Engine {
@@ -26,9 +29,20 @@ pub struct Engine {
 impl Engine {
     /// Create a new engine with the given grid size.
     pub fn new(cols: usize, rows: usize) -> Self {
+        Self::with_colors(cols, rows, Colors::default())
+    }
+
+    /// Create a new engine with the given grid size and startup dynamic color
+    /// state (256-color palette + default fg/bg/cursor). Used to seed a
+    /// theme's colors before the first frame; the running program can still
+    /// override any of these at runtime via OSC 4/10/11/12, same as with the
+    /// default palette. Mirrors the reference `crates/spike/src/engine.rs`'s
+    /// `with_colors`.
+    pub fn with_colors(cols: usize, rows: usize, colors: Colors) -> Self {
         let terminal = Terminal::new(Options {
             cols: clamp_dim(cols),
             rows: clamp_dim(rows),
+            colors,
             ..Default::default()
         });
         Self {
@@ -91,6 +105,78 @@ impl Engine {
     /// A plain-text dump of the visible screen (used by smoke modes).
     pub fn screen_dump(&self) -> String {
         self.terminal().plain_string()
+    }
+
+    // -- selection -------------------------------------------------------
+
+    /// Resolve a `(col, row)` cell coordinate in the currently-rendered
+    /// viewport (row 0 = top of the visible window this frame rendered) to a
+    /// [`Pin`], or `None` if it's out of the grid. The app currently always
+    /// renders `snapshot_window(0)` (no scrollback UI wired yet — see
+    /// `docs/analysis/renderer-r5.md`'s deferrals), so "viewport" and
+    /// "currently visible" coincide; this is the seam a future scrollback
+    /// offset would thread through.
+    pub fn pin_at(&self, col: usize, row: usize) -> Option<Pin> {
+        if col >= self.cols() || row >= self.rows() {
+            return None;
+        }
+        let point = Point::viewport(col as ghostty_vt::page::size::CellCountInt, row as u32);
+        self.terminal().screen().pages.pin(point)
+    }
+
+    /// Set (replace) the engine's selection. `None` clears it. Builds an
+    /// untracked selection from `start`/`end` pins and lets `Screen::select`
+    /// track it (matches upstream's `select` contract).
+    pub fn select(&mut self, start: Pin, end: Pin, rectangle: bool) {
+        let sel = Selection::init(start, end, rectangle);
+        self.terminal_mut().screen_mut().select(Some(sel));
+    }
+
+    /// Clear the current selection, if any.
+    pub fn clear_selection(&mut self) {
+        self.terminal_mut().screen_mut().clear_selection();
+    }
+
+    /// The current selection's pins (start, end, rectangle), if any is set.
+    /// Used by the render path to compute which cells to tint.
+    pub fn selection(&self) -> Option<(Pin, Pin, bool)> {
+        let sel = self.terminal().screen().selection.as_ref()?;
+        Some((sel.start(), sel.end(), sel.rectangle))
+    }
+
+    /// Resolve a pair of pins (as returned by [`Engine::selection`]) to an
+    /// ordered [`ScreenRange`] in absolute screen coordinates, the pin-free
+    /// geometry the per-frame tint pass consumes. `None` only if a pin
+    /// somehow doesn't resolve to a screen point (shouldn't happen for a live
+    /// selection's own pins).
+    pub fn screen_range(
+        &self,
+        start: Pin,
+        end: Pin,
+        rectangle: bool,
+    ) -> Option<crate::selection::ScreenRange> {
+        let sel = Selection::init(start, end, rectangle);
+        let pages = &self.terminal().screen().pages;
+        let tl = pages
+            .point_from_pin(ghostty_vt::point::Tag::Screen, sel.top_left(pages))?
+            .coord();
+        let br = pages
+            .point_from_pin(ghostty_vt::point::Tag::Screen, sel.bottom_right(pages))?
+            .coord();
+        Some(crate::selection::ScreenRange {
+            top_left: (tl.x as usize, tl.y as usize),
+            bottom_right: (br.x as usize, br.y as usize),
+            rectangle,
+        })
+    }
+
+    /// The current selection's text (trimmed trailing whitespace per row), or
+    /// `None` if there is no selection. This may reach above the currently
+    /// rendered window into scrollback; `Screen::selection_string` walks the
+    /// pagelist directly rather than needing a full `Snapshot`.
+    pub fn selection_string(&self) -> Option<String> {
+        let sel = self.terminal().screen().selection.as_ref()?;
+        Some(self.terminal().screen().selection_string(sel, true))
     }
 
     /// The OSC 7 working directory as a filesystem path, if the running shell
@@ -258,5 +344,101 @@ mod tests {
             Some("/bare/path")
         );
         assert_eq!(pwd_path_from_osc7(""), None);
+    }
+
+    #[test]
+    fn with_colors_seeds_startup_palette_and_default_fg_bg() {
+        let mut colors = Colors::default();
+        colors.palette.current[1] = ghostty_vt::color::Rgb::new(0x11, 0x22, 0x33);
+        colors
+            .foreground
+            .set(ghostty_vt::color::Rgb::new(0xaa, 0xbb, 0xcc));
+        colors
+            .background
+            .set(ghostty_vt::color::Rgb::new(0x00, 0x11, 0x22));
+
+        let engine = Engine::with_colors(10, 3, colors);
+        let window = engine.snapshot_window(0);
+        assert_eq!(
+            window.palette[1],
+            ghostty_vt::color::Rgb::new(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            window.default_fg,
+            Some(ghostty_vt::color::Rgb::new(0xaa, 0xbb, 0xcc))
+        );
+        assert_eq!(
+            window.default_bg,
+            Some(ghostty_vt::color::Rgb::new(0x00, 0x11, 0x22))
+        );
+    }
+
+    #[test]
+    fn pin_at_out_of_grid_returns_none() {
+        let engine = Engine::new(10, 3);
+        assert!(engine.pin_at(10, 0).is_none());
+        assert!(engine.pin_at(0, 3).is_none());
+        assert!(engine.pin_at(9, 2).is_some());
+    }
+
+    #[test]
+    fn select_and_selection_string_round_trip_single_row() {
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"hello world");
+        let start = engine.pin_at(0, 0).unwrap();
+        let end = engine.pin_at(4, 0).unwrap();
+        engine.select(start, end, false);
+        assert_eq!(engine.selection_string().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn select_handles_backwards_drag() {
+        // A drag from a later cell back to an earlier one (end before start in
+        // press order) must still produce the same forward-ordered text —
+        // `Screen::selection_string` orders the selection itself.
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"hello world");
+        let anchor = engine.pin_at(4, 0).unwrap();
+        let active = engine.pin_at(0, 0).unwrap();
+        engine.select(anchor, active, false);
+        assert_eq!(engine.selection_string().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn select_spans_multiple_rows() {
+        let mut engine = Engine::new(5, 3);
+        engine.write(b"abcde\r\nfghij");
+        let start = engine.pin_at(0, 0).unwrap();
+        let end = engine.pin_at(4, 1).unwrap();
+        engine.select(start, end, false);
+        assert_eq!(engine.selection_string().as_deref(), Some("abcde\nfghij"));
+    }
+
+    #[test]
+    fn clear_selection_removes_it() {
+        let mut engine = Engine::new(10, 3);
+        engine.write(b"hello");
+        let start = engine.pin_at(0, 0).unwrap();
+        let end = engine.pin_at(4, 0).unwrap();
+        engine.select(start, end, false);
+        assert!(engine.selection().is_some());
+        engine.clear_selection();
+        assert!(engine.selection().is_none());
+        assert!(engine.selection_string().is_none());
+    }
+
+    #[test]
+    fn screen_range_resolves_ordered_bounds() {
+        let mut engine = Engine::new(10, 3);
+        engine.write(b"hello");
+        let start = engine.pin_at(4, 0).unwrap();
+        let end = engine.pin_at(0, 0).unwrap();
+        engine.select(start, end, false);
+        let (s, e, rect) = engine.selection().unwrap();
+        let range = engine.screen_range(s, e, rect).unwrap();
+        // Backwards drag (4 -> 0): the range is still reported top-left to
+        // bottom-right.
+        assert_eq!(range.top_left, (0, 0));
+        assert_eq!(range.bottom_right, (4, 0));
     }
 }

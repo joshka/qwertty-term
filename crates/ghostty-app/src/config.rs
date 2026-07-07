@@ -23,14 +23,12 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    /// A ghostty theme name (or absolute path to a theme file). Not resolved to
-    /// colors in this chunk (theme-file parsing is deferred; see the deferrals
-    /// note in `docs/analysis/renderer-r5.md`) — kept so a user's config round-
-    /// trips and so the field is available when theme resolution lands.
+    /// A ghostty theme name (or absolute path to a theme file), resolved via
+    /// [`crate::theme::load_theme`] into the engine's startup palette + fg/bg/
+    /// cursor/selection colors (see `crate::app::Controller::new`).
     pub theme: Option<String>,
-    /// When true, finishing a mouse selection immediately copies it to the
-    /// system clipboard. Selection is deferred for R5 (documented), so this is
-    /// stored and surfaced but not yet acted on.
+    /// When true, finishing a mouse-drag selection immediately copies it to
+    /// the system clipboard (see `crate::app::Controller::mouse_to_tab`).
     #[serde(rename = "copy-on-select")]
     pub copy_on_select: bool,
     #[serde(rename = "font-size")]
@@ -44,12 +42,11 @@ const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
 # This file is created automatically on first run. Uncomment and edit any of
 # the lines below; unknown keys are ignored.
 
-# Theme name (resolution is not wired in the current build; the value is kept
-# for forward compatibility).
+# Theme name, looked up in ~/.config/ghostty/themes/ then the shared ghostty
+# themes directory (or an absolute path to a theme file).
 # theme = "GruvboxDarkHard"
 
-# Copy the mouse selection to the clipboard as soon as the drag finishes
-# (selection itself is not yet implemented in the native app).
+# Copy the mouse selection to the clipboard as soon as the drag finishes.
 # copy-on-select = false
 
 # Terminal font size in points.

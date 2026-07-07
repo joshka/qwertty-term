@@ -52,6 +52,7 @@ use crate::geometry;
 use crate::input::translate::{InputConfig, RawKeyEvent};
 use crate::menu::{MenuAction, TopMenu};
 use crate::pty::PtySession;
+use crate::selection::{ScreenRange, SelectionColors, tint_selection};
 use crate::tabs::{self, TabId, TabRegistry};
 use crate::view::TerminalView;
 use ghostty_renderer::engine::{Engine as RenderEngine, FrameOptions};
@@ -86,6 +87,15 @@ struct Tab {
     last_mouse_cell: Option<(i64, i64)>,
     /// Whether a mouse button is currently held (for out-of-viewport motion).
     mouse_button_down: bool,
+    /// The cell the current selection drag started at, if a drag is in
+    /// progress. `None` when no drag is live (a fresh press starts one; a
+    /// release ends it). The live selection value itself is engine-owned
+    /// (`Engine::select`/`selection`); this is just drag-in-progress state.
+    selection_anchor: Option<(usize, usize)>,
+    /// Selection highlight colors resolved from the tab's theme at startup
+    /// (or [`SelectionColors::Inverse`] if the theme had none / no theme was
+    /// configured).
+    selection_colors: SelectionColors,
 }
 
 impl Tab {
@@ -134,16 +144,42 @@ impl Tab {
 
     /// Render one frame into the view's layer.
     fn render(&mut self) {
-        let Some(render) = self.render.as_mut() else {
+        if self.render.is_none() {
             return;
-        };
-        let window = self.engine.snapshot_window(0);
+        }
+        let mut window = self.engine.snapshot_window(0);
+        if let Some(range) = self.selection_screen_range() {
+            tint_selection(&mut window, range, self.selection_colors);
+        }
         let snapshot = FullSnapshot::from_window(window);
+        let render = self.render.as_mut().expect("checked above");
         render.update_frame(&snapshot, &mut self.font.grid, FrameOptions::default());
         if render.sync_atlas(&self.font.grid).is_err() {
             return;
         }
         let _ = render.draw_and_present(self.view.host_layer());
+    }
+
+    /// The engine's current selection, resolved to absolute screen
+    /// coordinates the render path can test cells against, or `None` if there
+    /// is no selection. Pin resolution (`point_from_pin`) walks the pagelist,
+    /// so this is done once per frame here rather than per cell.
+    fn selection_screen_range(&self) -> Option<ScreenRange> {
+        let (start, end, rectangle) = self.engine.selection()?;
+        self.engine.screen_range(start, end, rectangle)
+    }
+
+    /// Convert a device-pixel viewport position into a `(col, row)` cell
+    /// coordinate, or `None` if it falls outside the grid.
+    fn cell_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        geometry::cell_at(
+            x,
+            y,
+            self.cols,
+            self.rows,
+            self.font.cell_width,
+            self.font.cell_height,
+        )
     }
 }
 
@@ -155,6 +191,19 @@ pub struct ControllerState {
     font_family: Option<String>,
     default_font_size: f32,
     mtm: MainThreadMarker,
+    /// The engine startup colors resolved from `config.theme` (palette +
+    /// default fg/bg/cursor), applied to every new tab's engine. Falls back
+    /// to `ghostty-vt`'s built-in default `Colors` if no theme is configured
+    /// or it fails to load (a warning is printed to stderr in that case; see
+    /// `crate::theme::load_theme`).
+    startup_colors: ghostty_vt::terminal::Colors,
+    /// Selection highlight colors resolved from the same theme (explicit
+    /// `selection-background`/`selection-foreground` if the theme set them,
+    /// else a plain inverse-video swap).
+    selection_colors: SelectionColors,
+    /// Whether finishing a mouse-drag selection immediately copies it to the
+    /// clipboard (`copy-on-select` config key).
+    copy_on_select: bool,
 }
 
 /// The controller handle passed to views and menu targets.
@@ -167,6 +216,23 @@ impl Controller {
         let default_font_size = config
             .font_size
             .unwrap_or(crate::font_size::DEFAULT_FONT_SIZE);
+
+        // Resolve the configured theme (if any) into engine startup colors +
+        // selection highlight colors. Mirrors the reference spike's
+        // `WindowTerminal::new` theme lookup (`crates/spike/src/window/mod.rs`).
+        let theme = config.theme.as_deref().and_then(crate::theme::load_theme);
+        let startup_colors = theme
+            .as_ref()
+            .map(crate::theme::ThemeColors::to_colors)
+            .unwrap_or_default();
+        let selection_colors = match theme
+            .as_ref()
+            .and_then(|t| t.selection_background.zip(t.selection_foreground))
+        {
+            Some((bg, fg)) => SelectionColors::Explicit { bg, fg },
+            None => SelectionColors::Inverse,
+        };
+
         Controller(Rc::new(RefCell::new(ControllerState {
             registry: TabRegistry::new(),
             tabs: HashMap::new(),
@@ -174,6 +240,9 @@ impl Controller {
             font_family: config.font_family.clone(),
             default_font_size,
             mtm,
+            startup_colors,
+            selection_colors,
+            copy_on_select: config.copy_on_select,
         })))
     }
 
@@ -245,6 +314,13 @@ impl Controller {
     /// tracking mode/format and write it to the PTY. No-op when the program has
     /// not enabled mouse reporting. `pressed` updates the held-button state used
     /// for out-of-viewport motion.
+    ///
+    /// Also drives left-button selection: a press starts (or, if the program
+    /// has enabled mouse reporting and shift isn't held, defers to) a
+    /// selection anchor; drag motion while the button is down extends it;
+    /// release finalizes it and, if `copy-on-select` is configured, copies
+    /// the selected text. This mirrors the reference spike's
+    /// `handle_pointer_selection` (`crates/spike/src/window/mod.rs`).
     #[allow(clippy::too_many_arguments)]
     pub fn mouse_to_tab(
         &self,
@@ -256,6 +332,7 @@ impl Controller {
         y: f32,
         pressed: Option<bool>,
     ) {
+        let copy_on_select = self.0.borrow().copy_on_select;
         let mut state = self.0.borrow_mut();
         let Some(t) = state.tabs.get_mut(&tab) else {
             return;
@@ -263,6 +340,45 @@ impl Controller {
         if let Some(p) = pressed {
             t.mouse_button_down = p;
         }
+
+        if button == Some(ghostty_input::mouse::Button::Left) {
+            let reporting_active =
+                t.engine.mouse_event() != ghostty_input::mouse_encode::MouseEvent::None;
+            let selection_allowed = !reporting_active || mods.shift;
+            if selection_allowed {
+                match action {
+                    ghostty_input::mouse::Action::Press => {
+                        t.engine.clear_selection();
+                        t.selection_anchor = None;
+                        if let Some(cell) = t.cell_at(x, y) {
+                            t.selection_anchor = Some(cell);
+                        }
+                    }
+                    ghostty_input::mouse::Action::Motion => {
+                        if t.mouse_button_down
+                            && let Some(anchor) = t.selection_anchor
+                            && let Some(cell) = t.cell_at(x, y)
+                            && let (Some(start), Some(end)) = (
+                                t.engine.pin_at(anchor.0, anchor.1),
+                                t.engine.pin_at(cell.0, cell.1),
+                            )
+                        {
+                            t.engine.select(start, end, false);
+                        }
+                    }
+                    ghostty_input::mouse::Action::Release => {
+                        if copy_on_select
+                            && t.selection_anchor.is_some()
+                            && let Some(text) = t.engine.selection_string()
+                        {
+                            crate::clipboard::write(&text);
+                        }
+                        t.selection_anchor = None;
+                    }
+                }
+            }
+        }
+
         let ctx = crate::input::mouse::MouseContext {
             event_mode: t.engine.mouse_event(),
             format: t.engine.mouse_format(),
@@ -297,9 +413,7 @@ impl Controller {
                     self.close_tab(active);
                 }
             }
-            MenuAction::Copy => {
-                // Selection is deferred for R5 (documented). No-op placeholder.
-            }
+            MenuAction::Copy => self.copy_selection_from_active(),
             MenuAction::Paste => self.paste_into_active(),
             MenuAction::FontSizeUp => self.font_size_active(FontStep::Up),
             MenuAction::FontSizeDown => self.font_size_active(FontStep::Down),
@@ -308,6 +422,18 @@ impl Controller {
                 let mtm = self.0.borrow().mtm;
                 NSApplication::sharedApplication(mtm).terminate(None);
             }
+        }
+    }
+
+    /// Copy the active tab's current selection to the system clipboard
+    /// (Cmd-C). No-op if there is no selection.
+    fn copy_selection_from_active(&self) {
+        let Some(tab) = self.active_tab() else { return };
+        let state = self.0.borrow();
+        if let Some(t) = state.tabs.get(&tab)
+            && let Some(text) = t.engine.selection_string()
+        {
+            crate::clipboard::write(&text);
         }
     }
 
@@ -380,9 +506,14 @@ impl Controller {
     /// if set, adds the new window as a native tab of the parent's window.
     fn spawn_tab(&self, cwd: Option<PathBuf>, tab_group_parent: Option<TabId>) -> Option<TabId> {
         let mtm = self.0.borrow().mtm;
-        let (family, default_size) = {
+        let (family, default_size, startup_colors, selection_colors) = {
             let s = self.0.borrow();
-            (s.font_family.clone(), s.default_font_size)
+            (
+                s.font_family.clone(),
+                s.default_font_size,
+                s.startup_colors.clone(),
+                s.selection_colors,
+            )
         };
 
         // Backing scale: default to 2.0 (Retina) before the window is on a
@@ -397,7 +528,7 @@ impl Controller {
         let init_h = (INITIAL_HEIGHT * scale) as usize;
         let (cols, rows) = geometry::grid_size(init_w, init_h, cw, ch);
 
-        let engine = Engine::new(cols, rows);
+        let engine = Engine::with_colors(cols, rows, startup_colors);
         let pty = PtySession::spawn_in_dir(cols as u16, rows as u16, cwd.as_deref()).ok()?;
         let render = RenderEngine::new(cw, ch).ok();
 
@@ -421,6 +552,8 @@ impl Controller {
             scale,
             last_mouse_cell: None,
             mouse_button_down: false,
+            selection_anchor: None,
+            selection_colors,
         };
 
         // Correct the scale from the real window, then reflow to the actual view

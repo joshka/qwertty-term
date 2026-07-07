@@ -17,7 +17,9 @@ pub mod geometry;
 pub mod input;
 pub mod menu;
 pub mod pty;
+pub mod selection;
 pub mod tabs;
+pub mod theme;
 
 // macOS-only: the font grid + AppKit shell + render presentation path.
 #[cfg(target_os = "macos")]

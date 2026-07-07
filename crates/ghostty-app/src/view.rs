@@ -177,7 +177,10 @@ define_class!(
 
         #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
-            // Selection is deferred for R5; report empty.
+            // NSTextInputClient's marked-text selection, not the terminal's
+            // mouse selection (that's engine-side; see crate::selection /
+            // crate::app::Controller::mouse_to_tab). This app never has a
+            // selected range within IME marked text, so always report empty.
             NSRange::new(NSUInteger::MAX, 0)
         }
 

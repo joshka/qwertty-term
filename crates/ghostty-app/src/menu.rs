@@ -19,9 +19,8 @@ pub enum MenuAction {
     /// Close the frontmost tab (Cmd-W). Closes the window when it's the last
     /// tab.
     CloseTab,
-    /// Copy the current selection to the clipboard (Cmd-C). Selection is
-    /// deferred for R5, so this is a no-op placeholder that still occupies the
-    /// binding.
+    /// Copy the active tab's current selection to the clipboard (Cmd-C).
+    /// No-op if there is no selection.
     Copy,
     /// Paste the clipboard into the active tab's PTY (Cmd-V), bracketed if the
     /// program enabled bracketed paste.
