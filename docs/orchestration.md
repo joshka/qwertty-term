@@ -36,6 +36,21 @@ Every chunk prompt MUST contain, in this order:
 - If the chunk is large: a priority ladder ("if budget runs short, do X > Y > Z and leave a
   PROGRESS note in the analysis doc").
 
+## Workspace lifecycle rules (added after the render-r1 incident)
+
+- Create a chunk's workspace ONLY at launch time, and only when every dependency chunk is
+  already on main — a workspace created against a base missing its dependency crate wastes
+  the agent's whole startup (and stopping that agent can collateral-damage sibling
+  workspace directories).
+- After ANY TaskStop or agent kill, verify sibling workspace dirs survived
+  (`jj workspace list` vs `ls work/`); a registered-but-missing dir is fixed by
+  `jj workspace forget NAME && jj workspace add work/NAME` from work/default.
+- Agents that find their assigned workspace missing must report BLOCKED, not repair it.
+- `jj workspace update-stale` in work/default can DISCARD un-snapshotted file edits (it
+  resets to the last recorded tree). After any update-stale, re-verify your in-progress
+  edits are still on disk before describing/committing — and prefer running a trivial jj
+  command (e.g. `jj st`) immediately after editing files so they get snapshotted early.
+
 ## Integration recipe (run from work/default, NEVER from the repo root)
 
 ```sh

@@ -1416,6 +1416,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-font"
+version = "0.1.0"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
 name = "ghostty-input"
 version = "0.0.0"
 
@@ -1424,13 +1431,6 @@ name = "ghostty-renderer"
 version = "0.0.0"
 dependencies = [
  "ghostty-vt",
-]
-
-[[package]]
-name = "ghostty-font"
-version = "0.1.0"
-dependencies = [
- "ttf-parser",
 ]
 
 [[package]]
