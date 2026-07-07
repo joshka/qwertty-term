@@ -22,6 +22,11 @@
 //! - [`embedded`] — embedded fallback fonts.
 //! - [`backend`] — font backend enumeration (currently a CoreText-only
 //!   stub).
+//! - [`coretext`] (macOS only) — [`coretext::Face`]: CoreText face loading
+//!   (load-by-name discovery + embedded fallback), CoreGraphics glyph
+//!   rasterization to a [`coretext::Bitmap`], and `FaceMetrics` extraction
+//!   reconciled with the table-derived layer. See
+//!   `docs/analysis/font-coretext.md`.
 //!
 //! # Example
 //!
@@ -38,6 +43,8 @@
 
 pub mod atlas;
 pub mod backend;
+#[cfg(target_os = "macos")]
+pub mod coretext;
 pub mod embedded;
 pub mod metrics;
 pub mod tables;

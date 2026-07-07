@@ -13,4 +13,34 @@ name = "ghostty_font"
 [dependencies]
 ttf-parser = "0.25"
 
+# CoreText/CoreGraphics face loading + rasterization (macOS only). We use the
+# objc2 framework-binding family (objc2 0.6, objc2-* 0.3) rather than the older
+# core-text/core-graphics crates, to match the rest of M3's macOS surface
+# (the renderer chunk pins objc2-metal/objc2-quartz-core per the plan) and
+# because these are the actively maintained, framework-complete bindings.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFData",
+    "CFString",
+    "CFCGTypes",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGColorSpace",
+    "CGContext",
+    "CGBitmapContext",
+    "CGImage",
+] }
+objc2-core-text = { version = "0.3", default-features = false, features = [
+    "std",
+    "CTFont",
+    "CTFontDescriptor",
+    "CTFontManager",
+    "CTFontTraits",
+    "objc2-core-graphics",
+] }
+
 [dev-dependencies]
