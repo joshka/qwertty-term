@@ -44,8 +44,9 @@ Every chunk prompt MUST contain, in this order:
   workspace directories).
 - After ANY TaskStop or agent kill, verify sibling workspace dirs survived
   (`jj workspace list` vs `ls work/`); a registered-but-missing dir is fixed by
-  `jj workspace forget NAME && jj workspace add work/NAME` from work/default.
-- Agents that find their assigned workspace missing must report BLOCKED, not repair it.
+  `jj workspace forget <name> && jj workspace add work/<name>` from work/default.
+- Agents that find their assigned workspace missing must report BLOCKED, not repair it —
+  put that in the prompt for chunks launched near other lifecycle churn.
 - `jj workspace update-stale` in work/default can DISCARD un-snapshotted file edits (it
   resets to the last recorded tree). After any update-stale, re-verify your in-progress
   edits are still on disk before describing/committing — and prefer running a trivial jj
@@ -108,14 +109,14 @@ committing** — the recurring orchestrator mistake is commit-then-check.
    The analysis doc is the recovery map — this is why analysis-first is non-negotiable.
 4. **SendMessage cross-delivery**: messages sent to one agent id can leak to unrelated
    sessions (observed 2026-07-07: a stand-down + technical-answer chain reached a session
-   that owned none of it, which read the stream as attempted manipulation - correctly).
+   that owned none of it, which read the stream as attempted manipulation — correctly).
    Scope every SendMessage defensively — but phrase it so the ADDRESSEE is not confused:
    launch prompts say "You are the agent assigned to TASK; your first action is `cd
    WORKSPACE`. If you received this while running some OTHER task in another session,
    disregard it." (A bare "if you are not the agent... disregard" made a
    freshly-spawned agent refuse its own task because its shell started in
    work/default.) Never escalate instructions to an
-   agent that reports not recognizing the task - stop messaging it instead.
+   agent that reports not recognizing the task — stop messaging it instead.
 5. **Phantom root workspace**: if jj reports stale/divergent state mentioning the repo root,
    someone ran jj/git at `~/local/ghostty-rs` (editors do this). The bad snapshot looks like
    "everything deleted + work/ files added". `jj abandon` it; never run jj at the root.
