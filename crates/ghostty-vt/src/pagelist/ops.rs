@@ -738,13 +738,17 @@ impl PageList {
 }
 
 /// Iterates prompt rows. Port of `PromptIterator`.
-struct PromptIterator {
+///
+/// This is the simplified variant used by `scrollPrompt`/`highlightSemanticContent`/
+/// `selectOutput`: it yields only rows whose `semantic_prompt == Prompt` (skipping
+/// continuations) and takes no limit.
+pub(crate) struct PromptIterator {
     current: Option<Pin>,
     direction: Direction,
 }
 
 impl PromptIterator {
-    fn new(start: Pin, direction: Direction) -> Self {
+    pub(crate) fn new(start: Pin, direction: Direction) -> Self {
         PromptIterator {
             current: Some(start),
             direction,
@@ -753,7 +757,7 @@ impl PromptIterator {
 
     /// # Safety
     /// Node chain live.
-    unsafe fn next(&mut self) -> Option<Pin> {
+    pub(crate) unsafe fn next(&mut self) -> Option<Pin> {
         unsafe {
             loop {
                 let mut p = self.current?;

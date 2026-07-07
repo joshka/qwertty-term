@@ -323,6 +323,12 @@ impl Pin {
             }
         }
     }
+
+    /// Prompt iterator from this pin. Port of `Pin.promptIterator` (null limit;
+    /// see [`super::ops::PromptIterator`] for the simplification note).
+    pub(crate) fn prompt_iterator(self, direction: Direction) -> super::ops::PromptIterator {
+        super::ops::PromptIterator::new(self, direction)
+    }
 }
 
 // ---- PageList iterator entry points ----

@@ -15,6 +15,7 @@
 pub mod cursor;
 pub mod hyperlink;
 pub mod kitty_key;
+pub mod selection;
 pub mod semantic;
 
 use crate::page::size::CellCountInt;
@@ -33,6 +34,7 @@ use crate::charsets::CharsetState;
 use cursor::{Cursor, CursorCopy, SavedCursor};
 use hyperlink::{Hyperlink, HyperlinkId};
 use kitty_key::FlagStack;
+use selection::{Order, Selection};
 use semantic::{PromptKind, Redraw, SemanticPrompt};
 
 /// The character protection mode. Port of `ansi.ProtectedMode`. Owned as
@@ -52,18 +54,6 @@ pub struct Dirty {
     pub selection: bool,
     /// Set when a hovered OSC8 hyperlink dirties the full screen.
     pub hyperlink_hover: bool,
-}
-
-/// Placeholder for a tracked selection.
-///
-/// TODO(chunk:selection): `Selection.zig` is a later chunk. This is a
-/// stand-in so the `selection` field, the `select`/`clear_selection` hooks, and
-/// the `dirty.selection` bit are shaped and wired for it. When the real
-/// `Selection` lands, replace this and port the `select*`/`selectionString`
-/// query methods.
-#[derive(Debug, Clone, Copy)]
-pub struct SelectionPlaceholder {
-    _priv: (),
 }
 
 /// Options for constructing a [`Screen`]. Port of `Screen.Options`.
@@ -119,8 +109,11 @@ pub struct Screen {
     /// The saved cursor (DECSC).
     pub saved_cursor: Option<SavedCursor>,
 
-    /// The tracked selection (SCAFFOLD — see [`SelectionPlaceholder`]).
-    pub selection: Option<SelectionPlaceholder>,
+    /// The selection for this screen (if any). This MUST be a tracked selection,
+    /// otherwise it will become invalid. Prefer [`Screen::select`] /
+    /// [`Screen::clear_selection`] over mutating this directly. Port of
+    /// `Screen.selection`.
+    pub selection: Option<Selection>,
 
     /// The charset state. See [`crate::charsets::CharsetState`].
     pub charset: CharsetState,
@@ -222,8 +215,8 @@ impl Screen {
 
     /// Clone the screen for the region `[top, bot]`. Copies dimensions and cell
     /// data; does NOT copy kitty images or live hyperlink cursor state (matching
-    /// Zig — clone is for read-only ops). Selection is scaffolded, so it is not
-    /// carried. Port of `clone` (cursor + no-selection paths).
+    /// Zig — clone is for read-only ops). The selection is preserved (and clipped
+    /// to the cloned area) via the tracked-pin remap. Port of `clone`.
     pub fn clone(&self, top: Point, bot: Option<Point>) -> Screen {
         let mut remap: Vec<(*mut Pin, *mut Pin)> = Vec::new();
         let mut pages = self.pages.clone(top, bot, Some(&mut remap));
@@ -256,12 +249,96 @@ impl Screen {
             })
         };
 
+        // Preserve the selection if we have one, clipping to the cloned area.
+        let remap_get = |old: *mut Pin| -> Option<*mut Pin> {
+            remap.iter().find(|(o, _)| *o == old).map(|(_, n)| *n)
+        };
+        let selection: Option<Selection> = self.selection.and_then(|sel| {
+            debug_assert!(sel.tracked());
+
+            // Order the (tracked) endpoints tl/br by pin pointer.
+            let (tl, br) = match sel.order(&self.pages) {
+                Order::Forward | Order::MirroredForward => {
+                    (sel.tracked_start().unwrap(), sel.tracked_end().unwrap())
+                }
+                Order::Reverse | Order::MirroredReverse => {
+                    (sel.tracked_end().unwrap(), sel.tracked_start().unwrap())
+                }
+            };
+
+            let start_pin: *mut Pin = match remap_get(tl) {
+                Some(p) => p,
+                None => {
+                    // tl fell outside the clone.
+                    if remap_get(br).is_none() {
+                        // Either the whole selection is out of bounds or the
+                        // clone is within the selection. Decide via the clone
+                        // top's screen y.
+                        let clone_top = self.pages.pin(top)?;
+                        let clone_top_y = self
+                            .pages
+                            .point_from_pin(Tag::Screen, clone_top)
+                            .unwrap()
+                            .coord
+                            .y;
+                        // SAFETY: tracked pin pointers live.
+                        let br_y = self
+                            .pages
+                            .point_from_pin(Tag::Screen, unsafe { *br })
+                            .unwrap()
+                            .coord
+                            .y;
+                        let tl_y = self
+                            .pages
+                            .point_from_pin(Tag::Screen, unsafe { *tl })
+                            .unwrap()
+                            .coord
+                            .y;
+                        if br_y < clone_top_y {
+                            return None;
+                        }
+                        if tl_y > clone_top_y {
+                            return None;
+                        }
+                    }
+                    // Move the top pin back in bounds to the top row.
+                    // SAFETY: tl pin pointer live.
+                    let tl_x = unsafe { (*tl).x };
+                    let mut p = Pin::at(pages.head_node());
+                    if sel.rectangle {
+                        p.x = tl_x;
+                    }
+                    pages.track_pin(p)
+                }
+            };
+
+            // Move the bottom-right pin back in bounds if it isn't already.
+            let end_pin: *mut Pin = match remap_get(br) {
+                Some(p) => p,
+                None => {
+                    // SAFETY: br pin pointer live; last node live.
+                    let br_x = unsafe { (*br).x };
+                    let last = pages.last_node();
+                    let last_rows = unsafe { pages.node_data(last).size.rows };
+                    let x = if sel.rectangle {
+                        br_x
+                    } else {
+                        pages.cols() - 1
+                    };
+                    let p = Pin::with(last, last_rows - 1, x);
+                    pages.track_pin(p)
+                }
+            };
+
+            Some(Selection::from_tracked(start_pin, end_pin, sel.rectangle))
+        });
+
         let result = Screen {
             pages,
             no_scrollback: self.no_scrollback,
             cursor,
             saved_cursor: None,
-            selection: None,
+            selection,
             charset: CharsetState::default(),
             protected_mode: ProtectedMode::default(),
             kitty_keyboard: FlagStack::default(),
@@ -1301,25 +1378,568 @@ impl Screen {
         }
     }
 
-    // ---- selection (SCAFFOLD) ------------------------------------------
+    // ---- selection -----------------------------------------------------
 
-    /// Set/clear the selection. Port of `select` (scaffold).
-    pub fn select(&mut self, sel: Option<SelectionPlaceholder>) {
-        match sel {
-            None => self.clear_selection(),
-            Some(s) => {
-                self.selection = Some(s);
-                self.dirty.selection = true;
+    /// Set the selection to the given selection. If it is untracked it is
+    /// tracked (taking ownership); the prior selection (if any) is untracked.
+    /// `None` clears the selection. Port of `select`.
+    ///
+    /// The Zig version threads `Allocator.Error`; the Rust pin model is
+    /// infallible-alloc, so this cannot fail.
+    pub fn select(&mut self, sel: Option<Selection>) {
+        let sel = match sel {
+            None => {
+                self.clear_selection();
+                return;
             }
+            Some(s) => s,
+        };
+
+        // If this selection is untracked then we track it.
+        let tracked_sel = if sel.tracked() {
+            sel
+        } else {
+            sel.track(&mut self.pages)
+        };
+
+        // Untrack the prior selection.
+        if let Some(old) = self.selection.take() {
+            old.deinit(&mut self.pages);
+        }
+        self.selection = Some(tracked_sel);
+        self.dirty.selection = true;
+    }
+
+    /// Same as `select(None)` but can't fail. Port of `clearSelection`.
+    pub fn clear_selection(&mut self) {
+        if let Some(sel) = self.selection.take() {
+            sel.deinit(&mut self.pages);
+            self.dirty.selection = true;
         }
     }
 
-    /// Clear the selection. Port of `clearSelection`.
-    pub fn clear_selection(&mut self) {
-        if self.selection.is_some() {
-            self.dirty.selection = true;
+    /// The selection for all contents on the screen, whitespace-trimmed, or
+    /// `None` if the screen is empty. Port of `selectAll`.
+    pub fn select_all(&self) -> Option<Selection> {
+        const WHITESPACE: [u32; 3] = [0, ' ' as u32, '\t' as u32];
+
+        let start = {
+            let mut it = self
+                .pages
+                .cell_iterator(Direction::RightDown, Point::screen(0, 0), None);
+            let mut found = None;
+            // SAFETY: iterator yields valid pins into live pages.
+            unsafe {
+                while let Some(p) = it.next() {
+                    let cell = *p.row_and_cell().1;
+                    if !cell.has_text() {
+                        continue;
+                    }
+                    if WHITESPACE.contains(&cell.codepoint()) {
+                        continue;
+                    }
+                    found = Some(p);
+                    break;
+                }
+            }
+            found?
+        };
+
+        let end = {
+            let mut it = self
+                .pages
+                .cell_iterator(Direction::LeftUp, Point::screen(0, 0), None);
+            let mut found = None;
+            // SAFETY: iterator yields valid pins into live pages.
+            unsafe {
+                while let Some(p) = it.next() {
+                    let cell = *p.row_and_cell().1;
+                    if !cell.has_text() {
+                        continue;
+                    }
+                    if WHITESPACE.contains(&cell.codepoint()) {
+                        continue;
+                    }
+                    found = Some(p);
+                    break;
+                }
+            }
+            found?
+        };
+
+        Some(Selection::init(start, end, false))
+    }
+
+    /// Select the word under `pin`. A word is a consecutive run of cells that
+    /// are exclusively whitespace/boundary or exclusively non-boundary. Spans
+    /// soft-wraps. `None` if the cell is empty. Port of `selectWord`.
+    pub fn select_word(&self, pin: Pin, boundary_codepoints: &[u32]) -> Option<Selection> {
+        // SAFETY: pin valid.
+        let start_cell = unsafe { *pin.row_and_cell().1 };
+        if !start_cell.has_text() {
+            return None;
         }
-        self.selection = None;
+
+        let expect_boundary = boundary_codepoints.contains(&start_cell.codepoint());
+
+        // Go forwards to find our end boundary.
+        let end = {
+            // SAFETY: pin valid; nodes live.
+            unsafe {
+                let mut it = pin.cell_iterator(Direction::RightDown, None);
+                let mut prev = it.next().unwrap(); // consume our start
+                loop {
+                    let Some(p) = it.next() else {
+                        break prev;
+                    };
+                    let (row, cell) = p.row_and_cell();
+                    let cell = *cell;
+
+                    if !cell.has_text() {
+                        break prev;
+                    }
+                    let this_boundary = boundary_codepoints.contains(&cell.codepoint());
+                    if this_boundary != expect_boundary {
+                        break prev;
+                    }
+                    // Next row and not wrapped -> return the previous.
+                    if p.x == (*p.node).data.size.cols - 1 && !(*row).wrap() {
+                        break p;
+                    }
+                    prev = p;
+                }
+            }
+        };
+
+        // Go backwards to find our start boundary.
+        let start = {
+            // SAFETY: pin valid; nodes live.
+            unsafe {
+                let mut it = pin.cell_iterator(Direction::LeftUp, None);
+                let mut prev = it.next().unwrap(); // consume our start
+                loop {
+                    let Some(p) = it.next() else {
+                        break prev;
+                    };
+                    let (row, cell) = p.row_and_cell();
+                    let cell = *cell;
+
+                    // Next row and not wrapped -> return the previous.
+                    if p.x == (*p.node).data.size.cols - 1 && !(*row).wrap() {
+                        break prev;
+                    }
+                    if !cell.has_text() {
+                        break prev;
+                    }
+                    let this_boundary = boundary_codepoints.contains(&cell.codepoint());
+                    if this_boundary != expect_boundary {
+                        break prev;
+                    }
+                    prev = p;
+                }
+            }
+        };
+
+        Some(Selection::init(start, end, false))
+    }
+
+    /// Select the command output under `pin`, delimited by shell-integration
+    /// semantic prompts. `None` if the point is not on output. Port of
+    /// `selectOutput`.
+    pub fn select_output(&self, pin: Pin) -> Option<Selection> {
+        // SAFETY: pin valid.
+        let cell = unsafe { *pin.row_and_cell().1 };
+        if cell.semantic_content() != SemanticContent::Output {
+            return None;
+        }
+
+        // Find the prompt whose output we'll be capturing.
+        // SAFETY: pin valid; nodes live.
+        let prompt_pin = unsafe {
+            let mut it = pin.prompt_iterator(Direction::LeftUp);
+            match it.next() {
+                Some(p) => p,
+                None => {
+                    // No prompt above: capture all output up to the next prompt.
+                    let mut it = pin.prompt_iterator(Direction::RightDown);
+                    let next = it.next()?;
+
+                    let start_pin = self.pages.get_top_left(Tag::Screen);
+                    let mut end_pin = next.up(1)?;
+                    end_pin.x = (*end_pin.node).data.size.cols - 1;
+                    let mut cell_it = end_pin.cell_iterator(Direction::LeftUp, Some(start_pin));
+                    while let Some(p) = cell_it.next() {
+                        let c = *p.row_and_cell().1;
+                        end_pin = p;
+                        if c.has_text() {
+                            break;
+                        }
+                    }
+                    return Some(Selection::init(start_pin, end_pin, false));
+                }
+            }
+        };
+
+        // Grab our content via the semantic-content highlighter.
+        let mut hl = self
+            .pages
+            .highlight_semantic_content(prompt_pin, SemanticContent::Output)?;
+
+        // Trim trailing whitespace.
+        // SAFETY: hl pins valid; nodes live.
+        unsafe {
+            let mut cell_it = hl.end.cell_iterator(Direction::LeftUp, Some(hl.start));
+            while let Some(p) = cell_it.next() {
+                let c = *p.row_and_cell().1;
+                hl.end = p;
+                if c.has_text() {
+                    break;
+                }
+            }
+        }
+
+        Some(Selection::init(hl.start, hl.end, false))
+    }
+
+    /// Select the line under `opts.pin`, across soft-wraps, trimming leading and
+    /// trailing whitespace. Respects semantic-prompt boundaries (any content
+    /// change is a boundary — issue #1329). Port of `selectLine`.
+    pub fn select_line(&self, opts: SelectLine) -> Option<Selection> {
+        // The semantic-prompt state of the clicked cell, if boundary tracking is on.
+        // SAFETY: pin valid.
+        let semantic_prompt_state: Option<SemanticContent> = if opts.semantic_prompt_boundary {
+            Some(unsafe { (*opts.pin.row_and_cell().1).semantic_content() })
+        } else {
+            None
+        };
+
+        // The real start of the row is the first row in the soft-wrap.
+        // SAFETY: pin valid; nodes live throughout.
+        let start_pin: Pin = unsafe {
+            let mut it = opts.pin.row_iterator(Direction::LeftUp, None);
+            let mut it_prev = it.next().unwrap(); // skip self
+
+            // Check the current row for semantic boundaries before the click.
+            let mut found: Option<Pin> = None;
+            if let Some(v) = semantic_prompt_state {
+                let (row, _) = it_prev.row_and_cell();
+                let cells = &*(*it_prev.node).data.get_cells(row);
+                // Scan backwards from clicked position to find where content starts.
+                for i in 0..=opts.pin.x {
+                    let x_rev = opts.pin.x - i;
+                    if cells[x_rev as usize].semantic_content() != v {
+                        let mut copy = it_prev;
+                        copy.x = x_rev + 1;
+                        found = Some(copy);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(p) = found {
+                p
+            } else {
+                let mut result: Option<Pin> = None;
+                'walk: while let Some(p) = it.next() {
+                    let (row, _) = p.row_and_cell();
+
+                    if !(*row).wrap() {
+                        let mut copy = it_prev;
+                        copy.x = 0;
+                        result = Some(copy);
+                        break 'walk;
+                    }
+
+                    if let Some(v) = semantic_prompt_state {
+                        // Check every cell in this row in reverse (going up/back).
+                        let cells = &*(*p.node).data.get_cells(row);
+                        for x in 0..cells.len() {
+                            let x_rev = cells.len() - 1 - x;
+                            if cells[x_rev].semantic_content() != v {
+                                result = Some(it_prev);
+                                break 'walk;
+                            }
+                            it_prev = p;
+                            it_prev.x = x_rev as CellCountInt;
+                        }
+                        continue;
+                    }
+
+                    it_prev = p;
+                }
+                match result {
+                    Some(p) => p,
+                    None => {
+                        let mut copy = it_prev;
+                        copy.x = 0;
+                        copy
+                    }
+                }
+            }
+        };
+
+        // The real end of the row is the final row in the soft-wrap.
+        // SAFETY: pin valid; nodes live throughout.
+        let end_pin: Pin = unsafe {
+            let mut it = opts.pin.row_iterator(Direction::RightDown, None);
+            let mut result: Option<Pin> = None;
+            'walk: while let Some(p) = it.next() {
+                let (row, _) = p.row_and_cell();
+
+                if let Some(v) = semantic_prompt_state {
+                    let cells = &*(*p.node).data.get_cells(row);
+
+                    // If this is our pin row we can start from our x because
+                    // the start_pin logic already found the real start.
+                    let start_offset = if p.node == opts.pin.node && p.y == opts.pin.y {
+                        opts.pin.x as usize
+                    } else {
+                        0
+                    };
+
+                    // Zero case: if the first col doesn't match, we end at the
+                    // end of the prior row (unless this is the first row).
+                    if start_offset == 0
+                        && cells[0].semantic_content() != v
+                        && let Some(mut prev) = p.up(1)
+                    {
+                        prev.x = (*p.node).data.size.cols - 1;
+                        result = Some(prev);
+                        break 'walk;
+                    }
+
+                    // For every other case, we end at the prior cell.
+                    for (x, cell) in cells.iter().enumerate().skip(start_offset) {
+                        if cell.semantic_content() != v {
+                            let mut copy = p;
+                            copy.x = (x - 1) as CellCountInt;
+                            result = Some(copy);
+                            break 'walk;
+                        }
+                    }
+                }
+
+                if !(*row).wrap() {
+                    let mut copy = p;
+                    copy.x = (*p.node).data.size.cols - 1;
+                    result = Some(copy);
+                    break 'walk;
+                }
+            }
+            result?
+        };
+
+        // Go forward from the start to find the first non-whitespace char.
+        // SAFETY: pins valid; nodes live.
+        let start: Pin = match opts.whitespace {
+            None => start_pin,
+            Some(whitespace) => unsafe {
+                let mut it = start_pin.cell_iterator(Direction::RightDown, Some(end_pin));
+                let mut result: Option<Pin> = None;
+                while let Some(p) = it.next() {
+                    let cell = *p.row_and_cell().1;
+                    if !cell.has_text() {
+                        continue;
+                    }
+                    if whitespace.contains(&cell.codepoint()) {
+                        continue;
+                    }
+                    result = Some(p);
+                    break;
+                }
+                result?
+            },
+        };
+
+        // Go backward from the end to find the first non-whitespace char.
+        // SAFETY: pins valid; nodes live.
+        let end: Pin = match opts.whitespace {
+            None => end_pin,
+            Some(whitespace) => unsafe {
+                let mut it = end_pin.cell_iterator(Direction::LeftUp, Some(start_pin));
+                let mut result: Option<Pin> = None;
+                while let Some(p) = it.next() {
+                    let cell = *p.row_and_cell().1;
+                    if !cell.has_text() {
+                        continue;
+                    }
+                    if whitespace.contains(&cell.codepoint()) {
+                        continue;
+                    }
+                    result = Some(p);
+                    break;
+                }
+                result?
+            },
+        };
+
+        Some(Selection::init(start, end, false))
+    }
+
+    /// Returns an iterator over the soft-wrapped lines starting from `start`.
+    /// Port of `lineIterator`.
+    pub fn line_iterator(&self, start: Pin) -> LineIterator<'_> {
+        LineIterator {
+            screen: self,
+            current: Some(start),
+        }
+    }
+
+    /// The raw text of a selection, soft-wrap-unwrapped. Port of
+    /// `selectionString`.
+    ///
+    /// Implemented locally over the plain-text machinery (no `ScreenFormatter`):
+    /// this is a single-pass port of the `.plain`/`unwrap=true` emit in
+    /// `formatter.zig` restricted to the selection region. Trailing blank lines
+    /// are always dropped; trailing whitespace on text rows is dropped only when
+    /// `trim` is set; empty cells accumulate as blanks and are only materialized
+    /// once real text follows (carrying across soft-wraps). The optional
+    /// `StringMap`/pin-map argument (used only by search) is not part of this
+    /// surface and is deferred with the formatter — see
+    /// `docs/analysis/selection.md`.
+    pub fn selection_string(&self, sel: &Selection, trim: bool) -> String {
+        use crate::page::Wide;
+
+        // Order the selection into a forward (tl -> br) selection and resolve the
+        // region's screen coordinates.
+        let tl_pin = sel.top_left(&self.pages);
+        let br_pin = sel.bottom_right(&self.pages);
+        let start_pt = self.pages.point_from_pin(Tag::Screen, tl_pin).unwrap();
+        let br = self
+            .pages
+            .point_from_pin(Tag::Screen, br_pin)
+            .unwrap()
+            .coord;
+        let start_x = start_pt.coord.x;
+        let mut end_x = br.x;
+        let mut br_pin = br_pin;
+        let rectangle = sel.rectangle;
+        let cols = self.pages.cols();
+
+        // Edge case (port of formatter.zig:908-929): if the end falls on a
+        // spacer_head and we're unwrapping (non-rectangle), move the end to the
+        // start of the next row so the wrapped wide char is emitted.
+        if !rectangle {
+            // SAFETY: br_pin valid.
+            let end_cell = unsafe { *br_pin.row_and_cell().1 };
+            if end_cell.wide() == crate::page::Wide::SpacerHead {
+                // SAFETY: br_pin node chain live.
+                if let Some(next) = unsafe { br_pin.down(1) } {
+                    br_pin = next;
+                    br_pin.x = 0;
+                    end_x = 0;
+                }
+            }
+        }
+
+        let mut out = String::new();
+        let mut blank_rows: usize = 0;
+        let mut blank_cells: usize = 0;
+
+        // Iterate rows tl..br in screen order.
+        let br_pt = self.pages.point_from_pin(Tag::Screen, br_pin).unwrap();
+        let mut row_it = self
+            .pages
+            .row_iterator(Direction::RightDown, start_pt, Some(br_pt));
+
+        // SAFETY: iterator yields valid pins into live pages.
+        unsafe {
+            // Track whether the current row is the last row of the region so
+            // end_x applies. We compare against br by pin identity.
+            while let Some(row_pin) = row_it.next() {
+                let is_last = row_pin.node == br_pin.node && row_pin.y == br_pin.y;
+                let is_first = row_pin.node == tl_pin.node && row_pin.y == tl_pin.y;
+
+                let (row, _) = row_pin.row_and_cell();
+                let page = self.pages.node_data(row_pin.node);
+                let cells_ptr = page.get_cells(row);
+                let base = cells_ptr.cast::<Cell>();
+                let row_cols = page.size.cols;
+
+                // Determine the x range for this row (port of `cells_subset`).
+                let row_end_x: usize = if rectangle || is_last {
+                    end_x as usize + 1
+                } else {
+                    row_cols as usize
+                };
+                let row_start_x: usize = if start_x > 0 && (rectangle || is_first) {
+                    match (*base.add(start_x as usize)).wide() {
+                        // Include the prior cell to get the full wide char.
+                        Wide::SpacerTail => start_x as usize - 1,
+                        // Spacer head on the first row: skip this whole row.
+                        Wide::SpacerHead => continue,
+                        Wide::Narrow | Wide::Wide => start_x as usize,
+                    }
+                } else {
+                    0
+                };
+
+                // If this row is blank, accumulate and move on.
+                let subset =
+                    std::slice::from_raw_parts(base.add(row_start_x), row_end_x - row_start_x);
+                if !Cell::has_text_any(subset) {
+                    blank_rows += 1;
+                    continue;
+                }
+
+                // Flush accumulated blank rows as newlines.
+                for _ in 0..blank_rows {
+                    out.push('\n');
+                }
+                blank_rows = 0;
+
+                // A non-wrapped row (or no-unwrap) queues a trailing newline.
+                if !(*row).wrap() {
+                    blank_rows += 1;
+                }
+                // Reset blank-cell run unless this row continues a soft-wrap.
+                if !(*row).wrap_continuation() {
+                    blank_cells = 0;
+                }
+
+                for x in row_start_x..row_end_x {
+                    let cell = *base.add(x);
+                    match cell.wide() {
+                        Wide::Narrow | Wide::Wide => {}
+                        Wide::SpacerHead | Wide::SpacerTail => continue,
+                    }
+
+                    // Accumulate blanks (empty cells always; trailing spaces when
+                    // trimming) until real text appears.
+                    if !cell.has_text() {
+                        blank_cells += 1;
+                        continue;
+                    }
+                    if cell.codepoint() == ' ' as u32 && trim {
+                        blank_cells += 1;
+                        continue;
+                    }
+
+                    // Real text: flush pending blank cells as spaces first.
+                    if blank_cells > 0 {
+                        for _ in 0..blank_cells {
+                            out.push(' ');
+                        }
+                        blank_cells = 0;
+                    }
+
+                    // Write the codepoint + any grapheme.
+                    let cp = cell.codepoint();
+                    if let Some(ch) = char::from_u32(cp) {
+                        out.push(ch);
+                    }
+                    if cell.has_grapheme()
+                        && let Some(slice) = page.lookup_grapheme(base.add(x))
+                    {
+                        out.extend((*slice).iter().filter_map(|&g| char::from_u32(g)));
+                    }
+                }
+            }
+        }
+
+        // `blank_rows`/`blank_cells` left over are trailing and dropped.
+        let _ = cols;
+        out
     }
 
     // ---- resize --------------------------------------------------------
@@ -1513,6 +2133,66 @@ impl Screen {
                     Ok(())
                 }
                 Err(_) => Err(()),
+            }
+        }
+    }
+}
+
+/// Default codepoints considered whitespace for line-selection trimming. Port of
+/// `selection_codepoints.default_line_whitespace`.
+pub const DEFAULT_LINE_WHITESPACE: [u32; 3] = [0, ' ' as u32, '\t' as u32];
+
+/// Options for [`Screen::select_line`]. Port of `Screen.SelectLine`.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectLine<'a> {
+    /// The pin of some part of the line to select.
+    pub pin: Pin,
+    /// Codepoints to trim from the ends of the selection; `None` disables
+    /// trimming. Defaults to [`DEFAULT_LINE_WHITESPACE`].
+    pub whitespace: Option<&'a [u32]>,
+    /// If true, any semantic-prompt state change is a selection boundary.
+    pub semantic_prompt_boundary: bool,
+}
+
+impl<'a> SelectLine<'a> {
+    /// A `SelectLine` for `pin` with the default whitespace and boundary
+    /// settings (matches the Zig struct's field defaults).
+    pub fn new(pin: Pin) -> SelectLine<'a> {
+        SelectLine {
+            pin,
+            whitespace: Some(&DEFAULT_LINE_WHITESPACE),
+            semantic_prompt_boundary: true,
+        }
+    }
+}
+
+/// Iterator over soft-wrapped lines from a starting pin. Port of
+/// `Screen.LineIterator`.
+pub struct LineIterator<'a> {
+    screen: &'a Screen,
+    current: Option<Pin>,
+}
+
+impl LineIterator<'_> {
+    /// The next soft-wrapped line as a selection, or `None` when exhausted.
+    /// Port of `LineIterator.next`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<Selection> {
+        let current = self.current?;
+        let result = self.screen.select_line(SelectLine {
+            pin: current,
+            whitespace: None,
+            semantic_prompt_boundary: false,
+        });
+        match result {
+            None => {
+                self.current = None;
+                None
+            }
+            Some(sel) => {
+                // SAFETY: end pin valid; node chain live.
+                self.current = unsafe { sel.end().down(1) };
+                Some(sel)
             }
         }
     }
