@@ -10,4 +10,24 @@ publish = false
 [dependencies]
 ghostty-vt = { path = "../ghostty-vt" }
 
+# Metal backend (chunk R1). All versions already present in the workspace
+# lockfile (transitively via eframe/winit), so these add no new lock entries.
+# objc2-io-surface is chosen over the servo `io-surface` crate because its
+# `IOSurfaceRef` is the exact parameter type of objc2-metal's
+# `newTextureWithDescriptor:iosurface:plane:` binding — zero conversion glue —
+# and it shares the objc2 memory-management model (`CFRetained`).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+# `objc2-io-surface` feature enables `newTextureWithDescriptor:iosurface:plane:`
+# (IOSurface-backed render targets, Target.zig); it's opt-in, not in the
+# default feature set.
+objc2-metal = { version = "0.3.2", features = ["objc2-io-surface"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSRange",
+] }
+objc2-io-surface = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+
 [dev-dependencies]
