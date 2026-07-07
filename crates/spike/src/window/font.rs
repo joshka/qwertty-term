@@ -90,9 +90,21 @@ pub(crate) fn glyph_probe_text() -> String {
     )
 }
 
-pub(crate) fn configure(ctx: &Context, saved_size: Option<f32>) -> TerminalFont {
+/// Configure the terminal font. `preferred_family` (typically the config's
+/// `font-family` key) moves any discovered font whose file name contains it
+/// (case-insensitively) to the front of the candidate list, ahead of the
+/// existing size/style-based ordering. This is a name-substring preference,
+/// not full font-family/style matching — the underlying discovery is still
+/// "local Nerd Font files found on disk" (see `discover_nerd_fonts`), so an
+/// unmatched or unset preference falls back to today's ordering unchanged.
+pub(crate) fn configure_with_family(
+    ctx: &Context,
+    saved_size: Option<f32>,
+    preferred_family: Option<&str>,
+) -> TerminalFont {
     let size = configured_font_size(saved_size);
-    let font_paths = terminal_font_paths();
+    let mut font_paths = terminal_font_paths();
+    prefer_family(&mut font_paths, preferred_family);
     if font_paths.is_empty() {
         return TerminalFont {
             family: FontFamily::Monospace,
@@ -115,6 +127,26 @@ pub(crate) fn configure(ctx: &Context, saved_size: Option<f32>) -> TerminalFont 
             diagnostics: Vec::new(),
         }
     }
+}
+
+/// Move the first discovered font path matching `preferred_family` (a
+/// case-insensitive file-name substring) to the front, preserving the
+/// relative order of everything else. No-op if `preferred_family` is `None`
+/// or matches nothing.
+fn prefer_family(font_paths: &mut Vec<PathBuf>, preferred_family: Option<&str>) {
+    let Some(preferred) = preferred_family else {
+        return;
+    };
+    let preferred = preferred.to_ascii_lowercase();
+    let Some(match_index) = font_paths.iter().position(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.to_ascii_lowercase().contains(&preferred))
+    }) else {
+        return;
+    };
+    let matched = font_paths.remove(match_index);
+    font_paths.insert(0, matched);
 }
 
 const POWERLINE_GLYPHS: [char; 4] = ['\u{e0b0}', '\u{e0b1}', '\u{e0b2}', '\u{e0b3}'];
@@ -400,5 +432,39 @@ mod tests {
         let diagnostics = inspect_font_paths(&[PathBuf::from("/definitely/missing/font.ttf")]);
 
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn prefer_family_moves_matching_font_to_front() {
+        let mut paths = vec![
+            PathBuf::from("/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"),
+            PathBuf::from("/fonts/FiraCodeNerdFontMono-Regular.ttf"),
+        ];
+
+        prefer_family(&mut paths, Some("firacode"));
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/fonts/FiraCodeNerdFontMono-Regular.ttf"),
+                PathBuf::from("/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"),
+            ]
+        );
+    }
+
+    #[test]
+    fn prefer_family_is_noop_when_unset_or_unmatched() {
+        let original = vec![
+            PathBuf::from("/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"),
+            PathBuf::from("/fonts/FiraCodeNerdFontMono-Regular.ttf"),
+        ];
+
+        let mut none_pref = original.clone();
+        prefer_family(&mut none_pref, None);
+        assert_eq!(none_pref, original);
+
+        let mut no_match = original.clone();
+        prefer_family(&mut no_match, Some("does-not-exist"));
+        assert_eq!(no_match, original);
     }
 }

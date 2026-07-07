@@ -15,3 +15,4 @@ pub use engine::{
 };
 pub use ghostty_vt::color::Rgb;
 pub use ghostty_vt::snapshot::Snapshot;
+pub use ghostty_vt::terminal::Colors;

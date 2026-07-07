@@ -14,7 +14,9 @@ mod font;
 mod input;
 mod renderer;
 mod theme;
+mod theme_file;
 
+use crate::config::{self, Config};
 use font::TerminalFont;
 use input::{encode_key, mouse_button_code};
 use renderer::{
@@ -24,6 +26,7 @@ use renderer::{
 
 pub(crate) fn run_window() -> PtyResult<()> {
     let preferences = app_shell::AppPreferences::load();
+    let config = config::load();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ghostty-rs")
@@ -36,8 +39,19 @@ pub(crate) fn run_window() -> PtyResult<()> {
         "ghostty-rs",
         options,
         Box::new(|cc| {
-            let terminal_font = font::configure(&cc.egui_ctx, preferences.font_size);
-            Ok(Box::new(WindowTerminal::new(terminal_font, preferences)?))
+            // config's `font-size` takes precedence over the saved
+            // preferences value, but a user dragging the in-app slider
+            // still updates `preferences` afterwards (see
+            // `paint_preferences`), matching prior behavior when no config
+            // override is set.
+            let font_size = config.font_size.or(preferences.font_size);
+            let terminal_font =
+                font::configure_with_family(&cc.egui_ctx, font_size, config.font_family.as_deref());
+            Ok(Box::new(WindowTerminal::new(
+                terminal_font,
+                preferences,
+                config,
+            )?))
         }),
     )?;
 
@@ -65,6 +79,7 @@ struct WindowTerminal {
     show_preferences: bool,
     preferences: app_shell::AppPreferences,
     last_saved_window_size: Vec2,
+    config: Config,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,12 +95,23 @@ pub(super) struct Selection {
 }
 
 impl WindowTerminal {
-    fn new(terminal_font: TerminalFont, preferences: app_shell::AppPreferences) -> PtyResult<Self> {
+    fn new(
+        terminal_font: TerminalFont,
+        preferences: app_shell::AppPreferences,
+        config: Config,
+    ) -> PtyResult<Self> {
         let cols = 100;
         let rows = 30;
         let last_saved_window_size = preferences.window_size;
+        let engine = match config.theme.as_deref() {
+            Some(name) => match theme_file::load_theme(name) {
+                Some(theme) => Engine::with_colors(cols, rows, theme.to_colors()),
+                None => Engine::new(cols, rows),
+            },
+            None => Engine::new(cols, rows),
+        };
         Ok(Self {
-            engine: Engine::new(cols, rows),
+            engine,
             pty: PtySession::spawn(cols as u16, rows as u16)?,
             scrollback_offset: 0,
             shown_title: "ghostty-rs".to_string(),
@@ -97,6 +123,7 @@ impl WindowTerminal {
             show_preferences: false,
             preferences,
             last_saved_window_size,
+            config,
         })
     }
 
@@ -309,6 +336,20 @@ impl WindowTerminal {
             )
         {
             selection.active = coord;
+        }
+
+        // copy-on-select: a finished drag copies the selection immediately,
+        // same text a subsequent explicit copy (`Event::Copy`) would produce
+        // (see `selected_text`), without requiring the user to press the
+        // platform copy shortcut.
+        if self.config.copy_on_select
+            && response.drag_stopped_by(PointerButton::Primary)
+            && self.selection.is_some()
+        {
+            let snapshot = self.engine.snapshot();
+            if let Some(text) = self.selected_text(&snapshot) {
+                response.ctx.copy_text(text);
+            }
         }
     }
 

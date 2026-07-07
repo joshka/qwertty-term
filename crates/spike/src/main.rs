@@ -15,6 +15,7 @@ use crossterm::{
 };
 use ghostty_spike::{CellStyle, CursorStyle, Engine, SnapshotColor, SnapshotUnderline};
 
+mod config;
 mod pty;
 mod window;
 

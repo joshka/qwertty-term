@@ -58,10 +58,12 @@ The window path supports mouse-wheel scrollback and `Shift-PageUp` /
 font metrics. It loads local Nerd Fonts automatically when they are installed,
 preferring mono regular variants, and falls back to egui's bundled monospace
 font otherwise. Drag with the primary mouse button to select visible text, then
-copy with the platform copy shortcut. When a terminal app enables mouse
-reporting, the window sends click, drag, and wheel events to the PTY; hold
-`Shift` to select text instead. The window closes after a successful shell exit
-and keeps an error banner visible when the child exits unsuccessfully.
+copy with the platform copy shortcut (or automatically, if `copy-on-select` is
+enabled in the config — see [Config](#config) below). When a terminal app
+enables mouse reporting, the window sends click, drag, and wheel events to the
+PTY; hold `Shift` to select text instead. The window closes after a successful
+shell exit and keeps an error banner visible when the child exits
+unsuccessfully.
 
 Override the native window font with:
 
@@ -89,6 +91,52 @@ Print the deterministic renderer-run probe for the same symbol set:
 ```bash
 cargo run -- --render-probe
 ```
+
+### Config
+
+The native window reads a small TOML config on startup:
+
+```text
+~/.config/ghostty-rs/config.toml
+```
+
+The file is created automatically on first run with every key commented out
+(all settings at their defaults). Recognized keys:
+
+```toml
+# Theme name, resolved against ~/.config/ghostty/themes/<name>, then the
+# shared ghostty themes directory (see below). An absolute path is used as-is.
+theme = "GruvboxDarkHard"
+
+# Copy the mouse selection to the clipboard as soon as the drag finishes.
+copy-on-select = true
+
+# Terminal font size in points.
+font-size = 14.0
+
+# Prefer a discovered font whose file name contains this substring.
+font-family = "JetBrainsMono Nerd Font Mono"
+```
+
+Unknown keys are ignored, and a missing or unparsable config file falls back
+to defaults (`copy-on-select = false`, no theme, no font overrides) rather
+than failing to start.
+
+`theme` names a ghostty theme file (upstream's `key = value` format, not the
+window's own TOML). It is resolved in order:
+
+1. an absolute path, used as-is;
+2. `~/.config/ghostty/themes/<name>`;
+3. the shared ghostty themes directory — `$GHOSTTY_RS_THEMES_DIR` if set,
+   otherwise `/Users/joshka/local/ghostty/zig-out/share/ghostty/themes`
+   (set the env var on machines without that checkout at that exact path).
+
+The theme's `palette = N=#RRGGBB` entries, `background`, and `foreground` seed
+the terminal's startup 256-color palette and default colors; a running
+program's own OSC 4/10/11/104/110/111 sequences still override them at
+runtime, same as with the built-in default palette. `cursor-color` is parsed
+but not yet applied by the renderer, which doesn't draw a themed cursor color
+today.
 
 ### App Bundle
 

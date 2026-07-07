@@ -13,7 +13,7 @@
 use ghostty_vt::modes::Mode;
 use ghostty_vt::snapshot::Snapshot;
 use ghostty_vt::stream::{Stream, TerminalHandler};
-use ghostty_vt::terminal::{Options, Terminal};
+use ghostty_vt::terminal::{Colors, Options, Terminal};
 
 pub use ghostty_vt::screen::cursor::CursorStyle;
 pub use ghostty_vt::snapshot::{
@@ -41,9 +41,19 @@ pub struct Engine {
 impl Engine {
     /// Create a new engine with the given grid size.
     pub fn new(cols: usize, rows: usize) -> Self {
+        Self::with_colors(cols, rows, Colors::default())
+    }
+
+    /// Create a new engine with the given grid size and startup dynamic
+    /// color state (256-color palette + default fg/bg/cursor). Used to seed
+    /// a theme's colors before the first frame; the running program can
+    /// still override any of these at runtime via OSC 4/10/11/12, same as
+    /// with the default palette.
+    pub fn with_colors(cols: usize, rows: usize, colors: Colors) -> Self {
         let terminal = Terminal::new(Options {
             cols: clamp_dim(cols),
             rows: clamp_dim(rows),
+            colors,
             ..Default::default()
         });
         Self {
