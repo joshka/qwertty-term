@@ -749,6 +749,66 @@ impl Engine {
     }
 }
 
+/// Accessors used by the additive presentation path (`crate::present`, R5).
+/// These expose the per-frame CPU data and the disjoint field borrows the
+/// on-screen draw needs, without duplicating the private field layout or
+/// changing any R4 behavior.
+impl Engine {
+    /// Current render-target pixel width (0 until the first `update_frame`).
+    pub(crate) fn screen_width(&self) -> usize {
+        self.screen_width
+    }
+
+    /// Current render-target pixel height (0 until the first `update_frame`).
+    pub(crate) fn screen_height(&self) -> usize {
+        self.screen_height
+    }
+
+    /// A copy of the current frame uniforms (cheap `Copy` struct).
+    pub(crate) fn uniforms_snapshot(&self) -> Uniforms {
+        self.uniforms
+    }
+
+    /// A copy of the current per-cell background instances.
+    pub(crate) fn bg_cells_snapshot(&self) -> Vec<crate::wire::CellBg> {
+        self.contents.bg_cells().to_vec()
+    }
+
+    /// The number of foreground (glyph) instances in the current frame.
+    pub(crate) fn fg_count(&self) -> usize {
+        self.contents.fg_count()
+    }
+
+    /// The per-row foreground instance lists, cloned into an owned Vec of Vecs
+    /// so the borrow of `self.contents` ends before the disjoint field borrows
+    /// in [`Engine::present_parts`].
+    pub(crate) fn fg_lists_snapshot(&self) -> Vec<Vec<CellText>> {
+        self.contents.fg_lists().to_vec()
+    }
+
+    /// Disjoint field borrows for the presentation draw: the backend, the swap
+    /// chain, and the three pipelines. Mirrors the destructuring in
+    /// `draw_frame` so the presentation path can hold the slot guard across
+    /// backend calls without a self-aliasing conflict.
+    pub(crate) fn present_parts(
+        &mut self,
+    ) -> (
+        &Metal,
+        &mut SwapChain<Metal>,
+        &Pipeline,
+        &Pipeline,
+        &Pipeline,
+    ) {
+        (
+            &self.backend,
+            &mut self.swap_chain,
+            &self.bg_color_pipeline,
+            &self.cell_bg_pipeline,
+            &self.cell_text_pipeline,
+        )
+    }
+}
+
 /// Build one of the three first-pixels pipelines by name from the R3 table.
 fn build_pipeline(
     backend: &Metal,

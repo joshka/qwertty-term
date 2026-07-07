@@ -1,0 +1,32 @@
+//! `ghostty-app`: the native macOS AppKit host for the ghostty-rs terminal
+//! (renderer chunk R5).
+//!
+//! Binary crate with a thin library face so the platform-independent logic
+//! (config, input translation, tab registry, menu action model, font-size
+//! state, grid geometry, OSC 7 pwd inheritance) is unit-testable off the main
+//! thread and the macOS shell (`app`, `view`, `clipboard`, `smoke`) layers on
+//! top.
+//!
+//! Architecture and the AppKit object graph are documented in
+//! `docs/analysis/renderer-r5.md`.
+
+pub mod config;
+pub mod engine;
+pub mod font_size;
+pub mod geometry;
+pub mod input;
+pub mod menu;
+pub mod pty;
+pub mod tabs;
+
+// macOS-only: the font grid + AppKit shell + render presentation path.
+#[cfg(target_os = "macos")]
+pub mod app;
+#[cfg(target_os = "macos")]
+pub mod clipboard;
+#[cfg(target_os = "macos")]
+pub mod font;
+#[cfg(target_os = "macos")]
+pub mod smoke;
+#[cfg(target_os = "macos")]
+pub mod view;

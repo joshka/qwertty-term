@@ -189,6 +189,15 @@ impl FullSnapshot {
             window: terminal.snapshot_window(scrollback_offset),
         }
     }
+
+    /// Wrap an already-captured [`SnapshotWindow`] (chunk R5, additive). A
+    /// window host that holds its engine behind a mutex takes the windowed
+    /// snapshot itself (releasing the lock before rendering), then wraps it here
+    /// — avoiding a second `snapshot_window` call and a longer lock hold.
+    /// Equivalent to [`FullSnapshot::capture`] once the window is captured.
+    pub fn from_window(window: ghostty_vt::snapshot::SnapshotWindow) -> FullSnapshot {
+        FullSnapshot { window }
+    }
 }
 
 impl RenderSnapshot for FullSnapshot {

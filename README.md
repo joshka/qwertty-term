@@ -92,6 +92,52 @@ Print the deterministic renderer-run probe for the same symbol set:
 cargo run -- --render-probe
 ```
 
+### Native App (Metal, `ghostty-app`)
+
+`ghostty-app` is the native macOS AppKit host that renders through the Metal
+stack (renderer chunks R1–R4) instead of egui. It is the successor to the
+`ghostty-spike --window` frontend above; the spike stays runnable until this
+path reaches visual parity.
+
+```bash
+cargo run -p ghostty-app --bin ghostty-app          # native window (default)
+```
+
+What works:
+
+- **Metal rendering** of the live terminal via an IOSurface-backed `CALayer`
+  (no `CAMetalLayer`, no copy).
+- **Native window tabs** — `Cmd-T` opens a new tab (each tab its own engine +
+  PTY), inheriting the active tab's working directory (OSC 7). Drag a tab out of
+  the tab bar to detach it into its own window. `Cmd-N` opens a new window,
+  `Cmd-W` closes the tab/window.
+- **Menu bar** (App / Shell / Edit / View) with `Cmd-N`/`T`/`W`, `Cmd-C`/`V`,
+  `Cmd-+`/`-`/`0` (font size), and `Cmd-Q`.
+- **Full macOS text input** through an `NSTextInputClient` view: dead keys, IME
+  composition, `macos-option-as-alt`, and correct Cmd/Ctrl routing.
+- **Mouse reporting** to programs that enable it (click, drag, scroll).
+
+Deferred in this build (see `docs/analysis/renderer-r5.md`): text selection and
+copy-on-select, inline IME-preedit rendering, theme-file → palette resolution,
+and CVDisplayLink pacing (a plain run-loop timer is used).
+
+Headless checks (no window, useful in CI):
+
+```bash
+# Full engine+PTY+renderer pipeline → IOSurface readback assertion. Exits 0 on
+# success (or on a graceful skip when no Metal device is present).
+cargo run -p ghostty-app --bin ghostty-app -- --offscreen-smoke
+
+# Launch the real app and auto-exit cleanly after N milliseconds (startup/
+# teardown smoke — no human needed to close the window).
+GHOSTTY_APP_SMOKE_MS=3000 cargo run -p ghostty-app --bin ghostty-app
+```
+
+`ghostty-app` reads the same `~/.config/ghostty-rs/config.toml` as the spike
+(`theme`, `copy-on-select`, `font-size`, `font-family`); see [Config](#config)
+below. `font-family` loads a CoreText family by name (falling back to the
+embedded JetBrains Mono).
+
 ### Config
 
 The native window reads a small TOML config on startup:

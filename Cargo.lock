@@ -1496,6 +1496,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-app"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "ghostty-font",
+ "ghostty-input",
+ "ghostty-renderer",
+ "ghostty-vt",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "portable-pty",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "ghostty-ffi"
 version = "0.0.0"
 dependencies = [
@@ -2326,6 +2345,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]

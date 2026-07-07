@@ -80,3 +80,9 @@ pub mod metal;
 /// font stack).
 #[cfg(target_os = "macos")]
 pub mod engine;
+
+/// Presentation wiring for a window host: draw a frame and assign its IOSurface
+/// to an [`metal::IOSurfaceLayer`]. Chunk R5 (additive over R4's offscreen
+/// [`engine::Engine::draw_frame`]). macOS only.
+#[cfg(target_os = "macos")]
+pub mod present;
