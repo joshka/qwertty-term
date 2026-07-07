@@ -1423,6 +1423,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-sprite"
+version = "0.1.0"
+dependencies = [
+ "tiny-skia",
+]
+
+[[package]]
 name = "ghostty-vt"
 version = "0.0.0"
 dependencies = [
@@ -3420,6 +3427,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
+ "png 0.17.16",
  "tiny-skia-path",
 ]
 
