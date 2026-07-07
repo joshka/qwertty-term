@@ -215,7 +215,7 @@ to the renderer. Its public surface (for whoever ports Phase 2):
 - **`Options` + `event_cb`** — a callback (`.quit`, results-ready, …) with userdata, invoked
   to wake the renderer.
 - **`Search`** — the per-active-search state bundle the thread owns (needle + `ScreenSearch`
-  + `ViewportSearch`), created when a needle is set, torn down on clear.
+  - `ViewportSearch`), created when a needle is set, torn down on clear.
 
 Porting it requires: an async runtime decision (Rust has no libxev; likely a dedicated
 `std::thread` + channel, or tokio if the app adopts it), the `ScreenSearch` result cache,
