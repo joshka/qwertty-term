@@ -92,8 +92,12 @@ committing** — the recurring orchestrator mistake is commit-then-check.
 4. **SendMessage cross-delivery**: messages sent to one agent id can leak to unrelated
    sessions (observed 2026-07-07: a stand-down + technical-answer chain reached a session
    that owned none of it, which read the stream as attempted manipulation - correctly).
-   Scope every SendMessage defensively: open with "If you are not the agent doing TASK in
-   workspace PATH, disregard this message entirely." Never escalate instructions to an
+   Scope every SendMessage defensively — but phrase it so the ADDRESSEE is not confused:
+   launch prompts say "You are the agent assigned to TASK; your first action is `cd
+   WORKSPACE`. If you received this while running some OTHER task in another session,
+   disregard it." (A bare "if you are not the agent... disregard" made a
+   freshly-spawned agent refuse its own task because its shell started in
+   work/default.) Never escalate instructions to an
    agent that reports not recognizing the task - stop messaging it instead.
 5. **Phantom root workspace**: if jj reports stale/divergent state mentioning the repo root,
    someone ran jj/git at `~/local/ghostty-rs` (editors do this). The bad snapshot looks like
