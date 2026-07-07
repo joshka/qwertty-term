@@ -523,6 +523,34 @@ impl PageList {
         self.get_top_left(Tag::Active)
     }
 
+    // ---- node/viewport accessors for the Screen layer (same-crate) ----
+
+    /// The first node (top of scrollback). Port of `pages.first`.
+    pub(crate) fn head_node(&self) -> *mut Node {
+        self.pages.first
+    }
+    /// Immutable page for a node.
+    ///
+    /// # Safety
+    /// `node` must be a live node in this list.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) unsafe fn node_data(&self, node: *mut Node) -> &Page {
+        unsafe { &(*node).data }
+    }
+    /// Mutable page for a node.
+    ///
+    /// # Safety
+    /// `node` must be a live node in this list.
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) unsafe fn node_data_mut(&self, node: *mut Node) -> &mut Page {
+        unsafe { &mut (*node).data }
+    }
+    /// Whether the viewport is pinned to the active area. Port of
+    /// `viewport == .active` (used by `viewportIsBottom`).
+    pub(crate) fn viewport_is_active(&self) -> bool {
+        self.viewport == Viewport::Active
+    }
+
     // ---- test-support accessors (same-crate only) ----
 
     #[cfg(test)]

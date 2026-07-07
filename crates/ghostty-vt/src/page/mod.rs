@@ -22,9 +22,9 @@ pub mod style;
 mod page_impl;
 
 pub use page_impl::{
-    Capacity, Cell, CloneFromError, ContentTag, GraphemeError, InsertHyperlinkError,
-    IntegrityError, OutOfMemory, Page, ReflowManagedError, Row, SemanticContent, SemanticPrompt,
-    Size, Wide,
+    Capacity, Cell, CloneFromError, ContentTag, GraphemeError, HyperlinkInsertId,
+    InsertHyperlinkError, IntegrityError, OutOfMemory, Page, ReflowManagedError, Row,
+    SemanticContent, SemanticPrompt, Size, Wide,
 };
 
 /// The byte size of a standard-capacity page's layout. Used by PageList to size its

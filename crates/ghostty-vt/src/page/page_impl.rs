@@ -400,6 +400,10 @@ impl Cell {
             _ => SemanticContent::Output,
         }
     }
+    #[inline]
+    pub fn set_semantic_content(&mut self, v: SemanticContent) {
+        self.0 = (self.0 & !(0b11 << Self::SEM_SHIFT)) | ((v as u64) << Self::SEM_SHIFT);
+    }
 
     /// True if there's text to render. Port of `Cell.hasText`.
     #[inline]
@@ -1082,6 +1086,17 @@ impl Page {
         &mut self.styles
     }
 
+    /// Direct access to the hyperlink set (dedup + refcount). Exposed for the
+    /// Screen layer's cursor-hyperlink caching (release across page moves).
+    ///
+    /// Callers must rebind the set context (`bind_hyperlink_ctx`) before ops
+    /// that hash/compare page-resident values; `release` on an id does not
+    /// require it (release only touches the item meta), matching how Screen
+    /// uses it.
+    pub fn hyperlink_set_mut(&mut self) -> &mut hyperlink::HyperlinkSet {
+        &mut self.hyperlink_set
+    }
+
     // ---- clearCells (page.zig:1195) ----
 
     /// Clear cells `[left, end)` of a row, reclaiming grapheme/hyperlink/style
@@ -1158,6 +1173,30 @@ impl Page {
             for i in left..end {
                 cells_base.add(i).write(Cell(0));
             }
+        }
+        self.assert_integrity();
+    }
+
+    /// Like [`clear_cells`](Self::clear_cells) but fills the range with `blank`
+    /// instead of the zero cell. Used by `Screen::clear_cells` to preserve the
+    /// cursor background color. Port of the `@memset(cells, self.blankCell())`
+    /// tail of Screen's `clearCells`.
+    ///
+    /// # Safety
+    ///
+    /// `row` valid for this page; `[left, end)` in bounds; `blank` must carry no
+    /// managed memory (grapheme/style/hyperlink) — it is written raw.
+    pub unsafe fn fill_cells(&mut self, row: *mut Row, left: usize, end: usize, blank: Cell) {
+        // SAFETY: delegated to clear_cells for the release + flag recompute; the
+        // fill afterwards only overwrites the just-cleared range.
+        unsafe {
+            self.pause_integrity_checks(true);
+            self.clear_cells(row, left, end);
+            let cells_base = (*row).cells().ptr(self.mem);
+            for i in left..end {
+                cells_base.add(i).write(blank);
+            }
+            self.pause_integrity_checks(false);
         }
         self.assert_integrity();
     }

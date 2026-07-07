@@ -118,6 +118,17 @@ impl Pin {
         }
     }
 
+    /// Mark this pin's row dirty. Port of `Pin.markDirty`.
+    ///
+    /// # Safety
+    /// The pin must be valid (node live, x/y in bounds).
+    pub(crate) unsafe fn mark_dirty(self) {
+        unsafe {
+            let (row, _) = self.row_and_cell();
+            (*row).set_dirty(true);
+        }
+    }
+
     /// Equality: same node, y, x. Port of `eql`.
     pub fn eql(self, other: Pin) -> bool {
         self.node == other.node && self.y == other.y && self.x == other.x

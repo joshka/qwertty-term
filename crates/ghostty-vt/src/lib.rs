@@ -18,6 +18,7 @@ pub mod page;
 pub mod pagelist;
 pub mod parser;
 pub mod point;
+pub mod screen;
 pub mod sgr;
 pub mod tabstops;
 pub mod unicode;
