@@ -49,10 +49,13 @@ pub mod row;
 pub mod shaders;
 pub mod size;
 pub mod snapshot;
+pub mod swap_chain;
 pub mod wire;
 
-/// The Metal GPU backend (chunk R1: context + resources). macOS only; the
-/// trait surface in [`gpu`] is platform-agnostic so other backends can slot
-/// in later.
+/// The Metal GPU backend. Chunk R1: context + resources. Chunk R2: frame
+/// lifecycle (`Frame`/`RenderPass`/`Pipeline`), the `IOSurfaceLayer`
+/// presentation target, and the swap chain (see [`swap_chain`]). macOS only;
+/// the trait surface in [`gpu`] is platform-agnostic so other backends can
+/// slot in later.
 #[cfg(target_os = "macos")]
 pub mod metal;

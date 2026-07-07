@@ -8,14 +8,23 @@
 //! bindings) is deliberately NOT ported — the `objc2-metal` crate provides
 //! the same bindings, generated from the headers.
 //!
-//! Out of R1 scope, landing in R2+: `IOSurfaceLayer` (presentation),
-//! `Frame`/`RenderPass`/`Pipeline` (frame lifecycle, declared here as
-//! uninhabited placeholder types so [`GpuBackend`]'s associated types are
-//! nameable), `shaders.zig`'s pipeline construction (R3), and the
-//! view-attachment/`contentsScale` wiring in upstream `Metal.init` (R5,
-//! needs a window).
+//! Chunk R2 adds the frame lifecycle and presentation: [`Frame`] (command
+//! buffer + completion → present → health), [`RenderPass`] (encoder +
+//! instanced draws), [`Pipeline`] (runtime-compiled shader library + vertex
+//! descriptor + premultiplied-alpha blending), and [`IOSurfaceLayer`] (the
+//! `CALayer` subclass presentation target). The R1 placeholder enums for
+//! `Frame`/`RenderPass`/`Pipeline` are replaced by these real types.
+//!
+//! Out of R2 scope, landing later: `shaders.zig`'s production pipeline table
+//! (R3, lives with the shaders), the cell engine that drives rebuild/draw
+//! (R4), and the view-attachment/`contentsScale` wiring in upstream
+//! `Metal.init` (R5, needs a window).
 
 mod buffer;
+mod frame;
+mod layer;
+mod pipeline;
+mod render_pass;
 mod sampler;
 mod target;
 mod texture;
@@ -30,6 +39,13 @@ use objc2_metal::{
 };
 
 pub use self::buffer::Buffer;
+pub use self::frame::{Frame, FrameCompletion, Health, Primitive};
+pub use self::layer::{DisplayCallback, IOSurfaceLayer};
+pub use self::pipeline::{
+    ColorAttachment, Options as PipelineOptions, Pipeline, VertexAttribute, VertexFormat,
+    VertexLayout, VertexStep, library_from_source,
+};
+pub use self::render_pass::{Attachment, Draw, RenderPass, Step};
 pub use self::sampler::Sampler;
 pub use self::target::Target;
 pub use self::texture::Texture;
@@ -56,17 +72,6 @@ impl fmt::Display for MetalError {
 }
 
 impl std::error::Error for MetalError {}
-
-/// Placeholder for upstream `metal/Frame.zig`; implemented in chunk R2.
-/// Uninhabited on purpose: nothing can construct a frame until R2 lands.
-pub enum Frame {}
-
-/// Placeholder for upstream `metal/RenderPass.zig`; implemented in chunk R2.
-pub enum RenderPass {}
-
-/// Placeholder for upstream `metal/Pipeline.zig`; implemented in chunks
-/// R2/R3 together with the shader library.
-pub enum Pipeline {}
 
 /// The Metal graphics API context. Port of the R1 subset of the `Metal`
 /// struct in `Metal.zig`: device + queue + device metadata. The
@@ -187,12 +192,30 @@ impl Metal {
     /// `*_srgb` iff linear blending, so Metal gamma-encodes after blending.
     /// (Upstream `initTarget`/`textureOptions`/`initShaders` all make this
     /// same choice from `self.blending.isLinear()`.)
-    fn target_pixel_format(&self) -> MTLPixelFormat {
+    ///
+    /// Public because pipeline color attachments (R2/R3) must match the target
+    /// format the frame renders into (upstream `initShaders` passes the same
+    /// choice into pipeline construction).
+    pub fn target_pixel_format(&self) -> MTLPixelFormat {
         if self.linear_blending {
             MTLPixelFormat::BGRA8Unorm_sRGB
         } else {
             MTLPixelFormat::BGRA8Unorm
         }
+    }
+
+    /// Begin encoding a frame on this context's command queue. Port of
+    /// `Metal.beginFrame` / `Frame.begin`. The `completion` hook runs once the
+    /// frame finishes (present + health report); the swap chain supplies it.
+    pub fn begin_frame(&self, completion: FrameCompletion) -> Result<Frame, MetalError> {
+        Frame::begin(&self.queue, completion)
+    }
+
+    /// Compile a render pipeline against this device. Port of `Pipeline.init`
+    /// dispatched through `Metal`. R3 owns the production shader source +
+    /// pipeline table; this is the device-bound entry point they call.
+    pub fn new_pipeline(&self, opts: &PipelineOptions<'_>) -> Result<Pipeline, MetalError> {
+        Pipeline::new(&self.device, opts)
     }
 }
 
