@@ -41,6 +41,13 @@ formatter differential vs ghostty_formatter_* is clean; trunk ~993 lib tests.
   `ghostty-rs-collab.md` (ours); their conformance-target sketch is expected during their
   Phase 2 — shape the Phase 4 headless API against it.
 
+## Plans and playbook (written 2026-07-07, Fable-era)
+
+`docs/orchestration.md` is the operations manual (chunk prompts, integration recipe,
+failure recoveries — follow it mechanically). `docs/plans/` holds locked design decisions
+for the big remaining work: `m3-first-pixels.md`, `m2-termio.md`, `m5-ffi-spike.md`.
+Execute against these; record an ADR before deviating from a locked decision.
+
 ## In flight / next
 
 - Phase 1 opening chunks: `page.zig` memory-model port (analysis + Page/bitmap
