@@ -15,7 +15,8 @@ into chunks below. `work/default` is the integration point: always green, gate b
 - [x] Fuzz campaign (7.9M runs clean) · Miri clean per module
 - [x] Kitty graphics exec + keyboard dispatch + REP/XTWINOPS/XTSHIFTESCAPE seams
 - [x] Snapshot gaps: dynamic palette, OSC 52 read-back, underline styles
-- [ ] Search core port (~2.6k of 5.2k; Thread.zig wrapper → M2) — IN FLIGHT
+- [x] Search core — DONE 2026-07-07: literal-substring matcher (upstream has NO regex —
+      zero deps), 38/38 tests; Thread wrapper + ScreenSearch cache → M2
 - [ ] Deferred-test backfill: Terminal edge permutations (~300 of 381), resize permutations,
       formatter raw-Page permutations — batchable Sonnet chunks, S/M each
 - [ ] Certification note in ledger (corpus size, perf table, fuzz/Miri evidence)
