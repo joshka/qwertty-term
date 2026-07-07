@@ -210,7 +210,7 @@ window in the responder chain, or a human:
    Left/Right *logic* via the pure `option_is_alt` test. R5 reads the raw
    `modifierFlags().rawValue` bits like upstream `ghosttyMods`.
 
-## 5. Recommendation (PROPOSED)
+## 5. Recommendation (ACCEPTED — ratified by Josh, 2026-07-08)
 
 **Use raw AppKit (`objc2`) for the R5 window host, not winit 0.30.**
 Confidence: **high** for the host choice; medium on effort estimate.
