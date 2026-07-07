@@ -15,11 +15,13 @@ hand-written streams); both spike frontends now run on the ghostty-vt engine
 tests, all green. Ledger + milestones in `docs/port-status.md`; 14 analysis docs in
 `docs/analysis/`.
 
-**Phase 1 remaining tail** (parallelizable): Selection.zig, formatter.zig, search/,
-kitty graphics exec + unicode placeholders, stream seams (kitty keyboard, XTWINOPS/title
-stack, mouse reporting, XTGETTCAP/DECRQSS tail, REP), snapshot gaps (OSC 52 read-back,
-dynamic palette into color resolution, underline styles), Terminal edge-permutation tests,
-resize-permutation tests deferred from PageList.
+**Phase 1 remaining tail** (parallelizable): search/, kitty graphics exec + unicode
+placeholders, stream seams (kitty keyboard, XTWINOPS/title stack, mouse reporting,
+XTGETTCAP tail, REP), snapshot gaps (OSC 52 read-back, dynamic palette into color
+resolution, underline styles), promptClickMove (OSC133 click plumbing), StringMap pin-map,
+Terminal edge-permutation tests, resize-permutation tests deferred from PageList,
+SelectionGesture (input phase). Selection and formatter are DONE (2026-07-06 late);
+formatter differential vs ghostty_formatter_* is clean; trunk ~993 lib tests.
 
 ## Prior state notes
 

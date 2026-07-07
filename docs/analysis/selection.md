@@ -80,6 +80,7 @@ desired order behaves as forward), using topLeft/bottomRight.
 ## Containment: `contains` / `containedRow`
 
 `contains(s, pin)` (`:258-286`) resolves tl/br/p to screen points, then:
+
 - rectangle: `p.y in [tl.y,br.y] and p.x in [tl.x,br.x]`.
 - else: single-row → x between tl.x/br.x; on tl row → `p.x >= tl.x`; on br row →
   `p.x <= br.x`; strictly between → always contained.
@@ -175,6 +176,7 @@ scrollback-adjacent position), purely via pin tracking.
 `clone` (`Screen.zig:442-567`) is the one place selection needs bespoke handling
 because pins are duplicated into a fresh pagelist via a `TrackedPinsRemap`
 (`:451-458`). Selection carry-over (`:488-555`):
+
 1. order the selection (forward/mirrored_forward → tl=start,br=end; reverse/
    mirrored_reverse → tl=end,br=start).
 2. `remap.get(tl)`; if missing, the tl pin fell outside the clone. Then, if
@@ -200,6 +202,7 @@ adjust end with not full screen, adjust beginning of line, adjust end of line,
 all ported 1:1 into `screen/selection.rs`'s `#[cfg(test)] mod tests`.
 
 **Deferred Screen selection tests (from `Screen.zig`, grep `test "…select`):**
+
 - `Screen: scrolling moves selection` (`:4501`)
 - clone: full / none / start cutoff / end cutoff / end cutoff reversed / subset /
   subset rectangle selection (`:5295-5544`, 7)
@@ -218,8 +221,8 @@ all ported 1:1 into `screen/selection.rs`'s `#[cfg(test)] mod tests`.
   rectangle more complex / multi-page (`:8873-9336`, 14)
 - `Screen: lineIterator`, `lineIterator soft wrap` (`:9338`, `:9369`, 2)
 
-Total deferred Screen selection tests: **46** (screen.md's "~45"): scrolling(1)
-+ clone(7) + select untracked/replaces(2) + selectAll(1) + selectLine(14) +
+Total deferred Screen selection tests: **46** (screen.md's "~45"): scrolling(1) +
+clone(7) + select untracked/replaces(2) + selectAll(1) + selectLine(14) +
 selectWord(4) + selectOutput(1) + selectionString(14) + lineIterator(2).
 `selectionString map allocation failure cleanup` (`:9966`) is a tripwire alloc-
 failure test — Rust is infallible-alloc, so it is not ported (same policy as the
