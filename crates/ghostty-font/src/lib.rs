@@ -27,6 +27,15 @@
 //!   rasterization to a [`coretext::Bitmap`], and `FaceMetrics` extraction
 //!   reconciled with the table-derived layer. See
 //!   `docs/analysis/font-coretext.md`.
+//! - [`collection`] (macOS only) — [`collection::Collection`] and
+//!   [`collection::FontIndex`]: faces grouped by [`collection::Style`], with a
+//!   slotmap-style index (decision 8).
+//! - [`resolver`] (macOS only) — [`resolver::CodepointResolver`]: the reduced
+//!   codepoint → font chain (sprite dispatch + primary face).
+//! - [`shaper`] (macOS only) — [`shaper::Shaper`]: rustybuzz run shaping with
+//!   upstream cluster→cell mapping semantics.
+//! - [`grid`] (macOS only) — [`grid::Grid`]: SharedGrid-reduced glyph render
+//!   cache + grayscale atlas upload. See `docs/analysis/font-shaping.md`.
 //!
 //! # Example
 //!
@@ -44,14 +53,31 @@
 pub mod atlas;
 pub mod backend;
 #[cfg(target_os = "macos")]
+pub mod collection;
+#[cfg(target_os = "macos")]
 pub mod coretext;
 pub mod embedded;
+#[cfg(target_os = "macos")]
+pub mod grid;
 pub mod metrics;
+#[cfg(target_os = "macos")]
+pub mod resolver;
+#[cfg(target_os = "macos")]
+pub mod shaper;
 pub mod tables;
 
 pub use atlas::Atlas;
 pub use backend::Backend;
 pub use metrics::{FaceMetrics, Metrics};
+
+#[cfg(target_os = "macos")]
+pub use collection::{Collection, FontIndex, Style};
+#[cfg(target_os = "macos")]
+pub use grid::{CachedGlyph, Grid};
+#[cfg(target_os = "macos")]
+pub use resolver::CodepointResolver;
+#[cfg(target_os = "macos")]
+pub use shaper::{ShapedCell, Shaper};
 
 #[cfg(test)]
 mod smoke_test {

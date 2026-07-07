@@ -234,6 +234,17 @@ impl Face {
         unsafe { self.font.size() }
     }
 
+    /// The raw font bytes this face was loaded from, if available.
+    ///
+    /// Present for faces loaded from in-memory bytes (all embedded fonts) and
+    /// `None` for system faces loaded by name. The shaper uses these to build a
+    /// `rustybuzz::Face` over the same bytes (decision 1); for name-loaded
+    /// faces, byte-backed shaping is a deferred completeness pass (a CoreText
+    /// shaper, or copying CoreText's table data, would be needed).
+    pub fn source_bytes(&self) -> Option<&'static [u8]> {
+        self.source_bytes
+    }
+
     /// True if the face can contain color glyphs.
     pub fn has_color(&self) -> bool {
         self.color.is_some()

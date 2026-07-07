@@ -12,6 +12,14 @@ name = "ghostty_font"
 
 [dependencies]
 ttf-parser = "0.25"
+# Pure-Rust HarfBuzz shaping port (decision 1: rustybuzz-first). 0.20 pins
+# ttf-parser 0.25 transitively, matching our own ttf-parser, so a rustybuzz
+# `Face` and a ttf-parser `Face` read the same font bytes without a version
+# skew.
+rustybuzz = "0.20"
+# Procedural sprite-glyph rasterizer (box drawing, block elements, etc.). The
+# reduced resolver dispatches sprite codepoints to this crate.
+ghostty-sprite = { path = "../ghostty-sprite" }
 
 # CoreText/CoreGraphics face loading + rasterization (macOS only). We use the
 # objc2 framework-binding family (objc2 0.6, objc2-* 0.3) rather than the older
@@ -44,3 +52,6 @@ objc2-core-text = { version = "0.3", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# The integration test asserts sprite codepoints route to ghostty-sprite; it
+# calls `ghostty_sprite::has_codepoint` directly from the test crate.
+ghostty-sprite = { path = "../ghostty-sprite" }
