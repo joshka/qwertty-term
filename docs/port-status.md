@@ -27,7 +27,7 @@ Status legend: `—` not started · `WIP` · `done`
 | Parser.zig | done | done | 25/25 | + table test; 14 vte differential tests, 4 divergences pinned (empty params, colon-non-m, param-overflow policy, utf8 ownership); analysis: `docs/analysis/vt-parser.md` |
 | stream.zig / stream_terminal.zig | — | — | — | |
 | Terminal.zig | — | — | — | 50+ inline tests |
-| Screen.zig | — | — | — | |
+| Screen.zig | done | done | 93 (Zig 188+5 kitty/key; ~85 deferred by category: Selection ~45, SGR ~13, hyperlink-query 9, promptClickMove 17, cursorCopy) | Miri clean on all screen:: tests; testWriteString+dumpString harness ported; placeholders pending: charset stub (unify with charsets.rs), semantic types (unify with osc), Selection scaffold; analysis: `docs/analysis/screen.md` |
 | sgr.zig | done | done | 30 (Zig 31; 1 C-ABI-only N/A) | colon/semicolon rules only for params 4/38/48/58; fuzzer crash case `ESC[58:4:m` pinned |
 | csi.zig | done | done | 5 (Zig 0) | net-new tests |
 | osc.zig + osc/parsers/ | done | done | 269/269 (+12 new) | all 25 Command variants; zero parser changes (seam held); prefix trie flattened to string match (equivalent); X11-name unification in flight (dedup chunk); analysis: `docs/analysis/osc.md` |
@@ -36,7 +36,7 @@ Status legend: `—` not started · `WIP` · `done`
 | modes.zig / charsets.zig / Tabstops.zig | done | done | 12/3/5 (Zig 12/1/5) | modes table via macro_rules!; bitsets → plain arrays (not load-bearing) |
 | hyperlink.zig | done | done | 0 (matches Zig) | PageEntry/HyperlinkSet data model |
 | kitty/graphics_*.zig | — | — | — | extraction candidate (protocol model) |
-| kitty/key.zig | — | — | — | |
+| kitty/key.zig | done | done | 5/5 | FlagStack in screen/kitty_key.rs |
 | Selection.zig / SelectionGesture.zig | — | — | — | |
 | formatter.zig | — | — | — | |
 | UTF8Decoder.zig | done | done | 3/3 | |
