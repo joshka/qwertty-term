@@ -1427,6 +1427,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-font"
+version = "0.1.0"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
 name = "ghostty-spike"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,16 @@
+[package]
+name = "ghostty-font"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Font table parsing, cell-metrics derivation, and texture atlas allocation for ghostty-rs. Standalone port of Ghostty's src/font/ opentype layer, Metrics.zig, and Atlas.zig."
+publish = false
+
+[lib]
+name = "ghostty_font"
+
+[dependencies]
+ttf-parser = "0.25"
+
+[dev-dependencies]

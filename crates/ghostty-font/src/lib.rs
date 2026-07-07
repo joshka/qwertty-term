@@ -1,0 +1,115 @@
+//! Font table parsing, cell-metrics derivation, and texture atlas allocation
+//! for ghostty-rs.
+//!
+//! This is a standalone port of Ghostty's `src/font/` opentype table layer,
+//! `Metrics.zig`, and `Atlas.zig` (commit `2da015cd6`). See
+//! `docs/analysis/font-foundations.md` for the full analysis: what each
+//! OpenType table provides and who consumes it, the `Metrics` derivation
+//! algorithm (rounding/centering rules, the modifier redistribution system),
+//! the `Atlas` skyline bin-packer, and the decisions to adopt `ttf-parser`
+//! for table parsing and to port (rather than adopt `etagere` for) the
+//! atlas.
+//!
+//! # Modules
+//!
+//! - [`metrics`] — [`metrics::Metrics`] and [`metrics::FaceMetrics`]: the
+//!   cell-dimension/decoration-placement derivation and its modifier system.
+//! - [`atlas`] — [`atlas::Atlas`]: the CPU-side texture atlas and its
+//!   skyline bin-packer.
+//! - [`tables`] — [`tables::face_metrics`]: extracts a [`metrics::FaceMetrics`]
+//!   from a `ttf_parser::Face`, replicating Ghostty's CoreText-backend
+//!   fallback logic against portable table/glyph queries.
+//! - [`embedded`] — embedded fallback fonts.
+//! - [`backend`] — font backend enumeration (currently a CoreText-only
+//!   stub).
+//!
+//! # Example
+//!
+//! ```
+//! use ghostty_font::{embedded, metrics::Metrics, tables};
+//! use ttf_parser::Face;
+//!
+//! let face = Face::parse(embedded::JETBRAINS_MONO, 0).unwrap();
+//! let face_metrics = tables::face_metrics(&face, 16.0);
+//! let metrics = Metrics::calc(face_metrics);
+//! assert!(metrics.cell_width > 0);
+//! assert!(metrics.cell_height > 0);
+//! ```
+
+pub mod atlas;
+pub mod backend;
+pub mod embedded;
+pub mod metrics;
+pub mod tables;
+
+pub use atlas::Atlas;
+pub use backend::Backend;
+pub use metrics::{FaceMetrics, Metrics};
+
+#[cfg(test)]
+mod smoke_test {
+    //! Smoke test: load embedded JetBrains Mono via ttf-parser, derive
+    //! `Metrics`, and assert plausible + pinned cell width/height/baseline.
+    //!
+    //! Values below were computed by running this exact derivation
+    //! (`tables::face_metrics` + `Metrics::calc`) against
+    //! `embedded::JETBRAINS_MONO` at 16px; they are pinned here as a
+    //! regression guard. They are **not** cross-checked against ghostty's
+    //! own CoreText-derived output for this exact font/size combination —
+    //! doing so would require running the Zig build with CoreText on this
+    //! machine's font-rendering stack, which is out of scope for this
+    //! chunk. Documented as unverified-vs-upstream per the task brief; the
+    //! derivation *logic* (this crate's `tables::face_metrics` and
+    //! `metrics::Metrics::calc`) is a line-for-line port of
+    //! `coretext.zig::getMetrics` + `Metrics.zig::calc`, so any divergence
+    //! from upstream would have to come from ttf-parser's measurement of
+    //! this specific font differing from CoreText's, not from the
+    //! derivation math.
+
+    use super::*;
+    use ttf_parser::Face;
+
+    #[test]
+    fn jetbrains_mono_smoke_test() {
+        let face = Face::parse(embedded::JETBRAINS_MONO, 0).expect("parse embedded font");
+
+        let face_metrics = tables::face_metrics(&face, 16.0);
+        let metrics = Metrics::calc(face_metrics);
+
+        // Plausibility bounds: for a 16px monospace font, cell width should
+        // be roughly half the point size to a bit more, cell height should
+        // exceed the point size (to fit ascent+descent+linegap), and the
+        // baseline should sit strictly inside the cell.
+        assert!(
+            (6..=16).contains(&metrics.cell_width),
+            "implausible cell_width: {}",
+            metrics.cell_width
+        );
+        assert!(
+            (12..=32).contains(&metrics.cell_height),
+            "implausible cell_height: {}",
+            metrics.cell_height
+        );
+        assert!(
+            metrics.cell_baseline > 0 && metrics.cell_baseline < metrics.cell_height,
+            "baseline {} not within cell height {}",
+            metrics.cell_baseline,
+            metrics.cell_height
+        );
+
+        // Pinned regression values (see doc comment above for provenance),
+        // computed by this exact derivation at 16px:
+        //   FaceMetrics { cell_width: 9.6, ascent: 16.32, descent: -4.8,
+        //     line_gap: 0.0, underline_position: -2.48,
+        //     underline_thickness: 0.8, strikethrough_position: 5.12,
+        //     strikethrough_thickness: 0.8, cap_height: 11.68,
+        //     ex_height: 8.8, ascii_height: 16.8, ic_width: None }
+        assert_eq!(metrics.cell_width, 10);
+        assert_eq!(metrics.cell_height, 21);
+        assert_eq!(metrics.cell_baseline, 5);
+        assert_eq!(metrics.underline_position, 18);
+        assert_eq!(metrics.underline_thickness, 1);
+        assert_eq!(metrics.strikethrough_position, 11);
+        assert_eq!(metrics.strikethrough_thickness, 1);
+    }
+}
