@@ -1,6 +1,6 @@
 # M5 FFI spike: ghostty-rs C ABI + Swift round-trip
 
-Status: **spike complete, go/no-go PROPOSED (pending maintainer review)**.
+Status: **spike complete, go/no-go ACCEPTED (Josh, 2026-07-08) (pending maintainer review)**.
 Scope: de-risk the Rust -> C-ABI -> Swift/AppKit seam with a thin end-to-end
 round-trip before committing to the full M5. Plan: `docs/plans/m5-ffi-spike.md`.
 
@@ -166,7 +166,7 @@ main-thread-only and only the wakeup path is cross-thread.
   banner):
   `cbindgen --config crates/ghostty-ffi/cbindgen.toml --output crates/ghostty-ffi/include/ghostty_rs.h`
 
-## Go/no-go recommendation (PROPOSED, pending maintainer review)
+## Go/no-go recommendation (ACCEPTED — ratified by Josh, 2026-07-08)
 
 **GO** on adapting upstream's Swift/AppKit sources rather than writing a shell
 from scratch, at **high confidence** for the app/surface/input/clipboard core.
