@@ -12,6 +12,7 @@ name = "ghostty-spike"
 path = "src/main.rs"
 
 [dependencies]
+ghostty-vt = { path = "../ghostty-vt" }
 base64 = "0.22.1"
 crossterm = "0.29.0"
 eframe = "0.34.2"

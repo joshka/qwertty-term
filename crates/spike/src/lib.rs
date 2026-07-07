@@ -1,21 +1,16 @@
-//! Rust proof-of-concept for a focused slice of Ghostty's VT core.
+//! Frontend shell for the ghostty-rs spike, now running on the `ghostty-vt`
+//! engine.
 //!
-//! Start with [`Terminal`] for the emulator state machine and grid. The crate
-//! root intentionally stays small and re-exports the public API from the
-//! modules that own each concept.
+//! The terminal state machine, grid, and scrollback all live in the
+//! `ghostty-vt` crate. This crate is just the two frontends (a crossterm
+//! terminal-hosted mode and an egui native window) plus the thin [`Engine`]
+//! adapter that bridges them to `ghostty-vt` (feed pty bytes, drain replies,
+//! snapshot the grid for rendering).
 
-mod cell;
-mod color;
-mod mode;
-mod osc;
-mod parser;
-mod screen;
-mod style;
-mod terminal;
+mod engine;
 
-pub use cell::Cell;
-pub use color::{AnsiColor, Color};
-pub use mode::{CursorShape, MouseTracking};
-pub use screen::{Cursor, ScreenKind};
-pub use style::Style;
-pub use terminal::Terminal;
+pub use engine::{
+    CellStyle, CellWidth, CursorStyle, Engine, MouseTracking, SnapshotCell, SnapshotColor,
+    SnapshotCursor, SnapshotRow, SnapshotUnderline,
+};
+pub use ghostty_vt::snapshot::Snapshot;

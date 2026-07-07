@@ -1414,6 +1414,7 @@ dependencies = [
  "base64",
  "crossterm",
  "eframe",
+ "ghostty-vt",
  "portable-pty",
  "ttf-parser",
  "unicode-width",

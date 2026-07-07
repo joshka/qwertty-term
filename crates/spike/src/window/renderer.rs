@@ -1,5 +1,8 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
-use ghostty_spike::{Cell, CursorShape, Style, Terminal};
+use ghostty_spike::{
+    CellStyle, CellWidth, CursorStyle, Engine, Snapshot, SnapshotCell, SnapshotRow,
+    SnapshotUnderline,
+};
 use unicode_width::UnicodeWidthChar;
 
 use crate::window::{
@@ -37,13 +40,13 @@ pub(super) fn paint_terminal(
     ui: &mut egui::Ui,
     rect: Rect,
     metrics: &CellMetrics,
-    terminal: &Terminal,
+    snapshot: &Snapshot,
     scrollback_offset: usize,
     selection: Option<Selection>,
 ) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::BLACK);
-    let plan = RenderPlan::from_terminal(terminal, scrollback_offset, selection);
+    let plan = RenderPlan::from_snapshot(snapshot, scrollback_offset, selection);
 
     for row in &plan.rows {
         for cell in &row.cells {
@@ -52,7 +55,7 @@ pub(super) fn paint_terminal(
                 rect.top() + row.visible_row as f32 * metrics.height,
             );
             let cell_rect = Rect::from_min_size(pos, Vec2::new(metrics.width, metrics.height));
-            let (_, bg) = colors(cell.style);
+            let (_, bg) = colors(&cell.style);
             if bg != Color32::BLACK {
                 painter.rect_filled(cell_rect, 0.0, bg);
             }
@@ -70,19 +73,19 @@ pub(super) fn paint_terminal(
                 rect.left() + run.start_col as f32 * metrics.width,
                 rect.top() + row.visible_row as f32 * metrics.height,
             );
-            let (fg, _) = colors(run.style);
+            let (fg, _) = colors(&run.style);
             painter.text(pos, Align2::LEFT_TOP, &run.text, metrics.font.clone(), fg);
             paint_text_decorations(&painter, pos, metrics, run, fg);
         }
     }
 
-    if scrollback_offset == 0 && terminal.cursor_visible() {
-        let cursor = terminal.cursor();
+    if scrollback_offset == 0 && snapshot.cursor.visible {
+        let cursor = snapshot.cursor;
         let pos = Pos2::new(
             rect.left() + cursor.col as f32 * metrics.width,
             rect.top() + cursor.row as f32 * metrics.height,
         );
-        paint_cursor(&painter, pos, metrics, terminal.cursor_shape());
+        paint_cursor(&painter, pos, metrics, cursor.style);
     }
 }
 
@@ -108,30 +111,43 @@ pub(super) fn render_probe_lines() -> Vec<String> {
     render_probe_lines_for_text(&font::glyph_probe_text())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RenderPlan {
     rows: Vec<RenderRow>,
 }
 
 impl RenderPlan {
-    fn from_terminal(
-        terminal: &Terminal,
+    fn from_snapshot(
+        snapshot: &Snapshot,
         scrollback_offset: usize,
         selection: Option<Selection>,
     ) -> Self {
-        let rows = (0..terminal.rows())
-            .map(|visible_row| {
-                RenderRow::from_terminal(terminal, scrollback_offset, selection, visible_row)
+        let window = snapshot.visible_window(scrollback_offset);
+        let top_logical = logical_start_row(snapshot, scrollback_offset);
+        let rows = window
+            .iter()
+            .enumerate()
+            .map(|(visible_row, row)| {
+                RenderRow::from_row(row, top_logical + visible_row, visible_row, selection)
             })
             .collect();
         Self { rows }
     }
 }
 
+/// The `all_rows` index of the top visible row for a given scrollback offset.
+fn logical_start_row(snapshot: &Snapshot, scrollback_offset: usize) -> usize {
+    let total = snapshot.all_rows.len();
+    let offset = scrollback_offset.min(snapshot.scrollback_len());
+    let bottom = total.saturating_sub(offset);
+    bottom.saturating_sub(snapshot.rows)
+}
+
 fn render_probe_lines_for_text(text: &str) -> Vec<String> {
-    let mut terminal = Terminal::new(80, 4);
-    terminal.write(text.as_bytes());
-    let plan = RenderPlan::from_terminal(&terminal, 0, None);
+    let mut engine = Engine::new(80, 4);
+    engine.write(text.as_bytes());
+    let snapshot = engine.snapshot();
+    let plan = RenderPlan::from_snapshot(&snapshot, 0, None);
     let lines: Vec<_> = plan
         .rows
         .iter()
@@ -150,7 +166,7 @@ fn render_probe_lines_for_text(text: &str) -> Vec<String> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RenderRow {
     visible_row: usize,
     cells: Vec<RenderCell>,
@@ -158,21 +174,22 @@ struct RenderRow {
 }
 
 impl RenderRow {
-    fn from_terminal(
-        terminal: &Terminal,
-        scrollback_offset: usize,
-        selection: Option<Selection>,
+    fn from_row(
+        row: &SnapshotRow,
+        logical_row: usize,
         visible_row: usize,
+        selection: Option<Selection>,
     ) -> Self {
-        let cells: Vec<_> = (0..terminal.cols())
-            .filter_map(|col| {
-                let cell = visible_cell(terminal, scrollback_offset, col, visible_row)?;
-                (!cell.is_wide_continuation()).then(|| RenderCell {
-                    col,
-                    ch: cell.ch(),
-                    style: cell.style(),
-                    selected: is_selected(terminal, scrollback_offset, selection, col, visible_row),
-                })
+        let cells: Vec<_> = row
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| !cell.is_spacer())
+            .map(|(col, cell)| RenderCell {
+                col,
+                ch: cell.ch,
+                style: cell.style,
+                selected: is_selected(selection, col, logical_row),
             })
             .collect();
         let runs = build_runs(&cells);
@@ -184,20 +201,20 @@ impl RenderRow {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RenderCell {
     col: usize,
     ch: char,
-    style: Style,
+    style: CellStyle,
     selected: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RenderRun {
     start_col: usize,
     cells: usize,
     text: String,
-    style: Style,
+    style: CellStyle,
     selected: bool,
 }
 
@@ -246,59 +263,30 @@ fn char_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
 }
 
+/// The `all_rows` index of the visible row `row`, given a scrollback offset.
 pub(super) fn visible_logical_row(
-    terminal: &Terminal,
+    snapshot: &Snapshot,
     scrollback_offset: usize,
     row: usize,
 ) -> usize {
-    visible_start_row(terminal, scrollback_offset) + row
+    logical_start_row(snapshot, scrollback_offset) + row
 }
 
-pub(super) fn logical_cell(terminal: &Terminal, logical_row: usize, col: usize) -> Option<&Cell> {
-    let scrollback_len = terminal.scrollback_len();
-    if logical_row < scrollback_len {
-        terminal
-            .scrollback_row(logical_row)
-            .and_then(|row| row.get(col))
-    } else {
-        terminal.cell(col, logical_row - scrollback_len)
-    }
-}
-
-fn visible_cell(
-    terminal: &Terminal,
-    scrollback_offset: usize,
+/// The character in a logical (all-rows) cell, or `None` if out of range.
+pub(super) fn logical_cell(
+    snapshot: &Snapshot,
+    logical_row: usize,
     col: usize,
-    row: usize,
-) -> Option<&Cell> {
-    logical_cell(
-        terminal,
-        visible_logical_row(terminal, scrollback_offset, row),
-        col,
-    )
+) -> Option<&SnapshotCell> {
+    snapshot.all_rows.get(logical_row)?.cells.get(col)
 }
 
-fn visible_start_row(terminal: &Terminal, scrollback_offset: usize) -> usize {
-    let total_rows = terminal.scrollback_len() + terminal.rows();
-    let bottom = total_rows.saturating_sub(scrollback_offset);
-    bottom.saturating_sub(terminal.rows())
-}
-
-fn is_selected(
-    terminal: &Terminal,
-    scrollback_offset: usize,
-    selection: Option<Selection>,
-    col: usize,
-    visible_row: usize,
-) -> bool {
+fn is_selected(selection: Option<Selection>, col: usize, logical_row: usize) -> bool {
     let Some((start, end)) = selection_range(selection) else {
         return false;
     };
 
-    let coord = CellCoord {
-        col,
-        logical_row: visible_logical_row(terminal, scrollback_offset, visible_row),
-    };
+    let coord = CellCoord { col, logical_row };
     coord_key(coord) >= coord_key(start) && coord_key(coord) <= coord_key(end)
 }
 
@@ -319,11 +307,11 @@ fn paint_cursor(
     painter: &egui::Painter,
     pos: Pos2,
     metrics: &CellMetrics,
-    cursor_shape: CursorShape,
+    cursor_style: CursorStyle,
 ) {
     let rect = Rect::from_min_size(pos, Vec2::new(metrics.width, metrics.height));
-    match cursor_shape {
-        CursorShape::Block => {
+    match cursor_style {
+        CursorStyle::Block | CursorStyle::BlockHollow => {
             painter.rect_stroke(
                 rect,
                 0.0,
@@ -331,7 +319,7 @@ fn paint_cursor(
                 StrokeKind::Inside,
             );
         }
-        CursorShape::Underline => {
+        CursorStyle::Underline => {
             let height = 2.0;
             let underline = Rect::from_min_max(
                 Pos2::new(rect.left(), rect.bottom() - height),
@@ -339,7 +327,7 @@ fn paint_cursor(
             );
             painter.rect_filled(underline, 0.0, Color32::WHITE);
         }
-        CursorShape::Bar => {
+        CursorStyle::Bar => {
             let width = 2.0;
             let bar = Rect::from_min_max(
                 rect.left_top(),
@@ -358,7 +346,7 @@ fn paint_text_decorations(
     color: Color32,
 ) {
     let width = run.cells as f32 * metrics.width;
-    if run.style.underline {
+    if run.style.underline != SnapshotUnderline::None {
         let y = pos.y + metrics.height - 2.0;
         painter.line_segment(
             [Pos2::new(pos.x, y), Pos2::new(pos.x + width, y)],
@@ -374,17 +362,26 @@ fn paint_text_decorations(
     }
 }
 
+/// Whether a cell counts as non-blank for selection text extraction.
+pub(super) fn is_nonblank(cell: &SnapshotCell) -> bool {
+    matches!(cell.width, CellWidth::Wide) || cell.ch != ' '
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghostty_spike::{AnsiColor, Color};
+    use ghostty_spike::{Engine, SnapshotColor};
+
+    fn snapshot_of(cols: usize, rows: usize, bytes: &[u8]) -> Snapshot {
+        let mut engine = Engine::new(cols, rows);
+        engine.write(bytes);
+        engine.snapshot()
+    }
 
     #[test]
     fn render_plan_skips_wide_continuations() {
-        let mut terminal = Terminal::new(6, 1);
-        terminal.write("a好b".as_bytes());
-
-        let plan = RenderPlan::from_terminal(&terminal, 0, None);
+        let snapshot = snapshot_of(6, 1, "a好b".as_bytes());
+        let plan = RenderPlan::from_snapshot(&snapshot, 0, None);
 
         let cells: Vec<_> = plan.rows[0]
             .cells
@@ -399,8 +396,7 @@ mod tests {
 
     #[test]
     fn render_plan_marks_selected_cells() {
-        let mut terminal = Terminal::new(4, 1);
-        terminal.write(b"abcd");
+        let snapshot = snapshot_of(4, 1, b"abcd");
         let selection = Some(Selection {
             anchor: CellCoord {
                 col: 1,
@@ -412,7 +408,7 @@ mod tests {
             },
         });
 
-        let plan = RenderPlan::from_terminal(&terminal, 0, selection);
+        let plan = RenderPlan::from_snapshot(&snapshot, 0, selection);
 
         let selected: Vec<_> = plan.rows[0]
             .cells
@@ -425,23 +421,15 @@ mod tests {
 
     #[test]
     fn render_plan_carries_cell_style() {
-        let mut terminal = Terminal::new(2, 1);
-        terminal.write(b"\x1b[31mA");
-
-        let plan = RenderPlan::from_terminal(&terminal, 0, None);
-
-        assert_eq!(
-            plan.rows[0].cells[0].style.fg,
-            Some(Color::Ansi(AnsiColor::Red))
-        );
+        let snapshot = snapshot_of(2, 1, b"\x1b[31mA");
+        let plan = RenderPlan::from_snapshot(&snapshot, 0, None);
+        assert_eq!(plan.rows[0].cells[0].style.fg, SnapshotColor::Palette(1));
     }
 
     #[test]
     fn render_plan_batches_adjacent_cells_with_same_style() {
-        let mut terminal = Terminal::new(6, 1);
-        terminal.write(b"abc\x1b[31mde");
-
-        let plan = RenderPlan::from_terminal(&terminal, 0, None);
+        let snapshot = snapshot_of(6, 1, b"abc\x1b[31mde");
+        let plan = RenderPlan::from_snapshot(&snapshot, 0, None);
 
         let runs: Vec<_> = plan.rows[0]
             .runs
@@ -451,19 +439,17 @@ mod tests {
         assert_eq!(
             runs,
             vec![
-                (0, 3, "abc", None),
-                (3, 2, "de", Some(Color::Ansi(AnsiColor::Red))),
-                (5, 1, " ", None),
+                (0, 3, "abc", SnapshotColor::Default),
+                (3, 2, "de", SnapshotColor::Palette(1)),
+                (5, 1, " ", SnapshotColor::Default),
             ]
         );
     }
 
     #[test]
     fn render_plan_keeps_wide_characters_in_separate_runs() {
-        let mut terminal = Terminal::new(4, 1);
-        terminal.write("a好b".as_bytes());
-
-        let plan = RenderPlan::from_terminal(&terminal, 0, None);
+        let snapshot = snapshot_of(4, 1, "a好b".as_bytes());
+        let plan = RenderPlan::from_snapshot(&snapshot, 0, None);
 
         let runs: Vec<_> = plan.rows[0]
             .runs
@@ -475,8 +461,7 @@ mod tests {
 
     #[test]
     fn render_plan_splits_runs_at_selection_boundaries() {
-        let mut terminal = Terminal::new(4, 1);
-        terminal.write(b"abcd");
+        let snapshot = snapshot_of(4, 1, b"abcd");
         let selection = Some(Selection {
             anchor: CellCoord {
                 col: 1,
@@ -488,7 +473,7 @@ mod tests {
             },
         });
 
-        let plan = RenderPlan::from_terminal(&terminal, 0, selection);
+        let plan = RenderPlan::from_snapshot(&snapshot, 0, selection);
 
         let runs: Vec<_> = plan.rows[0]
             .runs

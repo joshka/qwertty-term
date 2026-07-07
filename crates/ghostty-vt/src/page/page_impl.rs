@@ -2091,6 +2091,18 @@ impl Page {
         unsafe { self.styles.get(self.mem, id) as *const Style }
     }
 
+    /// Resolve an interned style id to a pointer to its [`Style`] value, without
+    /// changing the ref count. Read-only accessor for the snapshot/read-back
+    /// path (`crate::snapshot`).
+    ///
+    /// # Safety
+    /// `id` must be a live, non-default style id in this page (ref count > 0),
+    /// i.e. exactly the `style_id()` of one of this page's cells.
+    pub(crate) unsafe fn style_by_id(&self, id: style::Id) -> *const Style {
+        // SAFETY: per caller contract.
+        unsafe { self.styles_get(id) }
+    }
+
     /// Copy the managed memory (grapheme / hyperlink / style) of a source cell
     /// into an already-basic-initialized destination cell, for reflow. Port of
     /// the managed-memory section of `PageList.zig` `ReflowCursor.writeCell`

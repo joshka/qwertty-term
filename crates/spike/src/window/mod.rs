@@ -4,7 +4,7 @@ use eframe::egui::{
     self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Vec2,
     ViewportCommand,
 };
-use ghostty_spike::{Cell, MouseTracking, Terminal};
+use ghostty_spike::{Engine, MouseTracking, Snapshot};
 
 use crate::pty::{PtyResult, PtySession};
 
@@ -16,7 +16,10 @@ mod theme;
 
 use font::TerminalFont;
 use input::{encode_key, mouse_button_code};
-use renderer::{CellMetrics, logical_cell, paint_exit_status, paint_terminal, selection_range};
+use renderer::{
+    CellMetrics, is_nonblank, logical_cell, paint_exit_status, paint_terminal, selection_range,
+    visible_logical_row,
+};
 
 pub(crate) fn run_window() -> PtyResult<()> {
     let preferences = app_shell::AppPreferences::load();
@@ -49,7 +52,7 @@ pub(crate) fn render_probe_lines() -> Vec<String> {
 }
 
 struct WindowTerminal {
-    terminal: Terminal,
+    engine: Engine,
     pty: PtySession,
     scrollback_offset: usize,
     shown_title: String,
@@ -81,7 +84,7 @@ impl WindowTerminal {
         let rows = 30;
         let last_saved_window_size = preferences.window_size;
         Ok(Self {
-            terminal: Terminal::new(cols, rows),
+            engine: Engine::new(cols, rows),
             pty: PtySession::spawn(cols as u16, rows as u16)?,
             scrollback_offset: 0,
             shown_title: "ghostty-rs".to_string(),
@@ -98,8 +101,8 @@ impl WindowTerminal {
 
     fn drain_pty(&mut self) -> PtyResult<()> {
         while let Some(bytes) = self.pty.try_read() {
-            self.terminal.write(&bytes);
-            let response = self.terminal.take_output();
+            self.engine.write(&bytes);
+            let response = self.engine.take_output();
             if !response.is_empty() {
                 self.pty.write_all(&response)?;
             }
@@ -111,8 +114,8 @@ impl WindowTerminal {
     fn resize_to_rect(&mut self, rect: Rect, metrics: &CellMetrics) -> PtyResult<()> {
         let cols = (rect.width() / metrics.width).floor().max(1.0) as usize;
         let rows = (rect.height() / metrics.height).floor().max(1.0) as usize;
-        if cols != self.terminal.cols() || rows != self.terminal.rows() {
-            self.terminal.resize(cols, rows);
+        if cols != self.engine.cols() || rows != self.engine.rows() {
+            self.engine.resize(cols, rows);
             self.pty.resize(cols as u16, rows as u16)?;
             self.clamp_scrollback_offset();
         }
@@ -121,6 +124,7 @@ impl WindowTerminal {
 
     fn handle_events(
         &mut self,
+        snapshot: &Snapshot,
         ctx: &egui::Context,
         rect: Rect,
         metrics: &CellMetrics,
@@ -136,7 +140,7 @@ impl WindowTerminal {
                 Event::Paste(text) => {
                     self.scrollback_offset = 0;
                     self.selection = None;
-                    if self.terminal.bracketed_paste() {
+                    if self.engine.bracketed_paste() {
                         self.pty.write_all(b"\x1b[200~")?;
                         self.pty.write_all(text.as_bytes())?;
                         self.pty.write_all(b"\x1b[201~")?;
@@ -158,7 +162,7 @@ impl WindowTerminal {
                         continue;
                     }
                     if let Some(bytes) =
-                        encode_key(key, modifiers, self.terminal.application_cursor_keys())
+                        encode_key(key, modifiers, self.engine.application_cursor_keys())
                     {
                         self.scrollback_offset = 0;
                         self.selection = None;
@@ -181,23 +185,23 @@ impl WindowTerminal {
                     self.report_mouse_button(rect, metrics, pos, button, pressed)?;
                 }
                 Event::PointerMoved(pos)
-                    if self.terminal.mouse_tracking() == Some(MouseTracking::Any) =>
+                    if self.engine.mouse_tracking() == Some(MouseTracking::Any) =>
                 {
                     self.report_mouse_motion(rect, metrics, pos, 35)?;
                 }
                 Event::PointerMoved(pos)
-                    if self.terminal.mouse_tracking() == Some(MouseTracking::Drag) =>
+                    if self.engine.mouse_tracking() == Some(MouseTracking::Drag) =>
                 {
                     if let Some(button_code) = self.pressed_mouse_button {
                         self.report_mouse_motion(rect, metrics, pos, button_code + 32)?;
                     }
                 }
                 Event::Copy => {
-                    if let Some(text) = self.selected_text() {
+                    if let Some(text) = self.selected_text(snapshot) {
                         ctx.copy_text(text);
                     }
                 }
-                Event::WindowFocused(focused) if self.terminal.focus_reporting() => {
+                Event::WindowFocused(focused) if self.engine.focus_reporting() => {
                     if focused {
                         self.pty.write_all(b"\x1b[I")?;
                     } else {
@@ -215,9 +219,9 @@ impl WindowTerminal {
             return false;
         }
         match key {
-            Key::PageUp => self.scroll_by_lines(self.terminal.rows() as isize),
-            Key::PageDown => self.scroll_by_lines(-(self.terminal.rows() as isize)),
-            Key::Home => self.scrollback_offset = self.terminal.scrollback_len(),
+            Key::PageUp => self.scroll_by_lines(self.engine.rows() as isize),
+            Key::PageDown => self.scroll_by_lines(-(self.engine.rows() as isize)),
+            Key::Home => self.scrollback_offset = self.engine.scrollback_len(),
             Key::End => self.scrollback_offset = 0,
             _ => return false,
         }
@@ -228,7 +232,7 @@ impl WindowTerminal {
         let lines = match unit {
             MouseWheelUnit::Point => (delta.y / metrics.height).round() as isize,
             MouseWheelUnit::Line => delta.y.round() as isize,
-            MouseWheelUnit::Page => (delta.y * self.terminal.rows() as f32).round() as isize,
+            MouseWheelUnit::Page => (delta.y * self.engine.rows() as f32).round() as isize,
         };
         self.scroll_by_lines(lines);
     }
@@ -238,52 +242,51 @@ impl WindowTerminal {
             self.scrollback_offset = self
                 .scrollback_offset
                 .saturating_add(lines as usize)
-                .min(self.terminal.scrollback_len());
+                .min(self.engine.scrollback_len());
         } else {
             self.scrollback_offset = self.scrollback_offset.saturating_sub((-lines) as usize);
         }
     }
 
     fn clamp_scrollback_offset(&mut self) {
-        self.scrollback_offset = self.scrollback_offset.min(self.terminal.scrollback_len());
+        self.scrollback_offset = self.scrollback_offset.min(self.engine.scrollback_len());
     }
 
     fn handle_pointer_selection(
         &mut self,
+        snapshot: &Snapshot,
         response: &egui::Response,
         rect: Rect,
         metrics: &CellMetrics,
     ) {
         let shift_pressed = response.ctx.input(|input| input.modifiers.shift);
-        if self.terminal.mouse_tracking().is_some() && !shift_pressed {
+        if self.engine.mouse_tracking().is_some() && !shift_pressed {
             return;
         }
 
-        if response.drag_started_by(PointerButton::Primary) {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if let Some(coord) = self.coord_at_pos(rect, metrics, pos) {
-                    self.selection = Some(Selection {
-                        anchor: coord,
-                        active: coord,
-                    });
-                }
-            }
+        if response.drag_started_by(PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some(coord) = self.coord_at_pos(snapshot, rect, metrics, pos)
+        {
+            self.selection = Some(Selection {
+                anchor: coord,
+                active: coord,
+            });
         }
 
-        if response.dragged_by(PointerButton::Primary) {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if let (Some(coord), Some(selection)) = (
-                    self.coord_at_pos(rect, metrics, pos),
-                    self.selection.as_mut(),
-                ) {
-                    selection.active = coord;
-                }
-            }
+        if response.dragged_by(PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+            && let (Some(coord), Some(selection)) = (
+                self.coord_at_pos(snapshot, rect, metrics, pos),
+                self.selection.as_mut(),
+            )
+        {
+            selection.active = coord;
         }
     }
 
     fn should_report_mouse(&self, modifiers: Modifiers) -> bool {
-        self.terminal.mouse_tracking().is_some() && !modifiers.shift
+        self.engine.mouse_tracking().is_some() && !modifiers.shift
     }
 
     fn report_mouse_button(
@@ -353,7 +356,7 @@ impl WindowTerminal {
         row: usize,
         pressed: bool,
     ) -> PtyResult<()> {
-        if self.terminal.sgr_mouse() {
+        if self.engine.sgr_mouse() {
             let suffix = if pressed { 'M' } else { 'm' };
             let report = format!("\x1b[<{};{};{}{}", code, col + 1, row + 1, suffix);
             self.pty.write_all(report.as_bytes())
@@ -373,29 +376,27 @@ impl WindowTerminal {
 
     fn sync_title(&mut self, ctx: &egui::Context) {
         let title = self
-            .terminal
+            .engine
             .title()
             .filter(|title| !title.is_empty())
-            .unwrap_or("ghostty-rs");
+            .unwrap_or_else(|| "ghostty-rs".to_string());
         if title != self.shown_title {
-            self.shown_title = title.to_string();
+            self.shown_title = title;
             ctx.send_viewport_cmd(ViewportCommand::Title(self.shown_title.clone()));
         }
     }
 
-    fn logical_cell(&self, logical_row: usize, col: usize) -> Option<&Cell> {
-        logical_cell(&self.terminal, logical_row, col)
-    }
-
-    fn visible_logical_row(&self, row: usize) -> usize {
-        renderer::visible_logical_row(&self.terminal, self.scrollback_offset, row)
-    }
-
-    fn coord_at_pos(&self, rect: Rect, metrics: &CellMetrics, pos: Pos2) -> Option<CellCoord> {
+    fn coord_at_pos(
+        &self,
+        snapshot: &Snapshot,
+        rect: Rect,
+        metrics: &CellMetrics,
+        pos: Pos2,
+    ) -> Option<CellCoord> {
         self.screen_coord_at_pos(rect, metrics, pos)
             .map(|(col, row)| CellCoord {
                 col,
-                logical_row: self.visible_logical_row(row),
+                logical_row: visible_logical_row(snapshot, self.scrollback_offset, row),
             })
     }
 
@@ -411,14 +412,14 @@ impl WindowTerminal {
 
         let col = ((pos.x - rect.left()) / metrics.width).floor() as usize;
         let row = ((pos.y - rect.top()) / metrics.height).floor() as usize;
-        if col >= self.terminal.cols() || row >= self.terminal.rows() {
+        if col >= self.engine.cols() || row >= self.engine.rows() {
             return None;
         }
 
         Some((col, row))
     }
 
-    fn selected_text(&self) -> Option<String> {
+    fn selected_text(&self, snapshot: &Snapshot) -> Option<String> {
         let (start, end) = selection_range(self.selection)?;
         let mut out = String::new();
         for logical_row in start.logical_row..=end.logical_row {
@@ -434,35 +435,11 @@ impl WindowTerminal {
             let end_col = if logical_row == end.logical_row {
                 end.col
             } else {
-                self.terminal.cols() - 1
+                self.engine.cols() - 1
             };
-            self.push_selected_row(&mut out, logical_row, start_col, end_col);
+            push_selected_row(snapshot, &mut out, logical_row, start_col, end_col);
         }
         if out.is_empty() { None } else { Some(out) }
-    }
-
-    fn push_selected_row(
-        &self,
-        out: &mut String,
-        logical_row: usize,
-        start_col: usize,
-        end_col: usize,
-    ) {
-        let last_non_blank = (start_col..=end_col)
-            .rev()
-            .find(|&col| self.logical_cell(logical_row, col).is_some_and(is_nonblank));
-        let Some(last_col) = last_non_blank else {
-            return;
-        };
-
-        for col in start_col..=last_col {
-            let Some(cell) = self.logical_cell(logical_row, col) else {
-                continue;
-            };
-            if !cell.is_wide_continuation() {
-                out.push(cell.ch());
-            }
-        }
     }
 
     fn save_preferences(&self) {
@@ -488,9 +465,6 @@ impl WindowTerminal {
 impl eframe::App for WindowTerminal {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let _ = self.drain_pty();
-        for text in self.terminal.take_clipboard() {
-            ctx.copy_text(text);
-        }
         self.sync_title(ctx);
         if !self.close_requested
             && self.exit_status.is_none()
@@ -515,13 +489,14 @@ impl eframe::App for WindowTerminal {
             response.request_focus();
         }
         let _ = self.resize_to_rect(rect, &metrics);
-        self.handle_pointer_selection(&response, rect, &metrics);
-        let _ = self.handle_events(ui.ctx(), rect, &metrics);
+        let snapshot = self.engine.snapshot();
+        self.handle_pointer_selection(&snapshot, &response, rect, &metrics);
+        let _ = self.handle_events(&snapshot, ui.ctx(), rect, &metrics);
         paint_terminal(
             ui,
             rect,
             &metrics,
-            &self.terminal,
+            &snapshot,
             self.scrollback_offset,
             self.selection,
         );
@@ -570,8 +545,30 @@ impl WindowTerminal {
     }
 }
 
-fn is_nonblank(cell: &Cell) -> bool {
-    cell.ch() != ' ' || cell.is_wide_continuation()
+/// Append the selected span of a logical (all-rows) row to `out`, trimming
+/// trailing blanks and skipping wide-glyph spacer cells.
+fn push_selected_row(
+    snapshot: &Snapshot,
+    out: &mut String,
+    logical_row: usize,
+    start_col: usize,
+    end_col: usize,
+) {
+    let last_non_blank = (start_col..=end_col)
+        .rev()
+        .find(|&col| logical_cell(snapshot, logical_row, col).is_some_and(is_nonblank));
+    let Some(last_col) = last_non_blank else {
+        return;
+    };
+
+    for col in start_col..=last_col {
+        let Some(cell) = logical_cell(snapshot, logical_row, col) else {
+            continue;
+        };
+        if !cell.is_spacer() {
+            out.push(cell.ch);
+        }
+    }
 }
 
 fn exit_status_message(status: &portable_pty::ExitStatus) -> String {

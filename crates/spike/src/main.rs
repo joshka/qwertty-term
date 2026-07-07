@@ -13,7 +13,7 @@ use crossterm::{
     },
     terminal::{self as term, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ghostty_spike::{AnsiColor, Color, CursorShape, Style, Terminal};
+use ghostty_spike::{CellStyle, CursorStyle, Engine, SnapshotColor, SnapshotUnderline};
 
 mod pty;
 mod window;
@@ -68,22 +68,26 @@ fn run_replay() -> PtyResult<()> {
     io::stdin().read_to_end(&mut bytes)?;
 
     let (cols, rows) = term::size().unwrap_or((80, 24));
-    let mut terminal = Terminal::new(cols as usize, rows.max(1) as usize);
-    terminal.write(&bytes);
+    let mut engine = Engine::new(cols as usize, rows.max(1) as usize);
+    engine.write(&bytes);
 
-    println!("{}", terminal.screen_dump());
+    println!("{}", engine.screen_dump());
     Ok(())
 }
 
 fn run_smoke_command(command: &str) -> PtyResult<()> {
-    let mut terminal = Terminal::new(80, 24);
+    let mut engine = Engine::new(80, 24);
     let mut pty = PtySession::spawn(80, 24)?;
     pty.write_all(command.as_bytes())?;
     pty.write_all(b"\nexit\n")?;
 
     loop {
         while let Some(bytes) = pty.try_read() {
-            terminal.write(&bytes);
+            engine.write(&bytes);
+            let response = engine.take_output();
+            if !response.is_empty() {
+                pty.write_all(&response)?;
+            }
         }
         if pty.child_exited()? {
             break;
@@ -92,10 +96,10 @@ fn run_smoke_command(command: &str) -> PtyResult<()> {
     }
 
     while let Some(bytes) = pty.try_read() {
-        terminal.write(&bytes);
+        engine.write(&bytes);
     }
 
-    println!("{}", terminal.screen_dump());
+    println!("{}", engine.screen_dump());
     Ok(())
 }
 
@@ -103,13 +107,13 @@ fn run_interactive() -> PtyResult<()> {
     let mut stdout = io::stdout();
     let (cols, rows) = term::size().unwrap_or((80, 24));
     let terminal_rows = rows.max(1);
-    let mut terminal = Terminal::new(cols as usize, terminal_rows as usize);
+    let mut engine = Engine::new(cols as usize, terminal_rows as usize);
     let mut pty = PtySession::spawn(cols, terminal_rows)?;
 
     term::enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
 
-    let result = interactive_loop(&mut terminal, &mut pty, &mut stdout);
+    let result = interactive_loop(&mut engine, &mut pty, &mut stdout);
 
     execute!(
         stdout,
@@ -124,21 +128,20 @@ fn run_interactive() -> PtyResult<()> {
 }
 
 fn interactive_loop(
-    terminal: &mut Terminal,
+    engine: &mut Engine,
     pty: &mut PtySession,
     stdout: &mut io::Stdout,
 ) -> PtyResult<()> {
-    render(terminal, stdout)?;
+    render(engine, stdout)?;
 
     loop {
         let mut dirty = false;
         while let Some(bytes) = pty.try_read() {
-            terminal.write(&bytes);
-            let response = terminal.take_output();
+            engine.write(&bytes);
+            let response = engine.take_output();
             if !response.is_empty() {
                 pty.write_all(&response)?;
             }
-            drop(terminal.take_clipboard());
             dirty = true;
         }
 
@@ -150,12 +153,12 @@ fn interactive_loop(
             match event::read()? {
                 Event::Key(key) if should_quit(key) => break,
                 Event::Key(key) => {
-                    if let Some(bytes) = encode_key(key, terminal.application_cursor_keys()) {
+                    if let Some(bytes) = encode_key(key, engine.application_cursor_keys()) {
                         pty.write_all(&bytes)?;
                     }
                 }
                 Event::Paste(text) => {
-                    if terminal.bracketed_paste() {
+                    if engine.bracketed_paste() {
                         pty.write_all(b"\x1b[200~")?;
                         pty.write_all(text.as_bytes())?;
                         pty.write_all(b"\x1b[201~")?;
@@ -165,7 +168,7 @@ fn interactive_loop(
                 }
                 Event::Resize(cols, rows) => {
                     let terminal_rows = rows.max(1);
-                    terminal.resize(cols as usize, terminal_rows as usize);
+                    engine.resize(cols as usize, terminal_rows as usize);
                     pty.resize(cols, terminal_rows)?;
                     dirty = true;
                 }
@@ -174,7 +177,7 @@ fn interactive_loop(
         }
 
         if dirty {
-            render(terminal, stdout)?;
+            render(engine, stdout)?;
         }
     }
 
@@ -240,7 +243,7 @@ fn encode_control_char(ch: char) -> Option<Vec<u8>> {
     None
 }
 
-fn render(terminal: &Terminal, stdout: &mut io::Stdout) -> PtyResult<()> {
+fn render(engine: &Engine, stdout: &mut io::Stdout) -> PtyResult<()> {
     queue!(
         stdout,
         cursor::MoveTo(0, 0),
@@ -249,32 +252,32 @@ fn render(terminal: &Terminal, stdout: &mut io::Stdout) -> PtyResult<()> {
         SetAttribute(Attribute::Reset)
     )?;
 
-    for row in 0..terminal.rows() {
+    let snapshot = engine.snapshot();
+    let window = snapshot.visible_window(0);
+    for (row, snapshot_row) in window.iter().enumerate() {
         queue!(stdout, cursor::MoveTo(0, row as u16))?;
-        let mut last_style = None;
-        for col in 0..terminal.cols() {
-            let Some(cell) = terminal.cell(col, row) else {
-                continue;
-            };
-            if cell.is_wide_continuation() {
+        let mut last_style: Option<CellStyle> = None;
+        for cell in &snapshot_row.cells {
+            if cell.is_spacer() {
                 continue;
             }
-            if Some(cell.style()) != last_style {
-                apply_style(stdout, cell.style())?;
-                last_style = Some(cell.style());
+            if Some(cell.style) != last_style {
+                apply_style(stdout, &cell.style)?;
+                last_style = Some(cell.style);
             }
-            queue!(stdout, Print(cell.ch()))?;
+            queue!(stdout, Print(cell.ch))?;
         }
     }
 
+    let cursor = snapshot.cursor;
     queue!(
         stdout,
         ResetColor,
         SetAttribute(Attribute::Reset),
-        to_crossterm_cursor_style(terminal.cursor_shape()),
-        cursor::MoveTo(terminal.cursor().col as u16, terminal.cursor().row as u16)
+        to_crossterm_cursor_style(cursor.style),
+        cursor::MoveTo(cursor.col as u16, cursor.row as u16)
     )?;
-    if terminal.cursor_visible() {
+    if cursor.visible {
         queue!(stdout, cursor::Show)?;
     } else {
         queue!(stdout, cursor::Hide)?;
@@ -283,15 +286,15 @@ fn render(terminal: &Terminal, stdout: &mut io::Stdout) -> PtyResult<()> {
     Ok(())
 }
 
-fn to_crossterm_cursor_style(shape: CursorShape) -> SetCursorStyle {
-    match shape {
-        CursorShape::Block => SetCursorStyle::SteadyBlock,
-        CursorShape::Underline => SetCursorStyle::SteadyUnderScore,
-        CursorShape::Bar => SetCursorStyle::SteadyBar,
+fn to_crossterm_cursor_style(style: CursorStyle) -> SetCursorStyle {
+    match style {
+        CursorStyle::Block | CursorStyle::BlockHollow => SetCursorStyle::SteadyBlock,
+        CursorStyle::Underline => SetCursorStyle::SteadyUnderScore,
+        CursorStyle::Bar => SetCursorStyle::SteadyBar,
     }
 }
 
-fn apply_style(stdout: &mut io::Stdout, style: Style) -> PtyResult<()> {
+fn apply_style(stdout: &mut io::Stdout, style: &CellStyle) -> PtyResult<()> {
     queue!(
         stdout,
         ResetColor,
@@ -308,7 +311,7 @@ fn apply_style(stdout: &mut io::Stdout, style: Style) -> PtyResult<()> {
         } else {
             Attribute::NoItalic
         }),
-        SetAttribute(if style.underline {
+        SetAttribute(if style.underline != SnapshotUnderline::None {
             Attribute::Underlined
         } else {
             Attribute::NoUnderline
@@ -330,37 +333,20 @@ fn apply_style(stdout: &mut io::Stdout, style: Style) -> PtyResult<()> {
         })
     )?;
 
-    if let Some(fg) = style.fg.and_then(to_crossterm_color) {
+    if let Some(fg) = to_crossterm_color(style.fg) {
         queue!(stdout, SetForegroundColor(fg))?;
     }
-    if let Some(bg) = style.bg.and_then(to_crossterm_color) {
+    if let Some(bg) = to_crossterm_color(style.bg) {
         queue!(stdout, SetBackgroundColor(bg))?;
     }
 
     Ok(())
 }
 
-fn to_crossterm_color(color: Color) -> Option<CrosstermColor> {
+fn to_crossterm_color(color: SnapshotColor) -> Option<CrosstermColor> {
     match color {
-        Color::Ansi(color) => Some(match color {
-            AnsiColor::Black => CrosstermColor::Black,
-            AnsiColor::Red => CrosstermColor::DarkRed,
-            AnsiColor::Green => CrosstermColor::DarkGreen,
-            AnsiColor::Yellow => CrosstermColor::DarkYellow,
-            AnsiColor::Blue => CrosstermColor::DarkBlue,
-            AnsiColor::Magenta => CrosstermColor::DarkMagenta,
-            AnsiColor::Cyan => CrosstermColor::DarkCyan,
-            AnsiColor::White => CrosstermColor::Grey,
-            AnsiColor::BrightBlack => CrosstermColor::DarkGrey,
-            AnsiColor::BrightRed => CrosstermColor::Red,
-            AnsiColor::BrightGreen => CrosstermColor::Green,
-            AnsiColor::BrightYellow => CrosstermColor::Yellow,
-            AnsiColor::BrightBlue => CrosstermColor::Blue,
-            AnsiColor::BrightMagenta => CrosstermColor::Magenta,
-            AnsiColor::BrightCyan => CrosstermColor::Cyan,
-            AnsiColor::BrightWhite => CrosstermColor::White,
-        }),
-        Color::Indexed(value) => Some(CrosstermColor::AnsiValue(value)),
-        Color::Rgb { r, g, b } => Some(CrosstermColor::Rgb { r, g, b }),
+        SnapshotColor::Default => None,
+        SnapshotColor::Palette(value) => Some(CrosstermColor::AnsiValue(value)),
+        SnapshotColor::Rgb { r, g, b } => Some(CrosstermColor::Rgb { r, g, b }),
     }
 }

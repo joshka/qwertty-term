@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use ghostty_spike::Terminal;
+use ghostty_spike::Engine;
 
 #[test]
 fn replay_fixtures_match_expected_screen() {
@@ -19,11 +19,11 @@ fn run_fixture(path: &Path) {
     let input = fs::read_to_string(path.join("input.esc")).expect("read fixture input");
     let expected = fs::read_to_string(path.join("expected.txt")).expect("read fixture expected");
 
-    let mut terminal = Terminal::new(size.cols, size.rows);
-    terminal.write(&decode_escaped_stream(&input));
+    let mut engine = Engine::new(size.cols, size.rows);
+    engine.write(&decode_escaped_stream(&input));
 
     assert_eq!(
-        terminal.screen_dump(),
+        engine.screen_dump(),
         expected.trim_end_matches('\n'),
         "fixture {}",
         path.file_name()

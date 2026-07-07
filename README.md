@@ -6,11 +6,23 @@ This is not a full Ghostty port. It keeps the VT state machine, grid, cursor,
 style, and screen behavior small enough to inspect while borrowing behavior
 from Ghostty's terminal and stream tests.
 
+> **Now running on `ghostty-vt`.** Both frontends (the terminal-hosted mode and
+> the native window) are driven by the `ghostty-vt` engine crate — the
+> page-based Rust port of Ghostty's terminal core — via a thin adapter
+> (`crates/spike/src/engine.rs`). The frontends feed PTY bytes into
+> `ghostty-vt`, drain its reply queue back to the PTY, and render an owned
+> styled snapshot (`ghostty_vt::snapshot::Snapshot`) of the grid + scrollback.
+> The spike's original in-tree VT core has been removed.
+
 ## Run
 
 There are four useful run modes. The native window is the closest thing to
 "run the terminal app"; the terminal-hosted mode is useful when you want to
 exercise the PTY and VT core without opening another window.
+
+The spike binary is `ghostty-spike`. Bare `cargo run -- <args>` from the
+workspace root resolves to it; `cargo run -p ghostty-spike -- <args>` is the
+explicit form.
 
 ### Terminal-Hosted Shell
 
@@ -18,7 +30,7 @@ Start a PTY-backed terminal running your `$SHELL` inside the terminal you used
 to launch Cargo:
 
 ```bash
-cargo run
+cargo run -p ghostty-spike
 ```
 
 The app uses the local terminal as a simple renderer, starts a real PTY, and
@@ -34,7 +46,7 @@ experience.
 Start the experimental native macOS window frontend:
 
 ```bash
-cargo run -- --window
+cargo run -p ghostty-spike -- --window
 ```
 
 This opens a separate window backed by the same PTY and VT core. Close the
