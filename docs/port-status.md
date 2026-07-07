@@ -20,6 +20,23 @@ Status legend: `—` not started · `WIP` · `done`
 
 ## Milestones
 
+### M1 certification (2026-07-08)
+
+The `ghostty-vt` engine is certified against ghostty `2da015cd6`:
+
+- **Differential parity**: zero divergences vs ReleaseFast libghostty-vt across 3 replay
+  fixtures, 8 hand streams, and the 114-case corpus (11 torture suites + 4 real-app
+  captures) — on screen text, cursor, AND formatter output.
+- **Tests**: 1,428 lib tests (Terminal 419; every upstream inline test ported or its
+  absence justified in the ledger; 2 blocked on marked seams).
+- **Fuzz**: 7.9M runs / 121s, zero crashes. **Miri**: clean per module (bounded); caught
+  and fixed 3 real bugs during the port (2 Stacked Borrows, 1 UAF).
+- **Perf gate**: 0.52-0.63x of ReleaseFast reference on all four streams (gate ≥0.5x).
+- **Engine bugs found by the verification net itself**: spacer-tail overwrite panic
+  (corpus), wrap-join blank-trim divergence (backfill), grapheme-OOM silent-drop
+  infinite loop (backfill glitch fixture) - all fixed with regression tests.
+- Known deferrals tracked in the ledger; upstream findings drafted in work/upstream/.
+
 | Milestone                                                       | Status              | Notes                                                                                                                                                                                                                                                                                                                                               |
 | --------------------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Differential parity (fixtures + hand streams + 114-case corpus) | **done 2026-07-07** | zero divergences vs libghostty-vt; corpus (11 torture suites + 4 real-app captures) found+fixed 1 engine bug (spacer-tail overwrite panic)                                                                                                                                                                                                          |

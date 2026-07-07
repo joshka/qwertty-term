@@ -17,9 +17,11 @@ into chunks below. `work/default` is the integration point: always green, gate b
 - [x] Snapshot gaps: dynamic palette, OSC 52 read-back, underline styles
 - [x] Search core — DONE 2026-07-07: literal-substring matcher (upstream has NO regex —
       zero deps), 38/38 tests; Thread wrapper + ScreenSearch cache → M2
-- [ ] Deferred-test backfill: Terminal edge permutations (~300 of 381), resize permutations,
-      formatter raw-Page permutations — batchable Sonnet chunks, S/M each
-- [ ] Certification note in ledger (corpus size, perf table, fuzz/Miri evidence)
+- [x] Deferred-test backfill — DONE 2026-07-08: Terminal 419 tests (of Zig 381 semantic set;
+      only 2 blocked on seams), Screen cursorCopy ported, 1428 vt lib tests total; found+fixed
+      grapheme-OOM infinite-loop bug; PageList resize permutations confirmed intentionally
+      reduced
+- [x] Certification note — DONE 2026-07-08 (see docs/port-status.md Milestones)
 
 ## M2 — Daily-drivable terminal (termio + minimal input) — ~13k LoC
 
@@ -29,7 +31,7 @@ Dependency spine: A → B/C → D → E → M/N; input track H → I/J/K/L indep
 | --- | ------------------------------------------------------- | ------- | --- | -------------------------------------------------------------------------------------------------------------------- |
 | A   | PTY primitive (pty.zig+pty.c → rustix)                  | 546     | M   | quick-win class                                                                                                      |
 | B   | termio plumbing (Options/message/mailbox/backend)       | 384     | S   | preserve mailbox backpressure-unlock trick                                                                           |
-| C   | **threads-vs-tokio spike + ADR** (Thread.zig semantics) | 531     | M   | gates D; timeboxed                                                                                                   |
+| C   | **threads-vs-tokio spike + ADR** (Thread.zig semantics) | 531     | M   | **DONE 2026-07-08** (ADR-002 PROPOSED: threads+polling; awaiting Josh review)                                        |
 | D   | Exec: fork/exec, 2-stage read pipeline, termios poll    | 2,143   | XL  | highest-stakes concurrency                                                                                           |
 | E   | Termio integration hub                                  | 800     | L   | after B+D                                                                                                            |
 | F   | stream_handler glue (VT actions → mailboxes)            | 1,577   | L   | much already ported in ghostty-vt stream; delta only                                                                 |
