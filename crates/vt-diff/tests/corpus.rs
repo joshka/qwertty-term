@@ -215,7 +215,6 @@ fn assert_case_agrees(rel: &str) {
 /// The reference is right; the Rust port needs the same
 /// transient-state fix. Remove this test + the case's `SKIP` file when fixed.
 #[test]
-#[ignore = "known divergence: Rust engine debug-panics on spacer-tail overwrite"]
-fn known_divergence_wide_spacer_overwrite() {
+fn regression_wide_spacer_overwrite() {
     assert_case_agrees("wrap_semantics/wide_spacer_overwrite");
 }
