@@ -18,22 +18,22 @@ Screen re-exposes (`pages.eraseRowBounded`, `pages.scroll`).
 
 ## Fields (`Terminal.zig:45-134`)
 
-| field | Zig type | role |
-| --- | --- | --- |
-| `screens` | `ScreenSet` | primary + (lazy) alternate screen; `.active`/`.active_key` |
-| `status_display` | `ansi.StatusDisplay = .main` | DECSASD/DECSSDT; non-`.main` prints are black-holed |
-| `tabstops` | `Tabstops` | HT/HTS/TBC stop set, `TABSTOP_INTERVAL = 8` |
-| `rows`, `cols` | `size.CellCountInt` | terminal grid size (mirror of active screen) |
-| `width_px`, `height_px` | `u32 = 0` | pixel size for pty/images |
-| `scrolling_region` | `ScrollingRegion` | `{top, bottom, left, right}` (0-indexed; l/r margins) |
-| `pwd` | `std.ArrayList(u8)` | last reported OSC 7 pwd |
-| `title` | `std.ArrayList(u8)` | OSC 0/2 window title |
-| `colors` | `Colors` | `{background, foreground, cursor: DynamicRGB, palette: DynamicPalette}` |
-| `previous_char` | `?u21 = null` | for REP (`ESC [ n b`) repeat |
-| `modes` | `modespkg.ModeState = .{}` | current/saved/default mode bitsets |
-| `mouse_shape` | `mouse.Shape = .text` | OSC 22 mouse shape |
-| `glyph_glossary` | `glyph.Glossary = .empty` | Glyph Protocol registrations (build-gated) |
-| `flags` | packed struct | see below |
+| field                   | Zig type                     | role                                                                    |
+| ----------------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `screens`               | `ScreenSet`                  | primary + (lazy) alternate screen; `.active`/`.active_key`              |
+| `status_display`        | `ansi.StatusDisplay = .main` | DECSASD/DECSSDT; non-`.main` prints are black-holed                     |
+| `tabstops`              | `Tabstops`                   | HT/HTS/TBC stop set, `TABSTOP_INTERVAL = 8`                             |
+| `rows`, `cols`          | `size.CellCountInt`          | terminal grid size (mirror of active screen)                            |
+| `width_px`, `height_px` | `u32 = 0`                    | pixel size for pty/images                                               |
+| `scrolling_region`      | `ScrollingRegion`            | `{top, bottom, left, right}` (0-indexed; l/r margins)                   |
+| `pwd`                   | `std.ArrayList(u8)`          | last reported OSC 7 pwd                                                 |
+| `title`                 | `std.ArrayList(u8)`          | OSC 0/2 window title                                                    |
+| `colors`                | `Colors`                     | `{background, foreground, cursor: DynamicRGB, palette: DynamicPalette}` |
+| `previous_char`         | `?u21 = null`                | for REP (`ESC [ n b`) repeat                                            |
+| `modes`                 | `modespkg.ModeState = .{}`   | current/saved/default mode bitsets                                      |
+| `mouse_shape`           | `mouse.Shape = .text`        | OSC 22 mouse shape                                                      |
+| `glyph_glossary`        | `glyph.Glossary = .empty`    | Glyph Protocol registrations (build-gated)                              |
+| `flags`                 | packed struct                | see below                                                               |
 
 `flags` (`:89-134`): `shell_redraws_prompt: osc.semantic_prompt.Redraw = .true`
 (Kitty prompt-redraw-on-resize extension), `modify_other_keys_2: bool` (ESC[4;2m
@@ -141,8 +141,8 @@ Grouped, with `Terminal.zig` line refs:
   row shift + bg fill), `deleteLines` (`:2452`, DL).
 - **Insert/delete/erase chars**: `insertBlanks` (`:2631`, ICH), `deleteChars`
   (`:2732`, DCH), `eraseChars` (`:2782`, ECH).
-- **Erase**: `eraseLine` (`:2834`, EL — right/left/complete/right-unless-pending
-  + protected-mode variants), `eraseDisplay` (`:2914`, ED — below/above/complete/
+- **Erase**: `eraseLine` (`:2834`, EL — right/left/complete/right-unless-pending +
+  protected-mode variants), `eraseDisplay` (`:2914`, ED — below/above/complete/
   scrollback/scroll_complete + protected).
 - **Screen alignment / reset**: `decaln` (`:3046`, DECALN fill with `E`),
   `fullReset` (`:3580`, RIS), and the soft-reset path lives in the mode/switch
@@ -233,6 +233,7 @@ under the normal runner).
 ### Pass 2 additions
 
 **Screen surface added (all `pub(crate)`), ported from `Screen.zig`:**
+
 - `cursor_scroll_above` + `cursor_scroll_above_rotate` (scrollback-creating
   insert-above; single-page fast path + cross-page rotate), backed by a new
   `Page::rotate_rows_once_right` (`fastmem.rotateOnceR` port).
@@ -254,8 +255,8 @@ l/r-margin-aware row shift with same-page swap/move and cross-page clone),
 `erase_line` (right/left/complete + protected), `erase_display` (below/above/
 complete/scrollback/scroll_complete + ^L-at-prompt heuristic + protected),
 `decaln`, `set_attribute` (full `sgr::Attribute → Style` map), `switch_screen`/
-`switch_screen_mode` (47/1047/1049), `full_reset`. `index`'s l/r-margin slow path
-+ `blank_cell().is_zero()` bg-fill check are now wired via `scroll_up`.
+`switch_screen_mode` (47/1047/1049), `full_reset`. `index`'s l/r-margin slow path +
+`blank_cell().is_zero()` bg-fill check are now wired via `scroll_up`.
 
 **Grapheme-clustering print** (`terminal/print.rs::print_grapheme`): mode-2027
 break-state machine over the previous cell's cluster, `grapheme_width_effect`

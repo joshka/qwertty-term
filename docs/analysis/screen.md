@@ -35,21 +35,21 @@ There are **two** `Screen` instances per `Terminal` (primary + alternate);
 
 The cursor is the heart of Screen. Fields:
 
-| field | role |
-| --- | --- |
-| `x`, `y: CellCountInt` | position **within the active area** (not screen/history) |
-| `cursor_style: CursorStyle` | visual style (`cursor.zig`: bar/block/underline/block_hollow); defaults `.block` |
-| `pending_wrap: bool` | the "last column flag (LCF)"; next print soft-wraps |
-| `protected: bool` | new cells get the protected attribute |
-| `style: style.Style` | the concrete active style *value* (source of truth) |
-| `style_id: style.Id` | the **page-specific** interned id for `style`; `default_id` (0) when default |
-| `hyperlink_id: hyperlink.Id` | active OSC8 link id in the cursor's page (0 = none) |
-| `hyperlink_implicit_id: OffsetInt` | monotonic counter for links without an explicit id |
-| `hyperlink: ?*Hyperlink` | heap copy of the active link (page-independent) so it can be re-inserted when the page pin moves |
-| `semantic_content: Cell.SemanticContent` | output/input/prompt applied to newly written cells |
-| `semantic_content_clear_eol: bool` | input-area "clear to EOL" hint |
-| `page_pin: *PageList.Pin` | the **tracked** pin locating the cursor (always accurate across mutations) |
-| `page_row: *Row`, `page_cell: *Cell` | cached pointers derived from the pin — the fast path |
+| field                                    | role                                                                                             |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `x`, `y: CellCountInt`                   | position **within the active area** (not screen/history)                                         |
+| `cursor_style: CursorStyle`              | visual style (`cursor.zig`: bar/block/underline/block_hollow); defaults `.block`                 |
+| `pending_wrap: bool`                     | the "last column flag (LCF)"; next print soft-wraps                                              |
+| `protected: bool`                        | new cells get the protected attribute                                                            |
+| `style: style.Style`                     | the concrete active style *value* (source of truth)                                              |
+| `style_id: style.Id`                     | the **page-specific** interned id for `style`; `default_id` (0) when default                     |
+| `hyperlink_id: hyperlink.Id`             | active OSC8 link id in the cursor's page (0 = none)                                              |
+| `hyperlink_implicit_id: OffsetInt`       | monotonic counter for links without an explicit id                                               |
+| `hyperlink: ?*Hyperlink`                 | heap copy of the active link (page-independent) so it can be re-inserted when the page pin moves |
+| `semantic_content: Cell.SemanticContent` | output/input/prompt applied to newly written cells                                               |
+| `semantic_content_clear_eol: bool`       | input-area "clear to EOL" hint                                                                   |
+| `page_pin: *PageList.Pin`                | the **tracked** pin locating the cursor (always accurate across mutations)                       |
+| `page_row: *Row`, `page_cell: *Cell`     | cached pointers derived from the pin — the fast path                                             |
 
 The invariant (`assertIntegrity` `:344-365`): `cursor.x/y` must equal
 `pointFromPin(.active, page_pin)`. The pin is the truth; x/y and the row/cell
@@ -249,16 +249,16 @@ The port hinges on two harness helpers ported into `screen/mod.rs` under
 row iterator). These unlock the cursor/scroll/clear/erase/resize/clone/dirty/
 semantic-prompt tests.
 
-| Category (upstream) | Ported | Notes |
-| --- | --- | --- |
-| read/write (5) | 5 | via the harness |
-| clearRows/eraseRows (6) | 5 | styled-line variant deferred (needs SGR) |
-| scrolling/scrollback/scroll-and-clear (16) | 13 | 2 "across pages preserves style" deferred (SGR); "moves selection" deferred |
-| clone (15) | 8 | 7 selection-carrying clones deferred |
-| clear history / clear above (4) | 4 | |
-| resize no-reflow (11) | 11 | incl. trims-blank-lines (bg-cell write) + soft-wrap + semantic-prompt-preserve |
-| resize reflow (39) | 39 | full block incl. wide-char/spacer-head/grapheme, cursor-preserve, prompt_redraw last+true |
-| kitty FlagStack (5) | 5 | ported from `kitty/key.zig` |
+| Category (upstream)                        | Ported | Notes                                                                                     |
+| ------------------------------------------ | ------ | ----------------------------------------------------------------------------------------- |
+| read/write (5)                             | 5      | via the harness                                                                           |
+| clearRows/eraseRows (6)                    | 5      | styled-line variant deferred (needs SGR)                                                  |
+| scrolling/scrollback/scroll-and-clear (16) | 13     | 2 "across pages preserves style" deferred (SGR); "moves selection" deferred               |
+| clone (15)                                 | 8      | 7 selection-carrying clones deferred                                                      |
+| clear history / clear above (4)            | 4      |                                                                                           |
+| resize no-reflow (11)                      | 11     | incl. trims-blank-lines (bg-cell write) + soft-wrap + semantic-prompt-preserve            |
+| resize reflow (39)                         | 39     | full block incl. wide-char/spacer-head/grapheme, cursor-preserve, prompt_redraw last+true |
+| kitty FlagStack (5)                        | 5      | ported from `kitty/key.zig`                                                               |
 
 **Deferred tests (by reason):**
 
@@ -304,5 +304,3 @@ semantic-prompt tests.
   `TODO(chunk:terminal-state)`.
 - **`osc/semantic_prompt`** `Click`/`ClickEvents`/`PromptKind`/`Redraw` — narrow
   local placeholders marked `TODO(chunk:osc)`.
-</content>
-</invoke>

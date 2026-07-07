@@ -13,14 +13,14 @@ feeds the parser bytes when a control sequence is in flight.
 
 ## File map
 
-| File | Role |
-| --- | --- |
-| `src/terminal/Parser.zig` (1.1k) | Parser struct, `Action` union, `next(u8) → [3]?Action`, param/intermediate collection |
-| `src/terminal/parse_table.zig` (389) | Comptime `[256][14]Transition` table (state × byte → next state + transition action) |
-| `src/terminal/UTF8Decoder.zig` (143) | Hoehrmann DFA UTF-8 decoder, error-replacing, non-allocating |
-| `src/terminal/stream.zig` | Composes decoder + parser + handler; SIMD fast path lives here |
-| `src/simd/vt.zig` (+ `vt.cpp`) | `utf8DecodeUntilControlSeq` — SIMD decode of ground-state bytes (noted, not ported) |
-| `src/terminal/osc.zig` | `osc.Parser`, embedded in `Parser` (separate upcoming chunk) |
+| File                                 | Role                                                                                  |
+| ------------------------------------ | ------------------------------------------------------------------------------------- |
+| `src/terminal/Parser.zig` (1.1k)     | Parser struct, `Action` union, `next(u8) → [3]?Action`, param/intermediate collection |
+| `src/terminal/parse_table.zig` (389) | Comptime `[256][14]Transition` table (state × byte → next state + transition action)  |
+| `src/terminal/UTF8Decoder.zig` (143) | Hoehrmann DFA UTF-8 decoder, error-replacing, non-allocating                          |
+| `src/terminal/stream.zig`            | Composes decoder + parser + handler; SIMD fast path lives here                        |
+| `src/simd/vt.zig` (+ `vt.cpp`)       | `utf8DecodeUntilControlSeq` — SIMD decode of ground-state bytes (noted, not ported)   |
+| `src/terminal/osc.zig`               | `osc.Parser`, embedded in `Parser` (separate upcoming chunk)                          |
 
 ## States and the transition table
 
@@ -57,7 +57,7 @@ Anywhere transitions (`parse_table.zig:57-86`): `0x18`/`0x1A` → ground + execu
 3. **SOS/PM/APC all produce APC events**: Williams' sos_pm_apc_string state ignores its
    contents; ghostty emits `apc_start` on entry, `apc_put` per byte, `apc_end` on exit
    (`Parser.zig:274,307`, `parse_table.zig:111-120`) for all three introducers (ESC X, ESC ^,
-   ESC _; 0x98/0x9E/0x9F). Discriminating APC from SOS/PM is downstream's problem (the APC
+   ESC \_; 0x98/0x9E/0x9F). Discriminating APC from SOS/PM is downstream's problem (the APC
    handler keys on the first data byte, e.g. kitty graphics `G`). Data bytes `0x00-0x7F`
    (minus the anywhere aborts) are apc_put; **bytes `0xA0-0xFF` are silently dropped** (no
    table entry → default no-action self-transition) and `0x80-0x9F` hit the anywhere C1 rules

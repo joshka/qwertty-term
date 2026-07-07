@@ -23,10 +23,10 @@ the two pins as x-bounds per row — the module itself never encodes shape.
 
 ### The three representations
 
-| Type | Endpoints stored as | Survives mutation? | Purpose |
-| --- | --- | --- | --- |
-| `Untracked` (`:31-49`) | two `Pin` values | No — valid only for current terminal state | cheap, transient result (what `highlightSemanticContent` returns) |
-| `Tracked` (`:62-105`) | two `*Pin` (tracked pins in a `Screen`) | Yes — `PageList` fixes them on every mutation | long-lived highlights (a persistent selection) |
+| Type                     | Endpoints stored as                       | Survives mutation?                                       | Purpose                                                                                     |
+| ------------------------ | ----------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `Untracked` (`:31-49`)   | two `Pin` values                          | No — valid only for current terminal state               | cheap, transient result (what `highlightSemanticContent` returns)                           |
+| `Tracked` (`:62-105`)    | two `*Pin` (tracked pins in a `Screen`)   | Yes — `PageList` fixes them on every mutation            | long-lived highlights (a persistent selection)                                              |
 | `Flattened` (`:112-213`) | `MultiArrayList(Chunk)` + `top_x`/`bot_x` | Yes for traversal (holds node+serial, no live pin deref) | iterate the whole area without reading terminal state or dereferencing possibly-pruned pins |
 
 - **`Untracked`** — `{ start: Pin, end: Pin }`. `track(screen)` promotes it to a `Tracked`

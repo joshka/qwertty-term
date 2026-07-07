@@ -16,20 +16,20 @@ at the end for the exact accounting against upstream's 205).
 
 `PageList` (fields at `PageList.zig:117-204`):
 
-| field | role |
-| --- | --- |
-| `pool: MemoryPool` | node/page/pin pools (see below) |
-| `pages: List` | `IntrusiveDoublyLinkedList(Node)`; first = top of scrollback, last = bottom (active) |
-| `page_serial` / `page_serial_min` | monotonic serial per node; `min` is the lowest still-valid serial (bumped on prune/reset) so external refs can be invalidated cheaply |
-| `page_size: usize` | total bytes of allocated pages (**not** pool preheat) |
-| `explicit_max_size` / `min_max_size` | scrollback byte cap (see max-size below) |
-| `total_rows: usize` | cached sum of `size.rows` over all pages (for scrollbar + fast math) |
-| `tracked_pins: PinSet` | the set of pins kept up to date across mutations (the crux) |
-| `viewport: Viewport` | `active` \| `top` \| `pin` union |
-| `viewport_pin: *Pin` | pre-allocated pin used when `viewport == .pin` (never a fallible alloc on scroll) |
-| `viewport_pin_row_offset: ?usize` | lazily-computed cached offset-from-top of the viewport pin |
-| `cols` / `rows` | *desired* active dimensions (pages may lag due to lazy reflow) |
-| `pause_integrity_checks` | debug-only suspend counter for mid-mutation states |
+| field                                | role                                                                                                                                  |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `pool: MemoryPool`                   | node/page/pin pools (see below)                                                                                                       |
+| `pages: List`                        | `IntrusiveDoublyLinkedList(Node)`; first = top of scrollback, last = bottom (active)                                                  |
+| `page_serial` / `page_serial_min`    | monotonic serial per node; `min` is the lowest still-valid serial (bumped on prune/reset) so external refs can be invalidated cheaply |
+| `page_size: usize`                   | total bytes of allocated pages (**not** pool preheat)                                                                                 |
+| `explicit_max_size` / `min_max_size` | scrollback byte cap (see max-size below)                                                                                              |
+| `total_rows: usize`                  | cached sum of `size.rows` over all pages (for scrollbar + fast math)                                                                  |
+| `tracked_pins: PinSet`               | the set of pins kept up to date across mutations (the crux)                                                                           |
+| `viewport: Viewport`                 | `active` \| `top` \| `pin` union                                                                                                      |
+| `viewport_pin: *Pin`                 | pre-allocated pin used when `viewport == .pin` (never a fallible alloc on scroll)                                                     |
+| `viewport_pin_row_offset: ?usize`    | lazily-computed cached offset-from-top of the viewport pin                                                                            |
+| `cols` / `rows`                      | *desired* active dimensions (pages may lag due to lazy reflow)                                                                        |
+| `pause_integrity_checks`             | debug-only suspend counter for mid-mutation states                                                                                    |
 
 ### The Node and the intrusive list
 
@@ -242,6 +242,7 @@ It writes into the destination page as it consumes source rows.
 ### `resizeWithoutReflow` (`:2040-2194`)
 
 Cols first (so col-growth frees page bytes before row grow avoids pruning):
+
 - shrink cols: clear beyond-`cols` cells per row, set `page.size.cols`, clamp pins.
 - grow cols: per chunk, `resizeWithoutReflowGrowCols` (`:2196-2406`) — fast path if the
   page already has col capacity (unless a stale `spacer_head` sits at the old last col),
@@ -249,6 +250,7 @@ Cols first (so col-growth frees page bytes before row grow avoids pruning):
   needed, remapping pins throughout.
 
 Rows:
+
 - shrink rows: `trimTrailingBlankRows` first (Terminal.app behavior), then lower
   `self.rows` (creating history for the remainder).
 - grow rows: preserve cursor y if not at bottom (don't pull scrollback), else pull down
@@ -300,8 +302,8 @@ resets to active.
   before/isBetween + trackPin/untrackPin + viewport helpers + getTopLeft/BottomRight +
   pointFromPin), `pagelist/iter.rs` (Page/Row/Cell iterators + Chunk),
   `pagelist/reflow.rs` (`ReflowCursor` + `resizeCols`), `pagelist/resize.rs`
-  (resizeWithoutReflow family + erase/eraseRowBounded/eraseRows/erasePage + reset + clone
-  + split + compact + trim/trailing-blank).
+  (resizeWithoutReflow family + erase/eraseRowBounded/eraseRows/erasePage + reset + clone +
+  split + compact + trim/trailing-blank).
 - **Nodes**: `*mut Node` raw pointers, `Box`-owned nodes vended by `MemoryPool` (a
   free-list; `Box` gives the stable address the raw pointers require). List splicing is
   `unsafe` behind `NodeList`. `Pin.node`, `Node.prev/next`, viewport all hold `*mut Node`.
@@ -341,18 +343,18 @@ resets to active.
 Upstream `PageList.zig`: **205** inline tests. Rust port: **119** tests in
 `pagelist/tests.rs`, covering every in-scope category:
 
-| Category (upstream count) | Ported | Notes |
-| --- | --- | --- |
-| resize/reflow (71) | 25 | every semantically distinct behavior: no-reflow rows/cols each direction and combined, trim-blank, reflow wrap/unwrap, wide-char destroy/spacer-head wrap, grapheme reflow, kitty placeholder, semantic prompt, capacity-increase-forcing reflow, viewport-cache invalidation |
-| scroll (20) | 15 | top/active/pin/row/delta fast+slow paths, cache fast paths, max-size-0 |
-| highlightSemanticContent (17) | 17 | landed with the highlight chunk (see [highlight.md](highlight.md)) |
-| split (16) | 8 | middle/0/single-row/pin-tracking (before/at/after/multi)/wrap/styled/first-page |
-| erase + eraseRow(Bounded) (20) | 10 | history/active/row/bounded/pins/page-size/viewport fixups |
-| increaseCapacity (9) | 7 | all four dimensions + pins + dirty + OutOfSpace-at-max |
-| clone (9) | 6 | full/partial/less-than-active/remap in+out/dirty |
-| grow (8) | 5 | fit-in-capacity/allocate/prune-reuse (incl. pins, serials, byte accounting) |
-| iterators (14) | 6 | page fwd/rev 1-2 pages, cell fwd/rev, prompt jump 0/-1 |
-| reset/init/pointFromPin/misc (21) | 20 | includes 4/4 pointFromPin, 3/4 reset, scrollbar |
+| Category (upstream count)         | Ported | Notes                                                                                                                                                                                                                                                                         |
+| --------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| resize/reflow (71)                | 25     | every semantically distinct behavior: no-reflow rows/cols each direction and combined, trim-blank, reflow wrap/unwrap, wide-char destroy/spacer-head wrap, grapheme reflow, kitty placeholder, semantic prompt, capacity-increase-forcing reflow, viewport-cache invalidation |
+| scroll (20)                       | 15     | top/active/pin/row/delta fast+slow paths, cache fast paths, max-size-0                                                                                                                                                                                                        |
+| highlightSemanticContent (17)     | 17     | landed with the highlight chunk (see [highlight.md](highlight.md))                                                                                                                                                                                                            |
+| split (16)                        | 8      | middle/0/single-row/pin-tracking (before/at/after/multi)/wrap/styled/first-page                                                                                                                                                                                               |
+| erase + eraseRow(Bounded) (20)    | 10     | history/active/row/bounded/pins/page-size/viewport fixups                                                                                                                                                                                                                     |
+| increaseCapacity (9)              | 7      | all four dimensions + pins + dirty + OutOfSpace-at-max                                                                                                                                                                                                                        |
+| clone (9)                         | 6      | full/partial/less-than-active/remap in+out/dirty                                                                                                                                                                                                                              |
+| grow (8)                          | 5      | fit-in-capacity/allocate/prune-reuse (incl. pins, serials, byte accounting)                                                                                                                                                                                                   |
+| iterators (14)                    | 6      | page fwd/rev 1-2 pages, cell fwd/rev, prompt jump 0/-1                                                                                                                                                                                                                        |
+| reset/init/pointFromPin/misc (21) | 20     | includes 4/4 pointFromPin, 3/4 reset, scrollbar                                                                                                                                                                                                                               |
 
 Not ported 1:1: the tripwire allocator-failure-injection tests ("init error" and
 friends — Zig-only fail-point machinery; the Rust model is infallible-alloc),

@@ -10,7 +10,7 @@ producing a `Command` union on completion.
 
 ## `dcs.zig` (430 lines) — `Handler`
 
-### Lifecycle
+### Lifecycle (`dcs.zig`)
 
 `Handler.hook(alloc, dcs: DCS) ?Command` (`dcs.zig:25-43`) is called on `dcs_hook`
 (`DCS { intermediates: []const u8, params: []const u16, final: u8 }`, defined at
@@ -32,14 +32,15 @@ deliberately does **not** call `state.deinit()` in the general case — ownershi
 buffered memory (e.g. the XTGETTCAP `Writer.Allocating`) transfers into the returned
 `Command`, which the caller must `deinit`.
 
-### Commands enumerated (exactly 3, by `dcs.intermediates`/`dcs.final`, `tryHook` at
-`dcs.zig:50-110`)
+### Commands enumerated (exactly 3, `tryHook` at `dcs.zig:50-110`)
 
-| Intermediates | Final | Params | Command | Notes |
-|---|---|---|---|---|
-| (none) | `p` | must be exactly `[1000]` | **Tmux control mode enter** | Gated by `build_options.tmux_control_mode` (compiled in whenever oniguruma is available — i.e. normal builds; see below). `ESC P 1000 p`. |
-| `+` | `q` | any | **XTGETTCAP** | `ESC P + q <hex-encoded-names> ESC \` |
-| `$` | `q` | any | **DECRQSS** | `ESC P $ q <setting> ESC \` |
+Dispatched by `dcs.intermediates`/`dcs.final`:
+
+| Intermediates | Final | Params                   | Command                     | Notes                                                                                                                                     |
+| ------------- | ----- | ------------------------ | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| (none)        | `p`   | must be exactly `[1000]` | **Tmux control mode enter** | Gated by `build_options.tmux_control_mode` (compiled in whenever oniguruma is available — i.e. normal builds; see below). `ESC P 1000 p`. |
+| `+`           | `q`   | any                      | **XTGETTCAP**               | `ESC P + q <hex-encoded-names> ESC \`                                                                                                     |
+| `$`           | `q`   | any                      | **DECRQSS**                 | `ESC P $ q <setting> ESC \`                                                                                                               |
 
 Anything else (0 intermediates + any other final; 1 intermediate that isn't `+`/`$`; 2+
 intermediates) → `tryHook` returns `null` → `state = .ignore`, `hook` returns `null`. This
@@ -74,16 +75,16 @@ State: fixed 2-byte buffer (`data: [2]u8 = undefined, len: u2 = 0`) — no alloc
 `DECRQSS` enum by **exact length and content** — this is a fixed dispatch table, not
 generic parsing:
 
-| `len` | bytes | Result |
-|---|---|---|
-| 0 | — | `.none` |
-| 1 | `m` | `.sgr` |
-| 1 | `r` | `.decstbm` |
-| 1 | `s` | `.decslrm` |
-| 1 | other | `.none` |
-| 2 | `" q"` (space then `q`) | `.decscusr` |
-| 2 | other | `.none` |
-| ≥3 | — | `unreachable` (buffer physically caps at 2; the `put` overflow guard makes this unreachable in practice) |
+| `len` | bytes                   | Result                                                                                                   |
+| ----- | ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| 0     | —                       | `.none`                                                                                                  |
+| 1     | `m`                     | `.sgr`                                                                                                   |
+| 1     | `r`                     | `.decstbm`                                                                                               |
+| 1     | `s`                     | `.decslrm`                                                                                               |
+| 1     | other                   | `.none`                                                                                                  |
+| 2     | `" q"` (space then `q`) | `.decscusr`                                                                                              |
+| 2     | other                   | `.none`                                                                                                  |
+| ≥3    | —                       | `unreachable` (buffer physically caps at 2; the `put` overflow guard makes this unreachable in practice) |
 
 So DECRQSS in ghostty currently recognizes exactly 4 settings: SGR (`m`), DECSTBM (`r`),
 DECSLRM (`s`), DECSCUSR (`" q"`). Anything else hooks successfully (the DCS is
@@ -127,7 +128,7 @@ append, so the buffer never exceeds the limit; overflow is `error.OutOfMemory`, 
 by `max_bytes`. Tmux control mode has no `max_bytes` enforcement in `dcs.zig` itself (the
 `ControlParser` manages its own buffering — out of scope here).
 
-### Error handling shape
+### Error handling shape (`dcs.zig`)
 
 Both `hook` and `put` are non-throwing at the call boundary: internal errors
 (unrecognized command, allocation failure, buffer overflow) are caught inside the public
@@ -148,7 +149,7 @@ itself uses for CSI param overflow.
 
 ## `apc.zig` (402 lines) + `apc/` — `Handler`
 
-### Lifecycle
+### Lifecycle (`apc.zig`)
 
 `Handler.start()` (`apc.zig:34-37`) — called on `apc_start` — deinits any stale state
 (defensive; should already be `.inactive` after a prior `end`) and resets to
@@ -195,17 +196,18 @@ and the `;`-terminated path.
 
 ### Protocols enumerated (exactly 2 native + 1 seamed)
 
-| Identifier | Protocol enum | Parser type | Max bytes (default) | Notes |
-|---|---|---|---|---|
-| `G` (first byte) | `.kitty` | `kitty_gfx.CommandParser` (`kitty/graphics_command.zig`, part of a 6.3k-line `kitty/` subsystem) | 65 MiB | Chunked image transfer; **out of scope, sibling chunk owns `crates/ghostty-vt/src/kitty/`** |
-| `25a1;` | `.glyph` | `glyph.CommandParser` (`apc/glyph/request.zig`) | 1 MiB | Custom-glyph registration protocol (Private-Use-Area glyf/COLR outlines); depends on `font/Glyph.zig` + `font/opentype/glyf.zig` — **out of scope, font subsystem not yet ported** (see Seam design) |
+| Identifier       | Protocol enum | Parser type                                                                                      | Max bytes (default) | Notes                                                                                                                                                                                                |
+| ---------------- | ------------- | ------------------------------------------------------------------------------------------------ | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `G` (first byte) | `.kitty`      | `kitty_gfx.CommandParser` (`kitty/graphics_command.zig`, part of a 6.3k-line `kitty/` subsystem) | 65 MiB              | Chunked image transfer; **out of scope, sibling chunk owns `crates/ghostty-vt/src/kitty/`**                                                                                                          |
+| `25a1;`          | `.glyph`      | `glyph.CommandParser` (`apc/glyph/request.zig`)                                                  | 1 MiB               | Custom-glyph registration protocol (Private-Use-Area glyf/COLR outlines); depends on `font/Glyph.zig` + `font/opentype/glyf.zig` — **out of scope, font subsystem not yet ported** (see Seam design) |
 
 `Protocol.defaultMaxBytes` (`apc.zig:199-209`) hard-codes these two values; `max_bytes` on
 `Handler` is a `std.EnumMap(Protocol, usize)` overridable per-protocol
 (`Handler{ .max_bytes = .init(.{ .kitty = 4 }) }` in the test at `apc.zig:301`).
 
-### Glyph protocol detail (`apc/glyph.zig` + `apc/glyph/{request,response,execute,Glossary}.zig`, ~2.18k lines total)
+### Glyph protocol detail
 
+`apc/glyph.zig` + `apc/glyph/{request,response,execute,Glossary}.zig`, ~2.18k lines total.
 Substantial and font-coupled — enumerated here for completeness, but **seamed, not
 ported** (see below). Wire format (documented in `apc/glyph/request.zig:1-149`):
 `ESC _ 25a1 ; <verb> [ ; key=value ]* [ ; <payload> ] ESC \` with four verbs:
@@ -236,7 +238,7 @@ reacts to the sub-parser's error by discarding to `.ignore` (`apc.zig:100-112`,
 `"kitty max bytes exceeded"` test at `apc.zig:295-312` — note the test's off-by-one-ish
 boundary: `max_bytes = 4`, 4 bytes of data are accepted, the 5th byte trips the limit).
 
-### Error handling shape
+### Error handling shape (`apc.zig`)
 
 Same policy as DCS: sub-parser errors during `feed` are caught, the sub-parser is
 `deinit`ed to avoid leaks, and state drops to `.ignore` — never propagated to the caller.

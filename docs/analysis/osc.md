@@ -34,34 +34,34 @@ Every OSC command ghostty supports, in `Key` enum order (`osc.zig:172-203`,
 Rust port does not need to preserve this order since it has no C ABI yet,
 but the port keeps it anyway for diffability):
 
-| Variant | OSC | Zig payload | Notes |
-|---|---|---|---|
-| `invalid` | — | `void` | Zero/sentinel value, never a real dispatch |
-| `change_window_title` | 0, 2 | `[:0]const u8` | Hex or UTF-8/Latin-1 per title mode (mode interpretation is stream.zig's job, not the parser's) |
-| `change_window_icon` | 1 | `[:0]const u8` | Parsed but ignored by ghostty (no icon naming standard) |
-| `semantic_prompt` | 133 (+9;12 alias) | `SemanticPrompt` (= `parsers.semantic_prompt.Command`) | See below |
-| `clipboard_contents` | 52 | `{ kind: u8, data: [:0]const u8 }` | Also reachable via iTerm2's `Copy` (OSC 1337) |
-| `report_pwd` | 7 | `{ value: [:0]const u8 }` | Also reachable via ConEmu 9;9 and iTerm2 `CurrentDir` |
-| `mouse_shape` | 22 | `{ value: [:0]const u8 }` | Free-form string (W3C CSS cursor names in practice) |
-| `color_operation` | 4,5,10-19,104,105,110-119 | `{ op, requests: List, terminator }` | Batchable list of set/query/reset ops |
-| `kitty_color_protocol` | 21 | `kitty_color.OSC` (`kitty/color.zig`) | Batchable list, needs an allocator |
-| `show_desktop_notification` | 9, 777 | `{ title, body }` | OSC 9 body-only (title `""`); OSC 777 `notify;Title;Body` |
-| `hyperlink_start` | 8 | `{ id: ?[:0]const u8, uri }` | |
-| `hyperlink_end` | 8 | `void` | Empty URI + no id |
-| `conemu_sleep` | 9;1 | `{ duration_ms: u16 }` | Clamped 0-10000, default 100 on parse failure |
-| `conemu_show_message_box` | 9;2 | `[:0]const u8` | |
-| `conemu_change_tab_title` | 9;3 | `union { reset, value: [:0]const u8 }` | |
-| `conemu_progress_report` | 9;4 | `ProgressReport { state, progress: ?u8 }` | `state`: remove/set/error/indeterminate/pause |
-| `conemu_wait_input` | 9;5 | `void` | |
-| `conemu_guimacro` | 9;6 | `[:0]const u8` | |
-| `conemu_run_process` | 9;7 | `[:0]const u8` | |
-| `conemu_output_environment_variable` | 9;8 | `[:0]const u8` | |
-| `conemu_xterm_emulation` | 9;10 | `{ keyboard: ?bool, output: ?bool }` | `null` = "do not change" |
-| `conemu_comment` | 9;11 | `[:0]const u8` | |
-| `kitty_text_sizing` | 66 | `kitty_text_sizing.OSC` | scale/width/numerator/denominator/valign/halign + text |
-| `kitty_clipboard_protocol` | 5522 | `kitty_clipboard_protocol.OSC` | metadata/payload/terminator, lazy typed `readOption` |
-| `kitty_dnd_protocol` | 72 | `kitty_dnd_protocol.OSC` | metadata/payload/terminator, lazy typed `readOption` |
-| `context_signal` | 3008 | `context_signal.Command` | UAPI hierarchical context signalling |
+| Variant                              | OSC                       | Zig payload                                            | Notes                                                                                           |
+| ------------------------------------ | ------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `invalid`                            | —                         | `void`                                                 | Zero/sentinel value, never a real dispatch                                                      |
+| `change_window_title`                | 0, 2                      | `[:0]const u8`                                         | Hex or UTF-8/Latin-1 per title mode (mode interpretation is stream.zig's job, not the parser's) |
+| `change_window_icon`                 | 1                         | `[:0]const u8`                                         | Parsed but ignored by ghostty (no icon naming standard)                                         |
+| `semantic_prompt`                    | 133 (+9;12 alias)         | `SemanticPrompt` (= `parsers.semantic_prompt.Command`) | See below                                                                                       |
+| `clipboard_contents`                 | 52                        | `{ kind: u8, data: [:0]const u8 }`                     | Also reachable via iTerm2's `Copy` (OSC 1337)                                                   |
+| `report_pwd`                         | 7                         | `{ value: [:0]const u8 }`                              | Also reachable via ConEmu 9;9 and iTerm2 `CurrentDir`                                           |
+| `mouse_shape`                        | 22                        | `{ value: [:0]const u8 }`                              | Free-form string (W3C CSS cursor names in practice)                                             |
+| `color_operation`                    | 4,5,10-19,104,105,110-119 | `{ op, requests: List, terminator }`                   | Batchable list of set/query/reset ops                                                           |
+| `kitty_color_protocol`               | 21                        | `kitty_color.OSC` (`kitty/color.zig`)                  | Batchable list, needs an allocator                                                              |
+| `show_desktop_notification`          | 9, 777                    | `{ title, body }`                                      | OSC 9 body-only (title `""`); OSC 777 `notify;Title;Body`                                       |
+| `hyperlink_start`                    | 8                         | `{ id: ?[:0]const u8, uri }`                           |                                                                                                 |
+| `hyperlink_end`                      | 8                         | `void`                                                 | Empty URI + no id                                                                               |
+| `conemu_sleep`                       | 9;1                       | `{ duration_ms: u16 }`                                 | Clamped 0-10000, default 100 on parse failure                                                   |
+| `conemu_show_message_box`            | 9;2                       | `[:0]const u8`                                         |                                                                                                 |
+| `conemu_change_tab_title`            | 9;3                       | `union { reset, value: [:0]const u8 }`                 |                                                                                                 |
+| `conemu_progress_report`             | 9;4                       | `ProgressReport { state, progress: ?u8 }`              | `state`: remove/set/error/indeterminate/pause                                                   |
+| `conemu_wait_input`                  | 9;5                       | `void`                                                 |                                                                                                 |
+| `conemu_guimacro`                    | 9;6                       | `[:0]const u8`                                         |                                                                                                 |
+| `conemu_run_process`                 | 9;7                       | `[:0]const u8`                                         |                                                                                                 |
+| `conemu_output_environment_variable` | 9;8                       | `[:0]const u8`                                         |                                                                                                 |
+| `conemu_xterm_emulation`             | 9;10                      | `{ keyboard: ?bool, output: ?bool }`                   | `null` = "do not change"                                                                        |
+| `conemu_comment`                     | 9;11                      | `[:0]const u8`                                         |                                                                                                 |
+| `kitty_text_sizing`                  | 66                        | `kitty_text_sizing.OSC`                                | scale/width/numerator/denominator/valign/halign + text                                          |
+| `kitty_clipboard_protocol`           | 5522                      | `kitty_clipboard_protocol.OSC`                         | metadata/payload/terminator, lazy typed `readOption`                                            |
+| `kitty_dnd_protocol`                 | 72                        | `kitty_dnd_protocol.OSC`                               | metadata/payload/terminator, lazy typed `readOption`                                            |
+| `context_signal`                     | 3008                      | `context_signal.Command`                               | UAPI hierarchical context signalling                                                            |
 
 Not a `Command` variant but worth naming: OSC 6, 30, 300, 55, 552, 77 are
 recognized *prefixes* in the state machine (needed so e.g. "77" can bridge to
@@ -499,16 +499,16 @@ plus kitty's `redraw`/Ghostty's `last` extension and a `click_events`
 extension. Single-letter action codes, each optionally followed by
 `;key=value;key=value...`:
 
-| Code | `Action` | Notes |
-|---|---|---|
-| `A` | `fresh_line_new_prompt` | Also reachable via ConEmu 9;12 |
-| `B` | `end_prompt_start_input` | |
-| `I` | `end_prompt_start_input_terminate_eol` | |
-| `C` | `end_input_start_output` | |
-| `D` | `end_command` | First option field is positional (exit code), not `key=value` |
-| `L` | `fresh_line` | Takes **no** options at all — any trailing data invalidates |
-| `N` | `new_command` | |
-| `P` | `prompt_start` | |
+| Code | `Action`                               | Notes                                                         |
+| ---- | -------------------------------------- | ------------------------------------------------------------- |
+| `A`  | `fresh_line_new_prompt`                | Also reachable via ConEmu 9;12                                |
+| `B`  | `end_prompt_start_input`               |                                                               |
+| `I`  | `end_prompt_start_input_terminate_eol` |                                                               |
+| `C`  | `end_input_start_output`               |                                                               |
+| `D`  | `end_command`                          | First option field is positional (exit code), not `key=value` |
+| `L`  | `fresh_line`                           | Takes **no** options at all — any trailing data invalidates   |
+| `N`  | `new_command`                          |                                                               |
+| `P`  | `prompt_start`                         |                                                               |
 
 Options (read lazily via `Option.read`, same lazy-key-scan pattern as
 kitty_dnd/kitty_clipboard/context_signal): `aid` (string, any app-chosen
@@ -683,32 +683,32 @@ test. (Task instructions: do not edit `docs/port-status.md` from this
 chunk; the orchestrating session merges this table into it at integration
 time.)
 
-| Zig file | Zig tests | Rust file | Rust tests | Notes |
-|---|---|---|---|---|
-| `change_window_icon.zig` | 1 | `osc/parsers/change_window_icon.rs` | 1 | |
-| `change_window_title.zig` | 7 | `osc/parsers/change_window_title.rs` | 7 | |
-| `clipboard_operation.zig` | 4 | `osc/parsers/clipboard_operation.rs` | 5 | +1 Rust-only: without-allocator gate |
-| `color.zig` | 12 | `osc/parsers/color.rs` | 12 | X11 names → hex literals (divergence #1) |
-| `context_signal.zig` | 18 | `osc/parsers/context_signal.rs` | 18 | |
-| `hyperlink.zig` | 8 | `osc/parsers/hyperlink.rs` | 8 | |
-| `iterm2.zig` | 19 | `osc/parsers/iterm2.rs` | 19 | 1 `#[ignore]` (matches Zig's `SkipZigTest`) |
-| `kitty_clipboard_protocol.zig` | 27 | `osc/parsers/kitty_clipboard_protocol.rs` | 27 | |
-| `kitty_color.zig` | 5 | `osc/parsers/kitty_color.rs` | 5 | + `kitty/color.zig`'s 1 test folded into the same file (see next row) |
-| `kitty_dnd_protocol.zig` | 11 | `osc/parsers/kitty_dnd_protocol.rs` | 11 | |
-| `kitty_text_sizing.zig` | 8 | `osc/parsers/kitty_text_sizing.rs` | 8 | |
-| `mouse_shape.zig` | 1 | `osc/parsers/mouse_shape.rs` | 1 | |
-| `osc9.zig` | 61 | `osc/parsers/osc9.rs` | 61 | |
-| `report_pwd.zig` | 2 | `osc/parsers/report_pwd.rs` | 2 | |
-| `rxvt_extension.zig` | 1 | `osc/parsers/rxvt_extension.rs` | 1 | |
-| `semantic_prompt.zig` | 64 | `osc/parsers/semantic_prompt.rs` | 64 | |
-| **Parser-family subtotal** | **249** | | **250** | |
-| `osc/encoding.zig` (`isSafeUtf8`) | 1 | `osc/parsers/mod.rs` (`encoding_tests`) | 1 | |
-| `kitty/color.zig` (`Kind` Display) | 1 | `osc/parsers/kitty_color.rs` (`kind_display`) | 1 | counted in the kitty_color.rs row above |
-| `os/string_encoding.zig` (ported subset) | 18 | `osc/string_encoding.rs` | 18 | |
-| `osc/support.rs` (new shared helper, no Zig original) | — | `osc/support.rs` | 3 | factors out the repeated key=value scan (see "Per-parser structure" intro) |
-| `osc/rgb.rs` (new minimal support type, no direct Zig test file — cross-checks `color.zig`'s `RGB.parse`) | — | `osc/rgb.rs` | 6 | sanity cross-check ahead of the OSC-level color tests |
-| `osc/mod.rs` (new: `Parser` itself, the seam integration) | — | `osc/mod.rs` | 3 | seam composition + terminator + overflow |
-| **Grand total** | **269** (excl. `osc.zig`'s/`osc/parsers.zig`'s `refAllDecls` meta-tests, which assert nothing) | | **281** | 269 ported 1:1 + 12 new Rust-only (allocator gate, support-module unit tests, seam integration) |
+| Zig file                                                                                                  | Zig tests                                                                                      | Rust file                                     | Rust tests | Notes                                                                                           |
+| --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------- |
+| `change_window_icon.zig`                                                                                  | 1                                                                                              | `osc/parsers/change_window_icon.rs`           | 1          |                                                                                                 |
+| `change_window_title.zig`                                                                                 | 7                                                                                              | `osc/parsers/change_window_title.rs`          | 7          |                                                                                                 |
+| `clipboard_operation.zig`                                                                                 | 4                                                                                              | `osc/parsers/clipboard_operation.rs`          | 5          | +1 Rust-only: without-allocator gate                                                            |
+| `color.zig`                                                                                               | 12                                                                                             | `osc/parsers/color.rs`                        | 12         | X11 names → hex literals (divergence #1)                                                        |
+| `context_signal.zig`                                                                                      | 18                                                                                             | `osc/parsers/context_signal.rs`               | 18         |                                                                                                 |
+| `hyperlink.zig`                                                                                           | 8                                                                                              | `osc/parsers/hyperlink.rs`                    | 8          |                                                                                                 |
+| `iterm2.zig`                                                                                              | 19                                                                                             | `osc/parsers/iterm2.rs`                       | 19         | 1 `#[ignore]` (matches Zig's `SkipZigTest`)                                                     |
+| `kitty_clipboard_protocol.zig`                                                                            | 27                                                                                             | `osc/parsers/kitty_clipboard_protocol.rs`     | 27         |                                                                                                 |
+| `kitty_color.zig`                                                                                         | 5                                                                                              | `osc/parsers/kitty_color.rs`                  | 5          | + `kitty/color.zig`'s 1 test folded into the same file (see next row)                           |
+| `kitty_dnd_protocol.zig`                                                                                  | 11                                                                                             | `osc/parsers/kitty_dnd_protocol.rs`           | 11         |                                                                                                 |
+| `kitty_text_sizing.zig`                                                                                   | 8                                                                                              | `osc/parsers/kitty_text_sizing.rs`            | 8          |                                                                                                 |
+| `mouse_shape.zig`                                                                                         | 1                                                                                              | `osc/parsers/mouse_shape.rs`                  | 1          |                                                                                                 |
+| `osc9.zig`                                                                                                | 61                                                                                             | `osc/parsers/osc9.rs`                         | 61         |                                                                                                 |
+| `report_pwd.zig`                                                                                          | 2                                                                                              | `osc/parsers/report_pwd.rs`                   | 2          |                                                                                                 |
+| `rxvt_extension.zig`                                                                                      | 1                                                                                              | `osc/parsers/rxvt_extension.rs`               | 1          |                                                                                                 |
+| `semantic_prompt.zig`                                                                                     | 64                                                                                             | `osc/parsers/semantic_prompt.rs`              | 64         |                                                                                                 |
+| **Parser-family subtotal**                                                                                | **249**                                                                                        |                                               | **250**    |                                                                                                 |
+| `osc/encoding.zig` (`isSafeUtf8`)                                                                         | 1                                                                                              | `osc/parsers/mod.rs` (`encoding_tests`)       | 1          |                                                                                                 |
+| `kitty/color.zig` (`Kind` Display)                                                                        | 1                                                                                              | `osc/parsers/kitty_color.rs` (`kind_display`) | 1          | counted in the kitty_color.rs row above                                                         |
+| `os/string_encoding.zig` (ported subset)                                                                  | 18                                                                                             | `osc/string_encoding.rs`                      | 18         |                                                                                                 |
+| `osc/support.rs` (new shared helper, no Zig original)                                                     | —                                                                                              | `osc/support.rs`                              | 3          | factors out the repeated key=value scan (see "Per-parser structure" intro)                      |
+| `osc/rgb.rs` (new minimal support type, no direct Zig test file — cross-checks `color.zig`'s `RGB.parse`) | —                                                                                              | `osc/rgb.rs`                                  | 6          | sanity cross-check ahead of the OSC-level color tests                                           |
+| `osc/mod.rs` (new: `Parser` itself, the seam integration)                                                 | —                                                                                              | `osc/mod.rs`                                  | 3          | seam composition + terminator + overflow                                                        |
+| **Grand total**                                                                                           | **269** (excl. `osc.zig`'s/`osc/parsers.zig`'s `refAllDecls` meta-tests, which assert nothing) |                                               | **281**    | 269 ported 1:1 + 12 new Rust-only (allocator gate, support-module unit tests, seam integration) |
 
 All 281 `ghostty-vt` OSC tests pass, alongside the pre-existing 496-and-growing
 suite (`cargo test -p ghostty-vt`: 497 lib tests total after this chunk, 14

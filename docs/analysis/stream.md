@@ -66,47 +66,47 @@ Enumerated below — **implemented** = wired to a `Terminal` method through
 no-op in this chunk; **not modeled** = the stream simply doesn't route it (the
 dispatch prong is a no-op, matching upstream's "log and ignore").
 
-| Final | Op | Status |
-|---|---|---|
-| `A`/`k` | CUU cursor up | implemented |
-| `B` | CUD cursor down | implemented |
-| `C` | CUF cursor right | implemented |
-| `D`/`j` | CUB cursor left | implemented |
-| `E` | CNL (down + CR) | implemented |
-| `F` | CPL (up + CR) | implemented |
-| `G`/`` ` `` | HPA cursor col | implemented |
-| `H`/`f` | CUP set cursor pos | implemented |
-| `I` | CHT horizontal tab | implemented |
-| `J` | ED erase display (+ `?` protected) | implemented |
-| `K` | EL erase line (+ `?` protected) | implemented |
-| `L` | IL insert lines | implemented |
-| `M` | DL delete lines | implemented |
-| `P` | DCH delete chars | implemented |
-| `S` | SU scroll up | implemented |
-| `T` | SD scroll down | implemented |
-| `W` | CTC tab set/clear/reset | implemented |
-| `X` | ECH erase chars | implemented |
-| `Z` | CBT tab back | implemented |
-| `@` | ICH insert blanks | implemented |
-| `a` | HPR col relative | implemented |
-| `b` | REP repeat previous char | **not modeled** (needs `previous_char`; fixtures/diff don't use it) |
-| `c` | DA1/DA2/DA3 device attributes | implemented (reply) |
-| `d` | VPA cursor row | implemented |
-| `e` | VPR row relative | implemented |
-| `g` | TBC tab clear | implemented |
-| `h`/`l` | SM/RM set/reset mode (ansi + `?` private) | implemented |
-| `m` | SGR (via `sgr::Parser`) | implemented; `>` XTMODKEYS form **not modeled** |
-| `n` | DSR / CPR (+ `?`) | implemented (reply); `>` modify-key form not modeled |
-| `p` | DECRQM request mode (`$` / `?$`) | implemented (reply) |
-| `q` (space) | DECSCUSR cursor style | implemented (blink mode only; style rendering is a screen concern) |
-| `q` (`"`) | DECSCA protected mode | implemented |
-| `q` (`>`) | XTVERSION | implemented (reply) |
-| `r` | DECSTBM margins / `?` restore-mode | implemented |
-| `s` | DECSLRM margins / `?` save-mode / SC-ambiguous | implemented |
-| `t` | XTWINOPS size reports / title push-pop | **seam** (no-op tail; fixtures/diff don't use it) |
-| `u` | DECRC (no intermediate) | implemented; kitty-keyboard forms are a **seam** |
-| `}` (`$`) | DECSASD active status display | implemented |
-| others | — | ignored (matches upstream `log.warn` + return) |
+| Final       | Op                                             | Status                                                              |
+| ----------- | ---------------------------------------------- | ------------------------------------------------------------------- |
+| `A`/`k`     | CUU cursor up                                  | implemented                                                         |
+| `B`         | CUD cursor down                                | implemented                                                         |
+| `C`         | CUF cursor right                               | implemented                                                         |
+| `D`/`j`     | CUB cursor left                                | implemented                                                         |
+| `E`         | CNL (down + CR)                                | implemented                                                         |
+| `F`         | CPL (up + CR)                                  | implemented                                                         |
+| `G`/`` ` `` | HPA cursor col                                 | implemented                                                         |
+| `H`/`f`     | CUP set cursor pos                             | implemented                                                         |
+| `I`         | CHT horizontal tab                             | implemented                                                         |
+| `J`         | ED erase display (+ `?` protected)             | implemented                                                         |
+| `K`         | EL erase line (+ `?` protected)                | implemented                                                         |
+| `L`         | IL insert lines                                | implemented                                                         |
+| `M`         | DL delete lines                                | implemented                                                         |
+| `P`         | DCH delete chars                               | implemented                                                         |
+| `S`         | SU scroll up                                   | implemented                                                         |
+| `T`         | SD scroll down                                 | implemented                                                         |
+| `W`         | CTC tab set/clear/reset                        | implemented                                                         |
+| `X`         | ECH erase chars                                | implemented                                                         |
+| `Z`         | CBT tab back                                   | implemented                                                         |
+| `@`         | ICH insert blanks                              | implemented                                                         |
+| `a`         | HPR col relative                               | implemented                                                         |
+| `b`         | REP repeat previous char                       | **not modeled** (needs `previous_char`; fixtures/diff don't use it) |
+| `c`         | DA1/DA2/DA3 device attributes                  | implemented (reply)                                                 |
+| `d`         | VPA cursor row                                 | implemented                                                         |
+| `e`         | VPR row relative                               | implemented                                                         |
+| `g`         | TBC tab clear                                  | implemented                                                         |
+| `h`/`l`     | SM/RM set/reset mode (ansi + `?` private)      | implemented                                                         |
+| `m`         | SGR (via `sgr::Parser`)                        | implemented; `>` XTMODKEYS form **not modeled**                     |
+| `n`         | DSR / CPR (+ `?`)                              | implemented (reply); `>` modify-key form not modeled                |
+| `p`         | DECRQM request mode (`$` / `?$`)               | implemented (reply)                                                 |
+| `q` (space) | DECSCUSR cursor style                          | implemented (blink mode only; style rendering is a screen concern)  |
+| `q` (`"`)   | DECSCA protected mode                          | implemented                                                         |
+| `q` (`>`)   | XTVERSION                                      | implemented (reply)                                                 |
+| `r`         | DECSTBM margins / `?` restore-mode             | implemented                                                         |
+| `s`         | DECSLRM margins / `?` save-mode / SC-ambiguous | implemented                                                         |
+| `t`         | XTWINOPS size reports / title push-pop         | **seam** (no-op tail; fixtures/diff don't use it)                   |
+| `u`         | DECRC (no intermediate)                        | implemented; kitty-keyboard forms are a **seam**                    |
+| `}` (`$`)   | DECSASD active status display                  | implemented                                                         |
+| others      | —                                              | ignored (matches upstream `log.warn` + return)                      |
 
 Kitty-keyboard (`u` with `?`/`>`/`<`/`=`), XTSHIFTESCAPE (`s >`), and XTWINOPS
 title push/pop are **seams** — the stream doesn't route them (they touch state
@@ -165,13 +165,13 @@ exactly as upstream (`deviceStatus`, `stream_terminal.zig:325-359`).
 
 ## Zig-vs-Rust test counts
 
-| Source | Zig tests | Rust port | Notes |
-|---|---|---|---|
-| `stream.zig` | 38 | 18 dispatch-routing (spy) + 2 print | Ported the portable subset (cursor/mode/erase/DECSCUSR/DECSCA/insert/SCORC/tab/SGR/print/invalid-utf8). Skipped: `test Action` (C-ABI meta), 2 SIMD-path tests (perf path not ported), and the kitty-keyboard / XTWINOPS-title-push-pop / XTSHIFTESCAPE prong tests (seams). |
-| `stream_terminal.zig` | 65 | 13 integration (`TerminalHandler`) | Ported the color (OSC 4/104/10/11/12), query-ignore, title/pwd, and reply (CPR/DECRQSS/DA) tests. Skipped: kitty-graphics/glyph-APC exec tests, kitty-keyboard, mouse, and title-stack tests (all seams). |
-| **stream/tests.rs total** | — | **33** | + 3 fixture replays against the Rust engine (`fixture_*`). |
-| vt-diff `rust_engine.rs` | — | 3 | Rust oracle standalone (hello/empty/3 fixtures). |
-| vt-diff `differential.rs` | — | 9 | Rust-vs-reference (fixtures + 8 hand streams), `--features reference`. |
+| Source                    | Zig tests | Rust port                           | Notes                                                                                                                                                                                                                                                                        |
+| ------------------------- | --------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stream.zig`              | 38        | 18 dispatch-routing (spy) + 2 print | Ported the portable subset (cursor/mode/erase/DECSCUSR/DECSCA/insert/SCORC/tab/SGR/print/invalid-utf8). Skipped: `test Action` (C-ABI meta), 2 SIMD-path tests (perf path not ported), and the kitty-keyboard / XTWINOPS-title-push-pop / XTSHIFTESCAPE prong tests (seams). |
+| `stream_terminal.zig`     | 65        | 13 integration (`TerminalHandler`)  | Ported the color (OSC 4/104/10/11/12), query-ignore, title/pwd, and reply (CPR/DECRQSS/DA) tests. Skipped: kitty-graphics/glyph-APC exec tests, kitty-keyboard, mouse, and title-stack tests (all seams).                                                                    |
+| **stream/tests.rs total** | —         | **33**                              | + 3 fixture replays against the Rust engine (`fixture_*`).                                                                                                                                                                                                                   |
+| vt-diff `rust_engine.rs`  | —         | 3                                   | Rust oracle standalone (hello/empty/3 fixtures).                                                                                                                                                                                                                             |
+| vt-diff `differential.rs` | —         | 9                                   | Rust-vs-reference (fixtures + 8 hand streams), `--features reference`.                                                                                                                                                                                                       |
 
 The unported Zig tests exercise seam subsystems (kitty graphics/glyph, kitty
 keyboard, tmux, mouse, title stack) or the SIMD fast path — all of which produce

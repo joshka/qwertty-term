@@ -31,11 +31,11 @@ read-back seam used by:
 
 ## Formats (`Format` enum, `formatter.zig:23-55`)
 
-| format | styled? | newline | notes |
-| --- | --- | --- | --- |
-| `plain` (0) | no | `\n` | text only; trailing whitespace/blank-line trimmed per `trim` |
-| `vt` (1) | yes | `\r\n` | SGR re-emission; palette indices stay indices unless `palette` opt set (then RGB); `Extra` state after content |
-| `html` (2) | yes | `\n` | inline-style `<div>`s, `white-space: pre`; palette → `var(--vt-palette-N)` unless `palette` opt; non-ASCII → numeric entities; OSC8 → `<a>` |
+| format      | styled? | newline | notes                                                                                                                                       |
+| ----------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plain` (0) | no      | `\n`    | text only; trailing whitespace/blank-line trimmed per `trim`                                                                                |
+| `vt` (1)    | yes     | `\r\n`  | SGR re-emission; palette indices stay indices unless `palette` opt set (then RGB); `Extra` state after content                              |
+| `html` (2)  | yes     | `\n`    | inline-style `<div>`s, `white-space: pre`; palette → `var(--vt-palette-N)` unless `palette` opt; non-ASCII → numeric entities; OSC8 → `<a>` |
 
 `formatStyled(fmt)` (`:58-63`): `plain=false`, `vt/html=true`.
 
@@ -185,16 +185,16 @@ tabstops/pwd state is already public.
 Upstream: **100** inline tests. Rust port: **49** tests in
 `crates/ghostty-vt/src/formatter/tests.rs`, all passing. Categories:
 
-| category | upstream | Rust | notes |
-| --- | --- | --- | --- |
-| Page/Screen plain (single/multi/blank/trailing/wide/wrap) | 42 | 12 | the whole-content + soft-wrap/unwrap cases; subset/rectangle deferred |
-| Page/Screen VT (bold/multi/fg/multiline/reset/palette/bg) | 8 | 9 | at Terminal level |
-| PageList plain/VT (multi-page) | 12 | 0 | collapse into wrapped-row cases; genuine page-split deferred |
-| TerminalFormatter + Screen (plain/vt/selection) | 20 | 2 | text asserts kept, pin_map asserts dropped; deduped |
-| Terminal VT (region/modes/tabstops/keyboard/pwd) | 5 | 5 | round-trip |
-| Screen VT extras (cursor/style/protection/charsets) | 4 | 4 | round-trip |
-| Page HTML (plain/styles/colors/bg-fg/escaping/unicode) | 12 | 7 | |
-| Page codepoint_map | 9 | 9 | |
+| category                                                  | upstream | Rust | notes                                                                 |
+| --------------------------------------------------------- | -------- | ---- | --------------------------------------------------------------------- |
+| Page/Screen plain (single/multi/blank/trailing/wide/wrap) | 42       | 12   | the whole-content + soft-wrap/unwrap cases; subset/rectangle deferred |
+| Page/Screen VT (bold/multi/fg/multiline/reset/palette/bg) | 8        | 9    | at Terminal level                                                     |
+| PageList plain/VT (multi-page)                            | 12       | 0    | collapse into wrapped-row cases; genuine page-split deferred          |
+| TerminalFormatter + Screen (plain/vt/selection)           | 20       | 2    | text asserts kept, pin_map asserts dropped; deduped                   |
+| Terminal VT (region/modes/tabstops/keyboard/pwd)          | 5        | 5    | round-trip                                                            |
+| Screen VT extras (cursor/style/protection/charsets)       | 4        | 4    | round-trip                                                            |
+| Page HTML (plain/styles/colors/bg-fg/escaping/unicode)    | 12       | 7    |                                                                       |
+| Page codepoint_map                                        | 9        | 9    |                                                                       |
 
 The count is lower than 100 because the upstream `Page*`/`PageList*` tests
 fan out one behavior across many `start_x`/`end_x`/`start_y`/`end_y`

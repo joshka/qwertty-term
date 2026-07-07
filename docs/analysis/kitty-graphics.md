@@ -14,16 +14,16 @@ documented at the end.
 
 ## File inventory (Zig)
 
-| file | LOC | role | ported? |
-| --- | --- | --- | --- |
-| `graphics.zig` | 38 | namespace re-exports + `refAllDecls` test | n/a (module root) |
-| `graphics_command.zig` | 1333 | APC command grammar: KV parser + command tree + `Response` | **yes** → `command.rs` |
-| `graphics_image.zig` | 1050 | `Image`, `LoadingImage` (chunked transfer, decode), `Rect` | **yes** → `image.rs` |
-| `graphics_storage.zig` | 1601 | `ImageStorage`: image map, placement map, eviction, generation, delete | **yes (model)** → `storage.rs` |
-| `graphics_exec.zig` | 658 | `execute(alloc, *Terminal, *Command)` → `Response`; needs `Terminal` | deferred (Phase 1 trunk / Screen) |
-| `graphics_render.zig` | 27 | `render.Placement`: renderer-facing placement struct | deferred (Phase 4) |
-| `graphics_unicode.zig` | 1347 | unicode placeholder (`U+10EEEE`) placement resolution | deferred (needs Screen row/cell iteration) |
-| `color.zig` / `key.zig` | 77 / 169 | kitty color protocol / keyboard flags | out of scope (other chunks) |
+| file                    | LOC      | role                                                                   | ported?                                    |
+| ----------------------- | -------- | ---------------------------------------------------------------------- | ------------------------------------------ |
+| `graphics.zig`          | 38       | namespace re-exports + `refAllDecls` test                              | n/a (module root)                          |
+| `graphics_command.zig`  | 1333     | APC command grammar: KV parser + command tree + `Response`             | **yes** → `command.rs`                     |
+| `graphics_image.zig`    | 1050     | `Image`, `LoadingImage` (chunked transfer, decode), `Rect`             | **yes** → `image.rs`                       |
+| `graphics_storage.zig`  | 1601     | `ImageStorage`: image map, placement map, eviction, generation, delete | **yes (model)** → `storage.rs`             |
+| `graphics_exec.zig`     | 658      | `execute(alloc, *Terminal, *Command)` → `Response`; needs `Terminal`   | deferred (Phase 1 trunk / Screen)          |
+| `graphics_render.zig`   | 27       | `render.Placement`: renderer-facing placement struct                   | deferred (Phase 4)                         |
+| `graphics_unicode.zig`  | 1347     | unicode placeholder (`U+10EEEE`) placement resolution                  | deferred (needs Screen row/cell iteration) |
+| `color.zig` / `key.zig` | 77 / 169 | kitty color protocol / keyboard flags                                  | out of scope (other chunks)                |
 
 `testdata/` holds `@embedFile`-d raw image fixtures used by `graphics_image.zig` tests.
 
@@ -50,6 +50,7 @@ key, or an over-long value) and skip bytes until the next delimiter — the comm
 completed with whatever KV pairs did parse (kitty-compatible leniency).
 
 `feed(c)` (`:103-150`) transitions:
+
 - In `control_key`: `=` finishes the key (only if exactly one char accumulated, else go to
   `control_value_ignore`); `;` with no key means "payload only, no control" → `data`
   (`ESC_G;<data>` is valid per kitty); anything else accumulates into `kv_temp`.
@@ -125,12 +126,14 @@ Holds the in-progress `Image` (metadata from the first chunk's `Transmission`), 
 `shared_memory`); `.direct` = all false (direct is always allowed), `.all` = all true.
 
 `init(alloc, cmd, limits)` (`:74-153`):
+
 1. Build `Image` from the transmission metadata (id/number/width/height/compression/format).
 2. **Direct medium**: append `cmd.data` directly (base64 already decoded by the parser).
 3. Otherwise (file/temp/shm): validate capabilities (png without a decoder → `UnsupportedMedium`),
    check the medium is in `limits`, then treat the payload as a **path** and load it.
 
 **Security handling** (this is the sensitive part):
+
 - Reject paths containing embedded NUL (`:125-132`) — `realpath` would assert.
 - `readFile` (`:251-326`): rejects `/proc/`, `/sys/`, and `/dev/` (except `/dev/shm/`).
   For `temporary_file`: the path must be inside a temp dir (`isPathInTempDir`) **and** contain
@@ -192,6 +195,7 @@ single `static AtomicU64` (`fetch_add`).
 ### `ImageStorage` (`:69-902`)
 
 One per screen (main/alt). Fields:
+
 - `dirty` — set on any placement/image change **and** on scroll/resize (geometry). Renderer
   clears it. Informational only.
 - `generation` — stamp of the last **content** mutation (transmit/replace/placement/delete).
@@ -214,6 +218,7 @@ placeholder — has no rect). `deinit(screen)` untracks the pin. **This leaks
 `PageList.Pin`.**
 
 Geometry methods on `Placement` (need terminal px/cell geometry, **not** a full Terminal):
+
 - `pixelSize(image, t)` (`:758-834`): image px size honoring source rect, cols/rows, and
   aspect ratio. Uses `t.width_px/t.cols` and `t.height_px/t.rows` as cell size.
 - `gridSize(image, t)` (`:837-868`): cols/rows in cells (divCeil of pixel size + offset by
@@ -269,6 +274,7 @@ against a `PageList` directly (via a small test helper mirroring `trackPin`) plu
 
 `execute(alloc, *Terminal, *Command) ?Response` (`:23-91`) is the top of the subsystem. It
 checks `storage.enabled()`, dispatches on `cmd.control`:
+
 - `query` (`:97-`): `LoadingImage.init` + `complete` a throwaway image to validate, respond
   with id/number/placement, never persists.
 - `transmit`/`transmit_and_display`: manage the `loading` state across chunks (the `q`

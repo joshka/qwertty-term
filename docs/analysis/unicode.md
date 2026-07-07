@@ -13,17 +13,17 @@ does no UCD parsing and no per-rule evaluation for property lookup.
 
 ## File map
 
-| File | Role |
-| --- | --- |
-| `src/unicode/main.zig` | Public API: `codepointWidth`, `graphemeBreak`, `graphemeWidth`, `table` |
-| `src/unicode/props.zig` | `Properties` packed struct — the per-codepoint payload |
-| `src/unicode/props_table.zig` | Binds the codegen'd stage arrays into `lut.Tables(Properties)` |
-| `src/unicode/props_uucode.zig` | Codegen exe: uucode → 3-stage LUT → Zig source on stdout |
-| `symbols_table.zig`, `symbols_uucode.zig` | Same pattern, `bool` symbol table (renderer-only) |
-| `src/unicode/lut.zig` | Generic 3-stage LUT generator + runtime accessor |
-| `src/unicode/grapheme.zig` | Grapheme break FSM (precomputed) + cluster width measurement |
-| `src/build/UnicodeTables.zig` | Build plumbing: runs codegen exes, captures stdout as modules |
-| `src/build/uucode_config.zig` | ghostty's `width`/`is_symbol` derivations (the width policy) |
+| File                                      | Role                                                                    |
+| ----------------------------------------- | ----------------------------------------------------------------------- |
+| `src/unicode/main.zig`                    | Public API: `codepointWidth`, `graphemeBreak`, `graphemeWidth`, `table` |
+| `src/unicode/props.zig`                   | `Properties` packed struct — the per-codepoint payload                  |
+| `src/unicode/props_table.zig`             | Binds the codegen'd stage arrays into `lut.Tables(Properties)`          |
+| `src/unicode/props_uucode.zig`            | Codegen exe: uucode → 3-stage LUT → Zig source on stdout                |
+| `symbols_table.zig`, `symbols_uucode.zig` | Same pattern, `bool` symbol table (renderer-only)                       |
+| `src/unicode/lut.zig`                     | Generic 3-stage LUT generator + runtime accessor                        |
+| `src/unicode/grapheme.zig`                | Grapheme break FSM (precomputed) + cluster width measurement            |
+| `src/build/UnicodeTables.zig`             | Build plumbing: runs codegen exes, captures stdout as modules           |
+| `src/build/uucode_config.zig`             | ghostty's `width`/`is_symbol` derivations (the width policy)            |
 
 Consumers: `Terminal.zig` (`print` width + grapheme clustering, lines ~451/961/1006),
 `Screen.zig` (~3248), `Surface.zig` (~2572), `lib_vt.zig` / `terminal/c/unicode.zig` (C API

@@ -11,15 +11,15 @@ story.
 
 ## File map
 
-| File | Role |
-| --- | --- |
-| `src/terminal/size.zig` | `Offset(T)` typed byte offsets, `OffsetBuf` layout cursor, int-size policy |
-| `src/terminal/bitmap_allocator.zig` | `BitmapAllocator(chunk_size)` — offset-based chunk allocator |
-| `src/terminal/ref_counted_set.zig` | `RefCountedSet(T, Id, RefCountInt, Context)` — dedup + refcount |
-| `src/terminal/hash_map.zig` | `OffsetHashMap(K, V)` — stdlib HashMap fork with offset-based storage |
-| `src/terminal/style.zig` | `Style` value type + `style.Set = RefCountedSet(Style, u16, u16, …)` |
-| `src/terminal/hyperlink.zig` | `PageEntry` (offset-based hyperlink), `Set`, `Map` |
-| `src/terminal/page.zig` | `Page`, `Row`, `Cell`, `Capacity`, layout math, integrity checks |
+| File                                | Role                                                                       |
+| ----------------------------------- | -------------------------------------------------------------------------- |
+| `src/terminal/size.zig`             | `Offset(T)` typed byte offsets, `OffsetBuf` layout cursor, int-size policy |
+| `src/terminal/bitmap_allocator.zig` | `BitmapAllocator(chunk_size)` — offset-based chunk allocator               |
+| `src/terminal/ref_counted_set.zig`  | `RefCountedSet(T, Id, RefCountInt, Context)` — dedup + refcount            |
+| `src/terminal/hash_map.zig`         | `OffsetHashMap(K, V)` — stdlib HashMap fork with offset-based storage      |
+| `src/terminal/style.zig`            | `Style` value type + `style.Set = RefCountedSet(Style, u16, u16, …)`       |
+| `src/terminal/hyperlink.zig`        | `PageEntry` (offset-based hyperlink), `Set`, `Map`                         |
+| `src/terminal/page.zig`             | `Page`, `Row`, `Cell`, `Capacity`, layout math, integrity checks           |
 
 ## Why offsets instead of pointers
 

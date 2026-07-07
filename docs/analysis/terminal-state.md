@@ -144,7 +144,7 @@ of them per the gotchas above, semantics preserved).
 
 ## charsets.zig -> `charsets.rs`
 
-**Purpose**: the four charset "slots" (G0-G3, selected via `ESC ( `/`ESC )`/
+**Purpose**: the four charset "slots" (G0-G3, selected via `ESC (`/`ESC )`/
 `ESC *`/`ESC +`) and which slot is active for GL (7-bit) vs GR (8-bit),
 switched by SI/SO/locking shifts (a later `Terminal` chunk owns the
 shift-state machine; this module only owns the *tables*). 115 lines, 1
@@ -284,16 +284,16 @@ partial port (`default_palette_named`, `default_palette_cube_and_ramp`,
 
 ## Test porting status (exact counts)
 
-| Zig file | Zig tests | Rust file | Rust tests | Gap explanation |
-|---|---|---|---|---|
-| `sgr.zig` | 31 | `sgr.rs` | 30 | 1 C-ABI-only test, N/A (no FFI layer in this chunk) |
-| `csi.zig` | 0 | `csi.rs` | 5 | No Zig tests to port; 5 net-new covering the `EraseLine`/`TabClear` non-exhaustive-enum modeling |
-| `modes.zig` | 12 | `modes.rs` | 12 | Full 1:1 (2 tests changed mechanism, not behavior — see gotchas) |
-| `charsets.zig` | 1 | `charsets.rs` | 3 | 1 ported + 2 net-new (utf8 panic path, DEC special spot-check) |
-| `Tabstops.zig` | 5 | `tabstops.rs` | 5 | 1 test's mechanism changed (alloc-failure -> no-op-resize invariant, no Rust equivalent to a recoverable `Vec` alloc failure) |
-| `color.zig` | 25 | `color/mod.rs` | 26 | 23 ported (2 compile-existence checks N/A) + 3 pre-existing (from the earlier page-memory-chunk partial port, not newly added) |
-| `x11_color.zig` | 2 | `color/x11_color.rs` | 2 | Full 1:1 |
-| **Total** | **76** | | **83** | |
+| Zig file        | Zig tests | Rust file            | Rust tests | Gap explanation                                                                                                                |
+| --------------- | --------- | -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `sgr.zig`       | 31        | `sgr.rs`             | 30         | 1 C-ABI-only test, N/A (no FFI layer in this chunk)                                                                            |
+| `csi.zig`       | 0         | `csi.rs`             | 5          | No Zig tests to port; 5 net-new covering the `EraseLine`/`TabClear` non-exhaustive-enum modeling                               |
+| `modes.zig`     | 12        | `modes.rs`           | 12         | Full 1:1 (2 tests changed mechanism, not behavior — see gotchas)                                                               |
+| `charsets.zig`  | 1         | `charsets.rs`        | 3          | 1 ported + 2 net-new (utf8 panic path, DEC special spot-check)                                                                 |
+| `Tabstops.zig`  | 5         | `tabstops.rs`        | 5          | 1 test's mechanism changed (alloc-failure -> no-op-resize invariant, no Rust equivalent to a recoverable `Vec` alloc failure)  |
+| `color.zig`     | 25        | `color/mod.rs`       | 26         | 23 ported (2 compile-existence checks N/A) + 3 pre-existing (from the earlier page-memory-chunk partial port, not newly added) |
+| `x11_color.zig` | 2         | `color/x11_color.rs` | 2          | Full 1:1                                                                                                                       |
+| **Total**       | **76**    |                      | **83**     |                                                                                                                                |
 
 All 293 tests in `ghostty-vt`'s lib target pass (`cargo test -p ghostty-vt
 --lib`), along with the 14 differential-parser tests and 4 unicode
