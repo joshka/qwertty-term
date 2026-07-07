@@ -18,6 +18,8 @@
 //! - [`function_keys`] — the PC-style function key table (port of `input/function_keys.zig`).
 //! - [`kitty_keymap`] — the kitty keyboard protocol functional-key table (port of
 //!   `input/kitty.zig`).
+//! - [`keymap`] — the macOS native keycode → `Key` table (the macOS column of
+//!   `input/keycodes.zig`), for native AppKit hosts.
 //! - [`paste`] — bracketed-paste wrapping + control-char stripping (port of `input/paste.zig`).
 //! - [`mouse_encode`] — X10/UTF8/SGR/urxvt/SGR-pixels mouse report encoding (port of
 //!   `input/mouse_encode.zig`).
@@ -29,6 +31,7 @@ pub mod function_keys;
 pub mod key;
 pub mod key_encode;
 pub mod key_mods;
+pub mod keymap;
 pub mod kitty_keymap;
 pub mod mouse;
 pub mod mouse_encode;
