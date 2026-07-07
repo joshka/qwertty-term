@@ -53,31 +53,31 @@ completeness behind it.
 
 Font chunks (30.3k total; 27.7k macOS-relevant):
 
-| #   | Chunk                                             | Zig LoC     | Cx   | Notes                                                                                                                 |
-| --- | ------------------------------------------------- | ----------- | ---- | --------------------------------------------------------------------------------------------------------------------- |
-| F3  | **sprite rasterizer → ghostty-sprite crate**      | 6,239       | M/L  | — IN FLIGHT; fully independent                                                                                        |
-| F1  | opentype tables                                   | 2,457       | M    | ttf-parser replaces most; verify bare-glyf                                                                            |
-| F4  | Metrics + Atlas + backend + embedded fonts        | 3,981       | S/M  | atlas → etagere-class crate                                                                                           |
-| F5  | CoreText face + discovery                         | 3,197       | XL   | first pixels needs face + load-one-font only; Score ranking deferred                                                  |
-| F6  | Collection + CodepointResolver + SharedGrid(-Set) | 3,459       | L    | reduced single-style first; Index bitfield → slotmap decision                                                         |
-| F7  | run segmentation + shaping                        | 5,769       | L/XL | **rustybuzz-first** (upstream's coretext_harfbuzz variant proves viability); XL CoreText shaper = fidelity pass later |
-| F2  | glyf rasterizer (glyph protocol)                  | 1,756       | L    | not first-pixels; after F1                                                                                            |
-| F8  | HarfBuzz/CoreText shaper parity passes            | 2,172+2,678 | M/XL | deferred fidelity                                                                                                     |
+| #   | Chunk                                             | Zig LoC     | Cx   | Notes                                                                                                  |
+| --- | ------------------------------------------------- | ----------- | ---- | ------------------------------------------------------------------------------------------------------ |
+| F3  | **sprite rasterizer → ghostty-sprite crate**      | 6,239       | M/L  | — IN FLIGHT; fully independent                                                                         |
+| F1  | opentype tables                                   | 2,457       | M    | **DONE 2026-07-07 (ttf-parser adopted; skyline atlas ported — etagere rejected: no counter protocol)** |
+| F4  | Metrics + Atlas + backend + embedded fonts        | 3,981       | S/M  | **DONE 2026-07-07 (with F1: Metrics verified, Atlas, embedded fonts)**                                 |
+| F5  | CoreText face + discovery                         | 3,197       | XL   | **DONE 2026-07-08 (CoreText face+rasterize; F1 metrics VERIFIED exact)**                               |
+| F6  | Collection + CodepointResolver + SharedGrid(-Set) | 3,459       | L    | **DONE 2026-07-08 (reduced: slotmap Collection, sprite-dispatch resolver)**                            |
+| F7  | run segmentation + shaping                        | 5,769       | L/XL | **DONE 2026-07-08 (reduced: rustybuzz, cluster==cell mapping, atlas proof)**                           |
+| F2  | glyf rasterizer (glyph protocol)                  | 1,756       | L    | not first-pixels; after F1                                                                             |
+| F8  | HarfBuzz/CoreText shaper parity passes            | 2,172+2,678 | M/XL | deferred fidelity                                                                                      |
 
 Renderer chunks (13.9k total; Metal-first):
 
-| #   | Chunk                                                                                           | Zig LoC | Cx  | Notes                                        |
-| --- | ----------------------------------------------------------------------------------------------- | ------- | --- | -------------------------------------------- |
-| R0  | geometry + RenderSnapshot trait (size/State/cursor/row)                                         | 883     | S/M | first, solo; full-copy snapshot impl day one |
-| R1  | GpuBackend trait + Metal context (objc2-metal deletes 452-LoC bindings)                         | ~1,470  | L   | freezes trait + wire structs                 |
-| R2  | frame/present/pacing (IOSurface-on-CALayer, NOT CAMetalLayer; CVDisplayLink later, timer first) | ~1,050  | L   | ∥ R3/R4                                      |
-| R3  | shaders: cell_text/cell_bg/bg_color MSL + wire structs bit-exact                                | ~1,300  | L   | ∥ R2/R4                                      |
-| R4  | cell engine (rebuildCells family; full-redraw mode day one)                                     | ~2,600  | XL  | critical path                                |
-| R5  | render thread + mailbox (replace egui shell)                                                    | ~840    | L   | after pixels; sync loop OK first             |
-| R6  | kitty image + bg-image rendering                                                                | ~1,400  | L   | completeness                                 |
-| R7  | links (regex crate) + overlay + min-contrast polish                                             | ~740    | M   | completeness                                 |
-| R8  | shadertoy custom shaders (naga/shaderc)                                                         | ~1,100  | M   | completeness                                 |
-| R9  | OpenGL backend                                                                                  | ~1,870  | L   | Linux-later                                  |
+| #   | Chunk                                                                                           | Zig LoC | Cx  | Notes                                                                                                               |
+| --- | ----------------------------------------------------------------------------------------------- | ------- | --- | ------------------------------------------------------------------------------------------------------------------- |
+| R0  | geometry + RenderSnapshot trait (size/State/cursor/row)                                         | 883     | S/M | **DONE 2026-07-07 (RenderSnapshot trait + full-copy impl)**                                                         |
+| R1  | GpuBackend trait + Metal context (objc2-metal deletes 452-LoC bindings)                         | ~1,470  | L   | **DONE 2026-07-08 (objc2-metal; wire structs FROZEN; IOSurface readback proven; fixed upstream buffer over-alloc)** |
+| R2  | frame/present/pacing (IOSurface-on-CALayer, NOT CAMetalLayer; CVDisplayLink later, timer first) | ~1,050  | L   | **DONE 2026-07-08 (Frame/RenderPass/Pipeline/IOSurfaceLayer/SwapChain; clear+triangle readback proven)**            |
+| R3  | shaders: cell_text/cell_bg/bg_color MSL + wire structs bit-exact                                | ~1,300  | L   | **DONE 2026-07-08 (MSL verbatim, compiles on Metal; layouts pinned to wire offsets; color-math goldens)**           |
+| R4  | cell engine (rebuildCells family; full-redraw mode day one)                                     | ~2,600  | XL  | critical path                                                                                                       |
+| R5  | render thread + mailbox (replace egui shell)                                                    | ~840    | L   | after pixels; sync loop OK first                                                                                    |
+| R6  | kitty image + bg-image rendering                                                                | ~1,400  | L   | completeness                                                                                                        |
+| R7  | links (regex crate) + overlay + min-contrast polish                                             | ~740    | M   | completeness                                                                                                        |
+| R8  | shadertoy custom shaders (naga/shaderc)                                                         | ~1,100  | M   | completeness                                                                                                        |
+| R9  | OpenGL backend                                                                                  | ~1,870  | L   | Linux-later                                                                                                         |
 
 Exit artifact: the window renders with real CoreText glyphs, sprites, emoji; egui retired.
 Per-row dirty tracking slots in behind the RenderSnapshot trait when wired to PageList's
