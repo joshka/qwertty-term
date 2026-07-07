@@ -6,7 +6,22 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-06
+## State as of 2026-07-06 (end of autonomous run)
+
+**Phase 1 core loop CLOSED and demo live**: parser → stream → Terminal → Screen → PageList all
+ported; differential parity proven (zero divergences vs libghostty-vt across fixtures + 8
+hand-written streams); both spike frontends now run on the ghostty-vt engine
+(`cargo run -p ghostty-spike -- --window`). Trunk: 880 lib tests + differential + E2E PTY
+tests, all green. Ledger + milestones in `docs/port-status.md`; 14 analysis docs in
+`docs/analysis/`.
+
+**Phase 1 remaining tail** (parallelizable): Selection.zig, formatter.zig, search/,
+kitty graphics exec + unicode placeholders, stream seams (kitty keyboard, XTWINOPS/title
+stack, mouse reporting, XTGETTCAP/DECRQSS tail, REP), snapshot gaps (OSC 52 read-back,
+dynamic palette into color resolution, underline styles), Terminal edge-permutation tests,
+resize-permutation tests deferred from PageList.
+
+## Prior state notes
 
 - **Phase 0 essentially complete.** jj `work/` layout live (integrate in `work/default`,
   one workspace per chunk). Cargo workspace: `crates/ghostty-vt` (core, real code now),

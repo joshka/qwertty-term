@@ -18,6 +18,14 @@ Status legend: `—` not started · `WIP` · `done`
 | Criterion bench skeleton | done | baselines: ascii ~108 MiB/s, sgr ~104 MiB/s, utf8_mixed ~437 MiB/s (untuned) |
 | Unicode table codegen (xtask) | done | `cargo xtask gen-unicode` (UCD 17.0.0 pinned, downloads gitignored); 3-stage LUT matching ghostty's format; **exact parity: 0 mismatches vs ghostty's generated table over all 1,114,112 codepoints**; analysis: `docs/analysis/unicode.md` |
 
+
+## Milestones
+
+| Milestone | Status | Notes |
+|---|---|---|
+| Differential parity (fixtures + hand streams) | **done 2026-07-06** | zero divergences vs libghostty-vt |
+| Spike frontends on ghostty-vt engine | **done 2026-07-06** | `cargo run -p ghostty-spike -- --window`; snapshot read-back API added to ghostty-vt (also serves embeddability); spike's old core deleted; limitations: OSC 52 read-back, dynamic palette resolution, fancy underlines |
+
 ## Phase 1 — VT core (`src/terminal/` → `crates/ghostty-vt`)
 
 | Zig file | Analysis | Port | Tests | Notes |
