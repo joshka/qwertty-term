@@ -342,6 +342,20 @@ impl Cell {
         self.set_content_raw(idx as u32);
     }
 
+    /// The RGB triple stored in a `BgColorRgb` cell. Port of `Cell.content`'s
+    /// `color_rgb` packed field (`RGB{ r, g, b }`, LSB-first: r=bits 0-7,
+    /// g=8-15, b=16-23).
+    #[inline]
+    pub fn color_rgb(self) -> (u8, u8, u8) {
+        let raw = self.content_raw();
+        (raw as u8, (raw >> 8) as u8, (raw >> 16) as u8)
+    }
+    #[inline]
+    pub fn set_color_rgb(&mut self, r: u8, g: u8, b: u8) {
+        self.set_content_tag(ContentTag::BgColorRgb);
+        self.set_content_raw((r as u32) | ((g as u32) << 8) | ((b as u32) << 16));
+    }
+
     #[inline]
     pub fn style_id(self) -> StyleCountInt {
         ((self.0 >> Self::STYLE_SHIFT) & Self::STYLE_MASK) as StyleCountInt
@@ -1351,7 +1365,7 @@ impl Page {
     }
 
     /// Clear a cell's graphemes. Port of `clearGrapheme`.
-    unsafe fn clear_grapheme(&mut self, cell: *mut Cell) {
+    pub(crate) unsafe fn clear_grapheme(&mut self, cell: *mut Cell) {
         // SAFETY: cell valid per caller of the calling method.
         unsafe {
             let mem = self.mem;
@@ -1366,7 +1380,7 @@ impl Page {
     }
 
     /// Recompute a row's grapheme flag. Port of `updateRowGraphemeFlag`.
-    unsafe fn update_row_grapheme_flag(&self, row: *mut Row) {
+    pub(crate) unsafe fn update_row_grapheme_flag(&self, row: *mut Row) {
         // SAFETY: row valid per caller.
         unsafe {
             let base = (*row).cells().ptr(self.mem);
@@ -1444,7 +1458,7 @@ impl Page {
     }
 
     /// Recompute a row's hyperlink flag. Port of `updateRowHyperlinkFlag`.
-    unsafe fn update_row_hyperlink_flag(&self, row: *mut Row) {
+    pub(crate) unsafe fn update_row_hyperlink_flag(&self, row: *mut Row) {
         // SAFETY: row valid per caller.
         unsafe {
             let base = (*row).cells().ptr(self.mem);

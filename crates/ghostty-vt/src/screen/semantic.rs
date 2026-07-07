@@ -1,51 +1,13 @@
 //! Semantic prompt (OSC 133) state owned by `Screen`.
 //!
-//! The `SemanticPrompt` container and `seen` optimization are Screen's own; the
-//! `Click` / `ClickEvents` / `PromptKind` / `Redraw` enums originate in
-//! `src/terminal/osc/parsers/semantic_prompt.zig`.
-//!
-//! TODO(chunk:osc): replace these local placeholders with re-exports from the
-//! ported OSC parser module once the `osc` sibling chunk lands. They are defined
-//! narrowly here (values only, no parsing) so Screen's resize/prompt plumbing
-//! and `cursorSetSemanticContent` compile without depending on the OSC chunk.
+//! The `SemanticPrompt` container and its `seen` optimization are Screen's own.
+//! The `Click` / `ClickEvents` / `PromptKind` / `Redraw` vocabulary is the real
+//! parsed OSC 133 type set, re-exported here from
+//! [`crate::osc`] (the OSC chunk has landed), so
+//! Screen and Terminal share exactly one definition rather than the former
+//! local placeholder copy.
 
-/// OSC 133 click-events option. Port of `osc.semantic_prompt.ClickEvents`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClickEvents {
-    Absolute,
-    Relative,
-}
-
-/// OSC 133 click-handling option. Port of `osc.semantic_prompt.Click`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Click {
-    Line,
-    Multiple,
-    ConservativeVertical,
-    SmartVertical,
-}
-
-/// The kind of prompt line. Port of `osc.semantic_prompt.PromptKind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptKind {
-    Initial,
-    Right,
-    Continuation,
-    Secondary,
-}
-
-/// Whether/how the shell supports prompt redraw on resize. Port of
-/// `osc.semantic_prompt.Redraw`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Redraw {
-    /// Shell redraws the full prompt and all continuations.
-    True,
-    /// Shell does NOT redraw — Ghostty clears nothing on resize.
-    #[default]
-    False,
-    /// Shell redraws only the LAST prompt line (e.g. Bash).
-    Last,
-}
+pub use crate::osc::{Click, ClickEvents, PromptKind, Redraw};
 
 /// How click handling in a prompt is configured. Port of
 /// `SemanticPrompt.SemanticClick`.

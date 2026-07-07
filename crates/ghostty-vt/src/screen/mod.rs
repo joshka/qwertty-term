@@ -12,7 +12,6 @@
 //! prompt. Selection is SCAFFOLD only; SGR/charset tables and OSC parsing land
 //! with sibling chunks (see the `TODO(chunk:*)` markers).
 
-pub mod charset;
 pub mod cursor;
 pub mod hyperlink;
 pub mod kitty_key;
@@ -30,11 +29,21 @@ use crate::pagelist::{
 };
 use crate::point::{Point, Tag};
 
-use charset::CharsetState;
+use crate::charsets::CharsetState;
 use cursor::{Cursor, SavedCursor};
 use hyperlink::{Hyperlink, HyperlinkId};
 use kitty_key::FlagStack;
 use semantic::{PromptKind, Redraw, SemanticPrompt};
+
+/// The character protection mode. Port of `ansi.ProtectedMode`. Owned as
+/// Terminal-adjacent state but stored on `Screen` because erase paths read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProtectedMode {
+    #[default]
+    Off,
+    Iso,
+    Dec,
+}
 
 /// Renderer-facing dirty flags. Port of `Screen.Dirty`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -113,8 +122,13 @@ pub struct Screen {
     /// The tracked selection (SCAFFOLD — see [`SelectionPlaceholder`]).
     pub selection: Option<SelectionPlaceholder>,
 
-    /// The charset state (STUB — see [`charset`]).
+    /// The charset state. See [`crate::charsets::CharsetState`].
     pub charset: CharsetState,
+
+    /// The most-recently-seen protected-mode kind. Port of
+    /// `Screen.protected_mode`. Never reset to `.off` once set, because
+    /// `eraseChars` and friends depend on knowing the most recent mode.
+    pub protected_mode: ProtectedMode,
 
     /// The kitty keyboard settings.
     pub kitty_keyboard: FlagStack,
@@ -155,6 +169,7 @@ impl Screen {
             saved_cursor: None,
             selection: None,
             charset: CharsetState::default(),
+            protected_mode: ProtectedMode::default(),
             kitty_keyboard: FlagStack::default(),
             semantic_prompt: SemanticPrompt::default(),
             dirty: Dirty::default(),
@@ -248,6 +263,7 @@ impl Screen {
             saved_cursor: None,
             selection: None,
             charset: CharsetState::default(),
+            protected_mode: ProtectedMode::default(),
             kitty_keyboard: FlagStack::default(),
             semantic_prompt: SemanticPrompt::default(),
             dirty: self.dirty,
@@ -263,7 +279,7 @@ impl Screen {
     ///
     /// # Safety
     /// The cursor pin must be live (always true for a tracked cursor pin).
-    unsafe fn cursor_page(&self) -> *mut Page {
+    pub(crate) unsafe fn cursor_page(&self) -> *mut Page {
         unsafe {
             let node = (*self.cursor.page_pin).node;
             self.pages.node_data_mut(node)
@@ -284,11 +300,14 @@ impl Screen {
 
     /// The blank cell to use when preserving the cursor bg. Port of `blankCell`.
     ///
-    /// TODO(chunk:sgr): `Style::bg_cell` isn't ported yet, so a non-default
-    /// style falls back to the plain blank cell. Only affects bg preservation on
-    /// clears.
+    /// If the cursor's style has an explicit background color, blanked cells
+    /// carry that background (a `BgColor*` cell); otherwise the plain default
+    /// cell.
     fn blank_cell(&self) -> Cell {
-        Cell::default()
+        if self.cursor.style_id == style::DEFAULT_ID {
+            return Cell::default();
+        }
+        self.cursor.style.bg_cell().unwrap_or_default()
     }
 
     /// The active dimensions.
@@ -332,7 +351,7 @@ impl Screen {
     /// # Safety
     /// `cursor.x + n < cols`.
     #[allow(dead_code)]
-    unsafe fn cursor_cell_right(&self, n: CellCountInt) -> *mut Cell {
+    pub(crate) unsafe fn cursor_cell_right(&self, n: CellCountInt) -> *mut Cell {
         debug_assert!(self.cursor.x + n < self.pages.cols());
         unsafe { self.cursor.page_cell.add(n as usize) }
     }
@@ -342,7 +361,7 @@ impl Screen {
     /// # Safety
     /// `cursor.x >= n`.
     #[cfg_attr(not(test), allow(dead_code))]
-    unsafe fn cursor_cell_left(&self, n: CellCountInt) -> *mut Cell {
+    pub(crate) unsafe fn cursor_cell_left(&self, n: CellCountInt) -> *mut Cell {
         debug_assert!(self.cursor.x >= n);
         unsafe { self.cursor.page_cell.sub(n as usize) }
     }
@@ -357,6 +376,22 @@ impl Screen {
         // SAFETY: cursor pin valid after change.
         unsafe { self.refresh_cursor_pointers() };
         self.assert_integrity();
+    }
+
+    /// The row `n` rows above the cursor, without moving the cursor. Port of
+    /// `cursorRowUp` — used by `Terminal::cursor_left`'s reverse-wrap logic to
+    /// inspect the previous row's `wrap` flag.
+    ///
+    /// # Safety
+    /// The caller must guarantee `cursor.y >= n` (a row exists `n` above).
+    pub(crate) unsafe fn cursor_row_up(&self, n: CellCountInt) -> *mut crate::page::Row {
+        debug_assert!(self.cursor.y >= n);
+        // SAFETY: cursor pin valid; up(n) succeeds because y >= n (caller-asserted).
+        unsafe {
+            let pin = (*self.cursor.page_pin).up(n as usize).unwrap();
+            let (row, _) = pin.row_and_cell();
+            row
+        }
     }
 
     /// Move the cursor down by `n`. Port of `cursorDown`.
@@ -875,7 +910,7 @@ impl Screen {
 
     /// Move down if not at the bottom, else scroll. Port of `cursorDownOrScroll`.
     #[cfg_attr(not(test), allow(dead_code))]
-    fn cursor_down_or_scroll(&mut self) {
+    pub(crate) fn cursor_down_or_scroll(&mut self) {
         if self.cursor.y + 1 < self.pages.rows() {
             self.cursor_down(1);
         } else {
@@ -926,7 +961,7 @@ impl Screen {
     ///
     /// # Safety
     /// `page`/`row` live; `[left, end)` in bounds.
-    unsafe fn clear_cells_page(
+    pub(crate) unsafe fn clear_cells_page(
         &self,
         page: *mut Page,
         row: *mut crate::page::Row,
@@ -1144,6 +1179,32 @@ impl Screen {
 
         self.assert_integrity();
     }
+
+    /// Set the current hyperlink on the current cell. Port of `cursorSetHyperlink`
+    /// (simplified: no OutOfMemory retry — see TODO). Used by the Terminal print
+    /// path and the test harness.
+    pub(crate) fn cursor_set_hyperlink(&mut self) -> Result<(), ()> {
+        debug_assert!(self.cursor.hyperlink_id != 0);
+        // TODO(chunk:terminal-hyperlink): port the OutOfMemory grow+retry loop.
+        // SAFETY: cursor page/row/cell live.
+        unsafe {
+            let page = self.cursor_page();
+            match (*page).set_hyperlink(
+                self.cursor.page_row,
+                self.cursor.page_cell,
+                self.cursor.hyperlink_id,
+            ) {
+                Ok(()) => {
+                    let mem = (*page).memory_mut();
+                    (*page)
+                        .hyperlink_set_mut()
+                        .use_id(mem, self.cursor.hyperlink_id);
+                    Ok(())
+                }
+                Err(_) => Err(()),
+            }
+        }
+    }
 }
 
 /// Argument to [`Screen::cursor_set_semantic_content`]. Port of the inline
@@ -1315,34 +1376,13 @@ impl Screen {
             }
         }
     }
+}
 
-    /// Set the current hyperlink on the current cell. Port of `cursorSetHyperlink`
-    /// (simplified: no OutOfMemory retry — sufficient for the test harness).
-    fn cursor_set_hyperlink(&mut self) -> Result<(), ()> {
-        debug_assert!(self.cursor.hyperlink_id != 0);
-        // SAFETY: cursor page/row/cell live.
-        unsafe {
-            let page = self.cursor_page();
-            match (*page).set_hyperlink(
-                self.cursor.page_row,
-                self.cursor.page_cell,
-                self.cursor.hyperlink_id,
-            ) {
-                Ok(()) => {
-                    let mem = (*page).memory_mut();
-                    (*page)
-                        .hyperlink_set_mut()
-                        .use_id(mem, self.cursor.hyperlink_id);
-                    Ok(())
-                }
-                Err(_) => Err(()),
-            }
-        }
-    }
-
+impl Screen {
     /// Dump the region `[tl, br]` (inclusive) as plain text, one row per line.
-    /// A restricted port of `dumpString` (`.plain` emit) sufficient for tests:
-    /// concatenates each row's cell codepoints, optionally unwrapping soft-wrap.
+    /// A restricted port of `dumpString` (`.plain` emit): concatenates each
+    /// row's cell codepoints, optionally unwrapping soft-wrap. Used by both the
+    /// test harness and `Terminal::plain_string`.
     pub fn dump_string(&self, tag: Tag, unwrap: bool) -> String {
         use crate::page::Wide;
         let mut out = String::new();

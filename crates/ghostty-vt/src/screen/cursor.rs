@@ -7,8 +7,8 @@ use crate::page::style::{self, Style};
 use crate::page::{Cell, Row, SemanticContent};
 use crate::pagelist::Pin;
 
-use super::charset::CharsetState;
 use super::hyperlink::Hyperlink;
+use crate::charsets::CharsetState;
 
 /// The visual style of the cursor. Port of `cursor.zig`'s `Style`.
 ///

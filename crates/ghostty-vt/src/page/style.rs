@@ -127,6 +127,27 @@ impl Style {
         *self == Style::default()
     }
 
+    /// The bg-color-only [`Cell`] representing this style's background, or
+    /// `None` if the style has no explicit background. Port of `Style.bgCell`.
+    ///
+    /// Used by the erase/clear paths to preserve the active background color
+    /// when blanking cells (`Screen::blank_cell`).
+    pub fn bg_cell(&self) -> Option<super::Cell> {
+        match self.bg_color {
+            Color::None => None,
+            Color::Palette(idx) => {
+                let mut c = super::Cell::default();
+                c.set_color_palette(idx);
+                Some(c)
+            }
+            Color::Rgb(rgb) => {
+                let mut c = super::Cell::default();
+                c.set_color_rgb(rgb.r, rgb.g, rgb.b);
+                Some(c)
+            }
+        }
+    }
+
     /// Resolve the underline color. Port of `Style.underlineColor`.
     pub fn underline_color(&self, palette: &Palette) -> Option<Rgb> {
         match self.underline_color {
