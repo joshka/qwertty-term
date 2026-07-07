@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::Path;
 
-use vt_diff::{Oracle, ReferenceTerminal, RustTerminal};
+use vt_diff::{Oracle, ReferenceTerminal, RustTerminal, decode_escaped_stream};
 
 /// Feed `input` to both engines and assert the formatter's plain dumps agree
 /// after the shared normalization (the reference dump can carry trailing blank
@@ -85,35 +85,4 @@ fn read_size(path: &Path) -> (u16, u16) {
     let cols = parts.next().unwrap().parse().unwrap();
     let rows = parts.next().unwrap().parse().unwrap();
     (cols, rows)
-}
-
-fn decode_escaped_stream(text: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            let mut buf = [0; 4];
-            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-            continue;
-        }
-        match chars.next() {
-            Some('e') => out.push(0x1b),
-            Some('n') => out.push(b'\n'),
-            Some('r') => out.push(b'\r'),
-            Some('t') => out.push(b'\t'),
-            Some('\\') => out.push(b'\\'),
-            Some('x') => {
-                let hi = chars.next().unwrap().to_digit(16).unwrap() as u8;
-                let lo = chars.next().unwrap().to_digit(16).unwrap() as u8;
-                out.push((hi << 4) | lo);
-            }
-            Some(other) => {
-                out.push(b'\\');
-                let mut buf = [0; 4];
-                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
-            }
-            None => out.push(b'\\'),
-        }
-    }
-    out
 }

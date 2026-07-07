@@ -1,0 +1,1 @@
+Rust engine panics (debug integrity check InvalidSpacerTailLocation) when a spacer-tail cell is overwritten. See corpus.rs known-divergence test known_divergence_wide_spacer_overwrite.

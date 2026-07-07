@@ -8,6 +8,9 @@
 //! The reference side requires the `reference` cargo feature and the
 //! Zig-built static library; see the crate README.
 
+mod esc;
+pub use esc::decode_escaped_stream;
+
 mod oracle;
 pub use oracle::{CursorPos, Oracle, ScreenDump, normalize_screen_text};
 
