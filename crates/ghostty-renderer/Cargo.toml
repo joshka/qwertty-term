@@ -1,0 +1,13 @@
+[package]
+name = "ghostty-renderer"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Renderer core ported from Ghostty: geometry, cursor style resolution, row heuristics, and the RenderSnapshot contract between ghostty-vt and any renderer backend"
+publish = false
+
+[dependencies]
+ghostty-vt = { path = "../ghostty-vt" }
+
+[dev-dependencies]
