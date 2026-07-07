@@ -84,7 +84,8 @@ existing row-dirty flags.
 
 ## M4 — Input/config completeness
 
-- [x] Minimal TOML config: theme (ghostty theme files), copy-on-select, font-size — IN FLIGHT
+- [x] Minimal TOML config — DONE 2026-07-07: ~/.config/ghostty-rs/config.toml (theme via
+      ghostty theme files, copy-on-select, font-size, font-family preference)
 - [ ] Legacy key encoder (chunk J above, if not landed in M2)
 - [ ] Binding.zig keybind system + actions (4,882 XL) — only when wanted; near-default user
 - [ ] Full config port (Config.zig 10.9k + subsystems ~14.5k) + `+import-ghostty-config` — LOW
