@@ -120,13 +120,15 @@ byte→coordinate map. So the port lands a self-contained `encode_page_plain(nod
 `search/sliding_window.rs` that mirrors the **plain + unwrap** subset of
 `PageFormatter.formatWithState` + its `point_map` accounting
 (`formatter.zig:797-1360`). The plain path is much smaller than the full formatter (no
-headers, styles, or hyperlinks) — only
-  - blank-cell runs → spaces, each mapped to the coordinate reached by walking back from the
-    current `(x,y)` (`formatter.zig:1150-1183`),
-  - codepoint/grapheme cells → their UTF-8 bytes, each mapped to `(x,y)`
-    (`formatter.zig:1305-1324`),
-  - deferred blank rows flushed as `'\n'`, mapped to the prior row's coordinate
-    (`formatter.zig:1078-1103`).
+headers, styles, or hyperlinks) — only:
+
+- blank-cell runs → spaces, each mapped to the coordinate reached by walking back from the
+  current `(x,y)` (`formatter.zig:1150-1183`),
+- codepoint/grapheme cells → their UTF-8 bytes, each mapped to `(x,y)`
+  (`formatter.zig:1305-1324`),
+- deferred blank rows flushed as `'\n'`, mapped to the prior row's coordinate
+  (`formatter.zig:1078-1103`).
+
 This keeps `formatter.rs`'s deferral intact and confines the search-only encoding to the
 search module.
 
