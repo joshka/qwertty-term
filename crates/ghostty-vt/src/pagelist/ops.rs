@@ -4,8 +4,9 @@
 use super::iter::Direction;
 use super::pin::{Overflow, Pin};
 use super::{Node, PageList, Viewport, initial_capacity, std_size};
+use crate::highlight::Untracked;
 use crate::page::size::CellCountInt;
-use crate::page::{Capacity, Page};
+use crate::page::{Capacity, Page, SemanticContent};
 use crate::point::{Point, Tag};
 
 /// Which capacity dimension to grow. Port of `IncreaseCapacity`.
@@ -588,6 +589,149 @@ impl PageList {
                     (*(*node).data.get_row(y)).set_dirty(false);
                 }
                 node = (*node).next;
+            }
+        }
+    }
+
+    // ---- semantic-content highlighting ----
+
+    /// Build an untracked highlight for the semantic content (`.prompt`/`.input`/`.output`)
+    /// within the command zone containing the prompt row at `at`. Returns `None` when there is
+    /// no content of the requested kind. Port of `highlightSemanticContent`.
+    ///
+    /// `at` must be a prompt row (asserted). The zone runs from `at` to the last cell of the row
+    /// just before the next prompt, or to the end of the screen if there is no further prompt.
+    ///
+    /// Consumers (not in this chunk): `Screen.selectOutput` and the search/renderer pipeline —
+    /// see `docs/analysis/highlight.md`.
+    pub fn highlight_semantic_content(
+        &self,
+        at: Pin,
+        content: SemanticContent,
+    ) -> Option<Untracked> {
+        // Performance note (from Zig): this could be a single forward pass. Semantic-content
+        // ops aren't the fast path, so clarity wins.
+
+        // Bound the zone: from `at` to just before the next prompt, else end of screen.
+        //
+        // NOTE: the ported `PromptIterator` (see below in this file) is the simplified variant
+        // used by `scrollPrompt` — it yields only rows whose semantic_prompt == Prompt (skipping
+        // continuations) and takes no limit. `highlightSemanticContent` only needs `next()`
+        // twice with a null limit (self, then the next distinct prompt), so it is behaviorally
+        // equivalent to Zig's `nextRightDown(.right_down, null)` here.
+        let end: Pin = {
+            let mut it = PromptIterator::new(at, Direction::RightDown);
+            // Safety assertion: our starting point is a prompt row, so the first returned
+            // prompt is ourselves.
+            let first = unsafe { it.next() };
+            debug_assert_eq!(first.map(|p| p.y), Some(at.y));
+
+            match unsafe { it.next() } {
+                Some(next) => {
+                    // End is the last cell of the row just before the next prompt.
+                    match unsafe { next.up(1) } {
+                        Some(mut prev) => {
+                            prev.x = unsafe { (*prev.node).data.size.cols } - 1;
+                            prev
+                        }
+                        // No row above the next prompt: fall through to end-of-screen.
+                        None => self.get_bottom_right(Tag::Screen)?,
+                    }
+                }
+                // No further prompt: the zone ends at the end of the screen.
+                None => self.get_bottom_right(Tag::Screen)?,
+            }
+        };
+
+        match content {
+            // For the prompt, select all the way up to command output, including input lines.
+            SemanticContent::Prompt => {
+                let mut result = Untracked {
+                    start: at.left(at.x as usize),
+                    end: at,
+                };
+                let mut it = unsafe { at.cell_iterator(Direction::RightDown, Some(end)) };
+                while let Some(p) = unsafe { it.next() } {
+                    let sc = unsafe { (*p.row_and_cell().1).semantic_content() };
+                    match sc {
+                        SemanticContent::Prompt | SemanticContent::Input => result.end = p,
+                        SemanticContent::Output => break,
+                    }
+                }
+                Some(result)
+            }
+
+            // For input, include the start of input to the end of input; prompts in the middle
+            // (continuation prompts) are skipped.
+            SemanticContent::Input => {
+                let mut it = unsafe { at.cell_iterator(Direction::RightDown, Some(end)) };
+
+                // Find the start.
+                let mut result = 'find_start: {
+                    while let Some(p) = unsafe { it.next() } {
+                        let sc = unsafe { (*p.row_and_cell().1).semantic_content() };
+                        match sc {
+                            SemanticContent::Prompt => {}
+                            SemanticContent::Input => {
+                                break 'find_start Untracked { start: p, end: p };
+                            }
+                            SemanticContent::Output => return None,
+                        }
+                    }
+                    // No input found.
+                    return None;
+                };
+
+                // Find the end.
+                while let Some(p) = unsafe { it.next() } {
+                    let sc = unsafe { (*p.row_and_cell().1).semantic_content() };
+                    match sc {
+                        // Prompts can be nested in our input for continuation.
+                        SemanticContent::Prompt => {}
+                        // Output means we're done.
+                        SemanticContent::Output => break,
+                        SemanticContent::Input => result.end = p,
+                    }
+                }
+                Some(result)
+            }
+
+            SemanticContent::Output => {
+                let mut it = unsafe { at.cell_iterator(Direction::RightDown, Some(end)) };
+
+                // Find the start.
+                let mut result = 'find_start: {
+                    while let Some(p) = unsafe { it.next() } {
+                        let cell = unsafe { *p.row_and_cell().1 };
+                        match cell.semantic_content() {
+                            SemanticContent::Prompt | SemanticContent::Input => {}
+                            SemanticContent::Output => {
+                                // Skip empty cells: they default to .output but aren't real output.
+                                if !cell.has_text() {
+                                    continue;
+                                }
+                                break 'find_start Untracked { start: p, end: p };
+                            }
+                        }
+                    }
+                    // No output found.
+                    return None;
+                };
+
+                // Find the end.
+                while let Some(p) = unsafe { it.next() } {
+                    let cell = unsafe { *p.row_and_cell().1 };
+                    match cell.semantic_content() {
+                        SemanticContent::Prompt | SemanticContent::Input => break,
+                        // Only extend to cells with actual text.
+                        SemanticContent::Output => {
+                            if cell.has_text() {
+                                result.end = p;
+                            }
+                        }
+                    }
+                }
+                Some(result)
             }
         }
     }

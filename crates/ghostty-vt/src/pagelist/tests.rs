@@ -3,8 +3,9 @@
 //! Ported faithfully, not consolidated (the Page chunk consolidated some of its
 //! tests; full fidelity here compensates downstream). A handful of upstream tests
 //! exercise Zig-only machinery (tripwire allocator-failure injection) or modules
-//! outside this chunk (`highlightSemanticContent` → `highlight.zig`, `diagram`);
-//! those are noted where skipped.
+//! outside the PageList chunk (`diagram`); those are noted where skipped.
+//! The 17 `highlightSemanticContent` tests, originally deferred to the highlight
+//! chunk, are ported at the end of this file.
 
 #![allow(dead_code)]
 
@@ -1713,4 +1714,459 @@ fn clone_partial_trimmed_right() {
     let s2 = s.clone(Point::active(0, 0), Some(Point::active(0, 5)), None);
     assert_eq!(s2.total_rows(), s2.rows() as usize);
     assert_eq!(read_cp(&s2, Point::active(0, 0)), 'A' as u32);
+}
+
+// ---- highlightSemanticContent (ported 1:1 from PageList.zig `2da015cd6`) ----
+//
+// `highlight.zig` itself has 0 inline tests; these 17 exercise
+// `PageList.highlightSemanticContent`. See `docs/analysis/highlight.md`.
+
+use crate::page::{SemanticContent, SemanticPrompt};
+
+/// Set the semantic-prompt flag on a screen row. Mirrors `rac.row.semantic_prompt = kind`.
+fn set_row_prompt(s: &mut PageList, y: u32, kind: SemanticPrompt) {
+    let c = s.get_cell(Point::screen(0, y)).unwrap();
+    unsafe { (*c.row).set_semantic_prompt(kind) };
+}
+
+/// Write a cell with a codepoint and semantic content. Mirrors the Zig
+/// `cell.* = .{ .content_tag = .codepoint, .content = .{ .codepoint = cp }, .semantic_content = sc }`.
+fn set_cell(s: &mut PageList, x: u16, y: u32, cp: u32, sc: SemanticContent) {
+    let c = s.get_cell(Point::screen(x, y)).unwrap();
+    unsafe {
+        let mut cell = Cell::init(cp);
+        cell.set_semantic_content(sc);
+        *c.cell = cell;
+    }
+}
+
+/// Set only the semantic content of an existing cell. Mirrors `cell.semantic_content = sc`.
+fn set_cell_content(s: &mut PageList, x: u16, y: u32, sc: SemanticContent) {
+    let c = s.get_cell(Point::screen(x, y)).unwrap();
+    unsafe { (*c.cell).set_semantic_content(sc) };
+}
+
+/// The screen-point of a highlight endpoint pin.
+fn hl_point(s: &PageList, p: Pin) -> Point {
+    s.point_from_pin(Tag::Screen, p).unwrap()
+}
+
+#[test]
+fn highlight_semantic_content_prompt() {
+    let mut s = PageList::init(10, 20, Some(0));
+    assert_eq!(s.first_node(), s.last_node());
+
+    // Prompt on row 5.
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    // First 5 cols are prompt.
+    for x in 0..5u16 {
+        set_cell(&mut s, x, 5, 'A' as u32, SemanticContent::Prompt);
+    }
+    // Next 3 are input.
+    for x in 5..8u16 {
+        set_cell(&mut s, x, 5, 'B' as u32, SemanticContent::Input);
+    }
+    // Prompt on row 10.
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(2, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Prompt)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(0, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(7, 5));
+}
+
+#[test]
+fn highlight_semantic_content_prompt_with_output() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..3u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 3..7u16 {
+        set_cell(&mut s, x, 5, 'l' as u32, SemanticContent::Input);
+    }
+    // Rest is output (shouldn't be included in prompt highlight).
+    for x in 7..10u16 {
+        set_cell(&mut s, x, 5, 'o' as u32, SemanticContent::Output);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Prompt)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(0, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(6, 5));
+}
+
+#[test]
+fn highlight_semantic_content_prompt_multiline() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    // First row is all prompt.
+    for x in 0..10u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    // Row 6 continues with input.
+    for x in 0..5u16 {
+        set_cell(&mut s, x, 6, 'c' as u32, SemanticContent::Input);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(2, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Prompt)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(0, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(4, 6));
+}
+
+#[test]
+fn highlight_semantic_content_prompt_only() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..5u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Prompt)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(0, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(4, 5));
+}
+
+#[test]
+fn highlight_semantic_content_prompt_to_end_of_screen() {
+    let mut s = PageList::init(10, 20, Some(0));
+    // Single prompt on row 15, no following prompt.
+    set_row_prompt(&mut s, 15, SemanticPrompt::Prompt);
+    for x in 0..3u16 {
+        set_cell(&mut s, x, 15, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 3..8u16 {
+        set_cell(&mut s, x, 15, 'c' as u32, SemanticContent::Input);
+    }
+
+    let at = s.pin(Point::screen(0, 15)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Prompt)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(0, 15));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(7, 15));
+}
+
+#[test]
+fn highlight_semantic_content_input_basic() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..3u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 3..8u16 {
+        set_cell(&mut s, x, 5, 'l' as u32, SemanticContent::Input);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Input)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(3, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(7, 5));
+}
+
+#[test]
+fn highlight_semantic_content_input_with_output() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..5u16 {
+        set_cell(&mut s, x, 5, 'c' as u32, SemanticContent::Input);
+    }
+    for x in 5..10u16 {
+        set_cell(&mut s, x, 5, 'o' as u32, SemanticContent::Output);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Input)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(2, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(4, 5));
+}
+
+#[test]
+fn highlight_semantic_content_input_multiline_with_continuation() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..10u16 {
+        set_cell(&mut s, x, 5, 'c' as u32, SemanticContent::Input);
+    }
+    // Row 6 has continuation prompt then more input.
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 6, '>' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..6u16 {
+        set_cell(&mut s, x, 6, 'd' as u32, SemanticContent::Input);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Input)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(2, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(5, 6));
+}
+
+#[test]
+fn highlight_semantic_content_input_no_input_returns_null() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..3u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    // Rest is output (no input!).
+    for x in 3..10u16 {
+        set_cell(&mut s, x, 5, 'o' as u32, SemanticContent::Output);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    assert!(
+        s.highlight_semantic_content(at, SemanticContent::Input)
+            .is_none()
+    );
+}
+
+#[test]
+fn highlight_semantic_content_input_to_end_of_screen() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 15, SemanticPrompt::Prompt);
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 15, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..7u16 {
+        set_cell(&mut s, x, 15, 'c' as u32, SemanticContent::Input);
+    }
+
+    let at = s.pin(Point::screen(0, 15)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Input)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(2, 15));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(6, 15));
+}
+
+#[test]
+fn highlight_semantic_content_input_prompt_only_returns_null() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    // All cells are prompt.
+    for x in 0..10u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    // Mark rows 6-9 as prompt to ensure no input before next prompt.
+    for y in 6..10u32 {
+        for x in 0..10u16 {
+            set_cell_content(&mut s, x, y, SemanticContent::Prompt);
+        }
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    assert!(
+        s.highlight_semantic_content(at, SemanticContent::Input)
+            .is_none()
+    );
+}
+
+#[test]
+fn highlight_semantic_content_output_basic() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..5u16 {
+        set_cell(&mut s, x, 5, 'l' as u32, SemanticContent::Input);
+    }
+    // Cols 5-7 are output.
+    for x in 5..8u16 {
+        set_cell(&mut s, x, 5, 'o' as u32, SemanticContent::Output);
+    }
+    // Mark remaining cells as prompt to bound the output.
+    for x in 8..10u16 {
+        set_cell_content(&mut s, x, 5, SemanticContent::Prompt);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Output)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(5, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(7, 5));
+}
+
+#[test]
+fn highlight_semantic_content_output_multiline() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..4u16 {
+        set_cell(&mut s, x, 5, 'l' as u32, SemanticContent::Input);
+    }
+    // Rest of row 5 is output.
+    for x in 4..10u16 {
+        set_cell(&mut s, x, 5, 'o' as u32, SemanticContent::Output);
+    }
+    // Row 6 is all output.
+    for x in 0..10u16 {
+        set_cell(&mut s, x, 6, 'o' as u32, SemanticContent::Output);
+    }
+    // Row 7 has partial output then input to bound it.
+    for x in 0..5u16 {
+        set_cell(&mut s, x, 7, 'o' as u32, SemanticContent::Output);
+    }
+    for x in 5..10u16 {
+        set_cell_content(&mut s, x, 7, SemanticContent::Input);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Output)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(4, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(4, 7));
+}
+
+#[test]
+fn highlight_semantic_content_output_stops_at_next_prompt() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..4u16 {
+        set_cell(&mut s, x, 5, 'l' as u32, SemanticContent::Input);
+    }
+    for x in 4..10u16 {
+        set_cell(&mut s, x, 5, 'o' as u32, SemanticContent::Output);
+    }
+    // Row 6 has output then prompt starts.
+    for x in 0..3u16 {
+        set_cell(&mut s, x, 6, 'o' as u32, SemanticContent::Output);
+    }
+    for x in 3..6u16 {
+        set_cell(&mut s, x, 6, '$' as u32, SemanticContent::Prompt);
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Output)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(4, 5));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(2, 6));
+}
+
+#[test]
+fn highlight_semantic_content_output_to_end_of_screen() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 15, SemanticPrompt::Prompt);
+    for x in 0..2u16 {
+        set_cell(&mut s, x, 15, '$' as u32, SemanticContent::Prompt);
+    }
+    for x in 2..4u16 {
+        set_cell(&mut s, x, 15, 'c' as u32, SemanticContent::Input);
+    }
+    for x in 4..10u16 {
+        set_cell(&mut s, x, 15, 'o' as u32, SemanticContent::Output);
+    }
+    // Row 16 has output then prompt to bound it.
+    for x in 0..8u16 {
+        set_cell(&mut s, x, 16, 'o' as u32, SemanticContent::Output);
+    }
+    for x in 8..10u16 {
+        set_cell_content(&mut s, x, 16, SemanticContent::Prompt);
+    }
+
+    let at = s.pin(Point::screen(0, 15)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Output)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(4, 15));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(7, 16));
+}
+
+#[test]
+fn highlight_semantic_content_output_no_output_returns_null() {
+    let mut s = PageList::init(10, 20, Some(0));
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..3u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    // Rest is input (must explicitly mark all cells to avoid default .output).
+    for x in 3..10u16 {
+        set_cell(&mut s, x, 5, 'c' as u32, SemanticContent::Input);
+    }
+    // Mark rows 6-9 as input to ensure no output between prompts.
+    for y in 6..10u32 {
+        for x in 0..10u16 {
+            set_cell_content(&mut s, x, y, SemanticContent::Input);
+        }
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    assert!(
+        s.highlight_semantic_content(at, SemanticContent::Output)
+            .is_none()
+    );
+}
+
+#[test]
+fn highlight_semantic_content_output_skips_empty_cells() {
+    // Empty cells with default .output semantic content are not selected as output.
+    // Happens when a prompt/input line doesn't fill the row — trailing cells default .output.
+    let mut s = PageList::init(10, 20, Some(0));
+    // Prompt on row 5 — only fills first 3 cells; rest empty with default .output.
+    set_row_prompt(&mut s, 5, SemanticPrompt::Prompt);
+    for x in 0..3u16 {
+        set_cell(&mut s, x, 5, '$' as u32, SemanticContent::Prompt);
+    }
+    // Row 6 has short input; cells 4-9 empty with default .output.
+    for x in 0..4u16 {
+        set_cell(&mut s, x, 6, 'l' as u32, SemanticContent::Input);
+    }
+    // Rows 7-8 have actual output with text.
+    for y in 7..9u32 {
+        for x in 0..5u16 {
+            set_cell(&mut s, x, y, 'o' as u32, SemanticContent::Output);
+        }
+    }
+    set_row_prompt(&mut s, 10, SemanticPrompt::Prompt);
+
+    // Output should start at row 7, not row 5 (empty cells have default .output).
+    let at = s.pin(Point::screen(0, 5)).unwrap();
+    let hl = s
+        .highlight_semantic_content(at, SemanticContent::Output)
+        .unwrap();
+    assert_eq!(hl_point(&s, hl.start), Point::screen(0, 7));
+    assert_eq!(hl_point(&s, hl.end), Point::screen(4, 8));
 }

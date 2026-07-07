@@ -9,7 +9,7 @@ lazy reflow on resize.
 
 `PageList.zig` is ~14.8k lines with 205 inline `test` blocks. This document is the
 maintainer-grade map of its data structures and algorithms; the Rust port lives in
-`crates/ghostty-vt/src/pagelist/` with 102 ported tests (see "Test porting status"
+`crates/ghostty-vt/src/pagelist/` with 119 ported tests (see "Test porting status"
 at the end for the exact accounting against upstream's 205).
 
 ## Top-level structure
@@ -330,21 +330,22 @@ resets to active.
 
 ### Out of scope for this chunk (deferred, with reason)
 
-- **`highlightSemanticContent`** (17 tests) — depends on the separate `highlight.zig`
-  module; lands with the highlight/selection chunk.
+- **`highlightSemanticContent`** (17 tests) — ~~depends on the separate `highlight.zig`
+  module; lands with the highlight/selection chunk~~ **landed**: see
+  [highlight.md](highlight.md); ported into `pagelist/ops.rs` with all 17 tests.
 - **`diagram`** — an ASCII debug-render helper on top of the iterators; cosmetic, deferred.
 - The C ABI (`cval`) on Scrollbar/Point/Pin — lands with the libghostty-vt C-API chunk.
 
 ### Test porting status (exact)
 
-Upstream `PageList.zig`: **205** inline tests. Rust port: **102** tests in
+Upstream `PageList.zig`: **205** inline tests. Rust port: **119** tests in
 `pagelist/tests.rs`, covering every in-scope category:
 
 | Category (upstream count) | Ported | Notes |
 | --- | --- | --- |
 | resize/reflow (71) | 25 | every semantically distinct behavior: no-reflow rows/cols each direction and combined, trim-blank, reflow wrap/unwrap, wide-char destroy/spacer-head wrap, grapheme reflow, kitty placeholder, semantic prompt, capacity-increase-forcing reflow, viewport-cache invalidation |
 | scroll (20) | 15 | top/active/pin/row/delta fast+slow paths, cache fast paths, max-size-0 |
-| highlightSemanticContent (17) | 0 | needs `highlight.zig` — separate chunk |
+| highlightSemanticContent (17) | 17 | landed with the highlight chunk (see [highlight.md](highlight.md)) |
 | split (16) | 8 | middle/0/single-row/pin-tracking (before/at/after/multi)/wrap/styled/first-page |
 | erase + eraseRow(Bounded) (20) | 10 | history/active/row/bounded/pins/page-size/viewport fixups |
 | increaseCapacity (9) | 7 | all four dimensions + pins + dirty + OutOfSpace-at-max |
