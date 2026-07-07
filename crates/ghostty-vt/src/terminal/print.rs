@@ -31,12 +31,15 @@ impl Terminal {
             self.scrolling_region.right + 1
         };
 
-        // TODO(chunk:terminal-print-grapheme): the mode-2027 grapheme-cluster
-        // path (attach `c` to the previous grapheme cluster, wide/narrow
-        // width-effect handling, cross-page grapheme transfer) is not ported.
-        // When `grapheme_cluster` is set upstream diverts here first; we fall
-        // through to the scalar path, which is correct for all non-clustering
-        // input (the overwhelming majority).
+        // Grapheme clustering (mode 2027). Ordered least-likely-first so we can
+        // drop out fast. Port of `Terminal.zig:763-955`.
+        if c > 255
+            && self.modes.get(Mode::GraphemeCluster)
+            && self.screen().cursor.x > 0
+            && self.print_grapheme(c, right_limit)
+        {
+            return;
+        }
 
         // Width: fast path for byte-sized chars.
         let width: usize = if c <= 0xFF {
@@ -109,6 +112,179 @@ impl Terminal {
             return;
         }
         self.screen_mut().cursor_right(1);
+    }
+
+    /// The mode-2027 grapheme-clustering branch of `print`. Returns `true` if
+    /// `c` was consumed (attached to the previous grapheme cluster), `false` if
+    /// the caller should fall through to the normal width path. Port of
+    /// `Terminal.zig:766-955`.
+    fn print_grapheme(&mut self, c: u32, right_limit: CellCountInt) -> bool {
+        use crate::unicode::{
+            BreakState, GraphemeWidthEffect, grapheme_break, grapheme_width_effect,
+        };
+
+        // Determine the previous cell (`prev`) and how far left of the cursor it
+        // is (`left`). If we are NOT at a grapheme break, `c` combines with it.
+        let wraparound = self.modes.get(Mode::Wraparound);
+        // SAFETY: cursor pointers live throughout the block.
+        unsafe {
+            let left: CellCountInt = if wraparound {
+                CellCountInt::from(!self.screen().cursor.pending_wrap)
+            } else if self.screen().cursor.x != right_limit - 1 {
+                1
+            } else {
+                CellCountInt::from((*self.screen().cursor.page_cell).codepoint() == 0)
+            };
+
+            let immediate = self.screen().cursor_cell_left(left);
+            let (mut prev_cell, prev_left) = if (*immediate).wide() == Wide::SpacerTail {
+                (self.screen().cursor_cell_left(left + 1), left + 1)
+            } else {
+                (immediate, left)
+            };
+
+            // Empty cell: a grapheme break; fall through.
+            if (*prev_cell).codepoint() == 0 {
+                return false;
+            }
+
+            // Run the grapheme break state machine over prev's cluster + c.
+            let mut previous_codepoint = (*prev_cell).codepoint();
+            let grapheme_break_result = {
+                let mut state = BreakState::Default;
+                if (*prev_cell).has_grapheme() {
+                    let page = self.screen().cursor_page();
+                    if let Some(cps) = (*page).lookup_grapheme(prev_cell) {
+                        for &cp2 in &*cps {
+                            debug_assert!(!grapheme_break(previous_codepoint, cp2, &mut state));
+                            previous_codepoint = cp2;
+                        }
+                    }
+                }
+                grapheme_break(previous_codepoint, c, &mut state)
+            };
+
+            // A break means c starts a new cell: fall through.
+            if grapheme_break_result {
+                return false;
+            }
+
+            // c is part of the previous grapheme. Apply the width effect.
+            match grapheme_width_effect(previous_codepoint, c) {
+                GraphemeWidthEffect::Ignore => return true,
+                GraphemeWidthEffect::NoChange => {}
+                GraphemeWidthEffect::Wide => {
+                    if (*prev_cell).wide() != Wide::Wide {
+                        // Move the cursor back to the previous cell.
+                        self.screen_mut().cursor_left(prev_left);
+
+                        if self.screen().cursor.x == right_limit - 1 {
+                            if !wraparound {
+                                return true;
+                            }
+                            let row_wrap = right_limit == self.cols;
+                            if row_wrap {
+                                (*self.screen().cursor.page_row).set_wrap(true);
+                            }
+
+                            let prev_cp = (*prev_cell).codepoint();
+                            if (*prev_cell).has_grapheme() {
+                                // Like print_cell but keeps the grapheme data so
+                                // we can move it after wrapping.
+                                (*prev_cell).set_wide(if row_wrap {
+                                    Wide::SpacerHead
+                                } else {
+                                    Wide::Narrow
+                                });
+                                (*prev_cell).set_codepoint(0);
+
+                                self.print_wrap();
+                                self.print_cell(prev_cp, Wide::Wide);
+
+                                let new_pin = *self.screen().cursor.page_pin;
+                                let (new_row, new_cell) = new_pin.row_and_cell();
+
+                                // Transfer graphemes from the old cell to the new.
+                                if let Some(mut old_pin) = new_pin.up(1) {
+                                    old_pin.x = right_limit - 1;
+                                    let (old_row, old_cell) = old_pin.row_and_cell();
+
+                                    if new_pin.node == old_pin.node {
+                                        let page = self.screen().cursor_page();
+                                        (*page).move_grapheme(prev_cell, new_cell);
+                                        (*prev_cell).set_content_tag(ContentTag::Codepoint);
+                                        (*new_cell).set_content_tag(ContentTag::CodepointGrapheme);
+                                        (*new_row).set_grapheme(true);
+                                    } else {
+                                        let old_page =
+                                            self.screen().pages.node_data_mut(old_pin.node);
+                                        if let Some(cps) = (*old_page).lookup_grapheme(old_cell) {
+                                            let cps: Vec<u32> = (*cps).to_vec();
+                                            for cp in cps {
+                                                let _ =
+                                                    self.screen_mut().append_grapheme(new_cell, cp);
+                                            }
+                                        }
+                                        let old_page =
+                                            self.screen().pages.node_data_mut(old_pin.node);
+                                        (*old_page).clear_grapheme(old_cell);
+                                    }
+
+                                    let old_page = self.screen().pages.node_data_mut(old_pin.node);
+                                    (*old_page).update_row_grapheme_flag(old_row);
+                                }
+
+                                prev_cell = new_cell;
+                            } else {
+                                self.print_cell(
+                                    0,
+                                    if row_wrap {
+                                        Wide::SpacerHead
+                                    } else {
+                                        Wide::Narrow
+                                    },
+                                );
+                                self.print_wrap();
+                                self.print_cell(prev_cp, Wide::Wide);
+                                prev_cell = self.screen().cursor.page_cell;
+                            }
+                        } else {
+                            (*prev_cell).set_wide(Wide::Wide);
+                        }
+
+                        // Write the spacer tail after the (now wide) prev cell.
+                        self.screen_mut().cursor_right(1);
+                        self.print_cell(0, Wide::SpacerTail);
+
+                        // Advance beyond the spacer.
+                        if self.screen().cursor.x == right_limit - 1 {
+                            self.screen_mut().cursor.pending_wrap = true;
+                        } else {
+                            self.screen_mut().cursor_right(1);
+                        }
+                    }
+                }
+                GraphemeWidthEffect::Narrow => {
+                    if (*prev_cell).wide() == Wide::Wide {
+                        (*prev_cell).set_wide(Wide::Narrow);
+
+                        // Remove the wide spacer tail.
+                        let tail = self.screen().cursor_cell_left(prev_left - 1);
+                        (*tail).set_wide(Wide::Narrow);
+
+                        if self.screen().cursor.x == right_limit - 1 {
+                            self.screen_mut().cursor.pending_wrap = false;
+                        } else {
+                            self.screen_mut().cursor_left(1);
+                        }
+                    }
+                }
+            }
+
+            self.screen_mut().cursor_mark_dirty();
+            let _ = self.screen_mut().append_grapheme(prev_cell, c);
+            true
+        }
     }
 
     /// Attach a zero-width codepoint to the previous cell. Port of the width-0
@@ -325,15 +501,5 @@ impl Terminal {
             }
         }
         self.screen().assert_integrity();
-    }
-
-    /// ICH: insert `count` blank cells at the cursor, shifting right. Port of
-    /// `insertBlanks`.
-    ///
-    /// PROGRESS: the full left/right-margin-aware shift with SGR bg fill is not
-    /// yet ported. This handles the common no-margin case sufficient for the
-    /// insert-mode print path. See `docs/analysis/terminal.md` PROGRESS.
-    pub fn insert_blanks(&mut self, _count: usize) {
-        // TODO(chunk:terminal-edit): port the full margin-aware cell shift.
     }
 }

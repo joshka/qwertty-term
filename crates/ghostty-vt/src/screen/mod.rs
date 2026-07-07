@@ -30,7 +30,7 @@ use crate::pagelist::{
 use crate::point::{Point, Tag};
 
 use crate::charsets::CharsetState;
-use cursor::{Cursor, SavedCursor};
+use cursor::{Cursor, CursorCopy, SavedCursor};
 use hyperlink::{Hyperlink, HyperlinkId};
 use kitty_key::FlagStack;
 use semantic::{PromptKind, Redraw, SemanticPrompt};
@@ -282,7 +282,7 @@ impl Screen {
     pub(crate) unsafe fn cursor_page(&self) -> *mut Page {
         unsafe {
             let node = (*self.cursor.page_pin).node;
-            self.pages.node_data_mut(node)
+            self.pages.node_page_ptr(node)
         }
     }
 
@@ -303,7 +303,7 @@ impl Screen {
     /// If the cursor's style has an explicit background color, blanked cells
     /// carry that background (a `BgColor*` cell); otherwise the plain default
     /// cell.
-    fn blank_cell(&self) -> Cell {
+    pub(crate) fn blank_cell(&self) -> Cell {
         if self.cursor.style_id == style::DEFAULT_ID {
             return Cell::default();
         }
@@ -918,6 +918,269 @@ impl Screen {
         }
     }
 
+    /// Insert a blank row above the cursor: everything below the cursor shifts
+    /// down by one and a new blank row appears at the cursor. Port of
+    /// `cursorScrollAbove`. Creates scrollback (`grow`) rather than shifting the
+    /// whole scrollback up.
+    pub(crate) fn cursor_scroll_above(&mut self) {
+        // We unconditionally mark the cursor row dirty because the cursor
+        // always changes page rows here and that can force re-shaping.
+        self.cursor_mark_dirty();
+
+        // Bottom of the screen: use the specialized fast path.
+        if self.cursor.y == self.pages.rows() - 1 {
+            self.cursor_down_scroll();
+            return;
+        }
+
+        // Logic below assumes at least one row that isn't moving.
+        debug_assert!(self.cursor.y < self.pages.rows() - 1);
+
+        // SAFETY: cursor pin live.
+        let old_pin = unsafe { *self.cursor.page_pin };
+        if self.pages.grow_node().is_some() {
+            self.cursor_scroll_above_rotate();
+        } else {
+            // grow() didn't allocate a new page.
+            // SAFETY: cursor pin live.
+            let on_last = unsafe { (*self.cursor.page_pin).node } == self.pages.last_node();
+            if on_last {
+                // Fast path: all the rows we move are within one page.
+                debug_assert_eq!(old_pin.node, unsafe { (*self.cursor.page_pin).node });
+                // SAFETY: cursor pin live; down(1) valid (not on last row).
+                unsafe {
+                    *self.cursor.page_pin = (*self.cursor.page_pin).down(1).unwrap();
+                    let pin = *self.cursor.page_pin;
+                    let page: *mut Page = self.pages.node_page_ptr(pin.node);
+                    let y = pin.y as usize;
+                    let rows = (*page).size.rows as usize;
+                    (*page).pause_integrity_checks(true);
+                    (*page).rotate_rows_once_right(y, rows);
+                    (*page).pause_integrity_checks(false);
+                    (*page).dirty = true;
+                    let (row, cell) = pin.row_and_cell();
+                    self.cursor.page_row = row;
+                    self.cursor.page_cell = cell;
+                }
+            } else {
+                // Didn't grow pages but cursor isn't on the last page: copy
+                // rows across pages (slow path).
+                self.cursor_scroll_above_rotate();
+            }
+        }
+
+        // The newly created line needs to be styled per the bg color if set.
+        if self.cursor.style_id != style::DEFAULT_ID
+            && let Some(blank) = self.cursor.style.bg_cell()
+        {
+            // SAFETY: cursor page/row live; fill the whole row.
+            unsafe {
+                let page = self.cursor_page();
+                let cols = (*page).size.cols as usize;
+                let base = (*(self.cursor.page_row)).cells().ptr((*page).mem());
+                for x in 0..cols {
+                    base.add(x).write(blank);
+                }
+            }
+        }
+        self.assert_integrity();
+    }
+
+    /// The cross-page rotate helper for [`Self::cursor_scroll_above`]. Port of
+    /// `cursorScrollAboveRotate`.
+    fn cursor_scroll_above_rotate(&mut self) {
+        // SAFETY: cursor pin live; down(1) valid.
+        let new = unsafe { (*self.cursor.page_pin).down(1).unwrap() };
+        self.cursor_change_pin(new);
+
+        // Go through each page following our pin, shift all rows down by one
+        // and copy the last row of the previous page.
+        // SAFETY: node chain live.
+        unsafe {
+            let cursor_node = (*self.cursor.page_pin).node;
+            let mut current = self.pages.last_node();
+            while current != cursor_node {
+                let prev = (*current).prev;
+                let prev_page: *mut Page = self.pages.node_page_ptr(prev);
+                let cur_page: *mut Page = self.pages.node_page_ptr(current);
+                let cur_rows = (*cur_page).size.rows as usize;
+
+                (*cur_page).pause_integrity_checks(true);
+                (*cur_page).rotate_rows_once_right(0, cur_rows);
+                (*cur_page).pause_integrity_checks(false);
+
+                // Copy the last row of prev to the top of current.
+                let dst_row = (*cur_page).get_row(0);
+                let src_row = (*prev_page).get_row((*prev_page).size.rows as usize - 1);
+                let _ = (*cur_page).clone_row_from(prev_page, dst_row, src_row);
+                (*cur_page).dirty = true;
+
+                current = prev;
+            }
+
+            // current is the cursor page: rotate from the cursor row down and
+            // clear the cursor row.
+            debug_assert_eq!(current, (*self.cursor.page_pin).node);
+            let cur_page: *mut Page = self.pages.node_page_ptr(current);
+            let y = (*self.cursor.page_pin).y as usize;
+            let cur_rows = (*cur_page).size.rows as usize;
+            (*cur_page).pause_integrity_checks(true);
+            (*cur_page).rotate_rows_once_right(y, cur_rows);
+            (*cur_page).pause_integrity_checks(false);
+
+            let row = (*cur_page).get_row(y);
+            let cols = (*cur_page).size.cols as usize;
+            self.clear_cells_page(cur_page, row, 0, cols);
+            (*cur_page).dirty = true;
+
+            // Refresh cursor caches after rotations.
+            let (row, cell) = (*self.cursor.page_pin).row_and_cell();
+            self.cursor.page_row = row;
+            self.cursor.page_cell = cell;
+        }
+    }
+
+    /// Copy another cursor into this screen. The source cursor may be on any
+    /// screen, but its x/y must be within our bounds. Port of `cursorCopy` (the
+    /// `hyperlink = false` path used by alt-screen switching).
+    pub(crate) fn cursor_copy(&mut self, other: &CursorCopy) {
+        debug_assert!(other.x < self.pages.cols());
+        debug_assert!(other.y < self.pages.rows());
+
+        // End any active hyperlink on our cursor.
+        self.end_hyperlink();
+
+        // Adopt the other cursor's value state, but keep our own page pin, x/y,
+        // and (old) style id so the old style is cleaned up in our own page.
+        let old_style_id = self.cursor.style_id;
+        self.cursor.style = other.style;
+        self.cursor.protected = other.protected;
+        self.cursor.pending_wrap = other.pending_wrap;
+        self.cursor.cursor_style = other.cursor_style;
+        self.cursor.semantic_content = other.semantic_content;
+        self.cursor.semantic_content_clear_eol = other.semantic_content_clear_eol;
+        self.cursor.style_id = old_style_id;
+
+        // Clean up our old style and load the other cursor's style.
+        if self.manual_style_update().is_err() {
+            self.cursor.style = Style::default();
+            self.cursor.style_id = style::DEFAULT_ID;
+        }
+
+        // Move to the target location within our own screen.
+        self.cursor_absolute(other.x, other.y);
+        self.assert_integrity();
+    }
+
+    /// Reset the cursor row's soft-wrap state. Port of `cursorResetWrap`.
+    pub(crate) fn cursor_reset_wrap(&mut self) {
+        self.cursor.pending_wrap = false;
+
+        // SAFETY: cursor row live.
+        if !unsafe { (*self.cursor.page_row).wrap() } {
+            return;
+        }
+
+        // This row does not wrap and the next row is not wrapped-to.
+        // SAFETY: cursor row live.
+        unsafe {
+            (*self.cursor.page_row).set_wrap(false);
+        }
+        // SAFETY: cursor pin live.
+        if let Some(next) = unsafe { (*self.cursor.page_pin).down(1) } {
+            // SAFETY: next pin valid.
+            unsafe {
+                let (row, _) = next.row_and_cell();
+                (*row).set_wrap_continuation(false);
+            }
+        }
+
+        // If the last cell is a spacer head, clear it.
+        // SAFETY: cursor page/row live.
+        unsafe {
+            let page = self.cursor_page();
+            let cols = (*page).size.cols as usize;
+            let base = (*self.cursor.page_row).cells().ptr((*page).mem());
+            if (*base.add(cols - 1)).wide() == crate::page::Wide::SpacerHead {
+                self.clear_cells_page(page, self.cursor.page_row, cols - 1, cols);
+            }
+        }
+    }
+
+    /// Handle boundary conditions when splitting cells at column `x`. Port of
+    /// `splitCellBoundary`. `x` may be up to and including `cols` (the boundary
+    /// to the right of the final cell).
+    pub(crate) fn split_cell_boundary(&mut self, x: CellCountInt) {
+        use crate::page::Wide;
+        // SAFETY: cursor page live.
+        let page = unsafe { self.cursor_page() };
+        // SAFETY: page live.
+        let cols = unsafe { (*page).size.cols };
+        debug_assert!(x <= cols);
+
+        // SAFETY: page/row/cursor pin live throughout.
+        unsafe {
+            (*page).pause_integrity_checks(true);
+            let base = (*self.cursor.page_row).cells().ptr((*page).mem());
+
+            // [ A B C D E F | ]  boundary between final cell and row end.
+            if x == cols {
+                if !(*self.cursor.page_row).wrap() {
+                    (*page).pause_integrity_checks(false);
+                    return;
+                }
+                if (*base.add(cols as usize - 1)).wide() == Wide::SpacerHead {
+                    self.clear_cells_page(
+                        page,
+                        self.cursor.page_row,
+                        cols as usize - 1,
+                        cols as usize,
+                    );
+                }
+                (*page).pause_integrity_checks(false);
+                return;
+            }
+
+            // [ | A B C ... ] or [ A | B C ... ] and the row is a wrap
+            // continuation: the first cell may be a wide cell whose spacer head
+            // lives on the previous row.
+            if (x == 0 || x == 1)
+                && (*self.cursor.page_row).wrap_continuation()
+                && (*base.add(0)).wide() == Wide::Wide
+                && let Some(p_row) = (*self.cursor.page_pin).up(1)
+            {
+                let p_page: *mut Page = self.pages.node_page_ptr(p_row.node);
+                let (prow, _) = p_row.row_and_cell();
+                let p_cols = (*p_page).size.cols as usize;
+                let p_base = (*prow).cells().ptr((*p_page).mem());
+                if (*p_base.add(p_cols - 1)).wide() == Wide::SpacerHead {
+                    self.clear_cells_page(p_page, prow, p_cols - 1, p_cols);
+                }
+            }
+
+            if x == 0 {
+                (*page).pause_integrity_checks(false);
+                return;
+            }
+
+            // [ ... X | Y ... ] boundary between two cells mid-row.
+            debug_assert!(x > 0 && x < cols);
+            match (*base.add(x as usize - 1)).wide() {
+                Wide::SpacerHead => unreachable!("spacer head in the middle of a row"),
+                Wide::Narrow | Wide::SpacerTail => {}
+                Wide::Wide => {
+                    self.clear_cells_page(
+                        page,
+                        self.cursor.page_row,
+                        x as usize - 1,
+                        x as usize + 1,
+                    );
+                }
+            }
+            (*page).pause_integrity_checks(false);
+        }
+    }
+
     // ---- clear / erase -------------------------------------------------
 
     /// Physically erase history. Port of `eraseHistory`.
@@ -942,7 +1205,7 @@ impl Screen {
         unsafe {
             while let Some(pin) = it.next() {
                 let node = pin.node;
-                let page: *mut Page = self.pages.node_data_mut(node);
+                let page: *mut Page = self.pages.node_page_ptr(node);
                 let (row, _) = pin.row_and_cell();
                 let cols = (*page).size.cols as usize;
                 if protected {
@@ -979,7 +1242,7 @@ impl Screen {
     ///
     /// # Safety
     /// `page`/`row` live; range in bounds.
-    unsafe fn clear_unprotected_cells_page(
+    pub(crate) unsafe fn clear_unprotected_cells_page(
         &self,
         page: *mut Page,
         row: *mut crate::page::Row,
@@ -1178,6 +1441,54 @@ impl Screen {
         }
 
         self.assert_integrity();
+    }
+
+    /// Append a codepoint to `cell` as grapheme data, growing grapheme capacity
+    /// on OOM and re-homing `cell` after any capacity adjustment. Port of
+    /// `Screen.appendGrapheme`. `cell` must be in the cursor's current row.
+    pub(crate) fn append_grapheme(&mut self, cell: *mut Cell, cp: u32) -> Result<(), ()> {
+        // SAFETY: cell in the cursor row; cursor pointers live.
+        unsafe {
+            let page = self.cursor_page();
+            if (*page)
+                .append_grapheme(self.cursor.page_row, cell, cp)
+                .is_ok()
+            {
+                (*page).assert_integrity();
+                return Ok(());
+            }
+
+            // Compute the cell's column index relative to the cursor so we can
+            // re-derive the (possibly moved) pointer after growing capacity.
+            let zero = self.cursor.page_cell.sub(self.cursor.x as usize);
+            let cell_idx = cell.offset_from(zero) as usize;
+
+            let node = (*self.cursor.page_pin).node;
+            if self
+                .increase_capacity(node, Some(IncreaseCapacity::GraphemeBytes))
+                .is_err()
+            {
+                return Err(());
+            }
+
+            // Re-derive the cell pointer from the reloaded cursor pointers.
+            use std::cmp::Ordering;
+            let reloaded = match cell_idx.cmp(&(self.cursor.x as usize)) {
+                Ordering::Equal => self.cursor.page_cell,
+                Ordering::Less => self.cursor.page_cell.sub(self.cursor.x as usize - cell_idx),
+                Ordering::Greater => self.cursor.page_cell.add(cell_idx - self.cursor.x as usize),
+            };
+
+            let page = self.cursor_page();
+            if (*page)
+                .append_grapheme(self.cursor.page_row, reloaded, cp)
+                .is_err()
+            {
+                return Err(());
+            }
+            (*page).assert_integrity();
+        }
+        Ok(())
     }
 
     /// Set the current hyperlink on the current cell. Port of `cursorSetHyperlink`

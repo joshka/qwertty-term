@@ -529,6 +529,10 @@ impl PageList {
     pub(crate) fn head_node(&self) -> *mut Node {
         self.pages.first
     }
+    /// The last node (bottom of the active area). Port of `pages.last`.
+    pub(crate) fn last_node(&self) -> *mut Node {
+        self.pages.last
+    }
     /// Immutable page for a node.
     ///
     /// # Safety
@@ -545,6 +549,15 @@ impl PageList {
     pub(crate) unsafe fn node_data_mut(&self, node: *mut Node) -> &mut Page {
         unsafe { &mut (*node).data }
     }
+    /// Raw mutable pointer to a node's page, WITHOUT creating an intermediate
+    /// `&mut Page` (so callers can hold several such pointers into distinct or
+    /// aliasing nodes without tripping Stacked Borrows). Port of `&node.data`.
+    ///
+    /// # Safety
+    /// `node` must be a live node in this list.
+    pub(crate) unsafe fn node_page_ptr(&self, node: *mut Node) -> *mut Page {
+        unsafe { &raw mut (*node).data }
+    }
     /// Whether the viewport is pinned to the active area. Port of
     /// `viewport == .active` (used by `viewportIsBottom`).
     pub(crate) fn viewport_is_active(&self) -> bool {
@@ -556,10 +569,6 @@ impl PageList {
     #[cfg(test)]
     pub(crate) fn first_node(&self) -> *mut Node {
         self.pages.first
-    }
-    #[cfg(test)]
-    pub(crate) fn last_node(&self) -> *mut Node {
-        self.pages.last
     }
     #[cfg(test)]
     pub(crate) fn page_size_bytes(&self) -> usize {

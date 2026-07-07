@@ -810,6 +810,13 @@ impl Page {
     pub fn memory_mut(&mut self) -> *mut u8 {
         self.mem
     }
+    /// The page's base memory pointer for offset resolution. Unlike
+    /// [`Self::memory_mut`] this takes `&self`, which is required by the
+    /// scroll/edit paths that already hold a `*mut Page` and only read `mem`.
+    #[inline]
+    pub(crate) fn mem(&self) -> *mut u8 {
+        self.mem
+    }
 
     /// The byte length of this page's backing memory (its layout total size).
     #[inline]
@@ -1068,6 +1075,30 @@ impl Page {
         debug_assert!(y < self.size.rows as usize);
         // SAFETY: y in bounds; rows region valid.
         unsafe { self.rows.ptr(self.mem).add(y) }
+    }
+
+    /// Rotate the rows `[y_start, y_end)` right by one: `[0 1 2 3]` becomes
+    /// `[3 0 1 2]`. Port of `fastmem.rotateOnceR(Row, rows)`. Rotates the `Row`
+    /// structs (which hold cell/managed-memory offsets), physically leaving cell
+    /// data in place but re-homing it to a different row index — exactly what the
+    /// Zig scroll paths rely on. Integrity checks must be paused by the caller.
+    ///
+    /// # Safety
+    ///
+    /// `y_start < y_end <= size.rows`.
+    pub(crate) unsafe fn rotate_rows_once_right(&mut self, y_start: usize, y_end: usize) {
+        debug_assert!(y_start < y_end && y_end <= self.size.rows as usize);
+        // SAFETY: range in bounds per caller contract; rows region valid.
+        unsafe {
+            let base = self.rows.ptr(self.mem);
+            let last = std::ptr::read(base.add(y_end - 1));
+            let mut i = y_end - 1;
+            while i > y_start {
+                std::ptr::write(base.add(i), std::ptr::read(base.add(i - 1)));
+                i -= 1;
+            }
+            std::ptr::write(base.add(y_start), last);
+        }
     }
 
     /// Get the cells slice for a row. Port of `getCells`.
@@ -1351,7 +1382,7 @@ impl Page {
     }
 
     /// Move graphemes between cells (map keyed by offset). Port of `moveGrapheme`.
-    unsafe fn move_grapheme(&mut self, src: *mut Cell, dst: *mut Cell) {
+    pub(crate) unsafe fn move_grapheme(&mut self, src: *mut Cell, dst: *mut Cell) {
         // SAFETY: cells valid per caller of the calling method.
         unsafe {
             let mem = self.mem;
@@ -1704,6 +1735,65 @@ impl Page {
                 (*src_row).set_styled(false);
                 (*src_row).set_kitty_virtual_placeholder(false);
             }
+        }
+        self.assert_integrity();
+    }
+
+    /// Swap two cells within the same row as quickly as possible. Port of
+    /// `swapCells`.
+    ///
+    /// # Safety
+    ///
+    /// `src`/`dst` must be valid cell pointers within this page.
+    pub unsafe fn swap_cells(&mut self, src: *mut Cell, dst: *mut Cell) {
+        // SAFETY: cells valid per caller.
+        unsafe {
+            let mem = self.mem;
+
+            // Graphemes are keyed by cell offset so we do have to move them.
+            // We do this first so that all our grapheme state is correct.
+            if (*src).has_grapheme() || (*dst).has_grapheme() {
+                if (*src).has_grapheme() && !(*dst).has_grapheme() {
+                    self.move_grapheme(src, dst);
+                } else if !(*src).has_grapheme() && (*dst).has_grapheme() {
+                    self.move_grapheme(dst, src);
+                } else {
+                    // Both had graphemes, so we have to manually swap.
+                    let src_offset = get_offset(mem, src);
+                    let dst_offset = get_offset(mem, dst);
+                    let mut map = self.grapheme_map.map(mem);
+                    let src_value = map.get(&src_offset).unwrap();
+                    let dst_value = map.get(&dst_offset).unwrap();
+                    map.remove(&src_offset);
+                    map.remove(&dst_offset);
+                    map.put_assume_capacity_no_clobber(src_offset, dst_value);
+                    map.put_assume_capacity_no_clobber(dst_offset, src_value);
+                }
+            }
+
+            // Hyperlinks are keyed by cell offset.
+            if (*src).hyperlink() || (*dst).hyperlink() {
+                if (*src).hyperlink() && !(*dst).hyperlink() {
+                    self.move_hyperlink(src, dst);
+                } else if !(*src).hyperlink() && (*dst).hyperlink() {
+                    self.move_hyperlink(dst, src);
+                } else {
+                    // Both had hyperlinks, so we have to manually swap.
+                    let src_offset = get_offset(mem, src);
+                    let dst_offset = get_offset(mem, dst);
+                    let mut map = self.hyperlink_map.map(mem);
+                    let src_value = map.get(&src_offset).unwrap();
+                    let dst_value = map.get(&dst_offset).unwrap();
+                    map.remove(&src_offset);
+                    map.remove(&dst_offset);
+                    map.put_assume_capacity_no_clobber(src_offset, dst_value);
+                    map.put_assume_capacity_no_clobber(dst_offset, src_value);
+                }
+            }
+
+            // Copy the metadata. Styles are keyed by ID and we're preserving the
+            // exact ref count and row state here, so no style accounting needed.
+            std::ptr::swap(src, dst);
         }
         self.assert_integrity();
     }

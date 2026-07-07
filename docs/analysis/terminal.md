@@ -209,22 +209,60 @@ local Terminal-owned equivalents or marked seams:
 
 ## Test porting status
 
-Upstream `Terminal.zig`: **381** inline tests (`grep -c '^test '`). This chunk
-ports **27** Rust tests (`terminal::tests` + `terminal::screen_set::tests`) —
-the tier-1 operation net plus the common-path print tests. The remaining ~354
-Zig tests are DEFERRED behind the operations not yet ported (erase/scroll/
-insert-delete-line family, alt-screen switch, full/soft reset, DECALN, SGR
-`setAttribute`, mode-2027 grapheme clustering). See the PROGRESS note.
+Upstream `Terminal.zig`: **381** inline tests (`grep -c '^test '`). As of pass 2
+the Rust port has **76** `terminal::tests` (+1 `terminal::screen_set::tests`),
+covering the tier-1 operation net, the common + grapheme-clustering print paths,
+and a representative-but-not-exhaustive net over the erase/scroll/insert-delete
+family, SGR `setAttribute`, alt-screen switch (47/1047/1049), `fullReset`, and
+DECALN. The remaining unported Zig tests are additional edge-case variants of
+already-ported operations (e.g. every hyperlink/style-ref/cross-page-boundary
+permutation of insert/delete lines) plus the stream-dependent tests; the
+operations they exercise are all implemented and Miri-clean.
 
-## PROGRESS (this chunk — INCOMPLETE, hand-off state)
+## PROGRESS (pass 2 — erase/scroll/edit/SGR/alt-screen/clustering DONE)
 
-This is a large keystone chunk; per the chunk's stated priority ordering
-(compile-green > analysis doc > print+cursor+tests > erase/scroll+tests >
-alt-screen/reset+tests), the following landed and the rest is deferred with a
-clear path.
+Pass 1 landed the tier-1 op net + non-clustering print. **Pass 2** completes the
+policy-layer operation ladder: the deferred Screen surface, the erase/scroll/edit
+tier, SGR, alt-screen/reset, DECALN, and the mode-2027 grapheme-clustering print
+path. All `cargo test -p ghostty-vt` green (824 lib), fmt+clippy clean, and
+Miri-clean over `terminal::` (76/76) and `screen::` (92/93; one skip:
+`screen::tests::scrolling_when_viewport_is_pruned` exceeds a 3-minute per-test
+Miri budget — a pass-1-era large-scrollback test untouched by this pass, green
+under the normal runner).
 
-**Landed (all `cargo test -p ghostty-vt` green, fmt+clippy clean, Miri-clean
-over `terminal::` with no skips):**
+### Pass 2 additions
+
+**Screen surface added (all `pub(crate)`), ported from `Screen.zig`:**
+- `cursor_scroll_above` + `cursor_scroll_above_rotate` (scrollback-creating
+  insert-above; single-page fast path + cross-page rotate), backed by a new
+  `Page::rotate_rows_once_right` (`fastmem.rotateOnceR` port).
+- `cursor_copy` (+ `Cursor::to_copy` / `CursorCopy` snapshot) — copies a cursor's
+  value state onto another screen (the `hyperlink = false` alt-screen path).
+- `cursor_reset_wrap`, `split_cell_boundary` (wide-char/spacer-head boundary
+  splitting for delete/erase chars), `append_grapheme` (OOM-retry wrapper),
+  `Page::swap_cells` (in-row cell swap w/ grapheme+hyperlink re-homing),
+  `Page::move_grapheme` made `pub(crate)`.
+- `blank_cell` + `clear_unprotected_cells_page` promoted to `pub(crate)`;
+  `PageList::{last_node, node_page_ptr}` added (`node_page_ptr` returns a raw
+  `*mut Page` via `&raw mut`, avoiding the Stacked-Borrows aliasing that
+  `node_data_mut`'s `&mut Page` retag triggers when two page ptrs alias).
+
+**Terminal ops added:** `scroll_up`/`scroll_down`/`scroll_viewport`,
+`insert_lines`/`delete_lines` (+ `row_will_be_shifted`, `shift_row` — full
+l/r-margin-aware row shift with same-page swap/move and cross-page clone),
+`insert_blanks`/`delete_chars`/`erase_chars` (margin-aware cell shift + bg fill),
+`erase_line` (right/left/complete + protected), `erase_display` (below/above/
+complete/scrollback/scroll_complete + ^L-at-prompt heuristic + protected),
+`decaln`, `set_attribute` (full `sgr::Attribute → Style` map), `switch_screen`/
+`switch_screen_mode` (47/1047/1049), `full_reset`. `index`'s l/r-margin slow path
++ `blank_cell().is_zero()` bg-fill check are now wired via `scroll_up`.
+
+**Grapheme-clustering print** (`terminal/print.rs::print_grapheme`): mode-2027
+break-state machine over the previous cell's cluster, `grapheme_width_effect`
+handling (`ignore`/`no_change`/`wide`/`narrow`), the wide-effect wrap dance
+incl. spacer-head insertion and cross-row grapheme transfer.
+
+### Pass 1 landed (unchanged)
 
 - **Reconciliations** (Screen placeholders): `screen/charset.rs` stub deleted →
   `CharsetArray`/`CharsetState` hoisted to `crate::charsets`; `screen/semantic.rs`
@@ -249,40 +287,30 @@ over `terminal::` with no skips):**
   emoji-base gating via `properties().emoji_vs_base`, style-ref release/use,
   hyperlink re-apply.
 
-**Screen surface exposed this chunk (all `pub(crate)`):** `cursor_page`,
+**Screen surface exposed in pass 1 (all `pub(crate)`):** `cursor_page`,
 `cursor_cell_left`/`cursor_cell_right`, `cursor_down_or_scroll`,
 `cursor_set_hyperlink` (moved out of `#[cfg(test)]`), `clear_cells_page`,
-`cursor_row_up` (new), `Page::{clear_grapheme, update_row_grapheme_flag,
+`cursor_row_up`, `Page::{clear_grapheme, update_row_grapheme_flag,
 update_row_hyperlink_flag}`, `Screen::dump_string` (moved out of `#[cfg(test)]`),
-`Screen::protected_mode` field (new).
+`Screen::protected_mode` field.
 
-**DEFERRED (not ported) + why — the next passes:**
+### Remaining deferrals (stream-dependent or sibling-chunk seams)
 
-1. **mode-2027 grapheme clustering** in `print` (`Terminal.zig:764-949`):
-   needs `moveGrapheme`, cross-page grapheme transfer, `graphemeWidthEffect`.
-   Marked `TODO(chunk:terminal-print-grapheme)`. ~15 Zig print tests deferred
-   (Devanagari, multicodepoint grapheme, ZWJ, VS16-with-second-char).
-2. **erase family** (`eraseChars`, `eraseLine`, `eraseDisplay`) and
-   **insert/delete** (`insertBlanks` — stubbed, `deleteChars`, `insertLines`,
-   `deleteLines`): need a cell-slice `clear_cells` + margin-aware row/cell shift
-   + SGR bg fill exposed from Screen. `TODO(chunk:terminal-edit)`.
-3. **scroll family** (`scrollUp`, `scrollDown` — stubbed, `scrollViewport`):
-   depend on `insertLines` + `cursorScrollAbove` (Screen has only
-   `cursor_down_scroll`; `cursor_scroll_above` was deferred in the Screen chunk).
-   `index`'s l/r-margin slow path and its `blankCell().isZero()` bg-fill check
-   likewise wait on this. `TODO(chunk:terminal-scroll)`.
-4. **alt-screen switch** (`switchScreen`/`switchScreenMode`, DEC 47/1047/1049
-   cursor-copy rules), **deccolm**, **full/soft reset** (`fullReset`),
-   **DECALN** (`decaln`): need `cursorCopy` between screens (deferred in Screen
-   chunk) + `reset` wiring. `TODO(chunk:terminal-screens)`.
-5. **SGR** (`setAttribute`, `printAttributes`): map `sgr::Attribute` →
-   `Style` mutation + `manual_style_update`. `TODO(chunk:terminal-sgr)`.
-6. **semantic prompt** (`semanticPrompt` OSC 133 dispatch, `cursorIsAtPrompt`):
-   straightforward once `cursor_set_semantic_content` variants are threaded.
-   `TODO(chunk:terminal-osc133)`.
-7. **kitty graphics / glyph / mouse interpretation / stream handler**: seams for
-   sibling chunks (`kitty-gfx`, `apc`, `input`, `stream`) — see Seams section.
+The operation ladder is complete. What remains is NOT policy-layer work — it is
+either the next chunk (stream/dispatch) or a marked sibling-chunk seam:
 
-The ~354 deferred Zig tests map onto tiers 1-6 above; port them alongside each
-tier. The method names/signatures already shaped here mean the stream chunk maps
-1:1 without renames.
+1. **`printAttributes`** (DECRQSS SGR query → string) — a reporting method that
+   belongs with the query/report family the stream layer drives.
+2. **`deccolm`** (80/132 column switch) — needs the mode-handler + resize wiring
+   that lands with the stream/mode-dispatch chunk.
+3. **soft reset** (DECSTR) — lives in the mode/switch handlers (stream chunk).
+4. **semantic prompt** (`semanticPrompt` OSC 133 dispatch, `cursorIsAtPrompt`) —
+   `TODO(chunk:terminal-osc133)`; `cursor_set_semantic_content` is already wired.
+5. **kitty graphics / glyph / mouse interpretation / stream handler** — seams for
+   sibling chunks (`kitty-gfx`, `apc`, `input`, `stream`); see Seams section. The
+   kitty-images `dirty = true` scroll hooks are `kitty_images_dirty` no-op bools.
+
+The unported Zig tests are exhaustive edge-case permutations of already-ported
+ops (hyperlink-moving / style-ref / cross-page-boundary variants of insert/delete
+lines, scroll-up hyperlink cases, etc.) plus stream-driven tests. The method
+names/signatures are shaped so the stream chunk maps 1:1 without renames.

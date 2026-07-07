@@ -99,6 +99,39 @@ impl Cursor {
     }
 }
 
+impl Cursor {
+    /// Snapshot the value-state of this cursor for copying onto another screen.
+    /// Port of the read side of `cursorCopy`'s `other: Cursor` argument (the
+    /// fields it actually reads for the `hyperlink = false` path).
+    pub(crate) fn to_copy(&self) -> CursorCopy {
+        CursorCopy {
+            x: self.x,
+            y: self.y,
+            style: self.style,
+            protected: self.protected,
+            pending_wrap: self.pending_wrap,
+            cursor_style: self.cursor_style,
+            semantic_content: self.semantic_content,
+            semantic_content_clear_eol: self.semantic_content_clear_eol,
+        }
+    }
+}
+
+/// The value-state of a cursor to copy onto another screen. Port of the subset
+/// of `Screen.Cursor` that `cursorCopy` reads (excluding page pin / hyperlink /
+/// style id, which are managed per-screen).
+#[derive(Debug, Clone, Copy)]
+pub struct CursorCopy {
+    pub x: CellCountInt,
+    pub y: CellCountInt,
+    pub style: Style,
+    pub protected: bool,
+    pub pending_wrap: bool,
+    pub cursor_style: CursorStyle,
+    pub semantic_content: SemanticContent,
+    pub semantic_content_clear_eol: bool,
+}
+
 /// Saved cursor state (DECSC). Port of `Screen.SavedCursor`.
 #[derive(Debug, Clone)]
 pub struct SavedCursor {
