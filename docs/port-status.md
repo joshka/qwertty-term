@@ -35,7 +35,7 @@ Status legend: `—` not started · `WIP` · `done`
 | style.zig / color.zig | done | done | 8 + 26 | StyleSet done; full color port (X11 names via embedded rgb.txt, CIELAB 256-cube light/dark logic, RGB.parse grammar); analysis: `docs/analysis/terminal-state.md` |
 | modes.zig / charsets.zig / Tabstops.zig | done | done | 12/3/5 (Zig 12/1/5) | modes table via macro_rules!; bitsets → plain arrays (not load-bearing) |
 | hyperlink.zig | done | done | 0 (matches Zig) | PageEntry/HyperlinkSet data model |
-| kitty/graphics_*.zig | — | — | — | extraction candidate (protocol model) |
+| kitty/graphics_*.zig | done (model) | done (model) | 63/63 (command 22, image 16, storage 25) | pin-tracked placements (eviction deliberately skips untrack, matches upstream); PNG via `png` crate; exec/render/unicode-placeholder deferred (Terminal/Phase-4/Screen-iter); extraction-ready except Pin/Rect leak; analysis: `docs/analysis/kitty-graphics.md` |
 | kitty/key.zig | done | done | 5/5 | FlagStack in screen/kitty_key.rs |
 | Selection.zig / SelectionGesture.zig | — | — | — | |
 | formatter.zig | — | — | — | |
