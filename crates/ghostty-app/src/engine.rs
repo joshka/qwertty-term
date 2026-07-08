@@ -282,6 +282,29 @@ impl Engine {
         }
     }
 
+    /// Whether the alternate screen is currently active (a full-screen program
+    /// like vim/htop is running). Drives the wheel-scroll alternate-scroll
+    /// path. Mirrors upstream `terminal.screens.active_key == .alternate`.
+    pub fn alt_screen_active(&self) -> bool {
+        self.terminal().screens.active_key() == ghostty_vt::terminal::ScreenKey::Alternate
+    }
+
+    /// Whether mode 1007 (`mouse_alternate_scroll`) is set. Combined with
+    /// [`Engine::alt_screen_active`] and mouse reporting being off, this turns
+    /// wheel events into cursor-key presses. Default is `true` (upstream's
+    /// mode-table default).
+    pub fn mouse_alternate_scroll(&self) -> bool {
+        self.mode(Mode::MouseAlternateScroll)
+    }
+
+    /// The total number of scrollback rows above the active area (history the
+    /// viewport can be scrolled up into). Used to clamp a wheel-driven
+    /// scrollback offset at the top of history.
+    pub fn scrollback_len(&self) -> usize {
+        let total = self.terminal().screen().pages.total_rows();
+        total.saturating_sub(self.rows())
+    }
+
     fn mode(&self, mode: Mode) -> bool {
         self.terminal().modes.get(mode)
     }

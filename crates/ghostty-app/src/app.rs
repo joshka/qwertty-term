@@ -282,6 +282,15 @@ struct Surface {
     last_present_delta: i32,
     /// Whether the render path reads the presented frame back each tick.
     capture_present: bool,
+    /// This pane's scrollback viewport offset in rows *up from the bottom*
+    /// (0 = the live active area). The render path snapshots `snapshot_window`
+    /// at this offset, so each split pane scrolls independently. Clamped to the
+    /// pane's scrollback length on each wheel event; reset to 0 on key input
+    /// (upstream `scroll-to-bottom.keystroke`, default on).
+    scrollback_offset: usize,
+    /// Per-pane wheel accumulator (sub-cell pixel remainder). Port of
+    /// upstream `mouse.pending_scroll_y`.
+    wheel: crate::scroll::WheelState,
 }
 
 impl Surface {
@@ -367,7 +376,7 @@ impl Surface {
         }
         let (mut window, range) = {
             let engine = self.engine();
-            let window = engine.snapshot_window(0);
+            let window = engine.snapshot_window(self.scrollback_offset);
             let range = engine
                 .selection()
                 .and_then(|(start, end, rect)| engine.screen_range(start, end, rect));
@@ -412,6 +421,128 @@ impl Surface {
             self.font.cell_width,
             self.font.cell_height,
         )
+    }
+
+    /// Snap this pane's viewport back to the live active area (offset 0) and
+    /// clear the wheel accumulator. Called on key input to this pane (upstream
+    /// `scroll-to-bottom.keystroke`, default on).
+    fn snap_to_bottom(&mut self) {
+        self.scrollback_offset = 0;
+        self.wheel = crate::scroll::WheelState::default();
+    }
+
+    /// Apply one wheel event to this pane: run the decision ladder over the
+    /// live mode state and either report (buttons 4/5), emit alternate-scroll
+    /// cursor keys, or move the scrollback viewport. Port of the body of
+    /// upstream `scrollCallback` (Surface.zig 3437–3599).
+    ///
+    /// `yoff` is the raw vertical scroll (macOS `scrollingDeltaY`; positive =
+    /// up), `precision` whether it is a precision (trackpad) delta, `mods` the
+    /// live modifiers (for the reporting path). `mult` is the configured
+    /// multiplier.
+    fn apply_wheel(
+        &mut self,
+        yoff: f64,
+        precision: bool,
+        mods: ghostty_input::key_mods::Mods,
+        mult: crate::scroll::ScrollMultiplier,
+    ) {
+        let cell_h = self.font.cell_height as f64;
+        let delta = self.wheel.row_delta(yoff, precision, cell_h, mult);
+        if delta == 0 {
+            return;
+        }
+
+        let (reporting_active, alt_screen, alt_scroll, cursor_keys) = {
+            let engine = self.engine();
+            (
+                engine.mouse_event() != ghostty_input::mouse_encode::MouseEvent::None,
+                engine.alt_screen_active(),
+                engine.mouse_alternate_scroll(),
+                engine.key_encode_options().cursor_key_application,
+            )
+        };
+
+        match crate::scroll::decide(delta, reporting_active, alt_screen, alt_scroll) {
+            crate::scroll::WheelOutcome::None => {}
+            crate::scroll::WheelOutcome::AltScrollKeys { count, up } => {
+                // Upstream clears the selection before sending cursor keys.
+                self.engine().clear_selection();
+                self.selection_anchor = None;
+                let bytes = arrow_key_bytes(up, cursor_keys);
+                for _ in 0..count {
+                    self.io.write(&bytes);
+                }
+            }
+            crate::scroll::WheelOutcome::Report { count, up } => {
+                // Upstream clears the selection when reporting is active
+                // (a shift-override selection could exist).
+                self.engine().clear_selection();
+                self.selection_anchor = None;
+                for _ in 0..count {
+                    self.report_wheel(up, mods);
+                }
+            }
+            crate::scroll::WheelOutcome::Viewport { rows_up } => {
+                // Positive `rows_up` scrolls *up* into history (increases the
+                // offset); negative scrolls back down toward the active area.
+                let max = self.engine().scrollback_len();
+                let cur = self.scrollback_offset as isize;
+                let next = (cur + rows_up).clamp(0, max as isize);
+                self.scrollback_offset = next as usize;
+            }
+        }
+    }
+
+    /// Emit one xterm wheel button-4 (up) / button-5 (down) press report,
+    /// re-using the existing mouse encode path so the bytes are byte-identical
+    /// to a direct wheel report. A no-op if reporting produced nothing.
+    fn report_wheel(&mut self, up: bool, mods: ghostty_input::key_mods::Mods) {
+        use ghostty_input::mouse::{Action, Button};
+        let button = if up { Button::Four } else { Button::Five };
+        let (event_mode, format) = {
+            let engine = self.engine();
+            (engine.mouse_event(), engine.mouse_format())
+        };
+        let ctx = crate::input::mouse::MouseContext {
+            event_mode,
+            format,
+            screen_width: (self.cols * self.font.cell_width as usize) as f64,
+            screen_height: (self.rows * self.font.cell_height as usize) as f64,
+            cell_width: self.font.cell_width as f64,
+            cell_height: self.font.cell_height as f64,
+            any_button_pressed: self.mouse_button_down,
+        };
+        // Wheel reports are a press at the current pointer cell. We don't track
+        // a live pointer position on the wheel path (upstream reads the OS
+        // cursor pos); report at the top-left cell (0,0), which the common SGR
+        // decoders accept. Wheel buttons carry no motion, so the cell is
+        // informational only for scroll.
+        let bytes = crate::input::mouse::encode(
+            Action::Press,
+            Some(button),
+            mods,
+            0.0,
+            0.0,
+            &ctx,
+            &mut self.last_mouse_cell,
+        );
+        if !bytes.is_empty() {
+            self.io.write(&bytes);
+        }
+    }
+}
+
+/// The byte sequence for a synthetic cursor-up/down arrow key on the
+/// alternate-scroll path, respecting DECCKM (`cursor_keys` application mode).
+/// Matches upstream `scrollCallback`: application mode `ESC O A`/`ESC O B`,
+/// normal mode `ESC [ A`/`ESC [ B`.
+fn arrow_key_bytes(up: bool, cursor_key_application: bool) -> Vec<u8> {
+    match (up, cursor_key_application) {
+        (true, true) => b"\x1bOA".to_vec(),
+        (false, true) => b"\x1bOB".to_vec(),
+        (true, false) => b"\x1b[A".to_vec(),
+        (false, false) => b"\x1b[B".to_vec(),
     }
 }
 
@@ -544,6 +675,9 @@ pub struct ControllerState {
     /// Whether finishing a mouse-drag selection immediately copies it to the
     /// clipboard (`copy-on-select` config key).
     copy_on_select: bool,
+    /// Wheel-scroll multipliers (`mouse-scroll-multiplier` config), clamped to
+    /// upstream's valid range.
+    scroll_multiplier: crate::scroll::ScrollMultiplier,
 }
 
 /// The controller handle passed to views and menu targets.
@@ -583,6 +717,11 @@ impl Controller {
             startup_colors,
             selection_colors,
             copy_on_select: config.copy_on_select,
+            scroll_multiplier: crate::scroll::ScrollMultiplier {
+                precision: config.mouse_scroll_multiplier.precision,
+                discrete: config.mouse_scroll_multiplier.discrete,
+            }
+            .clamped(),
         })))
     }
 
@@ -809,6 +948,18 @@ impl Controller {
         }
     }
 
+    /// Feed bytes straight into a surface's *engine* (parser), as if they were
+    /// pty output (smoke/test only). Unlike [`Controller::write_to_surface`]
+    /// (which writes to the shell's stdin and waits for the async round-trip),
+    /// this fills the terminal/scrollback synchronously — used by the
+    /// scrollback-isolation probe so the offset is deterministic.
+    pub fn feed_surface_output(&self, tab: TabId, surface: SurfaceId, bytes: &[u8]) {
+        let state = self.0.borrow();
+        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
+            s.engine().write(bytes);
+        }
+    }
+
     /// The active tab's divider paths in layout order (smoke/test only) — the
     /// divider-resize smoke picks one to drag.
     pub fn active_divider_paths(&self) -> Vec<Vec<bool>> {
@@ -973,15 +1124,26 @@ impl Controller {
             let opts = s.engine().key_encode_options();
             let bytes = crate::input::translate::encode_raw(raw, &cfg, opts);
             if !bytes.is_empty() {
+                // A key that produced bytes snaps the viewport back to the live
+                // area (upstream `scroll-to-bottom.keystroke`, default on). Only
+                // scrolled-back panes are affected; this pane is the focused
+                // (first-responder) one that received the key.
+                s.snap_to_bottom();
                 s.io.write(&bytes);
             }
         }
     }
 
-    /// Send already-composed text (IME commit) to `surface`'s pty.
+    /// Send already-composed text (IME commit) to `surface`'s pty. Committed
+    /// text is user input, so it snaps this pane's viewport to the bottom.
     pub fn send_text_to_surface(&self, tab: TabId, surface: SurfaceId, text: &str) {
-        let state = self.0.borrow();
-        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
+        let mut state = self.0.borrow_mut();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            s.snap_to_bottom();
             s.io.write(text.as_bytes());
         }
     }
@@ -1074,6 +1236,42 @@ impl Controller {
         if !bytes.is_empty() {
             s.io.write(&bytes);
         }
+    }
+
+    /// Route one wheel event to `surface` within `tab`. Runs the wheel-scroll
+    /// decision ladder (report / alternate-scroll cursor keys / scrollback
+    /// viewport) against that pane's live mode state; each pane owns its own
+    /// scrollback offset so panes scroll independently. `yoff` is the raw
+    /// vertical scroll (positive = up), `precision` whether it's a trackpad
+    /// (pixel) delta, `mods` the live modifiers (for the reporting path).
+    pub fn wheel_to_surface(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+        yoff: f64,
+        precision: bool,
+        mods: ghostty_input::key_mods::Mods,
+    ) {
+        let mult = self.0.borrow().scroll_multiplier;
+        let mut state = self.0.borrow_mut();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            s.apply_wheel(yoff, precision, mods, mult);
+        }
+    }
+
+    /// This pane's current scrollback viewport offset in rows up from the
+    /// bottom (0 = live active area). Smoke/test only.
+    pub fn surface_scrollback_offset(&self, tab: TabId, surface: SurfaceId) -> Option<usize> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.scrollback_offset)
     }
 
     /// Focus `surface` within `tab` (click-to-focus / directional nav). Updates
@@ -1313,6 +1511,8 @@ impl Controller {
             frame_dump,
             last_present_delta: 0,
             capture_present,
+            scrollback_offset: 0,
+            wheel: crate::scroll::WheelState::default(),
         })
     }
 
@@ -2656,6 +2856,51 @@ impl AppDelegate {
             ));
         }
 
+        // --- Per-pane scrollback isolation: fill the left pane's scrollback,
+        // scroll IT back with wheel-up events, and assert only that pane's
+        // viewport offset moved (the top-right pane stays pinned to the live
+        // area). Proves each split pane owns its own scrollback offset. ---
+        {
+            // Push plenty of lines straight into the left pane's engine so it
+            // has scrollback to reveal. Feeding the engine directly (not the
+            // shell's stdin) makes the fill synchronous so the offset check
+            // below is deterministic. Its grid is small, so ~120 lines is well
+            // over a screen.
+            let mut fill = String::new();
+            for i in 0..120 {
+                fill.push_str(&format!("SCROLLBACK-{i:03}\r\n"));
+            }
+            controller.feed_surface_output(tab, left, fill.as_bytes());
+        }
+        // Both panes start pinned to the bottom.
+        if controller.surface_scrollback_offset(tab, left) != Some(0)
+            || controller.surface_scrollback_offset(tab, top_right) != Some(0)
+        {
+            fail("panes should start at scrollback offset 0".into());
+        }
+        // Wheel the LEFT pane up several ticks (positive yoff = up into history).
+        for _ in 0..5 {
+            controller.wheel_to_surface(
+                tab,
+                left,
+                1.0,
+                false,
+                ghostty_input::key_mods::Mods::default(),
+            );
+        }
+        let left_off = controller.surface_scrollback_offset(tab, left).unwrap_or(0);
+        if left_off == 0 {
+            fail("wheel-up on the left pane did not move its scrollback offset".into());
+        }
+        // The OTHER pane must be unaffected.
+        if controller.surface_scrollback_offset(tab, top_right) != Some(0) {
+            fail(format!(
+                "scrolling the left pane moved the top-right pane's viewport \
+                 (offset {:?}); per-pane scrollback is not isolated",
+                controller.surface_scrollback_offset(tab, top_right)
+            ));
+        }
+
         // --- Close-collapse: close the middle pane (top-right). The tree
         // collapses so the sibling (bottom-right) absorbs the right column →
         // 2 panes remain. ---
@@ -2698,9 +2943,10 @@ impl AppDelegate {
         println!(
             "OK: splits smoke — split-right + split-down build 3 isolated shells \
              (each marker only in its own pane), directional focus walks the grid, \
-             a divider drag resizes both adjacent panes' grids, closing the middle \
-             pane collapses to 2 with the sibling absorbing the space, and closing \
-             every pane closes the tab."
+             a divider drag resizes both adjacent panes' grids, wheel-scrolling one \
+             pane back leaves the others pinned to the live area (per-pane scrollback \
+             isolation), closing the middle pane collapses to 2 with the sibling \
+             absorbing the space, and closing every pane closes the tab."
         );
         std::process::exit(0);
     }
@@ -2920,4 +3166,19 @@ pub fn run(
     app.setDelegate(Some(object));
 
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::arrow_key_bytes;
+
+    #[test]
+    fn arrow_key_bytes_match_upstream_alternate_scroll_sequences() {
+        // Normal mode (DECCKM off): CSI A / CSI B.
+        assert_eq!(arrow_key_bytes(true, false), b"\x1b[A");
+        assert_eq!(arrow_key_bytes(false, false), b"\x1b[B");
+        // Application mode (DECCKM on): SS3 A / SS3 B.
+        assert_eq!(arrow_key_bytes(true, true), b"\x1bOA");
+        assert_eq!(arrow_key_bytes(false, true), b"\x1bOB");
+    }
 }

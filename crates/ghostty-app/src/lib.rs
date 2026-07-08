@@ -17,6 +17,7 @@ pub mod frame_dump;
 pub mod geometry;
 pub mod input;
 pub mod menu;
+pub mod scroll;
 pub mod selection;
 pub mod splitkeys;
 pub mod splits;

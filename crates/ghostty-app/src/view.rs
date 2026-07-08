@@ -157,13 +157,22 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
-            // Report scroll as button 4 (up) / 5 (down) press, like xterm.
+            // Route the raw vertical delta through the controller's wheel-scroll
+            // ladder (mouse reporting → alternate-scroll cursor keys → scrollback
+            // viewport). `scrollingDeltaY` is positive-up (matching upstream's
+            // "positive is up" convention; macOS natural-scrolling inversion is
+            // already applied by AppKit). Precision (trackpad) deltas are pixels;
+            // non-precision are wheel ticks — the ladder scales each accordingly.
             let dy = event.scrollingDeltaY();
             if dy == 0.0 {
                 return;
             }
-            let btn = if dy > 0.0 { MouseBtn::WheelUp } else { MouseBtn::WheelDown };
-            self.route_mouse(event, MouseKind::Down, Some(btn));
+            let precision = event.hasPreciseScrollingDeltas();
+            let mods = mods_from_flags(event.modifierFlags());
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.with_controller(|c| {
+                c.wheel_to_surface(tab, surface, dy, precision, mods)
+            });
         }
     }
 
@@ -499,12 +508,14 @@ enum MouseKind {
 }
 
 /// The buttons the view reports, mapped onto `ghostty_input`'s button set.
+/// Wheel up/down are handled separately by the wheel-scroll ladder
+/// (`scroll_wheel` → `Controller::wheel_to_surface`), which re-uses the
+/// xterm button-4/5 encoding internally, so this covers only the pressable
+/// buttons.
 #[derive(Clone, Copy)]
 enum MouseBtn {
     Left,
     Right,
-    WheelUp,
-    WheelDown,
 }
 
 impl MouseBtn {
@@ -513,9 +524,6 @@ impl MouseBtn {
         match self {
             MouseBtn::Left => Button::Left,
             MouseBtn::Right => Button::Right,
-            // xterm reports wheel up/down as buttons 4/5.
-            MouseBtn::WheelUp => Button::Four,
-            MouseBtn::WheelDown => Button::Five,
         }
     }
 }

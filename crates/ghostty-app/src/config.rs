@@ -35,6 +35,30 @@ pub struct Config {
     pub font_size: Option<f32>,
     #[serde(rename = "font-family")]
     pub font_family: Option<String>,
+    /// Per-axis wheel-scroll multipliers (`precision` for trackpad/pixel
+    /// deltas, `discrete` for mouse-wheel ticks). Mirrors ghostty's
+    /// `mouse-scroll-multiplier` (defaults precision 1.0, discrete 3.0). A TOML
+    /// table: `[mouse-scroll-multiplier]` with `precision`/`discrete` keys.
+    #[serde(rename = "mouse-scroll-multiplier")]
+    pub mouse_scroll_multiplier: MouseScrollMultiplier,
+}
+
+/// The `[mouse-scroll-multiplier]` config table. Field defaults match
+/// upstream `Config.MouseScrollMultiplier` (precision 1.0, discrete 3.0).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MouseScrollMultiplier {
+    pub precision: f64,
+    pub discrete: f64,
+}
+
+impl Default for MouseScrollMultiplier {
+    fn default() -> Self {
+        MouseScrollMultiplier {
+            precision: 1.0,
+            discrete: 3.0,
+        }
+    }
 }
 
 const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
@@ -54,6 +78,12 @@ const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
 
 # Substring to prefer when picking among discovered terminal fonts.
 # font-family = "JetBrainsMono Nerd Font Mono"
+
+# Wheel-scroll multipliers. `precision` scales trackpad (pixel) deltas;
+# `discrete` scales mouse-wheel ticks (rows per detent).
+# [mouse-scroll-multiplier]
+# precision = 1.0
+# discrete = 3.0
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -121,6 +151,27 @@ mod tests {
         assert_eq!(config.theme, None);
         assert_eq!(config.font_size, None);
         assert_eq!(config.font_family, None);
+        assert_eq!(
+            config.mouse_scroll_multiplier,
+            MouseScrollMultiplier::default()
+        );
+        assert_eq!(config.mouse_scroll_multiplier.precision, 1.0);
+        assert_eq!(config.mouse_scroll_multiplier.discrete, 3.0);
+    }
+
+    #[test]
+    fn parses_mouse_scroll_multiplier_table() {
+        let toml = "[mouse-scroll-multiplier]\nprecision = 1.5\ndiscrete = 2.5\n";
+        let config = parse(toml).unwrap();
+        assert_eq!(config.mouse_scroll_multiplier.precision, 1.5);
+        assert_eq!(config.mouse_scroll_multiplier.discrete, 2.5);
+    }
+
+    #[test]
+    fn mouse_scroll_multiplier_partial_table_keeps_defaults() {
+        let config = parse("[mouse-scroll-multiplier]\ndiscrete = 5.0\n").unwrap();
+        assert_eq!(config.mouse_scroll_multiplier.precision, 1.0);
+        assert_eq!(config.mouse_scroll_multiplier.discrete, 5.0);
     }
 
     #[test]
