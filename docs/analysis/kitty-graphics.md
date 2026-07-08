@@ -7,10 +7,10 @@ images to the terminal (in several encodings and transport mediums), storing the
 placing them on the screen at pin-tracked positions with z-layers and unicode placeholders.
 
 The subsystem is ~6.3k LOC across eight Zig files. This document maps the **model** —
-command grammar, image storage, placement tracking — which is what the Rust port in
-`crates/ghostty-vt/src/kitty/` covers. The **exec** and **render** layers (which need
-`Terminal`/`Screen` and a GPU renderer respectively) are deferred; their interfaces are
-documented at the end.
+command grammar, image storage, placement tracking — and the **exec** and **unicode
+placeholder** layers, all now ported in `crates/ghostty-vt/src/kitty/`. Only the actual GPU
+texture upload/draw of a resolved `RenderPlacement` remains outside this crate's scope (that's
+an embedder/renderer concern, not a `ghostty-vt` one).
 
 ## File inventory (Zig)
 
@@ -21,8 +21,8 @@ documented at the end.
 | `graphics_image.zig`    | 1050     | `Image`, `LoadingImage` (chunked transfer, decode), `Rect`             | **yes** → `image.rs`                       |
 | `graphics_storage.zig`  | 1601     | `ImageStorage`: image map, placement map, eviction, generation, delete | **yes (model)** → `storage.rs`             |
 | `graphics_exec.zig`     | 658      | `execute(alloc, *Terminal, *Command)` → `Response`; needs `Terminal`   | **yes** → `exec.rs`                        |
-| `graphics_render.zig`   | 27       | `render.Placement`: renderer-facing placement struct                   | deferred (Phase 4)                         |
-| `graphics_unicode.zig`  | 1347     | unicode placeholder (`U+10EEEE`) placement resolution                  | deferred (needs Screen row/cell iteration) |
+| `graphics_render.zig`   | 27       | `render.Placement`: renderer-facing placement struct                   | **yes** → `unicode.rs::RenderPlacement`    |
+| `graphics_unicode.zig`  | 1347     | unicode placeholder (`U+10EEEE`) placement resolution                  | **yes** → `unicode.rs`                     |
 | `color.zig` / `key.zig` | 77 / 169 | kitty color protocol / keyboard flags                                  | out of scope (other chunks)                |
 
 `testdata/` holds `@embedFile`-d raw image fixtures used by `graphics_image.zig` tests.
@@ -302,36 +302,113 @@ Two seams remain inside exec: file/shm/png/zlib media (the default `image_limits
 a real decoder + medium reader), and animation actions (`f`/`a`/`c`, which return
 `"ERROR: unimplemented action"` exactly as upstream).
 
-## Deferred interfaces (documented, not ported)
+## Unicode placeholders (`U=1` virtual placements, `graphics_unicode.zig` + `graphics_render.zig`)
 
-### render (`graphics_render.zig`, Phase 4)
+Ported to `crates/ghostty-vt/src/kitty/unicode.rs`. This is the mechanism kitty uses to make
+graphics scroll, reflow, and copy/paste like ordinary text: instead of a screen-anchored pin
+(the `Location::Pin` case in `storage.rs`), a `U=1` display command creates a
+`Location::Virtual` placement, and the *client* (e.g. a shell prompt or `icat`-style tool)
+paints ordinary-looking cells that happen to hold the codepoint `U+10EEEE` — the "unicode
+placeholder". These cells carry the placement's identity and the row/column fragment they
+represent entirely in existing cell attributes, so no new cell-storage fields are needed:
 
-`render.Placement` (`:8-27`) is a flat renderer-facing struct (top_left pin, pixel offsets,
-source rect, dest width/height). Built from a stored `Placement` + `Image` + terminal geometry
-at frame time. Phase 4.
+- **Image ID**: the low 24 bits live in the cell's **foreground color** — `colorToId`
+  (ported as `color_to_id`) reads the palette index directly, or packs an RGB triple as
+  `(r<<16)|(g<<8)|b`. This lets any of the three SGR foreground forms (256-color palette or
+  24-bit RGB) carry an id, matching how kitty-compatible clients (e.g. shell integration
+  scripts) already set colors.
+- **Image ID, high byte**: an optional 4th byte, packed via the **3rd combining diacritic**
+  on the placeholder cell (`image_id = low24 | (high8 << 24)`), for image ids that don't fit
+  in 24 bits.
+- **Placement ID**: the low 24 bits of the cell's **underline color**, via the same
+  `colorToId` mechanism (`p=0` if the underline color is unset/none).
+- **Row/column fragment**: two more **combining diacritics** (row first, then column) from a
+  fixed 297-entry table of Unicode combining marks
+  ([kitty's `rowcolumn-diacritics.txt`](https://sw.kovidgoyal.net/kitty/_downloads/f0a0de9ec8d9ff4456206db8e0814937/rowcolumn-diacritics.txt)),
+  ported verbatim as `DIACRITICS` (binary-searched by `get_index`, since it's sorted). These
+  say *which row/column of the image* this particular placeholder cell represents — a large
+  image spans many placeholder cells, each showing one "tile".
+- Missing diacritics are **not** errors — they mean "continue the previous placement": a
+  cell missing its column diacritic implicitly continues at `prev.col + 1` (see
+  `IncompletePlacement::can_append`, "converted from Kitty's logic, don't @ me" per upstream's
+  own comment). Invalid diacritic codepoints are likewise tolerated (logged upstream, silently
+  ignored here) rather than erroring.
 
-### unicode placeholders (`graphics_unicode.zig`, needs Screen)
+### Print-path half: recognizing the placeholder
 
-Resolves virtual placements (`U=1`) that are positioned via `U+10EEEE` placeholder cells
-carrying image id/placement/row/column in their fg color + combining diacritics. Needs Screen
-row/cell iteration; deferred to the Screen/trunk chunk.
+`crate::terminal::print::print_cell` (the single choke point every print path funnels
+through) checks the mapped codepoint against `kitty::unicode::PLACEHOLDER` and sets
+`Row::kitty_virtual_placeholder` — a bit already present on `Page`/`Row` (exercised by
+`pagelist` reflow/resize tests) but never previously set by the print path (the
+`TODO(chunk:kitty-gfx)` seam this chunk closes). Two narrow-batching fast paths
+(`print_slice_fast_narrow`'s first-codepoint check, and `print_slice_fill_narrow`'s
+run-continuation scan) must *not* swallow the placeholder codepoint into a batched cell
+write, since only `print_cell` sets the row flag; both now explicitly exclude
+`kitty::unicode::PLACEHOLDER` before consulting `codepoint_width` (which returns 1 for it,
+same as any other narrow codepoint) — mirroring upstream's `printSliceEligible` guard. The
+run-continuation gap (a placeholder appearing after the first codepoint of an already-batched
+narrow run) was a real latent bug caught while porting: `codepoint_width(0x10EEEE) == 1`
+made it look eligible for the batch, silently dropping the row flag for any placeholder that
+wasn't the very first codepoint the print path saw.
+
+### Read-path half: resolving placements at render-collection time
+
+`kitty::unicode::placement_iterator(pin, limit)` returns a `PlacementIterator` that walks
+rows via the existing `Pin::row_iterator` (right-down direction), skipping any row whose
+`kitty_virtual_placeholder` flag is unset (an O(1) per-row check — this is *why* the flag
+exists: without it, resolving placements would mean inspecting every cell's codepoint on
+every frame). Within a flagged row it scans cells left-to-right, decoding each placeholder
+cell into an `IncompletePlacement` (`IncompletePlacement::init`, reading the cell's style via
+`Page::style_by_id` and its diacritics via `Page::lookup_grapheme`) and merging contiguous,
+compatible cells into a single run (`IncompletePlacement::append`/`canAppend`) — "a run is
+always only a single row" (never wraps across rows), matching upstream. A run ends when a
+cell breaks compatibility (different image/placement id, or a non-continuing row/col), and
+the iterator resumes from that exact cell on the next call — achieved in Rust by writing the
+iterator's resume pin (`self.row`) in lockstep with the scan index, since Zig's version
+aliases a local `row: *Pin` directly against the iterator's stored pin.
+
+`Placement::render_placement(storage, image, cell_width, cell_height)` resolves one
+iterator-yielded `Placement` (a run: image id, placement id, row/col fragment, width) plus the
+*stored* `storage::Placement` (which carries the requested `columns`/`rows` for the whole
+virtual placement, looked up by placement id or, if unset, "the first virtual placement for
+this image") into a `RenderPlacement` — the flat, `Pin`-plus-pixel-rects struct a GPU renderer
+consumes (port of `graphics_render.zig`'s 27-line `render.Placement`, folded into this module
+since nothing else produces one). The math is aspect-ratio-preserving letterboxing: the
+image's native size fits into the requested grid's pixel size (scale-and-center on whichever
+axis is the tighter constraint), then the specific row/col fragment's source and destination
+sub-rects are carved out of that centered, scaled image — including the "this fragment is
+entirely in the letterboxed margin, render nothing" degenerate case. This is straight
+floating-point geometry ported 1:1 from `graphics_unicode.zig:130-351`; the three `dog.png`
+fixture tests (4x2, 2x2, 1x1 grids) pin the exact rounding behavior.
+
+### Storage interplay (verified, no changes needed)
+
+A `U=1` display command (`kitty::exec::display`) already builds a `Location::Virtual`
+placement — `exec.rs` was ported (a prior chunk) against the same `storage::Location` enum
+this module reads, and the wiring needed no changes: `display` skips `PageList::track_pin`
+entirely for `U=1` (a virtual placement has no rect to track) and rejects `P=`/parent-id
+placements as `EINVAL` (matching upstream, since a virtual placement can't be a relative-offset
+child). The only remaining consumer-side task was the read path this chunk adds.
 
 ## Extraction-readiness (library candidate)
 
 The command grammar (`command.rs`) and `Response` are fully ghostty-free — pure `u8`/`u32`
 data, publishable as-is. The blockers for a standalone crate are:
 
-1. **`PageList.Pin` leaks** into `Placement.location`, `Rect`, and the storage delete/rect
-   API. A standalone crate would need to abstract "a tracked screen position" behind a trait
-   or generic parameter. For now the port keeps `Pin` (this is a `ghostty-vt` module, not yet
-   a split crate), matching the prompt's "design the seam, split later" guidance.
+1. **`PageList.Pin` leaks** into `Placement.location`, `Rect`, the storage delete/rect API,
+   and now `unicode::Placement`/`RenderPlacement` (the placeholder-resolution read path also
+   walks and returns pins). A standalone crate would need to abstract "a tracked screen
+   position" behind a trait or generic parameter. For now the port keeps `Pin` (this is a
+   `ghostty-vt` module, not yet a split crate), matching the prompt's "design the seam, split
+   later" guidance.
 2. **`TerminalGeometry`** was introduced precisely to *avoid* leaking `Terminal`; it is a POD
    the model owns, so it is not a leak.
 3. **PNG decode** is behind a seam, so the model doesn't force a decoder dependency.
 
-Recommended eventual split: parametrize storage over a `Pin`/`Position` trait and a
-`PinTracker` (track/untrack) trait; the command grammar and `Image` (sans `Rect`) can go in a
-lower crate with zero ghostty types.
+Recommended eventual split: parametrize storage (and the unicode-placement read path) over a
+`Pin`/`Position` trait and a `PinTracker` (track/untrack) trait, plus a small "row flag +
+style/grapheme lookup" trait for `unicode.rs`; the command grammar and `Image` (sans `Rect`)
+can go in a lower crate with zero ghostty types.
 
 ## Pin-API gaps
 

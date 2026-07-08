@@ -980,3 +980,81 @@ fn kitty_graphics_via_apc() {
         .expect("image stored");
     assert_eq!(img.format, crate::kitty::command::Format::Rgb);
 }
+
+// End-to-end U=1 (unicode virtual placement): transmit a 2x2 RGB image via
+// APC through the real stream, `a=p,U=1` display it as a 2x1-cell virtual
+// placement, print two placeholder cells (col 0 and col 1) carrying the
+// image id in fg color and the column index via diacritics, then resolve
+// the printed cells back into placements and a renderer-facing rect. This
+// exercises the full pipeline this chunk ports: APC -> command parse ->
+// `kitty::execute` (storage) -> print-path placeholder recognition (row
+// flag) -> `kitty::unicode::placement_iterator` -> `render_placement`.
+#[test]
+fn kitty_unicode_placeholder_end_to_end() {
+    use base64::Engine as _;
+
+    let mut s = term(10, 10);
+    s.handler.terminal.width_px = 100;
+    s.handler.terminal.height_px = 100;
+
+    // Transmit a 2x2 RGB image (id=1), direct medium, uncompressed.
+    let pixels = [255u8, 0, 0].repeat(4); // 4 pixels, opaque red.
+    let b64 = base64::engine::general_purpose::STANDARD.encode(pixels);
+    let transmit = format!("\x1b_Ga=t,t=d,f=24,i=1,s=2,v=2;{b64}\x1b\\");
+    s.feed(transmit.as_bytes());
+    assert!(
+        s.handler
+            .terminal
+            .screen()
+            .kitty_images
+            .image_by_id(1)
+            .is_some()
+    );
+
+    // Display it as a virtual (U=1) placement sized 2 cols x 1 row.
+    s.feed(b"\x1b_Ga=p,i=1,U=1,c=2,r=1\x1b\\");
+    assert!(
+        s.handler
+            .terminal
+            .screen()
+            .kitty_images
+            .placements
+            .values()
+            .any(|p| matches!(p.location, crate::kitty::Location::Virtual))
+    );
+
+    // Print the two placeholder cells: fg color 1 = image id 1 (palette);
+    // diacritic 1 = row 0; diacritic 2 = col 0 / col 1.
+    s.feed(b"\x1b[38;5;1m");
+    s.feed("\u{10EEEE}\u{0305}\u{0305}".as_bytes());
+    s.feed("\u{10EEEE}\u{0305}\u{030D}".as_bytes());
+    s.feed(b"\x1b[39m");
+
+    let t = &s.handler.terminal;
+    let pin = t.screen().pages.get_top_left(crate::point::Tag::Viewport);
+    let mut it = unsafe { crate::kitty::unicode::placement_iterator(pin, None) };
+    let placement = unsafe { it.next() }.expect("one virtual placement run");
+    assert!(unsafe { it.next() }.is_none());
+
+    assert_eq!(placement.image_id, 1);
+    assert_eq!(placement.placement_id, 0);
+    assert_eq!(placement.row, 0);
+    assert_eq!(placement.col, 0);
+    assert_eq!(placement.width, 2);
+
+    // Resolve into a renderer-facing rect. Cell size: 100px / 10 cols/rows.
+    let storage = &t.screen().kitty_images;
+    let img = storage.image_by_id(1).unwrap();
+    let rp = placement
+        .render_placement(storage, img, 10, 10)
+        .expect("render placement resolves");
+    // The requested grid (2 cols x 1 row -> 20x10px) is wider than the
+    // square 2x2 source image, so aspect-fit scales to the grid's height
+    // (10px) and letterboxes 5px on each side: a centered 10x10 square.
+    assert_eq!(rp.source_width, 2);
+    assert_eq!(rp.source_height, 2);
+    assert_eq!(rp.dest_width, 10);
+    assert_eq!(rp.dest_height, 10);
+    assert_eq!(rp.offset_x, 5);
+    assert_eq!(rp.offset_y, 0);
+}

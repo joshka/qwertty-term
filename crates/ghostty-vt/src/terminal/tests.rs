@@ -4,12 +4,11 @@
 //! (381 total) are now ported 1:1, including the print path,
 //! erase/scroll/insert-delete-line family, alt-screen/reset, resize/reflow/
 //! DECCOLM, semantic prompt/OSC133, and printSlice/printAttributes groups.
-//! Two tests remain genuinely blocked on unported features, not missed:
-//! "print kitty unicode placeholder" (the print path has a
-//! `TODO(chunk:kitty-gfx): mark Kitty unicode-placeholder rows` seam, so the
-//! row flag is never actually set on print) and "glyph APC stores session
-//! glossary entries" (the `glyph`/APC protocol module doesn't exist in this
-//! crate at all yet).
+//! "print kitty unicode placeholder" is now ported (`print_kitty_unicode_placeholder`
+//! below) — the print path sets `Row::kitty_virtual_placeholder` (see
+//! `crate::terminal::print::print_cell`). One test remains genuinely blocked:
+//! "glyph APC stores session glossary entries" (the `glyph`/APC protocol module
+//! doesn't exist in this crate at all yet).
 
 use super::*;
 
@@ -335,6 +334,33 @@ fn print_wide_char_at_edge_spacer_head() {
     unsafe {
         assert_eq!((*tail).wide(), Wide::SpacerTail);
     }
+}
+
+// Zig: "Terminal: print kitty unicode placeholder".
+#[test]
+fn print_kitty_unicode_placeholder() {
+    let mut t = term(10, 10);
+
+    t.print(crate::kitty::unicode::PLACEHOLDER);
+    assert_eq!(t.screen().cursor.y, 0);
+    assert_eq!(t.screen().cursor.x, 1);
+
+    {
+        let list_cell = t
+            .screen()
+            .pages
+            .get_cell(crate::point::Point::screen(0, 0))
+            .unwrap();
+        unsafe {
+            assert_eq!(
+                (*list_cell.cell).codepoint(),
+                crate::kitty::unicode::PLACEHOLDER
+            );
+            assert!((*list_cell.row).kitty_virtual_placeholder());
+        }
+    }
+
+    assert!(t.is_dirty(crate::point::Point::active(0, 0)));
 }
 
 // Zig: "Terminal: print charset".

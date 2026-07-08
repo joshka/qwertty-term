@@ -15,9 +15,16 @@
 //!   [`crate::terminal::Terminal`] (cursor-tracked placements, chunked-transfer
 //!   `q` inheritance, delete against the real cursor, quiet-mode reply filter).
 //!
-//! Deferred (documented in `docs/analysis/kitty-graphics.md`): `graphics_render.zig`
-//! (Phase 4), `graphics_unicode.zig` (`U=1` unicode placeholders, needs Screen
-//! row/cell iteration).
+//! - [`unicode`]: the `U=1` unicode-placeholder mechanism —
+//!   [`unicode::placement_iterator`] walks flagged rows back into
+//!   [`unicode::Placement`]s, and [`unicode::Placement::render_placement`]
+//!   resolves one against stored [`storage::Placement`]/[`Image`] data into a
+//!   renderer-facing [`unicode::RenderPlacement`] (port of
+//!   `graphics_unicode.zig` and `graphics_render.zig`).
+//!
+//! Deferred (documented in `docs/analysis/kitty-graphics.md`): the GPU-side
+//! consumption of [`unicode::RenderPlacement`] (Phase 4; the struct and its
+//! math are ported here, only the actual texture upload/draw is deferred).
 //!
 //! # Extraction
 //!
@@ -31,6 +38,7 @@ pub mod command;
 pub mod exec;
 pub mod image;
 pub mod storage;
+pub mod unicode;
 
 pub use command::{Command, Parser as CommandParser, Response};
 pub use exec::{execute, execute_with};
@@ -39,6 +47,7 @@ pub use storage::{
     AddImageError, ImageStorage, Location, Placement, PlacementId, PlacementKey, PlacementTag,
     next_generation,
 };
+pub use unicode::{PlacementIterator, RenderPlacement, RenderPlacementError};
 
 use crate::page::size::CellCountInt;
 

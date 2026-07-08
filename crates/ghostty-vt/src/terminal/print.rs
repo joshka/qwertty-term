@@ -194,6 +194,12 @@ impl Terminal {
         if !allow_unicode {
             return 0;
         }
+        // The Kitty graphics placeholder requires row bookkeeping (setting
+        // `kitty_virtual_placeholder`) that only happens in `print_cell`; defer
+        // to the slow path. Port of `Terminal.zig:431-434` / `printSliceEligible`.
+        if cp0 == crate::kitty::unicode::PLACEHOLDER {
+            return 0;
+        }
         // First cp > 0xFF needs care under clustering: print() examines the
         // previous cell/pending-wrap state we can't cheaply reason about; only
         // take it when the cursor is at column 0 with no pending wrap.
@@ -228,7 +234,11 @@ impl Terminal {
                 if (0x10..=0xFF).contains(&cp) {
                     continue;
                 }
-                if cp > 0xFF && allow_unicode && crate::unicode::codepoint_width(cp) == 1 {
+                if cp > 0xFF
+                    && allow_unicode
+                    && cp != crate::kitty::unicode::PLACEHOLDER
+                    && crate::unicode::codepoint_width(cp) == 1
+                {
                     if !grapheme_cluster {
                         continue;
                     }
@@ -669,7 +679,12 @@ impl Terminal {
                 (*self.screen().cursor.page_row).set_styled(true);
             }
 
-            // TODO(chunk:kitty-gfx): mark Kitty unicode-placeholder rows.
+            // If this is a Kitty unicode placeholder, mark the row so the
+            // renderer can find rows with these much faster. Port of
+            // `Terminal.zig:1332-1339`.
+            if mapped == crate::kitty::unicode::PLACEHOLDER {
+                (*self.screen().cursor.page_row).set_kitty_virtual_placeholder(true);
+            }
 
             // Re-apply the active hyperlink, or clear a stale one.
             if self.screen().cursor.hyperlink_id > 0 {
