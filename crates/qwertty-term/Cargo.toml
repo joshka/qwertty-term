@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Native macOS AppKit host for the qwertty-term terminal: NSApplication/NSWindow with native tabs, a Metal-rendered NSView, an NSTextInputClient input path, and a menu bar"
 publish = false
+default-run = "qwertty-term"
 
 [lib]
 name = "qwertty_term"
