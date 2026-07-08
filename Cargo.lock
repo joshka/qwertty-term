@@ -1408,6 +1408,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "frame-capture"
+version = "0.0.0"
+dependencies = [
+ "ghostty-font",
+ "ghostty-renderer",
+ "ghostty-vt",
+ "png 0.18.1",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
