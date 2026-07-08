@@ -2204,6 +2204,90 @@ fn print_and_end_hyperlink() {
     assert!(t.is_dirty(Point::screen(0, 0)));
 }
 
+// Regression test (no Zig equivalent): three unique implicit hyperlinks on
+// one page exceed the default hyperlink-set ID space (cap 3 => 2 usable IDs)
+// while every allocated ID is still living (each printed cell holds a ref).
+// `RefCountedSet::add` must report OutOfMemory (grow hyperlink_bytes), not
+// NeedsRehash: a same-capacity rehash clone reclaims nothing when no IDs are
+// dead, so `start_hyperlink` retried forever. Matches upstream's integer
+// truncation of the 0.9 rehash threshold.
+#[test]
+fn unique_hyperlinks_grow_capacity_without_hanging() {
+    let mut t = term(80, 24);
+    for x in 0..3u16 {
+        // Implicit id: each start_hyperlink creates a distinct link.
+        t.screen_mut()
+            .start_hyperlink(b"http://example.com", None)
+            .unwrap();
+        t.print('a' as u32);
+        t.screen_mut().end_hyperlink();
+        assert!(hyperlink_id_at(&t, x, 0).is_some());
+    }
+    // Three distinct living links on the page.
+    unsafe {
+        let page = t.screen().cursor_page();
+        assert_eq!((*page).hyperlink_set_mut().count(), 3);
+    }
+}
+
+// Regression test (no Zig equivalent): exhaust the style-set ID space with
+// mostly-dead styles so `RefCountedSet::add` reports NeedsRehash, and verify
+// `manual_style_update` resolves it with a same-capacity rehash clone
+// (compacting dead IDs) rather than growing the style capacity.
+#[test]
+fn style_set_needs_rehash_compacts_dead_ids() {
+    use crate::page::style::StyleSet;
+
+    let mut t = term(80, 24);
+    let styles_cap = unsafe {
+        t.screen()
+            .pages
+            .node_data((*t.screen().cursor.page_pin).node)
+            .capacity
+            .styles
+    };
+    let max_items = StyleSet::layout(styles_cap as usize).cap;
+
+    // Fill every style ID with a unique style, each pinned by a printed cell.
+    for n in 1..max_items as u32 {
+        t.set_attribute(Attribute::DirectColorFg(crate::color::Rgb::new(
+            (n & 0xFF) as u8,
+            ((n >> 8) & 0xFF) as u8,
+            1,
+        )));
+        t.print('a' as u32);
+    }
+    t.set_attribute(Attribute::Unset);
+    assert_eq!(style_page_count(&t), max_items - 1);
+
+    // Overwrite all but the last styled cell with default-style cells, so
+    // every allocated ID except the highest one is dead. The dead IDs sit
+    // below a living one, so `add`'s trim-from-the-end can't reclaim them.
+    t.set_cursor_pos(1, 1);
+    for _ in 1..max_items as u32 - 1 {
+        t.print('b' as u32);
+    }
+    assert_eq!(style_page_count(&t), 1);
+
+    // A new style now has no free ID => NeedsRehash => same-capacity clone.
+    // Print away from the surviving styled cell (the cursor sits on it).
+    t.set_cursor_pos(5, 1);
+    t.set_attribute(Attribute::DirectColorFg(crate::color::Rgb::new(1, 2, 3)));
+    t.print('c' as u32);
+    assert_ne!(t.screen().cursor.style_id, 0);
+    assert_eq!(style_page_count(&t), 2);
+
+    // Rehash, not growth: the style capacity is unchanged.
+    let cap_after = unsafe {
+        t.screen()
+            .pages
+            .node_data((*t.screen().cursor.page_pin).node)
+            .capacity
+            .styles
+    };
+    assert_eq!(cap_after, styles_cap);
+}
+
 // Zig: "Terminal: print and change hyperlink".
 #[test]
 fn print_and_change_hyperlink() {
@@ -6990,21 +7074,17 @@ fn print_slice_differential_fuzz_vs_print() {
     // margin bound), so degenerate 1-column terminals are out of scope here,
     // same as upstream.
     //
-    // NOTE: upstream calls this with (500, 80, 24), (500, 10, 4), (500, 5,
-    // 2), (200, 2, 2). The original blocker for those counts — the
-    // per-mutation `Page::assert_integrity` scan — is now behind the opt-in
-    // `slow_runtime_safety` feature (see ADR 0001), but the counts still
-    // can't be restored: at higher op counts the hyperlink op reliably
-    // triggers a pre-existing infinite loop in `Screen::start_hyperlink`'s
-    // `SetNeedsRehash` retry path (the same-capacity `increase_capacity(node,
-    // None)` clone never compacts dead hyperlink-set IDs, so the error
-    // repeats forever — the third unique implicit hyperlink on a page can
-    // hang). Restore upstream counts once that bug is fixed.
+    // Op counts match upstream's `testPrintSliceDifferential` call sites:
+    // (500, 80, 24), (500, 10, 4), (500, 5, 2), (200, 2, 2). They were
+    // temporarily held down while `RefCountedSet::add`'s float rehash
+    // threshold made `Screen::start_hyperlink` retry `SetNeedsRehash`
+    // forever on a fully-living hyperlink set (see
+    // `unique_hyperlinks_grow_capacity_without_hanging`).
     let mut rng = SplitMix64::new(0xC0FFEE);
-    print_slice_differential(&mut rng, 15, 80, 24);
-    print_slice_differential(&mut rng, 15, 10, 4);
-    print_slice_differential(&mut rng, 15, 5, 2);
-    print_slice_differential(&mut rng, 10, 2, 2);
+    print_slice_differential(&mut rng, 500, 80, 24);
+    print_slice_differential(&mut rng, 500, 10, 4);
+    print_slice_differential(&mut rng, 500, 5, 2);
+    print_slice_differential(&mut rng, 200, 2, 2);
 }
 
 // Zig: "Terminal: printAttributes".

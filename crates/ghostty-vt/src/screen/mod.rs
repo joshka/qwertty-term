@@ -18,6 +18,7 @@ pub mod kitty_key;
 pub mod selection;
 pub mod semantic;
 
+use crate::page::ref_set::AddError;
 use crate::page::size::CellCountInt;
 use crate::page::style::{self, Style};
 use crate::page::{
@@ -696,11 +697,16 @@ impl Screen {
                     self.assert_integrity();
                     Ok(())
                 }
-                Err(_) => {
-                    // Style map full or needs rehash: grow style capacity (or
-                    // rehash), or split the page on OutOfSpace, then retry.
+                Err(err) => {
+                    // Style map full: grow style capacity. Needs rehash: clone
+                    // at the same capacity (compacts dead IDs). Either can hit
+                    // OutOfSpace, in which case split the page. Then retry.
+                    let adjustment = match err {
+                        AddError::OutOfMemory => Some(IncreaseCapacity::Styles),
+                        AddError::NeedsRehash => None,
+                    };
                     let node = (*self.cursor.page_pin).node;
-                    match self.increase_capacity(node, Some(IncreaseCapacity::Styles)) {
+                    match self.increase_capacity(node, adjustment) {
                         Ok(_) => {}
                         Err(()) => {
                             // OutOfSpace: split the page and retry on the (new)

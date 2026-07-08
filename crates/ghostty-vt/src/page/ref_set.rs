@@ -311,10 +311,15 @@ where
                 return Err(AddError::OutOfMemory);
             }
 
-            // Need a fresh ID.
+            // Need a fresh ID. The threshold is truncated to an integer,
+            // matching upstream's `@intFromFloat` — this matters at small
+            // capacities: when every allocated ID is living, a rehash
+            // reclaims nothing, so we must report OutOfMemory (grow) instead
+            // of NeedsRehash or the caller's rehash-retry loop never
+            // terminates (e.g. cap 3 with 2 living: 2 < trunc(2.7) is false).
             if self.next_id.to_usize() >= self.layout.cap {
                 let rehash_threshold = 0.9;
-                if (self.living as f64) < self.layout.cap as f64 * rehash_threshold {
+                if self.living < (self.layout.cap as f64 * rehash_threshold) as usize {
                     return Err(AddError::NeedsRehash);
                 }
                 return Err(AddError::OutOfMemory);
