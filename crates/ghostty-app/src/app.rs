@@ -39,7 +39,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSWindow, NSWindowStyleMask, NSWindowTabbingMode,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -78,6 +79,10 @@ struct Tab {
     window: Retained<NSWindow>,
     /// The terminal view hosting the render layer + input.
     view: Retained<TerminalView>,
+    /// The window's delegate (keeps the controller's active tab in sync with
+    /// the OS key window). AppKit holds window delegates weakly, so the `Tab`
+    /// owns this to keep it alive for the window's lifetime.
+    _window_delegate: Retained<WindowDelegate>,
     /// Current grid dimensions.
     cols: usize,
     rows: usize,
@@ -281,6 +286,32 @@ impl Controller {
     /// The active tab, if any.
     pub fn active_tab(&self) -> Option<TabId> {
         self.0.borrow().registry.active()
+    }
+
+    /// The plain-text screen dump of the active tab's engine (smoke/test only).
+    /// `None` if there is no active tab. Used by the synthetic-input smoke
+    /// (`GHOSTTY_APP_SMOKE_TYPE`) to assert a typed command round-tripped
+    /// through keyDown → encode → PTY → engine.
+    pub fn active_screen_text(&self) -> Option<String> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).map(|t| t.engine.screen_dump())
+    }
+
+    /// The active tab's `NSWindow` (smoke/test only): the target the synthetic
+    /// key events are delivered to. `None` if there is no active tab.
+    pub fn active_window(&self) -> Option<Retained<NSWindow>> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).map(|t| t.window.clone())
+    }
+
+    /// The active tab's terminal view (smoke/test only): used to force it to
+    /// become first responder before delivering synthetic key events.
+    pub fn active_view(&self) -> Option<Retained<TerminalView>> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).map(|t| t.view.clone())
     }
 
     /// Mark `tab` active (called when its window becomes key).
@@ -539,6 +570,11 @@ impl Controller {
         let view = TerminalView::new(mtm, id, controller_ptr);
         let window = make_window(mtm, &view);
 
+        // Per-window delegate: sync the controller's active tab to the OS key
+        // window on tab switch. Owned by the Tab (AppKit weak-holds delegates).
+        let window_delegate = WindowDelegate::new(mtm, self.clone(), id);
+        window.setDelegate(Some(ProtocolObject::from_ref(&*window_delegate)));
+
         let mut tab = Tab {
             engine,
             pty,
@@ -547,6 +583,7 @@ impl Controller {
             font_size,
             window: window.clone(),
             view: view.clone(),
+            _window_delegate: window_delegate,
             cols,
             rows,
             scale,
@@ -620,6 +657,48 @@ fn make_window(mtm: MainThreadMarker, view: &TerminalView) -> Retained<NSWindow>
 }
 
 // ---------------------------------------------------------------------------
+// Per-window delegate: keep the controller's active tab in sync with the OS
+// ---------------------------------------------------------------------------
+
+/// Ivars for a per-window delegate: the controller and the tab this window
+/// hosts. When the OS makes this window key (tab switch, click, Cmd-`{`/`}`),
+/// [`WindowDelegate`] tells the controller which tab is now active, so
+/// menu-driven actions (Copy/Paste/New Tab/Close/font-size) target the tab the
+/// user is actually looking at rather than whichever tab was created last.
+pub struct WindowDelegateIvars {
+    controller: Controller,
+    tab: TabId,
+}
+
+define_class!(
+    // SAFETY: NSObject subclass implementing NSWindowDelegate; no unsafe Drop.
+    #[unsafe(super(NSObject))]
+    #[name = "GhosttyWindowDelegate"]
+    #[ivars = WindowDelegateIvars]
+    #[thread_kind = MainThreadOnly]
+    pub struct WindowDelegate;
+
+    unsafe impl NSObjectProtocol for WindowDelegate {}
+
+    unsafe impl NSWindowDelegate for WindowDelegate {
+        /// The window (tab) became key: mark its tab active in the controller.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            let ivars = self.ivars();
+            ivars.controller.set_active(ivars.tab);
+        }
+    }
+);
+
+impl WindowDelegate {
+    /// Create a window delegate bound to `controller` + `tab`.
+    fn new(mtm: MainThreadMarker, controller: Controller, tab: TabId) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(WindowDelegateIvars { controller, tab });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AppDelegate + menu target
 // ---------------------------------------------------------------------------
 
@@ -628,6 +707,10 @@ pub struct DelegateIvars {
     controller: Controller,
     /// Auto-exit after this many milliseconds (smoke mode), 0 = never.
     smoke_ms: u64,
+    /// Synthetic-input smoke: text to type into the active tab after launch,
+    /// then assert echoes/output before exiting. Empty = disabled. See
+    /// [`AppDelegate::run_type_smoke`].
+    smoke_type: RefCell<String>,
 }
 
 define_class!(
@@ -657,13 +740,30 @@ define_class!(
             // Pace timer (~60Hz) on the main run loop.
             self.start_pace_timer();
 
-            // Smoke auto-exit.
-            let smoke_ms = self.ivars().smoke_ms;
-            if smoke_ms > 0 {
-                self.schedule_auto_exit(smoke_ms);
+            // Synthetic-input smoke: type a scripted command through the real
+            // keyDown path, then assert its round-trip and exit. Takes
+            // precedence over the plain auto-exit (it exits itself).
+            let has_type = !self.ivars().smoke_type.borrow().is_empty();
+            if has_type {
+                self.schedule_type_smoke();
+            } else {
+                // Smoke auto-exit.
+                let smoke_ms = self.ivars().smoke_ms;
+                if smoke_ms > 0 {
+                    self.schedule_auto_exit(smoke_ms);
+                }
             }
 
+            // Claim frontmost/focus. `activate()` alone is the modern
+            // *cooperative* form: when the binary is launched from a terminal
+            // (no .app bundle, activation policy set programmatically), it
+            // often does NOT steal key focus from the launching terminal, so
+            // the window renders but hardware keystrokes never reach `keyDown:`
+            // (the "I can see tabs but can't type" symptom). Forcibly take
+            // focus so a terminal-launched build is typable.
             app.activate();
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -694,21 +794,152 @@ define_class!(
         fn auto_exit(&self, _timer: &AnyObject) {
             NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
+
+        /// Synthetic-input smoke: deliver the scripted keystrokes now (the shell
+        /// has had time to draw its prompt), then schedule the assertion.
+        #[unsafe(method(ghosttyTypeSmokeSend:))]
+        fn type_smoke_send(&self, _timer: &AnyObject) {
+            self.run_type_smoke();
+        }
+
+        /// Synthetic-input smoke: read the active tab's screen and assert the
+        /// typed command's output appeared, then exit 0/1.
+        #[unsafe(method(ghosttyTypeSmokeCheck:))]
+        fn type_smoke_check(&self, _timer: &AnyObject) {
+            self.finish_type_smoke();
+        }
     }
 );
 
 impl AppDelegate {
     /// Create the delegate.
-    pub fn new(mtm: MainThreadMarker, controller: Controller, smoke_ms: u64) -> Retained<Self> {
+    pub fn new(
+        mtm: MainThreadMarker,
+        controller: Controller,
+        smoke_ms: u64,
+        smoke_type: String,
+    ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
             smoke_ms,
+            smoke_type: RefCell::new(smoke_type),
         });
         unsafe { msg_send![super(this), init] }
     }
 
     fn mtm(&self) -> MainThreadMarker {
         MainThreadMarker::from(self)
+    }
+
+    /// Schedule the synthetic-input smoke: give the shell ~700 ms to draw its
+    /// prompt, then send the scripted keystrokes (a follow-on timer reads the
+    /// result and exits).
+    fn schedule_type_smoke(&self) {
+        let target: &AnyObject = self.as_ref();
+        // SAFETY: the delegate outlives the timer; the selector is implemented
+        // on this class; main-thread call.
+        unsafe {
+            let _ = objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.7,
+                target,
+                sel!(ghosttyTypeSmokeSend:),
+                None,
+                false,
+            );
+        }
+    }
+
+    /// Deliver each character of the smoke script as a synthetic `keyDown`
+    /// `NSEvent` through the real AppKit responder chain (`app.sendEvent`), so
+    /// the whole window input path — first responder, `keyDown:`,
+    /// `interpretKeyEvents`, `insertText`/encode, PTY write — is exercised
+    /// exactly as a human keystroke would be. Then schedule the assertion for
+    /// ~900 ms out to let the shell round-trip.
+    fn run_type_smoke(&self) {
+        let mtm = self.mtm();
+        let app = NSApplication::sharedApplication(mtm);
+        let controller = &self.ivars().controller;
+
+        // The regression this smoke guards is that a terminal-launched build
+        // never became frontmost, leaving no key window and no responder to
+        // receive keystrokes. So drive the OS *key* window — the exact target a
+        // real keystroke would hit. If activation is broken again, there is no
+        // key window and the assertion below fails, which is precisely the
+        // point. Fall back to the active tab's window only if a key window is
+        // somehow absent, so the harness still delivers something to assert on.
+        let win_num: isize = app
+            .keyWindow()
+            .or_else(|| controller.active_window())
+            .map(|w| w.windowNumber())
+            .unwrap_or(0);
+
+        let script = self.ivars().smoke_type.borrow().clone();
+        for ch in script.chars() {
+            let (keycode, chars) = synth_key_for_char(ch);
+            let ns_chars = NSString::from_str(&chars);
+            // SAFETY: constructing a standard keyDown NSEvent via the class
+            // method; all pointers valid, context nil. Then dispatch it through
+            // the app like a real event.
+            unsafe {
+                let cls = objc2::class!(NSEvent);
+                let event: Option<Retained<objc2_app_kit::NSEvent>> = msg_send![
+                    cls,
+                    keyEventWithType: NSEventType::KeyDown,
+                    location: NSPoint::new(0.0, 0.0),
+                    modifierFlags: NSEventModifierFlags::empty(),
+                    timestamp: 0.0_f64,
+                    windowNumber: win_num,
+                    context: std::ptr::null::<AnyObject>(),
+                    characters: &*ns_chars,
+                    charactersIgnoringModifiers: &*ns_chars,
+                    isARepeat: false,
+                    keyCode: keycode,
+                ];
+                if let Some(event) = event {
+                    app.sendEvent(&event);
+                }
+            }
+        }
+
+        // Schedule the assertion.
+        let target: &AnyObject = self.as_ref();
+        unsafe {
+            let _ = objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.9,
+                target,
+                sel!(ghosttyTypeSmokeCheck:),
+                None,
+                false,
+            );
+        }
+    }
+
+    /// Read the active tab's engine screen and assert the smoke marker appeared
+    /// (proof the keystroke reached the shell and its output rendered back).
+    /// Exits the process `0` on success, `1` on failure.
+    fn finish_type_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let script = self.ivars().smoke_type.borrow().clone();
+        let marker = smoke_marker(&script);
+        let screen = controller.active_screen_text().unwrap_or_default();
+
+        let occurrences = screen.matches(&marker).count();
+        // The command line itself echoes the marker once; running it prints it
+        // again. We require at least one occurrence (the echo) as proof the
+        // keystrokes reached the PTY and rendered; two means the command also
+        // ran. Either way, zero means typing was completely dead.
+        if occurrences >= 1 {
+            println!(
+                "OK: synthetic-input smoke — marker '{marker}' found {occurrences}x in screen"
+            );
+            std::process::exit(0);
+        } else {
+            eprintln!(
+                "FAIL: synthetic-input smoke — marker '{marker}' not found; \
+                 typing produced no output.\n----- screen -----\n{screen}\n------------------"
+            );
+            std::process::exit(1);
+        }
     }
 
     /// Start the ~16 ms pace timer (repeating) on the main run loop.
@@ -784,16 +1015,47 @@ fn build_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMenu> {
     main
 }
 
+/// Map a script character to a synthetic `(macOS keyCode, characters-string)`
+/// pair for building a `keyDown` `NSEvent`. Only the characters used by the
+/// smoke script (`echo <marker>\n`) need real keycodes; everything else falls
+/// back to keycode 0 with its literal character, which the `NSTextInputClient`
+/// `insertText` path still delivers verbatim (the keycode only matters for
+/// keys that encode as control sequences, e.g. Enter). Newline maps to Return.
+fn synth_key_for_char(ch: char) -> (u16, String) {
+    match ch {
+        '\n' | '\r' => (0x24, "\r".to_string()), // Return
+        ' ' => (0x31, " ".to_string()),          // Space
+        // Letters/digits/punctuation: keycode is irrelevant to the insertText
+        // path; use 0 and carry the literal character.
+        other => (0, other.to_string()),
+    }
+}
+
+/// The substring the type-smoke asserts on: the argument of the scripted
+/// `echo <marker>` (everything after the first space, trimmed of the trailing
+/// newline). For a non-echo script, falls back to the whole trimmed script.
+fn smoke_marker(script: &str) -> String {
+    let trimmed = script.trim_end_matches(['\n', '\r']);
+    trimmed
+        .split_once(' ')
+        .map(|(_, rest)| rest.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
 /// Run the app: build the controller + delegate, set the activation policy, and
 /// enter the run loop. `smoke_ms > 0` schedules an auto-exit for the launch
-/// smoke test. Returns after the run loop exits.
-pub fn run(config: &crate::config::Config, smoke_ms: u64) {
+/// smoke test; a non-empty `smoke_type` instead runs the synthetic-input smoke
+/// (type the string through the real keyDown path, assert its round-trip, exit).
+/// Returns after the run loop exits.
+pub fn run(config: &crate::config::Config, smoke_ms: u64, smoke_type: String) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
     let controller = Controller::new(config, mtm);
-    let delegate = AppDelegate::new(mtm, controller, smoke_ms);
+    let delegate = AppDelegate::new(mtm, controller, smoke_ms, smoke_type);
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
 

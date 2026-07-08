@@ -223,6 +223,35 @@ mod tests {
         assert_eq!(bytes, b"a");
     }
 
+    /// End-to-end proof that a plain (legacy, non-kitty) shell — the state a
+    /// freshly spawned `$SHELL` is in — encodes `l`, `s`, and Enter as the exact
+    /// bytes the PTY expects. Guards suspect #4 (encoder regression) with the
+    /// *default* engine options a real tab uses, not the kitty options the other
+    /// tests exercise.
+    #[test]
+    fn typing_ls_enter_with_default_options_emits_expected_bytes() {
+        let cfg = InputConfig::default();
+        let opts = EncodeOptions::default();
+
+        // 'l' (macOS keycode 0x25) -> the byte 'l'.
+        let l = encode_raw(&raw_char(0x25, "l", 'l'), &cfg, opts);
+        assert_eq!(l, b"l", "'l' should encode to its literal byte");
+
+        // 's' (macOS keycode 0x01) -> the byte 's'.
+        let s = encode_raw(&raw_char(0x01, "s", 's'), &cfg, opts);
+        assert_eq!(s, b"s", "'s' should encode to its literal byte");
+
+        // Enter/Return (macOS keycode 0x24) -> carriage return.
+        let enter_raw = RawKeyEvent {
+            keycode: 0x24,
+            text: "\r".to_string(),
+            unshifted_codepoint: '\r' as u32,
+            ..Default::default()
+        };
+        let enter = encode_raw(&enter_raw, &cfg, opts);
+        assert_eq!(enter, b"\r", "Enter should encode to CR");
+    }
+
     #[test]
     fn ctrl_c_encodes_kitty_csi_u() {
         let mut raw = raw_char(0x08, "", 'c');

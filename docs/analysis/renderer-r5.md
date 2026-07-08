@@ -127,6 +127,32 @@ unit-tested.
    terminates after `<ms>`. **Runs green (exit 0) repeatedly**, proving
    startup/teardown of the whole window path.
 
+### Windowed synthetic-input smoke (needs a GUI session)
+
+`GHOSTTY_APP_SMOKE_TYPE="echo <marker>\n"` launches the real window and, after
+the shell draws its prompt, delivers **synthetic `NSEvent` keystrokes through
+the AppKit responder chain** (`app.sendEvent`) — exercising the full
+frontmost/key → `keyDown:` → `NSTextInputClient`/encode → PTY → engine → screen
+round-trip in-process (no accessibility permissions needed for the app's own
+events). It then asserts the marker appears in the engine's screen text and
+exits `0`/`1`. This is the regression guard for **"the window renders and tabs
+show, but typing is dead"**: that symptom is an app-activation failure — a
+terminal-launched build that never becomes frontmost has no key window, so
+hardware `keyDown:` never fires. The fix is `activateIgnoringOtherApps(true)`
+alongside the cooperative `activate()` in `applicationDidFinishLaunching`.
+
+Wired as an `#[ignore]`d cargo test (needs a windowserver session):
+
+```sh
+cargo test -p ghostty-app --test typing_smoke -- --ignored --nocapture
+```
+
+Or run the binary directly:
+
+```sh
+GHOSTTY_APP_SMOKE_TYPE='echo zz-marker\n' cargo run -p ghostty-app -- --window
+```
+
 ### Manual test steps (needs a human at a GUI session)
 
 ```sh

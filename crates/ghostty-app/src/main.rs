@@ -67,7 +67,14 @@ fn run_window() {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
-    ghostty_app::app::run(&config, smoke_ms);
+    // Synthetic-input smoke: if set, type this string through the real window
+    // keyDown path after launch and assert its round-trip (see app::run).
+    // `\n` / `\t` escapes in the env value are unescaped for convenience.
+    let smoke_type = std::env::var("GHOSTTY_APP_SMOKE_TYPE")
+        .ok()
+        .map(|v| v.replace("\\n", "\n").replace("\\t", "\t"))
+        .unwrap_or_default();
+    ghostty_app::app::run(&config, smoke_ms, smoke_type);
 }
 
 #[cfg(not(target_os = "macos"))]
