@@ -1580,6 +1580,7 @@ dependencies = [
 name = "ghostty-sprite"
 version = "0.1.0"
 dependencies = [
+ "png 0.17.16",
  "tiny-skia",
 ]
 

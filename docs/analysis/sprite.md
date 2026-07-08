@@ -217,9 +217,10 @@ Per the extraction policy, the API carries **no** `ghostty-vt` types:
 
 Upstream has no inline unit tests (its verification is golden-PNG fixtures in
 `src/font/sprite/testdata/`, checked against with a wuffs PNG decode + pixel
-diff in `Face.zig`). Those fixtures are noted but **not wired in** — pixel-exact
-parity is deferred until a renderer exists. In their place the port builds a
-structural net (see `crates/ghostty-sprite/tests/sprites.rs`):
+diff in `Face.zig`). Those fixtures are now wired in directly — see the
+"Golden-PNG parity vs upstream (MB3)" section below. Alongside them the port
+carries a structural net that needs no reference image (see
+`crates/ghostty-sprite/tests/sprites.rs`):
 
 - **smoke** — representative codepoints of every range, and all special sprites,
   render to in-bounds bitmaps at 7 odd/even cell sizes;
@@ -231,12 +232,116 @@ structural net (see `crates/ghostty-sprite/tests/sprites.rs`):
   (>1000 codepoints claimed);
 - **determinism** — same input → byte-identical output.
 
+## Golden-PNG parity vs upstream (MB3)
+
+The structural net above is now backed by a direct pixel comparison against
+upstream's own golden fixtures. See `crates/ghostty-sprite/tests/golden_parity.rs`.
+
+### Methodology
+
+Upstream's `test "sprite face render all sprites"` (`src/font/sprite/Face.zig`)
+renders every sprite codepoint into a set of **16×16 glyph atlases** — one PNG
+per 0x100-aligned Unicode block — and diffs them against reference PNGs in
+`src/font/sprite/testdata/`. It runs four cell metrics, passed as
+`testDrawRanges(width, ascent, descent, thickness)`:
+
+| config         | cell W×H | box/underline thickness | fixture suffix |
+| -------------- | -------- | ----------------------- | -------------- |
+| (18, 30, 6, 4) | 18×36    | 4                       | `18x36+4`      |
+| (12, 20, 4, 3) | 12×24    | 3                       | `12x24+3`      |
+| (11, 19, 2, 2) | 11×21    | 2                       | `11x21+2`      |
+| (9, 15, 2, 1)  | 9×17     | 1                       | `9x17+1`       |
+
+Those 36 reference PNGs (9 ranges × 4 sizes) are copied verbatim into
+`crates/ghostty-sprite/tests/testdata/` and are the golden files.
+
+The harness reconstructs each atlas from this crate's output and compares
+pixel-for-pixel:
+
+1. Each atlas cell is a padded box `stride = (W + 2·⌊W/4⌋) × (H + 2·⌊H/4⌋)`; the
+   glyph occupies the inner `W×H`. Upstream's `Metrics.calc` sets
+   `box_thickness = underline_thickness = ⌈thickness⌉`, so the harness builds
+   `Metrics` **directly** with the exact thickness (using `Metrics::simple`
+   would substitute its own heuristic thickness and mismatch).
+2. `render()` returns a *trimmed* bitmap plus offsets; the harness inverts the
+   `into_glyph` offset math (`clip_left = offset_x + ⌊W/4⌋`,
+   `clip_top = stride_y − clip_bottom − height`) to place it back at its cell
+   position, exactly reproducing upstream's un-trimmed atlas layout.
+3. The PNGs are 8-bit alpha coverage; decode is via the `png` crate.
+
+Per-range thresholds (a max single-pixel coverage delta and a max fraction of
+differing pixels) encode the parity contract. Integer-path families are held to
+**zero** (exact); antialiased families get a small perceptual budget sized just
+above the measured worst case so the test still catches regressions.
+
+### Results
+
+All 36 (range × size) cells pass. Worst-case diff fraction per family, over all
+four sizes (full table printed by `cargo test … golden_parity_report --
+--nocapture`):
+
+| family (range)                   | worst diff% | budget% | verdict                       |
+| -------------------------------- | ----------- | ------- | ----------------------------- |
+| box / block / geometric (U+2500) | 0.48        | 1.0     | exact except curves/diagonals |
+| braille (U+2800)                 | 0.00        | 0.0     | pixel-exact, all sizes        |
+| powerline (U+E000)               | 0.62        | 2.0     | AA on triangles/arcs          |
+| branch (U+F500)                  | 1.27        | 2.0     | AA on curved strokes          |
+| branch (U+F600)                  | 0.57        | 2.0     | AA on curved strokes          |
+| legacy computing (U+1FB00)       | 3.03        | 4.0     | AA on diagonals/hatch/curves  |
+| legacy supplement (U+1CC00)      | 0.59        | 1.0     | AA on triangles               |
+| octants (U+1CD00)                | 0.00        | 0.0     | pixel-exact, all sizes        |
+| legacy supplement (U+1CE00)      | 0.24        | 1.0     | AA on separated fills         |
+
+Key finding: **every seam-critical, integer-path glyph is pixel-identical to
+upstream** — all straight box-drawing lines, junctions, corners, tees, crosses,
+block elements, braille dots, sextants and octants. In the entire U+2500 range
+only 15 of 256 glyphs differ at all, and each is a rounded corner
+(U+256D..2570), a diagonal (U+2571..2573) or a triangle (U+25E2.., U+25F8..).
+No fixable defects were found; the port was already faithful.
+
+The human artifact is `target/sprite-parity.png` (written by the
+`write_specimen_artifact` test): one row per family at 18×36, three panels
+**ours | upstream | diff**. The diff panel paints matches as faded gray, pixels
+only upstream has red, pixels only we have green — the same convention as
+upstream's `testDiffAtlas`. It shows the ours/upstream columns visually
+indistinguishable and the diff reduced to thin green AA fringes on curves and
+diagonals.
+
+### Known acceptable divergences (each justified)
+
+All divergences are sub-pixel antialiasing on non-axis-aligned edges, caused by
+tiny-skia's scan conversion differing from upstream's z2d (see "2D backend
+decision" above). None affect legibility, seam continuity, or the integer grid.
+
+- **Rounded box corners (U+256D..2570), diagonals (U+2571..2573), triangles
+  (geometric U+25E2.., U+25F8..; corner triangles).** Coverage on a sloped edge
+  is a fill-rule/AA property of the rasterizer, not of the drawing geometry
+  (identical path endpoints). Diffs are ≤0.5% of the range and confined to the
+  one-pixel edge band.
+- **Braille and octants are *not* divergent** — they are pure integer
+  rectangles and match exactly, which is why they are pinned to zero tolerance.
+- **Legacy-computing diagonal-hatch fills (U+1FB98/99) and rounded-diagonal
+  boxes (U+1FBA0..) / curves (U+1FBD0..).** This is the largest divergence
+  (3.03% at the smallest 9×17 cell, where a one-pixel AA band is proportionally
+  biggest). The port is a line-for-line match of upstream's algorithm —
+  upstream itself carries a `// TODO: This doesn't align properly for most cell
+  sizes` on the hatch fills — so the difference is purely AA on near-vertical
+  diagonals. Budgeted at 4%; all larger sizes stay under 2.3%.
+- **Powerline / branch curves.** Arcs and flame separators antialiased slightly
+  differently; ≤1.3% worst case, invisible at normal viewing.
+
+### Fixes made
+
+None. The comparison confirmed parity rather than surfacing defects: all
+integer-path glyphs are already pixel-exact, and every remaining difference is
+the anticipated, deferred tiny-skia-vs-z2d AA on curves/diagonals. The
+contribution of this chunk is the permanent golden comparison itself (the 36
+checked-in fixtures, the reconstruction harness, the per-family tolerance
+contract, and the side-by-side artifact) so any future regression in the
+integer paths — or any drift beyond the AA budget — fails CI.
+
 ## Deferrals
 
-- **Golden-PNG parity vs upstream fixtures.** Structural tests only for now; a
-  pixel diff against `testdata/` PNGs is a valuable follow-up once there is a
-  renderer to produce comparable output, bearing in mind the tiny-skia vs z2d
-  anti-aliasing caveat above.
 - **Renderer/atlas wiring.** Deliberately out of scope for this chunk.
 - **Nerd-font constraint table.** Flagged as a companion extraction; not part of
   this port.

@@ -14,3 +14,4 @@ name = "ghostty_sprite"
 tiny-skia = "0.11"
 
 [dev-dependencies]
+png = "0.17"
