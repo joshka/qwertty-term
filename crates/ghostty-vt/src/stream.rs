@@ -123,6 +123,53 @@ fn copy_bounded<T: Copy + Default, const N: usize>(src: &[T]) -> ([T; N], u8) {
     (arr, n as u8)
 }
 
+/// Length of the leading run of bytes that are all `< 0x80` (ASCII) and not
+/// ESC (`0x1B`) — i.e. bytes that decode to themselves as single-byte
+/// codepoints and don't break the ground-state run. Uses SWAR (SIMD-within-a-
+/// register) over `u64` words to find the first "interesting" byte 8 at a time,
+/// falling back to a byte scan for the head/tail. Scalar analogue of upstream's
+/// `simd.vt`/`indexOfInterestingCharacter` scan.
+#[inline]
+fn ascii_non_esc_run(input: &[u8]) -> usize {
+    const LANES: usize = 8;
+    // Broadcast masks: high bit of every byte, and 0x1B in every byte.
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    const ESC: u64 = 0x1B1B_1B1B_1B1B_1B1B;
+    const ONES: u64 = 0x0101_0101_0101_0101;
+
+    let n = input.len();
+    let mut i = 0;
+
+    // Word-at-a-time scan.
+    while i + LANES <= n {
+        // SAFETY: `i + LANES <= n`, so the 8 bytes at `i` are in bounds. Read
+        // unaligned (input may not be 8-aligned).
+        let word = u64::from_le_bytes(unsafe { *(input.as_ptr().add(i) as *const [u8; LANES]) });
+        // Any byte >= 0x80: high bit set directly.
+        let high = word & HIGH;
+        // Any byte == 0x1B: xor with the broadcast, then a byte is zero iff it
+        // matched. The classic "byte is zero" trick: (x - 1) & ~x & 0x80.
+        let x = word ^ ESC;
+        let esc = x.wrapping_sub(ONES) & !x & HIGH;
+        let interesting = high | esc;
+        if interesting != 0 {
+            // First interesting byte is at the lowest set 0x80 bit / 8.
+            return i + (interesting.trailing_zeros() as usize / 8);
+        }
+        i += LANES;
+    }
+
+    // Scalar tail.
+    while i < n {
+        let b = input[i];
+        if b >= 0x80 || b == 0x1B {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
 /// An owned copy of one [`Action`], detached from the parser borrow.
 enum Emitted {
     Print(char),
@@ -551,6 +598,28 @@ impl<H: Handler> Stream<H> {
             // path. This mirrors what the SIMD decode-until-control-seq does in
             // bulk; here it is a scalar branch.
             if byte < 0x80 && !self.utf8.is_partial() {
+                // SWAR bulk-copy the maximal run of "boring" ASCII bytes —
+                // bytes that are < 0x80 and not ESC (0x1B). Each is a complete
+                // 1-byte codepoint equal to itself, so the run copies straight
+                // into `cp_buf` without per-byte decoder or ESC checks. This is
+                // the scalar analogue of upstream's SIMD
+                // `indexOfInterestingCharacter` scan feeding the bulk decode.
+                // The run is bounded by both the remaining input and remaining
+                // `cp_buf` capacity, so `n`/`i` stay in range.
+                let budget = (input.len() - i).min(cap - n);
+                let run = ascii_non_esc_run(&input[i..i + budget]);
+                if run > 0 {
+                    // ASCII byte == codepoint; widen each into the u32 buffer.
+                    for k in 0..run {
+                        self.cp_buf[n + k] = input[i + k] as u32;
+                    }
+                    n += run;
+                    i += run;
+                    continue;
+                }
+                // run == 0 means input[i] is < 0x80 but is ESC — handled by the
+                // ESC break at the top of the loop on the next iteration. (This
+                // is unreachable in practice: byte != 0x1B here, so run >= 1.)
                 self.cp_buf[n] = byte as u32;
                 n += 1;
                 i += 1;

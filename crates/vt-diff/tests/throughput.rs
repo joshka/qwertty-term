@@ -59,6 +59,64 @@ fn cursor_heavy_stream() -> Vec<u8> {
     v
 }
 
+/// Faithful replica of vtebench's `dense_cells` payload
+/// (`benchmarks/dense_cells/benchmark`): move home, then for every cell write a
+/// fresh 256-color fg/bg + bold/italic/underline SGR followed by one printable
+/// letter. This is the pure cell-write path — the one suite the whole-app
+/// vtebench baseline loses to real Ghostty. Cursor home per full-grid pass.
+fn dense_cells_stream() -> Vec<u8> {
+    let mut v = Vec::with_capacity(STREAM_MIB * 1024 * 1024 + 4096);
+    let letters = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut offset: u32 = 0;
+    let mut li = 0usize;
+    'outer: loop {
+        let char = letters[li % letters.len()] as char;
+        li += 1;
+        v.extend_from_slice(b"\x1b[H");
+        for line in 1..=ROWS as u32 {
+            for column in 1..=COLS as u32 {
+                let index = line + column + offset;
+                let fg_col = index % 156 + 100;
+                let bg_col = 255 - index % 156 + 100;
+                v.extend_from_slice(
+                    format!("\x1b[38;5;{fg_col};48;5;{bg_col};1;3;4m{char}").as_bytes(),
+                );
+                if v.len() >= STREAM_MIB * 1024 * 1024 {
+                    break 'outer;
+                }
+            }
+        }
+        offset += 1;
+    }
+    v
+}
+
+/// Faithful replica of vtebench's `scrolling` payload: `printf "y\n"` repeated.
+/// A single printable char plus newline forces a scroll on every line once the
+/// grid fills — exercises the scroll-up / linefeed path.
+fn scrolling_stream() -> Vec<u8> {
+    b"y\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(STREAM_MIB * 1024 * 1024)
+        .collect()
+}
+
+/// Scrolling confined to a DECSTBM region (mirrors vtebench's
+/// `scrolling_*_region` setups, which set a top/bottom margin before scrolling).
+/// Set once at the front, then the same `y\n` scroll payload.
+fn scrolling_region_stream() -> Vec<u8> {
+    let mut v = Vec::with_capacity(STREAM_MIB * 1024 * 1024 + 16);
+    // DECSTBM: rows 5..=ROWS-4 as the scroll region.
+    v.extend_from_slice(format!("\x1b[5;{}r", ROWS - 4).as_bytes());
+    v.extend_from_slice(b"\x1b[6;1H");
+    while v.len() < STREAM_MIB * 1024 * 1024 {
+        v.extend_from_slice(b"y\n");
+    }
+    v
+}
+
 fn run<O: Oracle>(oracle: &mut O, stream: &[u8]) -> f64 {
     let start = Instant::now();
     // feed in 64 KiB chunks to mimic PTY read granularity
@@ -72,11 +130,14 @@ fn run<O: Oracle>(oracle: &mut O, stream: &[u8]) -> f64 {
 #[test]
 #[ignore = "benchmark: run explicitly in release mode"]
 fn throughput() {
-    let streams: [(&str, Vec<u8>); 4] = [
+    let streams: [(&str, Vec<u8>); 7] = [
         ("ascii", ascii_stream()),
         ("sgr-heavy", sgr_stream()),
         ("utf8-mixed", utf8_stream()),
         ("cursor-heavy", cursor_heavy_stream()),
+        ("dense_cells", dense_cells_stream()),
+        ("scrolling", scrolling_stream()),
+        ("scroll-region", scrolling_region_stream()),
     ];
 
     println!(
