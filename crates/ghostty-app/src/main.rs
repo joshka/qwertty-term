@@ -84,7 +84,10 @@ fn run_window() {
         .ok()
         .map(|v| v.replace("\\n", "\n").replace("\\t", "\t"))
         .unwrap_or_default();
-    ghostty_app::app::run(&config, smoke_ms, smoke_type);
+    // Tab-strip geometry smoke: dump + assert window geometry across the
+    // 1-tab→2-tab→1-tab transition, then exit (see app::run).
+    let smoke_geometry = std::env::var_os("GHOSTTY_APP_SMOKE_GEOMETRY").is_some();
+    ghostty_app::app::run(&config, smoke_ms, smoke_type, smoke_geometry);
 }
 
 #[cfg(not(target_os = "macos"))]

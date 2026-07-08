@@ -42,11 +42,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSWindow, NSWindowDelegate,
+    NSColor, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSWindow, NSWindowDelegate,
     NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
@@ -69,6 +69,167 @@ use ghostty_renderer::snapshot::FullSnapshot;
 /// The initial window content size in points.
 const INITIAL_WIDTH: f64 = 800.0;
 const INITIAL_HEIGHT: f64 = 480.0;
+
+/// A geometry snapshot of a tab's window used to diagnose (and regression-test)
+/// the "spurious dark band under the titlebar" bug. All rects are in the
+/// window's flipped-to-AppKit-native coordinate space as AppKit reports them
+/// (`contentLayoutRect` and view `frame` are both bottom-left-origin window
+/// coordinates); the fields we assert on are size and the top-edge gap, both
+/// origin-independent, so the flip doesn't matter.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowGeometry {
+    /// Whether the window is part of a tab group whose tab bar is showing.
+    pub tab_bar_visible: bool,
+    /// Number of windows (tabs) in this window's tab group (1 if ungrouped).
+    pub tab_count: usize,
+    /// Whether the window has a (non-nil) `NSToolbar` — we never set one, so
+    /// this should be false; a toolbar would inset content and expose a band.
+    pub has_toolbar: bool,
+    /// The window's `contentLayoutRect` size in points (the un-obscured content
+    /// area — below the titlebar and any visible tab bar/toolbar).
+    pub content_layout: NSSize,
+    /// The terminal view's `frame` in window coordinates (origin + size).
+    pub view_frame: NSRect,
+    /// The `contentView`'s `frame` size (should equal the whole content area).
+    pub content_view: NSSize,
+    /// Total chrome height in points: the window frame height minus the standard
+    /// content height for this style mask (`window.frame - contentRectForFrameRect`).
+    /// A plain titled window is ~28pt; a value materially larger means AppKit is
+    /// reserving extra chrome (an in-titlebar tab strip / accessory) that a
+    /// content-flush terminal never gets to cover — the band's home when it
+    /// lives in window chrome rather than the content area.
+    pub chrome_height: f64,
+    /// The host layer's `bounds` in points (should equal the view bounds).
+    pub layer_bounds: NSSize,
+    /// The presented surface's size in device pixels (`cols*cw × rows*ch`), i.e.
+    /// the render target the grid produced.
+    pub surface_px: (usize, usize),
+    /// The layer's `contentsScale`.
+    pub contents_scale: f64,
+    /// Whether the window's background colour matches the terminal's default
+    /// background — the fix that makes any sub-cell remainder strip seamless
+    /// instead of chrome-grey. `false` means the band would show window chrome.
+    pub bg_matches_terminal: bool,
+    /// Whether the host layer's `contentsGravity` pins the surface to the visual
+    /// top (`kCAGravityBottomLeft` under the view's flipped geometry) — the fix
+    /// that moves the sub-cell remainder from a top band to the bottom edge.
+    pub gravity_pins_visual_top: bool,
+}
+
+impl WindowGeometry {
+    /// Probe `window`/`view` for the geometry fields. `surface_px` is the tab's
+    /// current render-target pixel size (the caller has the tab; the window/view
+    /// don't expose the grid). `default_bg` is the terminal's background colour
+    /// (to confirm the window background was painted to match). The backing scale
+    /// is read from the layer's `contentsScale`.
+    fn probe(
+        window: &NSWindow,
+        view: &TerminalView,
+        surface_px: (usize, usize),
+        default_bg: (u8, u8, u8),
+    ) -> Self {
+        let (tab_bar_visible, tab_count) = match window.tabGroup() {
+            Some(group) => (group.isTabBarVisible(), group.windows().count()),
+            None => (false, 1),
+        };
+        let has_toolbar = window.toolbar().is_some();
+        let content_layout = window.contentLayoutRect().size;
+        let view_frame = view.frame();
+        let content_view = window
+            .contentView()
+            .map(|cv| cv.frame().size)
+            .unwrap_or(NSSize::new(0.0, 0.0));
+        let window_frame = window.frame();
+        let style_content = window.contentRectForFrameRect(window_frame);
+        let chrome_height = window_frame.size.height - style_content.size.height;
+        let layer = view.host_layer().as_layer();
+        let layer_bounds = layer.bounds().size;
+        let contents_scale = layer.contentsScale();
+        let bg_matches_terminal = window_bg_matches(window, default_bg);
+        let gravity_pins_visual_top = view.surface_pinned_to_top();
+        WindowGeometry {
+            tab_bar_visible,
+            tab_count,
+            has_toolbar,
+            content_layout,
+            view_frame,
+            content_view,
+            chrome_height,
+            layer_bounds,
+            surface_px,
+            contents_scale,
+            bg_matches_terminal,
+            gravity_pins_visual_top,
+        }
+    }
+
+    /// The vertical shortfall in points between the layer (view) height and the
+    /// surface height mapped back to points (`surface_h / scale`) — the floor-
+    /// division remainder of the grid fit: the strip of layer the surface does
+    /// not cover. With `kCAGravityTopLeft` in a *flipped* view this exposed strip
+    /// lands at the **top** of the terminal, which is the reported dark band that
+    /// lives in *our surface layer*, not window chrome. A correct fit rounds the
+    /// view/layer down to a whole number of cells so this is ~0.
+    pub fn surface_gap_points(&self) -> f64 {
+        let scale = if self.contents_scale > 0.0 {
+            self.contents_scale
+        } else {
+            1.0
+        };
+        let surface_h_pt = self.surface_px.1 as f64 / scale;
+        (self.layer_bounds.height - surface_h_pt).max(0.0)
+    }
+
+    /// The vertical gap (in points) between the top of the un-obscured content
+    /// area and the top of the terminal view — the height of any exposed
+    /// window-chrome band above the terminal. `contentLayoutRect` and the view
+    /// frame share the window's bottom-left origin, so the view's top edge is
+    /// `view_frame.origin.y + view_frame.size.height` and the content area's top
+    /// edge is `content_view_height` (the full content view spans the layout
+    /// height when it fills). We compute the band as the difference between the
+    /// un-obscured content height and the view height plus the view's bottom
+    /// inset — i.e. how much content-area height the view fails to cover.
+    pub fn top_band_points(&self) -> f64 {
+        // The view should fill the content-layout height. Any shortfall (the
+        // content area is taller than the view, or the view is pushed down) is
+        // exposed chrome. Bottom inset + top shortfall both count.
+        let uncovered = self.content_layout.height - self.view_frame.size.height;
+        uncovered.max(0.0)
+    }
+
+    /// Log the snapshot to stderr with a label (the smoke diagnostic dump).
+    pub fn log(&self, label: &str) {
+        eprintln!(
+            "GEOMETRY[{label}]: tab_bar_visible={} tab_count={} has_toolbar={} \
+             content_layout={:.1}x{:.1} content_view={:.1}x{:.1} \
+             view_frame=({:.1},{:.1} {:.1}x{:.1}) chrome_height={:.1}pt \
+             layer_bounds={:.1}x{:.1} surface_px={}x{} scale={:.1} \
+             surface_gap={:.2}pt top_band={:.1}pt bg_matches_terminal={} \
+             gravity_pins_visual_top={}",
+            self.tab_bar_visible,
+            self.tab_count,
+            self.has_toolbar,
+            self.content_layout.width,
+            self.content_layout.height,
+            self.content_view.width,
+            self.content_view.height,
+            self.view_frame.origin.x,
+            self.view_frame.origin.y,
+            self.view_frame.size.width,
+            self.view_frame.size.height,
+            self.chrome_height,
+            self.layer_bounds.width,
+            self.layer_bounds.height,
+            self.surface_px.0,
+            self.surface_px.1,
+            self.contents_scale,
+            self.surface_gap_points(),
+            self.top_band_points(),
+            self.bg_matches_terminal,
+            self.gravity_pins_visual_top,
+        );
+    }
+}
 
 /// One terminal tab: engine + termio IO + renderer + window/view.
 struct Tab {
@@ -460,6 +621,24 @@ impl Controller {
         self.0.borrow_mut().registry.activate(tab);
     }
 
+    /// Snapshot the active tab's window/view/tab-group geometry (smoke/test
+    /// only). The field the "spurious top band" bug lives in: if the terminal
+    /// view does not fill `contentLayoutRect` exactly, the exposed slice is
+    /// window chrome (the dark band). `None` if there is no active tab.
+    pub fn active_geometry(&self) -> Option<WindowGeometry> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        let t = state.tabs.get(&tab)?;
+        let surface_px =
+            crate::geometry::pixel_size(t.cols, t.rows, t.font.cell_width, t.font.cell_height);
+        Some(WindowGeometry::probe(
+            &t.window,
+            &t.view,
+            surface_px,
+            t.default_bg,
+        ))
+    }
+
     /// Encode a raw key event and write it to `tab`'s PTY. Reads the tab's live
     /// terminal encode options + the user's option-as-alt config.
     pub fn encode_key_to_tab(&self, tab: TabId, raw: &RawKeyEvent) {
@@ -745,6 +924,22 @@ impl Controller {
         let view = TerminalView::new(mtm, id, controller_ptr);
         let window = make_window(mtm, &view);
 
+        // Paint the window background with the terminal's default background.
+        // The presented IOSurface is sized to a whole number of cells, so it is
+        // up to (cell_width-1)×(cell_height-1) device pixels smaller than the
+        // layer; that sub-cell remainder is uncovered layer area. Without this,
+        // the uncovered strip shows the window's default chrome-grey background
+        // — the reported "~25px dark band" whose colour "matches window chrome".
+        // Painting the window background the terminal colour makes any such strip
+        // seamless (a partial-cell of terminal background, indistinguishable from
+        // the grid). See `TerminalView::pin_surface_to_top` for the companion
+        // fix that moves the strip to the bottom edge.
+        set_window_background(&window, default_bg);
+        // Pin the surface flush to the visual top (under the titlebar) so the
+        // sub-cell remainder falls at the *bottom* — where a terminal's partial
+        // last row naturally belongs — instead of as a band under the titlebar.
+        view.pin_surface_to_top();
+
         // Per-window delegate: sync the controller's active tab to the OS key
         // window on tab switch. Owned by the Tab (AppKit weak-holds delegates).
         let window_delegate = WindowDelegate::new(mtm, self.clone(), id);
@@ -844,6 +1039,36 @@ fn make_window(mtm: MainThreadMarker, view: &TerminalView) -> Retained<NSWindow>
     window
 }
 
+/// Set `window`'s background colour to `(r, g, b)` (0–255 sRGB), so any sub-cell
+/// remainder of the content area not covered by the terminal surface reads as
+/// terminal background rather than the default system chrome grey.
+fn set_window_background(window: &NSWindow, (r, g, b): (u8, u8, u8)) {
+    let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+        r as f64 / 255.0,
+        g as f64 / 255.0,
+        b as f64 / 255.0,
+        1.0,
+    );
+    window.setBackgroundColor(Some(&color));
+}
+
+/// Whether `window`'s background colour matches `(r, g, b)` (0–255 sRGB) within a
+/// 1/255 rounding tolerance. Used by the geometry smoke to confirm the window
+/// background was painted the terminal colour so any sub-cell remainder strip is
+/// seamless. Converts the window colour into the sRGB space first (a named/system
+/// colour has no direct components).
+fn window_bg_matches(window: &NSWindow, (r, g, b): (u8, u8, u8)) -> bool {
+    let color = window.backgroundColor();
+    let Some(srgb) = color.colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace())
+    else {
+        return false;
+    };
+    let cr = (srgb.redComponent() * 255.0).round() as i32;
+    let cg = (srgb.greenComponent() * 255.0).round() as i32;
+    let cb = (srgb.blueComponent() * 255.0).round() as i32;
+    (cr - r as i32).abs() <= 1 && (cg - g as i32).abs() <= 1 && (cb - b as i32).abs() <= 1
+}
+
 // ---------------------------------------------------------------------------
 // Per-window delegate: keep the controller's active tab in sync with the OS
 // ---------------------------------------------------------------------------
@@ -920,6 +1145,10 @@ pub struct DelegateIvars {
     /// then assert echoes/output before exiting. Empty = disabled. See
     /// [`AppDelegate::run_type_smoke`].
     smoke_type: RefCell<String>,
+    /// Tab-strip geometry smoke (`GHOSTTY_APP_SMOKE_GEOMETRY`): dump + assert the
+    /// window geometry across the 1-tab → 2-tab → 1-tab transition, then exit.
+    /// See [`AppDelegate::run_geometry_smoke`].
+    smoke_geometry: bool,
 }
 
 define_class!(
@@ -949,11 +1178,15 @@ define_class!(
             // Pace timer (~60Hz) on the main run loop.
             self.start_pace_timer();
 
-            // Synthetic-input smoke: type a scripted command through the real
-            // keyDown path, then assert its round-trip and exit. Takes
-            // precedence over the plain auto-exit (it exits itself).
+            // Geometry smoke: dump + assert window geometry across the
+            // 1-tab→2-tab→1-tab transition, then exit. Takes precedence over the
+            // other smokes (it exits itself). Then synthetic-input, then the
+            // plain auto-exit.
+            let has_geometry = self.ivars().smoke_geometry;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
-            if has_type {
+            if has_geometry {
+                self.schedule_geometry_smoke();
+            } else if has_type {
                 self.schedule_type_smoke();
             } else {
                 // Smoke auto-exit.
@@ -1017,6 +1250,27 @@ define_class!(
         fn type_smoke_check(&self, _timer: &AnyObject) {
             self.finish_type_smoke();
         }
+
+        /// Geometry smoke, phase 1: dump/assert the 1-tab state, then open a
+        /// second tab and schedule phase 2.
+        #[unsafe(method(ghosttyGeomSmokeOneTab:))]
+        fn geom_smoke_one_tab(&self, _timer: &AnyObject) {
+            self.geometry_smoke_one_tab();
+        }
+
+        /// Geometry smoke, phase 2: dump/assert the 2-tab state, then close the
+        /// second tab and schedule phase 3.
+        #[unsafe(method(ghosttyGeomSmokeTwoTabs:))]
+        fn geom_smoke_two_tabs(&self, _timer: &AnyObject) {
+            self.geometry_smoke_two_tabs();
+        }
+
+        /// Geometry smoke, phase 3: dump/assert the back-to-1-tab state, then
+        /// exit 0/1.
+        #[unsafe(method(ghosttyGeomSmokeClosed:))]
+        fn geom_smoke_closed(&self, _timer: &AnyObject) {
+            self.geometry_smoke_closed();
+        }
     }
 );
 
@@ -1027,11 +1281,13 @@ impl AppDelegate {
         controller: Controller,
         smoke_ms: u64,
         smoke_type: String,
+        smoke_geometry: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
             smoke_ms,
             smoke_type: RefCell::new(smoke_type),
+            smoke_geometry,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -1180,6 +1436,203 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the geometry smoke: give the first window a beat to lay out on a
+    /// screen (backing scale + content layout settle), then run phase 1.
+    fn schedule_geometry_smoke(&self) {
+        self.schedule_selector(0.5, sel!(ghosttyGeomSmokeOneTab:));
+    }
+
+    /// Geometry smoke phase 1 — the reported bug's state: a single tab. Assert
+    /// the tab bar is hidden and the terminal view fills the content-layout
+    /// rect (no exposed chrome band). Then open a second tab and hand off to
+    /// phase 2 after AppKit has shown the tab bar and re-laid-out.
+    fn geometry_smoke_one_tab(&self) {
+        let controller = &self.ivars().controller;
+        let Some(geom) = controller.active_geometry() else {
+            eprintln!("FAIL: geometry smoke — no active tab at phase 1");
+            std::process::exit(1);
+        };
+        geom.log("1-tab");
+
+        let mut failed = false;
+        if geom.tab_bar_visible {
+            eprintln!(
+                "FAIL: geometry smoke — tab bar is VISIBLE with a single tab \
+                 (tab_count={}). The dark band under the titlebar is the native \
+                 tab strip showing when it shouldn't.",
+                geom.tab_count
+            );
+            failed = true;
+        }
+        if geom.has_toolbar {
+            eprintln!(
+                "FAIL: geometry smoke — window has an unexpected NSToolbar; its \
+                 height is exposed as a band under the titlebar."
+            );
+            failed = true;
+        }
+        // The view must cover the full un-obscured content height. Allow a
+        // sub-pixel rounding slack; the reported band was ~25px, far above it.
+        const BAND_SLACK_PT: f64 = 1.0;
+        if geom.top_band_points() > BAND_SLACK_PT {
+            eprintln!(
+                "FAIL: geometry smoke — the terminal view does not fill the \
+                 content-layout rect at 1 tab: a {:.1}pt band of window chrome \
+                 is exposed above/below the terminal (content_layout={:.1}h, \
+                 view={:.1}h).",
+                geom.top_band_points(),
+                geom.content_layout.height,
+                geom.view_frame.size.height,
+            );
+            failed = true;
+        }
+        // The band-fix assertions: whatever sub-cell remainder the grid fit
+        // leaves (it lives in *our surface layer*, not window chrome), it must be
+        // (a) painted the terminal background so it is seamless, and (b) pinned to
+        // the bottom edge (not shown as a band under the titlebar). These are the
+        // two changes that actually kill the reported band; the window-layout
+        // asserts above only prove the *chrome* was already correct.
+        if !geom.bg_matches_terminal {
+            eprintln!(
+                "FAIL: geometry smoke — the window background does not match the \
+                 terminal background, so the sub-cell remainder strip \
+                 ({:.1}pt of layer the surface can't cover) would show as a \
+                 chrome-grey band. Set the window background to the terminal bg.",
+                geom.surface_gap_points(),
+            );
+            failed = true;
+        }
+        if !geom.gravity_pins_visual_top {
+            eprintln!(
+                "FAIL: geometry smoke — the host layer's contentsGravity does not \
+                 pin the surface to the visual top; under the flipped view this \
+                 leaves the {:.1}pt sub-cell remainder as a band directly under \
+                 the titlebar (the reported bug).",
+                geom.surface_gap_points(),
+            );
+            failed = true;
+        }
+        if failed {
+            std::process::exit(1);
+        }
+
+        // Transition: open a second tab in the same window group.
+        if let Some(active) = controller.active_tab() {
+            controller.new_tab_in(active);
+        }
+        // Let AppKit show the tab bar and re-lay-out before phase 2.
+        self.schedule_selector(0.5, sel!(ghosttyGeomSmokeTwoTabs:));
+    }
+
+    /// Geometry smoke phase 2 — two tabs: the native tab bar must now be
+    /// visible, and the view must fill the *reduced* content-layout rect (the
+    /// content shrinks to make room for the bar, and the terminal must follow).
+    fn geometry_smoke_two_tabs(&self) {
+        let controller = &self.ivars().controller;
+        let Some(geom) = controller.active_geometry() else {
+            eprintln!("FAIL: geometry smoke — no active tab at phase 2");
+            std::process::exit(1);
+        };
+        geom.log("2-tab");
+
+        let mut failed = false;
+        if geom.tab_count < 2 {
+            eprintln!(
+                "FAIL: geometry smoke — expected 2 tabs in the group, saw {}.",
+                geom.tab_count
+            );
+            failed = true;
+        }
+        if !geom.tab_bar_visible {
+            eprintln!(
+                "FAIL: geometry smoke — tab bar is NOT visible with 2 tabs; the \
+                 native tab strip should appear."
+            );
+            failed = true;
+        }
+        // Even with the tab bar taking a slice, the view must fill whatever
+        // content-layout rect remains — no band on either side of the terminal.
+        const BAND_SLACK_PT: f64 = 1.0;
+        if geom.top_band_points() > BAND_SLACK_PT {
+            eprintln!(
+                "FAIL: geometry smoke — with the tab bar visible the view does \
+                 not fill the reduced content-layout rect: {:.1}pt uncovered \
+                 (content_layout={:.1}h, view={:.1}h).",
+                geom.top_band_points(),
+                geom.content_layout.height,
+                geom.view_frame.size.height,
+            );
+            failed = true;
+        }
+        if failed {
+            std::process::exit(1);
+        }
+
+        // Transition back: close the active (second) tab.
+        if let Some(active) = controller.active_tab() {
+            controller.close_tab(active);
+        }
+        self.schedule_selector(0.5, sel!(ghosttyGeomSmokeClosed:));
+    }
+
+    /// Geometry smoke phase 3 — back to a single tab after Cmd-W: the tab bar
+    /// must be hidden again and the view must re-expand to fill the restored
+    /// (larger) content-layout rect. Exits 0 on success.
+    fn geometry_smoke_closed(&self) {
+        let controller = &self.ivars().controller;
+        let Some(geom) = controller.active_geometry() else {
+            eprintln!("FAIL: geometry smoke — no active tab at phase 3");
+            std::process::exit(1);
+        };
+        geom.log("closed-back-to-1");
+
+        let mut failed = false;
+        if geom.tab_bar_visible {
+            eprintln!(
+                "FAIL: geometry smoke — tab bar still visible after closing back \
+                 to a single tab (tab_count={}).",
+                geom.tab_count
+            );
+            failed = true;
+        }
+        const BAND_SLACK_PT: f64 = 1.0;
+        if geom.top_band_points() > BAND_SLACK_PT {
+            eprintln!(
+                "FAIL: geometry smoke — after the tab bar hid, the view did not \
+                 re-expand to fill the content-layout rect: {:.1}pt uncovered.",
+                geom.top_band_points(),
+            );
+            failed = true;
+        }
+        if failed {
+            std::process::exit(1);
+        }
+
+        println!(
+            "OK: tab-strip geometry smoke — 1 tab has no chrome band (tab bar \
+             hidden, view fills content-layout), 2 tabs show the bar with the \
+             view filling the reduced rect, and closing back to 1 tab hides the \
+             bar and re-expands the view."
+        );
+        std::process::exit(0);
+    }
+
+    /// Schedule a one-shot `selector` on `self` `secs` out.
+    fn schedule_selector(&self, secs: f64, selector: Sel) {
+        let target: &AnyObject = self.as_ref();
+        // SAFETY: the delegate outlives the timer; the selector is implemented
+        // on this class; main-thread call.
+        unsafe {
+            let _ = objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                secs,
+                target,
+                selector,
+                None,
+                false,
+            );
+        }
+    }
+
     /// Start the ~16 ms pace timer (repeating) on the main run loop.
     fn start_pace_timer(&self) {
         let interval = 1.0 / 60.0;
@@ -1285,15 +1738,22 @@ fn smoke_marker(script: &str) -> String {
 /// Run the app: build the controller + delegate, set the activation policy, and
 /// enter the run loop. `smoke_ms > 0` schedules an auto-exit for the launch
 /// smoke test; a non-empty `smoke_type` instead runs the synthetic-input smoke
-/// (type the string through the real keyDown path, assert its round-trip, exit).
-/// Returns after the run loop exits.
-pub fn run(config: &crate::config::Config, smoke_ms: u64, smoke_type: String) {
+/// (type the string through the real keyDown path, assert its round-trip, exit);
+/// `smoke_geometry` instead runs the tab-strip geometry smoke (dump + assert the
+/// window geometry across the 1-tab→2-tab→1-tab transition, exit). Returns after
+/// the run loop exits.
+pub fn run(
+    config: &crate::config::Config,
+    smoke_ms: u64,
+    smoke_type: String,
+    smoke_geometry: bool,
+) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
     let controller = Controller::new(config, mtm);
-    let delegate = AppDelegate::new(mtm, controller, smoke_ms, smoke_type);
+    let delegate = AppDelegate::new(mtm, controller, smoke_ms, smoke_type, smoke_geometry);
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
 

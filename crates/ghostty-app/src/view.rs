@@ -25,7 +25,7 @@ use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSPoint, NSRange, NSRangePointer, NSRect,
     NSSize, NSString, NSUInteger,
 };
-use objc2_quartz_core::CALayer;
+use objc2_quartz_core::{CALayer, kCAGravityBottomLeft};
 
 use crate::app::Controller;
 use crate::input::preedit::Preedit;
@@ -254,6 +254,44 @@ impl TerminalView {
     /// The host layer to present into.
     pub fn host_layer(&self) -> &ghostty_renderer::metal::IOSurfaceLayer {
         &self.ivars().layer
+    }
+
+    /// Pin the presented surface flush to the *visual top* of the view.
+    ///
+    /// The surface is sized to a whole number of cells, so it is up to one cell
+    /// shorter than the view; the leftover strip is uncovered layer area. The
+    /// renderer's layer defaults to `kCAGravityTopLeft`, but this view returns
+    /// `isFlipped == true`, which makes AppKit set the backing layer's
+    /// `geometryFlipped = true` — inverting the layer's Y axis. In that flipped
+    /// geometry, `kCAGravityTopLeft` pins contents to the layer's max-Y corner,
+    /// which is the *visual bottom*, so the uncovered strip lands at the *top* —
+    /// exactly the reported dark band directly under the titlebar.
+    ///
+    /// Setting `kCAGravityBottomLeft` here pins contents to the layer's min-Y
+    /// corner in flipped geometry = the *visual top*, so the surface sits flush
+    /// under the titlebar (matching real Ghostty) and the sub-cell remainder
+    /// moves to the bottom edge — where a terminal's partial last row belongs,
+    /// and where the window's terminal-coloured background makes it invisible.
+    ///
+    /// Called once at view attachment; must run on the main thread.
+    pub fn pin_surface_to_top(&self) {
+        // SAFETY: `kCAGravityBottomLeft` is a valid contents-gravity constant;
+        // main-thread call at attachment time.
+        unsafe {
+            self.ivars()
+                .layer
+                .as_layer()
+                .setContentsGravity(kCAGravityBottomLeft);
+        }
+    }
+
+    /// Whether the host layer's `contentsGravity` is the visual-top-pinning value
+    /// installed by [`Self::pin_surface_to_top`] (smoke/test only).
+    pub fn surface_pinned_to_top(&self) -> bool {
+        let gravity = self.ivars().layer.as_layer().contentsGravity();
+        // SAFETY: `kCAGravityBottomLeft` is a valid framework NSString constant.
+        let want: &NSString = unsafe { kCAGravityBottomLeft };
+        gravity.to_string() == want.to_string()
     }
 
     /// Encode any committed text + the key event, then close the per-keyDown
