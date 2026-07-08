@@ -106,6 +106,25 @@ existing row-dirty flags.
       window works (NOTE: basic native NSWindow tabs + minimal menu land EARLY, in M3's R5
       window swap — see docs/plans/m3-first-pixels.md)
 
+## MB — betamax pure-Rust track (elevated 2026-07-08)
+
+Goal: betamax (~/local/betamax) drops `libghostty-vt-sys` (the pinned-Zig build) and, on
+macOS, renders THROUGH this stack for ghostty-identical output. Work splits across repos:
+
+- [ ] MB1 (betamax repo): swap `libghostty-vt-sys` -> `ghostty-vt` path/git dep. The VT
+      surface it consumes exists (Terminal/Stream/snapshot/formatter). Prompt for the
+      betamax thread: `work/betamax-thread-prompt.md`
+- [ ] MB2 (here): headless frame-capture example (`examples/frame-capture`: bytes in, PNG
+      frames out, injectable font+size, deterministic) — the rewrite-prompt's embeddability
+      artifact, now unblocked since the offscreen stack is proven (specimen/first-pixels
+      tests ARE this flow already; the example packages it)
+- [ ] MB3 (here): sprite golden-parity vs upstream PNGs (TUI-aesthetics quality bar) — IN
+      FLIGHT
+- [ ] MB4 (betamax): render via ghostty-renderer offscreen on macOS (Metal readback);
+      Linux CI stays on betamax's cosmic-text path until the software-raster ADR (M6)
+- [ ] MB5 (here): publishing prep for ghostty-vt/-sprite/-font/-renderer (versioning,
+      README, docs.rs) when Josh wants crates.io
+
 ## M6 — Long tail & deferred
 
 - [ ] Perf to parity (SIMD utf8/decode, wide-run batching; currently 0.52–0.63x)
@@ -113,8 +132,8 @@ existing row-dirty flags.
 - [ ] Glyph APC protocol (2.2k, needs F2) · kitty unicode placeholders (U=1) · file/shm media ·
   animation
 - [ ] tmux control mode (4.3k) · XTGETTCAP/DECRQSS full · OSC 21 effects
-- [ ] Embeddability/betamax (DEPRIORITIZED per Josh): frame-capture example, injectable
-      clock/fonts audit, betamax port spike, ghostty-sprite/vt crates.io publishing
+- [x] ~~Embeddability deprioritized~~ REVERSED 2026-07-08 (Josh): betamax-pure-Rust is now
+      an active track — see the new M-track below
 - [ ] qwertty conformance target + fixture regeneration (their Phase-2 sketch pending)
 - [ ] Linux: GTK spike ADR, FreeType/fontconfig (F-deferred), OpenGL (R9)
 - [ ] Inspector · i18n · Sparkle · Sentry (per rewrite-prompt non-goals until wanted)
