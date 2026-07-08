@@ -432,6 +432,49 @@ impl Face {
         self
     }
 
+    /// The upstream synthetic-bold line width for a face rendered at `size_px`
+    /// pixels-per-em: `max(size_px / 14, 1)` (coretext.zig:193-195, where
+    /// `points` is the render em size).
+    pub fn synthetic_bold_line_width(size_px: f64) -> f64 {
+        (size_px / 14.0).max(1.0)
+    }
+
+    /// Return an independent copy of this face at `size_px` pixels.
+    ///
+    /// Re-copies the underlying CTFont (`copyWithAttributes(size, null, null)`,
+    /// the same call [`Face::from_ct_font_at_size`] uses). Preserves the
+    /// `source_bytes` (so a byte-backed face stays byte-backed for shaping) but
+    /// resets synthetic flags. Used for the alias-to-regular and
+    /// synthesize-on-a-fresh-copy paths of family style completion.
+    pub fn try_clone(&self, size_px: f64) -> Result<Face, Error> {
+        // SAFETY: font is valid; null matrix = identity; no descriptor overrides.
+        let font = unsafe {
+            self.font
+                .copy_with_attributes(size_px as CGFloat, std::ptr::null(), None)
+        };
+        Ok(Face::from_ct_font(font, self.source_bytes))
+    }
+
+    /// Return a **synthetic italic** copy of this face: the same CTFont with the
+    /// [`ITALIC_SKEW`] transform matrix baked in, keeping the same pixel size.
+    ///
+    /// Port of upstream `Face.syntheticItalic` (coretext.zig:174-178:
+    /// `copyWithAttributes(0.0, &italic_skew, null)`). The skew is applied at the
+    /// CTFont level so both metric queries and rasterization see the slanted
+    /// outline; unlike synthetic bold there is no per-rasterize flag. Used as the
+    /// fallback italic mechanism when a family has no real italic member (e.g.
+    /// FiraCode Nerd Font Mono).
+    pub fn synthetic_italic(&self) -> Result<Face, Error> {
+        let size = self.size_px();
+        // SAFETY: font is a valid CTFont; ITALIC_SKEW is a valid affine
+        // transform; no descriptor overrides; size preserved.
+        let font = unsafe {
+            self.font
+                .copy_with_attributes(size as CGFloat, &ITALIC_SKEW, None)
+        };
+        Ok(Face::from_ct_font(font, self.source_bytes))
+    }
+
     /// Load a face from in-memory font bytes at `size_px` pixels.
     ///
     /// `bytes` must outlive the returned face (`'static` here, satisfied by the

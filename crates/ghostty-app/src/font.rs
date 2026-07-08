@@ -53,21 +53,37 @@ pub struct FontGrid {
 /// `size_px` should already account for the display's backing scale
 /// (`contentsScale`) so glyphs are rasterized at native resolution.
 pub fn build(family: Option<&str>, size_px: f64) -> Result<FontGrid, FontError> {
-    let face = match family {
-        Some(name) if !name.is_empty() => Face::load_by_name(name, size_px),
-        _ => Face::load_embedded(size_px),
+    // Whether the primary face actually resolved to the configured family (vs.
+    // `load_by_name` silently falling back to the embedded JetBrains Mono on a
+    // miss). Only a real match takes the named-family styled-completion path;
+    // otherwise the embedded default chain is the correct behavior.
+    let configured = family.filter(|n| !n.is_empty());
+    let face = match configured {
+        Some(name) => Face::load_by_name(name, size_px),
+        None => Face::load_embedded(size_px),
     }
     .map_err(FontError::Face)?;
     let metrics = Metrics::calc(face.face_metrics());
     let (cell_width, cell_height) = (metrics.cell_width, metrics.cell_height);
-    // Explicit nerd-symbols fallback slot ahead of discovery, mirroring
-    // upstream's `SharedGridSet` default-chain construction (see
-    // `Collection::new_with_default_fallbacks`). The embedded nerd-symbols
-    // font is a vendored, drift-tested asset (`embedded::SYMBOLS_NERD_FONT_MONO`
-    // / `tests/font_manifest.rs`), so a load failure here would indicate a
-    // corrupted binary rather than a recoverable runtime condition.
-    let collection =
-        Collection::new_with_default_fallbacks(face, size_px).map_err(FontError::Face)?;
+
+    // A configured family whose primary really resolved gets its *own* styled
+    // members (real discovered bold/italic first, then upstream's synthetic
+    // ladder), with the embedded default chain behind them — see
+    // `Collection::new_with_family_styles`. A miss (embedded fallback) or the
+    // no-family default uses the embedded default chain directly
+    // (`new_with_default_fallbacks`). Both mirror `SharedGridSet`'s two-phase
+    // construction; the embedded fonts are vendored drift-tested assets, so a
+    // load failure signals a corrupted binary, not a recoverable condition.
+    let resolved_matches = configured.is_some_and(|name| {
+        let got = face.family_name().to_lowercase();
+        let want = name.to_lowercase();
+        got.contains(&want) || want.contains(&got)
+    });
+    let collection = if let Some(name) = configured.filter(|_| resolved_matches) {
+        Collection::new_with_family_styles(face, name, size_px).map_err(FontError::Face)?
+    } else {
+        Collection::new_with_default_fallbacks(face, size_px).map_err(FontError::Face)?
+    };
     let resolver = CodepointResolver::new(collection);
     let grid = Grid::new(resolver, metrics).map_err(FontError::Grid)?;
     Ok(FontGrid {

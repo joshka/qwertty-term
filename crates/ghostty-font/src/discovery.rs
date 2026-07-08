@@ -216,6 +216,45 @@ fn strip_character_set(ct_desc: &CTFontDescriptor) -> CFRetained<CTFontDescripto
     unsafe { ct_desc.copy_with_attributes(dict) }
 }
 
+/// Discover a **styled member of a specific family** and load it at `size_px`.
+///
+/// This is the named-family analog of upstream's per-style discovery in
+/// `SharedGridSet.collection` (`SharedGridSet.zig:191-247`): when a `font-family`
+/// is configured, each style slot is populated by discovering a descriptor
+/// carrying that family plus the style's symbolic traits (bold/italic), taking
+/// the top-ranked result. Here we run the same query (family + traits +
+/// monospace) and return the highest-scored candidate **whose family name
+/// still matches the requested family** — so a family that lacks the requested
+/// style (e.g. FiraCode Nerd Font Mono has no italic) yields `None` rather than
+/// a fuzzy cross-family substitute, letting the caller fall through to the
+/// synthetic ladder (upstream `Collection.completeStyles`).
+///
+/// The `CTFontCollection`/`Score` path (already used for the regular family
+/// discovery) is the mechanism upstream's CoreText discovery backend uses; the
+/// symbolic-trait descriptor is assembled in [`Descriptor::to_ct_descriptor`].
+pub fn discover_family_style(family: &str, bold: bool, italic: bool, size_px: f64) -> Option<Face> {
+    let desc = Descriptor {
+        family: Some(family.to_string()),
+        size: size_px as f32,
+        bold,
+        italic,
+        monospace: true,
+        ..Default::default()
+    };
+    let faces = discover(&desc);
+
+    // Take the top-ranked candidate whose family still matches the request.
+    // Discovery can fuzzy-match across families; for a *named-family styled*
+    // lookup we only want the family's own members, so reject a mismatch and
+    // let the caller synthesize instead.
+    let want = family.to_lowercase();
+    let candidate = faces.into_iter().find(|f| {
+        let got = f.family_name().to_lowercase();
+        got.contains(&want) || want.contains(&got)
+    })?;
+    candidate.load(size_px).ok()
+}
+
 /// Discover a fallback face for `desc`, honoring the codepoint-search paths
 /// (`CoreText.discoverFallback`, discovery.zig:385-447).
 ///

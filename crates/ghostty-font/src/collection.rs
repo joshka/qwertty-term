@@ -153,6 +153,138 @@ impl Collection {
         Ok(collection)
     }
 
+    /// Create a collection for a **configured `font-family`** (`primary`), whose
+    /// bold/italic/bold-italic slots are filled from the family's *own* styled
+    /// members when they exist, then completed with upstream's synthetic ladder,
+    /// with the embedded default style chain + nerd-symbols behind them.
+    ///
+    /// This is the named-family analog of [`Collection::new_with_default_fallbacks`].
+    /// It mirrors the two-phase upstream construction in
+    /// `SharedGridSet.collection` (`SharedGridSet.zig:157-330`):
+    ///
+    /// 1. **Per-style discovery of the configured family** (`SharedGridSet.zig:191-247`):
+    ///    for each styled slot, discover a descriptor carrying `family` + the
+    ///    style's bold/italic symbolic traits and take the top-ranked member of
+    ///    that same family. For FiraCode Nerd Font Mono this yields a real
+    ///    **FiraCode Bold** for the bold slot (family name stays FiraCode, never
+    ///    JetBrains Mono). Added as **non-fallback** (upstream
+    ///    `addDeferred(..., .fallback = false)`).
+    ///
+    /// 2. **`completeStyles` synthetic ladder** (`Collection.zig:319-465`) for any
+    ///    slot the family didn't provide (FiraCode has no italic / bold-italic):
+    ///    - **italic** absent → synthetic italic via the [`ITALIC_SKEW`] matrix
+    ///      (`Collection.zig:373-393` → `face/coretext.zig:174-178`), falling back
+    ///      to an **alias to regular** if the skew copy fails.
+    ///    - **bold** absent → synthetic bold via the stroke mechanism
+    ///      (`Collection.zig:398-421` → `syntheticBold`), else alias to regular.
+    ///    - **bold-italic** absent → synthesize italic on top of the bold face we
+    ///      have, else synthesize bold on top of italic, else alias
+    ///      (`Collection.zig:424-465`). Here: skew the discovered bold.
+    ///
+    /// Then, **behind** those (as `fallback = true` entries), the embedded default
+    /// style chain (`SharedGridSet.zig:262-333`: embedded variable @ wght 700 for
+    /// bold, variable-italic for italic/bold-italic) and the nerd-symbols font, so
+    /// a codepoint the configured family lacks still resolves. Emoji discovery is
+    /// unchanged (handled by the resolver, not here).
+    ///
+    /// [`ITALIC_SKEW`]: crate::coretext::ITALIC_SKEW
+    pub fn new_with_family_styles(
+        primary: Face,
+        family: &str,
+        size_px: f64,
+    ) -> Result<Collection, crate::coretext::Error> {
+        use crate::discovery::discover_family_style;
+
+        let mut collection = Collection::new(primary);
+
+        // --- Phase 1: discover the configured family's own styled members. ---
+        // A real discovered styled member is a non-fallback (user) face: it is
+        // the configured font, just a different weight/slant.
+        let disc_bold = discover_family_style(family, true, false, size_px);
+        if let Some(face) = disc_bold {
+            collection.add(Style::Bold, face);
+        }
+        let disc_italic = discover_family_style(family, false, true, size_px);
+        if let Some(face) = disc_italic {
+            collection.add(Style::Italic, face);
+        }
+        let disc_bold_italic = discover_family_style(family, true, true, size_px);
+        if let Some(face) = disc_bold_italic {
+            collection.add(Style::BoldItalic, face);
+        }
+
+        // --- Phase 2: complete missing styles with the synthetic ladder. ---
+        // The base for synthesis is the primary (first regular) face.
+        let line_width = Face::synthetic_bold_line_width(size_px);
+
+        // Italic: skew the regular; alias-to-regular (a plain regular clone) on
+        // failure. We clone by re-copying the primary's CTFont at the same size.
+        let have_italic = !collection.italic.is_empty();
+        if !have_italic {
+            match collection.primary().synthetic_italic() {
+                Ok(face) => {
+                    collection.add(Style::Italic, face);
+                }
+                Err(_) => {
+                    // alias-to-regular: a straight copy of the primary.
+                    let alias = collection.primary_clone(size_px)?;
+                    collection.add(Style::Italic, alias);
+                }
+            }
+        }
+
+        // Bold: synthetic-bold stroke of the regular.
+        let have_bold = !collection.bold.is_empty();
+        if !have_bold {
+            let base = collection.primary_clone(size_px)?;
+            collection.add(Style::Bold, base.synthetic_bold(line_width));
+        }
+
+        // Bold-italic: prefer synthesizing italic on top of the bold we have
+        // (real or synthetic); else synthesize bold on top of italic
+        // (Collection.zig:424-465). Upstream's final "alias to italic" branch
+        // is only reachable when *both* syntheses fail; here synthetic bold is
+        // infallible once the italic base clones, so the clone error is the
+        // only failure and it propagates rather than aliasing.
+        let have_bold_italic = !collection.bold_italic.is_empty();
+        if !have_bold_italic {
+            // At this point bold is guaranteed populated (real or synthetic).
+            let bold_face = collection
+                .face_for_style(Style::Bold)
+                .expect("bold populated above");
+            match bold_face.synthetic_italic() {
+                Ok(face) => {
+                    collection.add(Style::BoldItalic, face);
+                }
+                Err(_) => {
+                    // Fall back to synthetic bold of the italic face.
+                    let italic_face = collection
+                        .face_for_style(Style::Italic)
+                        .expect("italic populated above")
+                        .try_clone(size_px)?;
+                    collection.add(Style::BoldItalic, italic_face.synthetic_bold(line_width));
+                }
+            }
+        }
+
+        // --- Behind the configured styles: the embedded default chain + symbols.
+        // These are fallback=true so they sit after the configured faces in each
+        // style's priority list (SharedGridSet.zig:262-333).
+        let embedded_bold = Face::load_embedded_bold(size_px)?;
+        collection.add_fallback(Style::Bold, embedded_bold);
+
+        let embedded_italic = Face::load_embedded_italic(size_px)?;
+        collection.add_fallback(Style::Italic, embedded_italic);
+
+        let embedded_bold_italic = Face::load_embedded_bold_italic(size_px)?;
+        collection.add_fallback(Style::BoldItalic, embedded_bold_italic);
+
+        let symbols = Face::load_embedded_symbols_nerd_font(size_px)?;
+        collection.add_fallback(Style::Regular, symbols);
+
+        Ok(collection)
+    }
+
     /// Append a user (non-fallback) face for `style`, returning its
     /// [`FontIndex`] (upstream `add`, Collection.zig:112).
     pub fn add(&mut self, style: Style, face: Face) -> FontIndex {
@@ -251,6 +383,12 @@ impl Collection {
         &self.regular[0].face
     }
 
+    /// An independent copy of the primary face at `size_px` (used as the base
+    /// for synthetic styled faces, so the stored primary is not consumed).
+    fn primary_clone(&self, size_px: f64) -> Result<Face, crate::coretext::Error> {
+        self.primary().try_clone(size_px)
+    }
+
     /// True if every style list has at least one entry.
     pub fn all_styles_populated(&self) -> bool {
         Style::ALL.iter().all(|&s| !self.list(s).is_empty())
@@ -344,6 +482,161 @@ mod tests {
                 style: Style::Regular,
                 slot: 0
             }
+        );
+    }
+
+    // --- Named-family styled-face completion (family-styles chunk) ---
+
+    const FIRA: &str = "FiraCode Nerd Font Mono";
+
+    /// Total ink coverage of a glyph in a face (sum of Alpha8 bytes). Heavier
+    /// (bolder) strokes cover more, so bold > regular for the same glyph.
+    fn ink_coverage(face: &Face, c: char) -> u64 {
+        let gid = face.glyph_index(c).expect("glyph exists");
+        let bmp = face.rasterize(gid).expect("rasterize");
+        bmp.data.iter().map(|&b| u64::from(b)).sum()
+    }
+
+    /// True if FiraCode Nerd Font Mono is installed (its regular member is
+    /// discoverable). Tests that need the family SKIP gracefully otherwise.
+    fn fira_installed() -> bool {
+        crate::discovery::discover_family_style(FIRA, false, false, 16.0).is_some()
+    }
+
+    /// The configured-family chain resolves `Style::Bold` to FiraCode's *own*
+    /// bold member — family name FiraCode, never JetBrains Mono. This is the
+    /// core regression the family-styles chunk fixes.
+    #[test]
+    fn fira_bold_is_fira_not_jetbrains() {
+        if !fira_installed() {
+            eprintln!("SKIP: {FIRA} not installed; family-styled bold test skipped");
+            return;
+        }
+        let primary = Face::load_by_name(FIRA, 16.0).expect("load FiraCode primary");
+        assert!(
+            primary.family_name().to_lowercase().contains("fira"),
+            "primary should be FiraCode, got {:?}",
+            primary.family_name()
+        );
+
+        let col = Collection::new_with_family_styles(primary, FIRA, 16.0).expect("build chain");
+
+        // Bold slot 0 is FiraCode's own bold, not the embedded JetBrains Mono.
+        let bold = col.face_for_style(Style::Bold).expect("bold populated");
+        let bold_family = bold.family_name().to_lowercase();
+        assert!(
+            bold_family.contains("fira"),
+            "bold face family should be FiraCode, got {:?}",
+            bold.family_name()
+        );
+        assert!(
+            !bold_family.contains("jetbrains"),
+            "bold face must NOT be JetBrains Mono, got {:?}",
+            bold.family_name()
+        );
+
+        // Every style is populated, and the embedded default chain sits behind
+        // the configured faces (bold list has both the FiraCode bold and the
+        // embedded fallback).
+        assert!(col.all_styles_populated());
+        assert!(
+            col.bold.len() >= 2,
+            "bold list should carry the FiraCode bold plus the embedded fallback"
+        );
+        assert!(
+            !col.bold[0].fallback,
+            "FiraCode bold is a non-fallback face"
+        );
+        assert!(
+            col.bold.last().unwrap().fallback,
+            "embedded bold is a fallback behind it"
+        );
+    }
+
+    /// The styled *resolver path* (`discover_family_style` directly) returns
+    /// FiraCode's bold member, mirroring `SharedGridSet`'s per-style discovery.
+    #[test]
+    fn fira_styled_resolver_returns_fira_bold() {
+        if !fira_installed() {
+            eprintln!("SKIP: {FIRA} not installed; styled resolver test skipped");
+            return;
+        }
+        let bold = crate::discovery::discover_family_style(FIRA, true, false, 16.0)
+            .expect("FiraCode has a real bold member");
+        let name = bold.family_name().to_lowercase();
+        assert!(
+            name.contains("fira") && !name.contains("jetbrains"),
+            "styled bold resolver should return FiraCode bold, got {:?}",
+            bold.family_name()
+        );
+    }
+
+    /// Offscreen ink-coverage: FiraCode's bold 'M' is measurably heavier than
+    /// its regular 'M'.
+    #[test]
+    fn fira_bold_heavier_than_regular() {
+        if !fira_installed() {
+            eprintln!("SKIP: {FIRA} not installed; ink-coverage test skipped");
+            return;
+        }
+        let primary = Face::load_by_name(FIRA, 16.0).expect("load FiraCode primary");
+        let col = Collection::new_with_family_styles(primary, FIRA, 16.0).expect("build chain");
+
+        let regular = ink_coverage(col.face_for_style(Style::Regular).unwrap(), 'M');
+        let bold = ink_coverage(col.face_for_style(Style::Bold).unwrap(), 'M');
+        eprintln!("FiraCode 'M' ink coverage: regular={regular} bold={bold}");
+        assert!(
+            bold > regular,
+            "bold 'M' ({bold}) should be heavier than regular 'M' ({regular})"
+        );
+    }
+
+    /// FiraCode has no italic member, so the italic slot is a *synthetic*
+    /// (skewed) FiraCode — still FiraCode family, not JetBrains Mono — populated
+    /// ahead of the embedded italic fallback.
+    #[test]
+    fn fira_italic_is_synthetic_fira() {
+        if !fira_installed() {
+            eprintln!("SKIP: {FIRA} not installed; synthetic-italic test skipped");
+            return;
+        }
+        let primary = Face::load_by_name(FIRA, 16.0).expect("load FiraCode primary");
+        let col = Collection::new_with_family_styles(primary, FIRA, 16.0).expect("build chain");
+
+        let italic = col.face_for_style(Style::Italic).expect("italic populated");
+        let fam = italic.family_name().to_lowercase();
+        assert!(
+            fam.contains("fira") && !fam.contains("jetbrains"),
+            "synthetic italic should still be FiraCode, got {:?}",
+            italic.family_name()
+        );
+        assert!(
+            italic.glyph_index('a').is_some(),
+            "synthetic italic renders"
+        );
+    }
+
+    /// An unknown/uninstalled family name falls back per the ladder without
+    /// panicking: discovery finds nothing for the styled slots, so bold is
+    /// synthetic-bold of the given primary and every style is populated.
+    #[test]
+    fn unknown_family_falls_back_without_panic() {
+        // `load_by_name` on a nonsense name yields the embedded JetBrains Mono;
+        // we feed that as the primary and use a nonsense family for discovery.
+        let primary =
+            Face::load_by_name("ThisFontDoesNotExist98765", 16.0).expect("embedded fallback");
+        let col = Collection::new_with_family_styles(primary, "ThisFontDoesNotExist98765", 16.0)
+            .expect("build chain without panic");
+
+        // No discovery match for any style → the synthetic ladder + embedded
+        // chain still populate every slot.
+        assert!(col.all_styles_populated());
+        // Bold 'M' (synthetic-bold of the primary) is heavier than regular 'M'.
+        let regular = ink_coverage(col.face_for_style(Style::Regular).unwrap(), 'M');
+        let bold = ink_coverage(col.face_for_style(Style::Bold).unwrap(), 'M');
+        assert!(
+            bold > regular,
+            "synthetic bold 'M' ({bold}) should be heavier than regular ({regular})"
         );
     }
 }
