@@ -20,8 +20,9 @@
 //! (or a future ghostty addition) still loads.
 //!
 //! Search order for a bare theme name (not an absolute path):
-//!   1. `~/.config/ghostty/themes/<name>`
-//!   2. `$QWERTTY_TERM_THEMES_DIR/<name>` if set, else a hardcoded fallback
+//!   1. `~/.config/qwertty-term/themes/<name>`
+//!   2. `~/.config/ghostty/themes/<name>` as a migration fallback
+//!   3. `$QWERTTY_TERM_THEMES_DIR/<name>` if set, else a hardcoded fallback
 //!      shared themes directory (the env var exists so this resolves on
 //!      machines without that checkout at that exact path).
 
@@ -127,11 +128,12 @@ impl ThemeColors {
 /// Resolve a `theme` config value to a theme file path and load+parse it.
 ///
 /// Absolute paths are used as-is. Otherwise, the name is looked up first in
-/// `~/.config/ghostty/themes/`, then in the shared ghostty themes directory
-/// (overridable via `QWERTTY_TERM_THEMES_DIR` for machines without the
-/// hardcoded checkout path). Returns `None` (falling back to `qwertty-term-vt`'s
-/// built-in default colors) if the theme can't be found or read; a warning is
-/// printed to stderr in that case.
+/// `~/.config/qwertty-term/themes/`, then in the legacy `~/.config/ghostty/themes/`,
+/// then in the shared ghostty themes directory (overridable via
+/// `QWERTTY_TERM_THEMES_DIR` for machines without the hardcoded checkout path).
+/// Returns `None` (falling back to `qwertty-term-vt`'s built-in default colors)
+/// if the theme can't be found or read; a warning is printed to stderr in that
+/// case.
 pub(crate) fn load_theme(name: &str) -> Option<ThemeColors> {
     let path = resolve_theme_path(name)?;
     match fs::read_to_string(&path) {
@@ -172,13 +174,15 @@ fn resolve_theme_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// The theme directory search order: `~/.config/ghostty/themes/` first
-/// (matches upstream ghostty's own user-themes location), then the shared
-/// themes directory (env-overridable).
+/// The theme directory search order: qwertty-term's user themes first, then
+/// upstream Ghostty's user-themes location as a migration fallback, then the
+/// shared themes directory (env-overridable).
 fn theme_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".config/ghostty/themes"));
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".config/qwertty-term/themes"));
+        dirs.push(home.join(".config/ghostty/themes"));
     }
     let shared = env::var("QWERTTY_TERM_THEMES_DIR")
         .map(PathBuf::from)

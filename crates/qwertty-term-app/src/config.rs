@@ -132,8 +132,9 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # This file is created automatically on first run. Uncomment and edit any of
 # the lines below; unknown keys are ignored.
 
-# Theme name, looked up in ~/.config/ghostty/themes/ then the shared ghostty
-# themes directory (or an absolute path to a theme file).
+# Theme name, looked up in ~/.config/qwertty-term/themes/, then the legacy
+# ~/.config/ghostty/themes/ directory, then the shared ghostty themes directory
+# (or an absolute path to a theme file).
 # theme = "GruvboxDarkHard"
 
 # Copy the mouse selection to the clipboard as soon as the drag finishes.
