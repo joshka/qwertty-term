@@ -434,7 +434,20 @@ impl Engine {
                     .collect();
                 let shaped = match self.shape_cell(grid, index, &text) {
                     Some(s) => s,
-                    None => return,
+                    // No byte-backed shaper for the resolved face — this is a
+                    // name-loaded system face (e.g. a config `font-family` like
+                    // "FiraCode Nerd Font Mono"), whose primary `Face` carries no
+                    // `source_bytes`. Dropping the glyph here is what made whole
+                    // classes of default-fg text invisible while decorations
+                    // (sprite path) and bold/italic (byte-backed embedded style
+                    // faces) still drew (field bug: "via" gone, eza headers show
+                    // only their underline). Fall back to per-codepoint CoreText
+                    // rendering via the face's own cmap — no ligatures/kerning
+                    // for named faces (deferred), but the glyph is drawn.
+                    None => {
+                        self.render_cell_unshaped(x, y, cp, style, grid, fg, alpha);
+                        return;
+                    }
                 };
                 for sc in shaped {
                     let g = match grid.render_glyph(index, sc.glyph_index) {
@@ -464,6 +477,50 @@ impl Engine {
                     );
                 }
             }
+        }
+    }
+
+    /// Render one cell's glyph without shaping, resolving the codepoint through
+    /// the styled face's own cmap and rasterizing via CoreText
+    /// (`render_codepoint_styled`). This is the fallback for name-loaded system
+    /// faces whose primary `Face` has no `source_bytes` (so [`Engine::shape_cell`]
+    /// returns `None`): shaping needs the bytes, but CoreText glyph lookup +
+    /// rasterization does not, so the glyph still draws.
+    ///
+    /// The tradeoff vs the shaped path is no ligatures / kerning / GSUB for
+    /// named faces (a documented deferral of the single-font reduced cut), but
+    /// for a monospace terminal the per-cell advance is fixed anyway, so the
+    /// visible result is correct for the common (non-ligature) case. Sprites and
+    /// non-primary fallback faces already take their own non-shaped paths in the
+    /// caller, so this only ever runs for the primary face.
+    #[allow(clippy::too_many_arguments)]
+    fn render_cell_unshaped(
+        &mut self,
+        x: usize,
+        y: usize,
+        cp: u32,
+        style: Style,
+        grid: &mut Grid,
+        fg: Rgb,
+        alpha: u8,
+    ) {
+        if let Ok(Some(g)) = grid.render_codepoint_styled(cp, style) {
+            if g.width == 0 || g.height == 0 {
+                return;
+            }
+            self.push_text_cell(
+                x,
+                y,
+                fg,
+                alpha,
+                &g,
+                0,
+                0,
+                atlas_from_kind(g.atlas),
+                false,
+                false,
+                Key::Text,
+            );
         }
     }
 
