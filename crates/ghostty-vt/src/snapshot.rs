@@ -604,6 +604,40 @@ mod tests {
         assert!(!snap.cursor.visible);
     }
 
+    // DECSCUSR (`CSI Ps SP q`) should stick on the cursor snapshot, not just
+    // flip the blink mode. Regression test for the shell-integration bar
+    // cursor (`CSI 5 SP q`) rendering as a block.
+    #[test]
+    fn decscusr_sets_snapshot_cursor_style() {
+        use crate::screen::cursor::CursorStyle;
+
+        let term = feed(10, 2, b"\x1b[5 q");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Bar);
+
+        let term = feed(10, 2, b"\x1b[6 q");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Bar);
+
+        let term = feed(10, 2, b"\x1b[3 q");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Underline);
+
+        let term = feed(10, 2, b"\x1b[4 q");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Underline);
+
+        let term = feed(10, 2, b"\x1b[1 q");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Block);
+
+        let term = feed(10, 2, b"\x1b[2 q");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Block);
+
+        // CSI 0 SP q (default) resets to block.
+        let term = feed(10, 2, b"\x1b[5 q\x1b[0 q");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Block);
+
+        // Full reset (RIS) restores the default block style.
+        let term = feed(10, 2, b"\x1b[5 q\x1bc");
+        assert_eq!(term.snapshot().cursor.style, CursorStyle::Block);
+    }
+
     #[test]
     fn scrollback_rows_precede_active() {
         // 4 cols, 2 rows; write enough to push a row into scrollback.

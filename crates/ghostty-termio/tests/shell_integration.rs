@@ -9,17 +9,11 @@
 //!    draws its first prompt.
 //! 2. The zsh integration's bar-cursor-at-prompt hook fires -- the raw
 //!    DECSCUSR bar sequence (`CSI 5 SP q` / `CSI 6 SP q`, feature `cursor`,
-//!    on by default) appears in the pty output stream.
-//!
-//! On (2): this crate's `ghostty-vt` dependency does not yet store cursor
-//! *shape* anywhere queryable (only blink-mode, derived from DECSCUSR, is
-//! tracked today -- see `TerminalHandler::cursor_style` and the analysis
-//! doc's note on this gap, which is the deferred M2 chunk F "stream_handler
-//! delta"). So this test asserts on the raw bytes the shell integration
-//! script actually sent, which is the strongest claim this Rust tree can
-//! currently make about "does the cursor become a bar at the prompt" -- the
-//! DECSCUSR sequence unambiguously reaches the terminal; only the
-//! terminal-side bookkeeping of cursor *shape* remains unported.
+//!    on by default) appears in the pty output stream, *and* the engine
+//!    actually stores the shape: `Terminal::snapshot().cursor.style` becomes
+//!    `ghostty_vt::screen::cursor::CursorStyle::Bar`
+//!    (`TerminalHandler::cursor_style` now threads DECSCUSR through to
+//!    `Screen.Cursor.cursor_style`, not just the blink mode).
 
 #![cfg(all(unix, target_os = "macos"))]
 
@@ -194,11 +188,24 @@ fn zsh_integration_prompt_marks_and_bar_cursor() {
     // must have emitted a DECSCUSR bar sequence (CSI 5 SP q blinking, or
     // CSI 6 SP q steady -- `setup_features` above requested blink=true, so
     // expect the blinking form, but accept either since a plugin/theme could
-    // still race the first render).
+    // still race the first render). The raw bytes are still worth asserting
+    // on (it's the strongest claim about what the shell actually sent), but
+    // the real proof is that the *engine* stored the shape: `cursor_style`
+    // now threads DECSCUSR through to `Screen.Cursor.cursor_style`, so the
+    // terminal's own snapshot must report `Bar`, not just the raw
+    // transcript containing the escape sequence.
     let saw_bar_cursor = contains(&transcript, b"\x1b[5 q") || contains(&transcript, b"\x1b[6 q");
     assert!(
         saw_bar_cursor,
         "no DECSCUSR bar-cursor sequence (CSI 5/6 SP q) seen at the prompt; transcript: {:?}",
+        String::from_utf8_lossy(&transcript)
+    );
+    let engine_cursor_style = stream.handler.terminal.snapshot().cursor.style;
+    assert_eq!(
+        engine_cursor_style,
+        ghostty_vt::screen::cursor::CursorStyle::Bar,
+        "engine cursor style did not become Bar after the shell's DECSCUSR bar sequence \
+         (got {engine_cursor_style:?}); transcript: {:?}",
         String::from_utf8_lossy(&transcript)
     );
 

@@ -1722,16 +1722,22 @@ impl Handler for TerminalHandler {
     }
 
     fn cursor_style(&mut self, style: CursorStyle) {
-        // The Rust Screen doesn't model cursor-style rendering; upstream sets
-        // `cursor_blinking` mode + `cursor.cursor_style`. We only track the
-        // blink mode, which is observable via mode reports.
-        let blink = matches!(
-            style,
-            CursorStyle::BlinkingBlock | CursorStyle::BlinkingBar | CursorStyle::BlinkingUnderline
-        );
-        if !matches!(style, CursorStyle::Default) {
-            self.terminal.modes.set(Mode::CursorBlinking, blink);
-        }
+        // Port of `stream_terminal.zig`'s `.cursor_style` handler: sets
+        // `cursor_blinking` mode + `cursor.cursor_style`. `Default` (CSI 0 q /
+        // CSI SP q) resets to the default style (block, since we don't expose
+        // a configurable default) and the default blink (off).
+        use crate::screen::cursor::CursorStyle as ScreenCursorStyle;
+        let (blink, shape) = match style {
+            CursorStyle::Default => (false, ScreenCursorStyle::Block),
+            CursorStyle::BlinkingBlock => (true, ScreenCursorStyle::Block),
+            CursorStyle::SteadyBlock => (false, ScreenCursorStyle::Block),
+            CursorStyle::BlinkingUnderline => (true, ScreenCursorStyle::Underline),
+            CursorStyle::SteadyUnderline => (false, ScreenCursorStyle::Underline),
+            CursorStyle::BlinkingBar => (true, ScreenCursorStyle::Bar),
+            CursorStyle::SteadyBar => (false, ScreenCursorStyle::Bar),
+        };
+        self.terminal.modes.set(Mode::CursorBlinking, blink);
+        self.terminal.screen_mut().cursor.cursor_style = shape;
     }
 
     fn window_title(&mut self, title: &str) {

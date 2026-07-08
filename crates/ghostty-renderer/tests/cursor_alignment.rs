@@ -66,33 +66,54 @@ impl Frame {
     /// differs from `bg` by more than `threshold` (summed abs channel
     /// delta).
     fn cell_bbox(&self, col: usize, row: usize, bg: Px, threshold: i32) -> Option<BBox> {
+        self.cols_bbox(col, col, row, bg, threshold)
+    }
+
+    /// Like [`Frame::cell_bbox`], but scans columns `col_start..=col_end` and
+    /// returns the bounding box in coordinates local to `col_start`'s left
+    /// edge (i.e. a hit in `col_start + 1` has `left/right >= cell_w`). Used
+    /// for cursor styles (e.g. the bar) that upstream intentionally draws
+    /// bleeding slightly outside their nominal cell so they sit "centered
+    /// between characters" (see `cursor_bar` in
+    /// `ghostty-sprite/src/draw/special.rs`).
+    fn cols_bbox(
+        &self,
+        col_start: usize,
+        col_end: usize,
+        row: usize,
+        bg: Px,
+        threshold: i32,
+    ) -> Option<BBox> {
         let mut bbox: Option<BBox> = None;
         for dy in 0..self.cell_h {
-            for dx in 0..self.cell_w {
-                let x = col * self.cell_w + dx;
-                let y = row * self.cell_h + dy;
-                if x >= self.width || y >= self.height {
-                    continue;
-                }
-                let p = self.px(x, y);
-                let d = (p.r as i32 - bg.r as i32).abs()
-                    + (p.g as i32 - bg.g as i32).abs()
-                    + (p.b as i32 - bg.b as i32).abs();
-                if d > threshold {
-                    bbox = Some(match bbox {
-                        None => BBox {
-                            left: dx,
-                            right: dx,
-                            top: dy,
-                            bottom: dy,
-                        },
-                        Some(b) => BBox {
-                            left: b.left.min(dx),
-                            right: b.right.max(dx),
-                            top: b.top.min(dy),
-                            bottom: b.bottom.max(dy),
-                        },
-                    });
+            for col in col_start..=col_end {
+                for dx in 0..self.cell_w {
+                    let x = col * self.cell_w + dx;
+                    let y = row * self.cell_h + dy;
+                    if x >= self.width || y >= self.height {
+                        continue;
+                    }
+                    let p = self.px(x, y);
+                    let d = (p.r as i32 - bg.r as i32).abs()
+                        + (p.g as i32 - bg.g as i32).abs()
+                        + (p.b as i32 - bg.b as i32).abs();
+                    if d > threshold {
+                        let local_dx = (col - col_start) * self.cell_w + dx;
+                        bbox = Some(match bbox {
+                            None => BBox {
+                                left: local_dx,
+                                right: local_dx,
+                                top: dy,
+                                bottom: dy,
+                            },
+                            Some(b) => BBox {
+                                left: b.left.min(local_dx),
+                                right: b.right.max(local_dx),
+                                top: b.top.min(dy),
+                                bottom: b.bottom.max(dy),
+                            },
+                        });
+                    }
                 }
             }
         }
@@ -200,6 +221,158 @@ fn cursor_rect_aligns_with_glyph_cell_box() {
     if let Some(path) = dump_png(&frame) {
         println!("cursor-alignment frame written to {path}");
     }
+}
+
+/// Render a single terminal with the cursor at `(col=2, row=1)` set to
+/// `decscusr` (a `CSI Ps SP q` sequence) and return the readback [`Frame`]
+/// plus the cell metrics used.
+fn render_with_cursor_style(decscusr: &[u8]) -> Option<(Frame, u32, u32)> {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping cursor-shape pixel test");
+            return None;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 10u16;
+    let rows = 4u16;
+    let term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    // Set the cursor shape via DECSCUSR, then park the cursor at col 2, row 1
+    // (0-indexed): CUP row 2, col 3 (1-indexed).
+    stream.feed(decscusr);
+    stream.feed(b"\x1b[2;3H");
+    let term = stream.handler.terminal;
+
+    let snapshot = FullSnapshot::capture(&term, 0);
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    let opts = FrameOptions::default();
+    engine.update_frame(&snapshot, &mut grid, opts);
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+
+    let (sw, sh) = engine.screen_size();
+    assert_eq!(pixels.len(), sw * sh * 4, "readback size");
+    Some((
+        Frame {
+            pixels,
+            width: sw,
+            height: sh,
+            cell_w: cw as usize,
+            cell_h: ch as usize,
+        },
+        cw,
+        ch,
+    ))
+}
+
+/// DECSCUSR bar (`CSI 5 SP q`, the shell-integration blinking-bar sequence):
+/// the cursor coverage must be a thin *vertical* strip pinned to (or just
+/// left of) the cursor cell's left edge, full cell height — not a full
+/// block.
+///
+/// Upstream's `cursor_bar` deliberately centers the bar *on* the cell's left
+/// edge (half the thickness bleeds into the previous cell) so it reads as
+/// sitting between characters rather than inside one — see `cursor_bar` in
+/// `ghostty-sprite/src/draw/special.rs`. So this scans the cursor cell (col
+/// 2) *and* the cell to its left (col 1) as one coordinate space, local to
+/// col 1's left edge; the full cell width is at local offset `cw..2*cw`.
+#[test]
+fn cursor_bar_is_thin_left_strip() {
+    let Some((frame, cw, ch)) = render_with_cursor_style(b"\x1b[5 q") else {
+        return;
+    };
+    let bg = Px {
+        r: 0x18,
+        g: 0x18,
+        b: 0x18,
+    };
+    let bbox = frame
+        .cols_bbox(1, 2, 1, bg, 24)
+        .expect("bar cursor should have coverage");
+
+    eprintln!("bar cursor bbox (local to col 1): {bbox:?} (cell {cw}x{ch})");
+
+    // Full cell height (bar spans top to bottom).
+    assert_eq!(bbox.top, 0, "bar should start at the top of the cell");
+    assert_eq!(
+        bbox.bottom,
+        ch as usize - 1,
+        "bar should reach the bottom of the cell"
+    );
+
+    // Thin (a small fraction of the cell width) and pinned to the cursor
+    // cell's left edge (local offset `cw`), allowing a little bleed either
+    // side for the centered-on-the-edge placement.
+    let cw = cw as usize;
+    assert!(
+        bbox.left + 1 >= cw,
+        "bar should sit at (or just left of) the cursor cell's left edge, \
+         got left={} cell_w={cw}",
+        bbox.left
+    );
+    let strip_width = bbox.right - bbox.left + 1;
+    assert!(
+        strip_width <= (cw / 4).max(2),
+        "bar should be a thin strip, not a full-width block: width={strip_width} cell_w={cw}"
+    );
+}
+
+/// DECSCUSR underline (`CSI 3 SP q` / `CSI 4 SP q`): the cursor coverage box
+/// must be a thin *horizontal* strip pinned to the cell's bottom edge
+/// (upstream `cursor_underline`: `cursor_thickness` tall, spanning the full
+/// cell width) — not a full block.
+#[test]
+fn cursor_underline_is_thin_bottom_strip() {
+    let Some((frame, cw, ch)) = render_with_cursor_style(b"\x1b[3 q") else {
+        return;
+    };
+    let bg = Px {
+        r: 0x18,
+        g: 0x18,
+        b: 0x18,
+    };
+    let bbox = frame
+        .cell_bbox(2, 1, bg, 24)
+        .expect("underline cursor should have coverage");
+
+    eprintln!("underline cursor bbox: {bbox:?} (cell {cw}x{ch})");
+
+    // Full cell width (underline spans left to right).
+    assert_eq!(
+        bbox.left, 0,
+        "underline should start at the left of the cell"
+    );
+    assert_eq!(
+        bbox.right,
+        cw as usize - 1,
+        "underline should reach the right of the cell"
+    );
+
+    // Thin (a small fraction of the cell height) and near the bottom edge
+    // (upstream's `underline_position` sits a font-metric-derived distance
+    // above the very last row, not necessarily flush against it).
+    let ch = ch as usize;
+    let strip_height = bbox.bottom - bbox.top + 1;
+    assert!(
+        strip_height <= (ch / 4).max(2),
+        "underline should be a thin strip, not a full-height block: height={strip_height} cell_h={ch}"
+    );
+    assert!(
+        bbox.bottom + ch / 4 >= ch - 1,
+        "underline should be pinned near the bottom edge, got bottom={} cell_h={ch}",
+        bbox.bottom
+    );
 }
 
 /// Write the BGRA frame to `target/cursor-alignment.png` (hand-rolled minimal
