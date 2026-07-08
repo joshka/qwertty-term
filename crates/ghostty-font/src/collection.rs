@@ -104,21 +104,50 @@ impl Collection {
     }
 
     /// Create a collection with `primary` as the first (non-fallback) regular
-    /// face, plus upstream's explicit nerd-symbols fallback slot
-    /// (`SharedGridSet.zig`: `symbols_nerd_font` is added as a `.regular`,
-    /// `fallback = true` entry immediately after the primary/bold/italic
-    /// faces, ahead of any discovery-found fallback). `size_px` loads the
-    /// embedded nerd-symbols font at the same render size as `primary`.
+    /// face, plus upstream's full default style table and explicit nerd-symbols
+    /// fallback slot.
     ///
     /// This is the parity-default constructor real Ghostty's `SharedGridSet`
-    /// uses when building the default (no font-family configured) grid: a
-    /// PUA nerd-font codepoint resolves to this embedded fallback face
-    /// *without* going through system discovery, exactly mirroring upstream.
+    /// uses when building the default (no font-family configured) grid
+    /// (`SharedGridSet.zig:260-330`). It completes the four-style table from the
+    /// embedded variable fonts, matching upstream's default-config mechanism
+    /// exactly (`wght` variation instancing, **not** synthetic stroke):
+    ///
+    /// - **Regular**: `primary` (the caller's face; embedded `variable` at
+    ///   `wght=400` for the no-family default).
+    /// - **Bold**: embedded `variable` at the `wght=700` instance
+    ///   (`SharedGridSet.zig:277-287`).
+    /// - **Italic**: embedded `variable_italic` at `wght=400`
+    ///   (`SharedGridSet.zig:293-300`) — a real discovered face, not synthetic.
+    /// - **BoldItalic**: embedded `variable_italic` at `wght=700`
+    ///   (`SharedGridSet.zig:306-318`).
+    ///
+    /// The nerd-symbols font (`symbols_nerd_font`) is added as a `.regular`,
+    /// `fallback = true` entry ahead of discovery, so a PUA nerd-font codepoint
+    /// resolves to it *without* system discovery. A styled (bold/italic) PUA
+    /// lookup reaches it through the resolver's step-5 regular retry, matching
+    /// upstream (which only registers the symbols font under `.regular`).
+    ///
+    /// Each built-in style face is a `fallback = true` entry (upstream default
+    /// faces are all `.fallback = true`), so the whole default chain is a
+    /// fallback chain behind any user-configured face.
     pub fn new_with_default_fallbacks(
         primary: Face,
         size_px: f64,
     ) -> Result<Collection, crate::coretext::Error> {
         let mut collection = Collection::new(primary);
+
+        // Complete the style table from the embedded variable fonts, mirroring
+        // upstream's default-config `wght`-variation mechanism.
+        let bold = crate::coretext::Face::load_embedded_bold(size_px)?;
+        collection.add_fallback(Style::Bold, bold);
+
+        let italic = crate::coretext::Face::load_embedded_italic(size_px)?;
+        collection.add_fallback(Style::Italic, italic);
+
+        let bold_italic = crate::coretext::Face::load_embedded_bold_italic(size_px)?;
+        collection.add_fallback(Style::BoldItalic, bold_italic);
+
         let symbols = crate::coretext::Face::load_embedded_symbols_nerd_font(size_px)?;
         collection.add_fallback(Style::Regular, symbols);
         Ok(collection)

@@ -342,6 +342,70 @@ mod tests {
         }
     }
 
+    /// The completed default style table resolves Bold and Italic to their own
+    /// (distinct-from-Regular) faces for a plain ASCII codepoint, and
+    /// BoldItalic to a fourth face. This is the core "bold/italic actually get
+    /// their own face" guarantee behind the field fix.
+    #[test]
+    fn default_chain_resolves_distinct_styles() {
+        let face = Face::load_embedded(16.0).expect("load embedded");
+        let col = Collection::new_with_default_fallbacks(face, 16.0).expect("default style table");
+        // Discovery off so we isolate the style-table faces (no system fallback).
+        let mut r = CodepointResolver::without_discovery(col);
+
+        let reg = r.get_index('a' as u32, Style::Regular).expect("regular a");
+        let bold = r.get_index('a' as u32, Style::Bold).expect("bold a");
+        let ital = r.get_index('a' as u32, Style::Italic).expect("italic a");
+        let bi = r
+            .get_index('a' as u32, Style::BoldItalic)
+            .expect("bold-italic a");
+
+        // Each resolves to a face in its own style's list (slot 0), so the four
+        // FontIndex values are all distinct.
+        assert_eq!(
+            reg,
+            FontIndex::Face {
+                style: Style::Regular,
+                slot: 0
+            }
+        );
+        assert_eq!(
+            bold,
+            FontIndex::Face {
+                style: Style::Bold,
+                slot: 0
+            }
+        );
+        assert_eq!(
+            ital,
+            FontIndex::Face {
+                style: Style::Italic,
+                slot: 0
+            }
+        );
+        assert_eq!(
+            bi,
+            FontIndex::Face {
+                style: Style::BoldItalic,
+                slot: 0
+            }
+        );
+        assert_ne!(reg, bold);
+        assert_ne!(reg, ital);
+        assert_ne!(bold, bi);
+
+        // The bold face carries the wght=700 variation instance; regular does
+        // not. This is the default-config mechanism (variation, not synthetic).
+        let bold_face = r.collection().get_face(bold).expect("bold face");
+        let reg_face = r.collection().get_face(reg).expect("reg face");
+        assert_eq!(
+            bold_face.wght(),
+            Some(700.0),
+            "bold is the wght=700 instance"
+        );
+        assert_eq!(reg_face.wght(), None, "regular is the default instance");
+    }
+
     /// Discovery fallback for CJK: 水 (U+6C34) resolves to a system CJK font.
     #[test]
     fn cjk_resolves_via_discovery() {

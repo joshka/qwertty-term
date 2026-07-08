@@ -68,9 +68,24 @@ impl Shaper {
     /// Build a shaper over `face`, which must have source bytes available
     /// (`Face::source_bytes`). Returns `None` for byte-less system faces
     /// (deferred: see `Face::source_bytes`).
+    ///
+    /// If `face` carries a `wght` variation instance (a bold face materialized
+    /// from a variable font, see [`Face::wght`]), the same variation is applied
+    /// to the rustybuzz face so shaped glyph ids match the instance CoreText
+    /// rasterizes. Without this, the shaper would shape against the default
+    /// (`wght=400`) instance while the raster is bold — the ids happen to align
+    /// for JetBrains Mono's non-ligature glyphs, but applying the variation
+    /// keeps positioning (advances) correct for the bold instance too.
     pub fn new(face: &Face) -> Option<Shaper> {
         let bytes = face.source_bytes()?;
-        Shaper::from_bytes(bytes, 0, face.size_px())
+        let mut shaper = Shaper::from_bytes(bytes, 0, face.size_px())?;
+        if let Some(wght) = face.wght() {
+            shaper.face.set_variations(&[rustybuzz::Variation {
+                tag: ttf_parser::Tag::from_bytes(b"wght"),
+                value: wght,
+            }]);
+        }
+        Some(shaper)
     }
 
     /// Build a shaper directly from font bytes, a face index (for `.ttc`

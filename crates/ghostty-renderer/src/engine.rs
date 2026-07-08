@@ -13,7 +13,7 @@
 //! rebuild the buffers, then draws. See `docs/analysis/renderer-r4.md`.
 
 use ghostty_font::grid::Grid;
-use ghostty_font::{AtlasKind, FontIndex, ShapedCell};
+use ghostty_font::{AtlasKind, FontIndex, ShapedCell, Style};
 use ghostty_sprite::Sprite;
 use ghostty_vt::color::{Palette, Rgb};
 use ghostty_vt::snapshot::{CellStyle, SnapshotCell, SnapshotColor, SnapshotUnderline};
@@ -363,9 +363,16 @@ impl Engine {
             return;
         }
 
+        // Map the cell's bold/italic attributes to a font style. The resolver
+        // then picks the styled face (or aliases back to regular when the style
+        // has no glyph for this codepoint). Sprites (box drawing / powerline)
+        // ignore style: `get_index_styled`'s step-3 sprite dispatch returns the
+        // sprite index regardless, so graphics elements stay sprites.
+        let style = style_of(&cell.style);
+
         // Resolve to a font index. Sprite codepoints route to the procedural
         // rasterizer; text codepoints shape through rustybuzz.
-        let Some(index) = grid.get_index(cp) else {
+        let Some(index) = grid.get_index_styled(cp, style) else {
             return;
         };
 
@@ -399,7 +406,7 @@ impl Engine {
             // which is exact for the single-codepoint fallback scope (emoji,
             // CJK). This is where color glyphs get routed to the color atlas.
             FontIndex::Face { slot, .. } if slot != 0 => {
-                if let Ok(Some(g)) = grid.render_codepoint(cp) {
+                if let Ok(Some(g)) = grid.render_codepoint_styled(cp, style) {
                     if g.width == 0 || g.height == 0 {
                         return;
                     }
@@ -425,7 +432,7 @@ impl Engine {
                 let text: String = std::iter::once(cell.ch)
                     .chain(cell.combining.iter().copied())
                     .collect();
-                let shaped = match self.shape_cell(grid, &text) {
+                let shaped = match self.shape_cell(grid, index, &text) {
                     Some(s) => s,
                     None => return,
                 };
@@ -460,11 +467,21 @@ impl Engine {
         }
     }
 
-    /// Shape one cell's text into shaped cells via the grid's primary face.
-    /// Returns `None` if the face has no byte-backed shaper (name-loaded system
-    /// faces; deferred).
-    fn shape_cell(&self, grid: &Grid, text: &str) -> Option<Vec<ShapedCell>> {
-        let face = grid.resolver().collection().primary();
+    /// Shape one cell's text into shaped cells via the face resolved at
+    /// `index`. Returns `None` if the face has no byte-backed shaper
+    /// (name-loaded system faces; deferred).
+    ///
+    /// Shaping against the *resolved* (styled) face — not always the primary —
+    /// means a bold/italic cell shapes with its own face, so the shaper applies
+    /// that face's `wght` variation (see [`ghostty_font::Shaper::new`]) and its
+    /// own cmap/GSUB. For JetBrains Mono the four styles share a glyph set, but
+    /// this keeps advances and any style-specific substitutions correct.
+    fn shape_cell(&self, grid: &Grid, index: FontIndex, text: &str) -> Option<Vec<ShapedCell>> {
+        let face = grid
+            .resolver()
+            .collection()
+            .get_face(index)
+            .unwrap_or_else(|| grid.resolver().collection().primary());
         let mut shaper = ghostty_font::Shaper::new(face)?;
         Some(shaper.shape_run(text))
     }
@@ -970,6 +987,18 @@ fn atlas_from_kind(kind: AtlasKind) -> Atlas {
     match kind {
         AtlasKind::Grayscale => Atlas::Grayscale,
         AtlasKind::Color => Atlas::Color,
+    }
+}
+
+/// Map a cell's bold/italic attributes to a font [`Style`] (upstream
+/// `renderer/cell.zig` derives the style from the cell's `bold`/`italic` flags
+/// the same way).
+fn style_of(style: &CellStyle) -> Style {
+    match (style.bold, style.italic) {
+        (false, false) => Style::Regular,
+        (true, false) => Style::Bold,
+        (false, true) => Style::Italic,
+        (true, true) => Style::BoldItalic,
     }
 }
 

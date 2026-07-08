@@ -22,11 +22,16 @@
 
 use std::ptr::NonNull;
 
-use objc2_core_foundation::{CFData, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_foundation::{
+    CFData, CFDictionary, CFMutableDictionary, CFNumber, CFRetained, CFString, CFType, CGFloat,
+    CGPoint, CGRect, CGSize,
+};
+use objc2_core_graphics::{
+    CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo, CGTextDrawingMode,
+};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation,
-    CTFontSymbolicTraits, CTFontTableOptions,
+    CTFontSymbolicTraits, CTFontTableOptions, kCTFontVariationAttribute,
 };
 
 use crate::embedded;
@@ -246,6 +251,21 @@ pub struct Face {
     /// Whether the face can contain color glyphs (symbolic-traits gate +
     /// sbix presence). See coretext.zig:103-107, 890-968.
     color: Option<ColorState>,
+    /// The `wght` (weight) variation-axis value applied to this face, if any.
+    /// Set when the face was materialized from a variable font at an explicit
+    /// weight instance (upstream's default-config bold path,
+    /// `SharedGridSet.zig:284-287,315-318`: `setVariations(wght=700)`). The
+    /// rustybuzz shaper reapplies this so shaping and rasterization agree on
+    /// the same instance. `None` for a face at the font's default instance.
+    wght: Option<f32>,
+    /// A synthetic-bold stroke line width in pixels, if this face is a
+    /// synthetic-bold variant (upstream `Face.synthetic_bold`,
+    /// coretext.zig:26,183-199). Applied at rasterization time as a
+    /// `fill_stroke` with this line width plus an ink-box expansion
+    /// (coretext.zig:311-320,511-516). `None` for non-synthetic faces. The
+    /// default config never sets this (it uses [`Face::wght`] instead); it is
+    /// the fallback when a variable `wght` axis is unavailable.
+    synthetic_bold: Option<f64>,
 }
 
 /// Color-glyph detection state (coretext.zig:890-968).
@@ -310,6 +330,108 @@ impl Face {
         Face::load_from_bytes(embedded::SYMBOLS_NERD_FONT_MONO, size_px)
     }
 
+    /// Load the embedded JetBrains Mono **italic** companion (variable weight,
+    /// default `wght=400` instance) at `size_px` pixels — upstream's
+    /// `embedded.variable_italic`, added as the default italic style face
+    /// (`SharedGridSet.zig:293-300`).
+    pub fn load_embedded_italic(size_px: f64) -> Result<Face, Error> {
+        Face::load_from_bytes(embedded::JETBRAINS_MONO_VARIABLE_ITALIC, size_px)
+    }
+
+    /// Load the embedded JetBrains Mono at the **bold** (`wght=700`) variation
+    /// instance — upstream's default bold style face
+    /// (`SharedGridSet.zig:277-287`: `embedded.variable` +
+    /// `setVariations(wght=700)`).
+    pub fn load_embedded_bold(size_px: f64) -> Result<Face, Error> {
+        Face::load_embedded(size_px)?.with_wght_variation(700.0)
+    }
+
+    /// Load the embedded JetBrains Mono **italic** at the **bold** (`wght=700`)
+    /// variation instance — upstream's default bold-italic style face
+    /// (`SharedGridSet.zig:306-318`: `embedded.variable_italic` +
+    /// `setVariations(wght=700)`).
+    pub fn load_embedded_bold_italic(size_px: f64) -> Result<Face, Error> {
+        Face::load_embedded_italic(size_px)?.with_wght_variation(700.0)
+    }
+
+    /// Return a copy of this face with the `wght` (weight) variation axis set to
+    /// `value`, keeping the same pixel size.
+    ///
+    /// Port of upstream `Face.setVariations` reduced to the single `wght` axis
+    /// the default-config bold path uses (coretext.zig:225-253,
+    /// `SharedGridSet.zig` bold/bold-italic slots). Builds a font descriptor
+    /// carrying `kCTFontVariationAttribute = { <wght axis id>: value }` and
+    /// copies the CTFont through it, so both CoreText rasterization and (via the
+    /// recorded [`Face::wght`]) rustybuzz shaping select the same instance.
+    pub fn with_wght_variation(mut self, value: f32) -> Result<Face, Error> {
+        // The variation dictionary is keyed by the axis's *identifier*, which
+        // for a registered axis is its four-character tag interpreted as a
+        // big-endian u32. `wght` = 0x77676874.
+        const WGHT_AXIS_ID: i64 = 0x7767_6874;
+
+        let axis_key = CFNumber::new_i64(WGHT_AXIS_ID);
+        let axis_val = CFNumber::new_f32(value);
+        let var_dict = CFMutableDictionary::<CFNumber, CFNumber>::with_capacity(1);
+        var_dict.set(&axis_key, &axis_val);
+
+        let attrs = CFMutableDictionary::<CFString, CFType>::with_capacity(1);
+        // SAFETY: kCTFontVariationAttribute is a valid static key; var_dict is a
+        // valid CFDictionary value (coerced to &CFType).
+        let key = unsafe { kCTFontVariationAttribute };
+        attrs.set(key, &var_dict);
+
+        let dict: &CFDictionary = attrs.as_opaque();
+        // SAFETY: dict is a valid attribute dictionary carrying the variation.
+        let desc = unsafe { CTFontDescriptor::with_attributes(dict) };
+
+        let size = self.size_px();
+        // SAFETY: font is valid; null matrix = identity; desc overrides the
+        // variation attribute; size preserved.
+        let font = unsafe {
+            self.font
+                .copy_with_attributes(size, std::ptr::null(), Some(&desc))
+        };
+
+        self.font = font;
+        // Re-derive color state from the new CTFont (traits are unchanged for a
+        // weight variation, but keep the invariant that `color` matches `font`).
+        // SAFETY: font is a valid CTFont.
+        let traits = unsafe { self.font.symbolic_traits() };
+        self.color = if traits.contains(CTFontSymbolicTraits::TraitColorGlyphs) {
+            let color_table = has_table(&self.font, b"sbix")
+                || has_table(&self.font, b"COLR")
+                || has_table(&self.font, b"CBDT")
+                || has_table(&self.font, b"SVG ");
+            Some(ColorState { color_table })
+        } else {
+            None
+        };
+        self.wght = Some(value);
+        Ok(self)
+    }
+
+    /// The `wght` variation-axis value applied to this face, if any.
+    ///
+    /// The shaper reads this to reapply the same weight instance on its
+    /// rustybuzz face, so shaped glyph ids match the rasterized (CoreText)
+    /// instance.
+    pub fn wght(&self) -> Option<f32> {
+        self.wght
+    }
+
+    /// Return a copy of this face flagged for a **synthetic bold** stroke of
+    /// `line_width` pixels.
+    ///
+    /// Port of upstream `Face.syntheticBold` (coretext.zig:183-199), the
+    /// fallback bold mechanism when a `wght` variation axis is unavailable (the
+    /// default config prefers [`Face::with_wght_variation`]). The stroke is
+    /// applied at rasterization time (see [`Face::rasterize_constrained`]).
+    /// `line_width` upstream is `max(points/14, 1)`.
+    pub fn synthetic_bold(mut self, line_width: f64) -> Face {
+        self.synthetic_bold = Some(line_width);
+        self
+    }
+
     /// Load a face from in-memory font bytes at `size_px` pixels.
     ///
     /// `bytes` must outlive the returned face (`'static` here, satisfied by the
@@ -370,6 +492,8 @@ impl Face {
             font,
             source_bytes,
             color,
+            wght: None,
+            synthetic_bold: None,
         }
     }
 
@@ -546,7 +670,7 @@ impl Face {
         // 1. Ink bounding rect: CoreGraphics space, origin bottom-left, +Y up.
         // SAFETY: single-element glyph buffer; null bounding_rects => only the
         // overall rect is computed and returned.
-        let rect: CGRect = unsafe {
+        let mut rect: CGRect = unsafe {
             self.font.bounding_rects_for_glyphs(
                 CTFontOrientation::Horizontal,
                 glyphs_ptr,
@@ -556,6 +680,17 @@ impl Face {
         };
 
         let is_color = self.is_color_glyph(glyph_id);
+
+        // Synthetic-bold ink expansion (coretext.zig:305-320): a synthetic-bold
+        // stroke gains half its line width on every edge, so grow the ink box
+        // by the line width and shift the origin down-left by half. Skipped for
+        // color (sbix) glyphs, which the stroke doesn't affect.
+        if !is_color && let Some(line_width) = self.synthetic_bold {
+            rect.size.width += line_width;
+            rect.size.height += line_width;
+            rect.origin.x -= line_width / 2.0;
+            rect.origin.y -= line_width / 2.0;
+        }
 
         // 4. Empty-glyph short circuit (coretext.zig:326-334).
         if rect.size.width < 0.25 || rect.size.height < 0.25 {
@@ -711,6 +846,14 @@ impl Face {
         } else {
             CGContext::set_gray_fill_color(Some(&ctx), 0.0, 1.0);
             CGContext::set_gray_stroke_color(Some(&ctx), 0.0, 1.0);
+        }
+
+        // 10. Synthetic bold: stroke the glyph outline in addition to filling
+        // it, thickening it (coretext.zig:511-516). The ink-box was already
+        // expanded above to make room for the stroke.
+        if !is_color && let Some(line_width) = self.synthetic_bold {
+            CGContext::set_text_drawing_mode(Some(&ctx), CGTextDrawingMode::FillStroke);
+            CGContext::set_line_width(Some(&ctx), line_width);
         }
 
         // 11. CTM translate then scale (coretext.zig:522-534). The scale
