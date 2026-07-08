@@ -134,6 +134,13 @@ pub struct Grid {
 /// demand). Includes the atlas's permanent 1px border.
 const INITIAL_ATLAS_SIZE: u32 = 512;
 
+/// The number of cells a color (emoji) glyph is allowed to occupy when the
+/// cell-fit constraint scales it. Emoji are width-2 in the terminal, matching
+/// upstream's emoji test (constraint width 2). The `.cover` constraint takes
+/// the smaller of the width/height cover factors, so a square emoji still
+/// scales to the cell height and centers within the 2-cell span.
+const EMOJI_CONSTRAINT_WIDTH: u32 = 2;
+
 impl Grid {
     /// Build a grid over `resolver` with cell `metrics`, allocating fresh
     /// grayscale and color atlases.
@@ -253,7 +260,14 @@ impl Grid {
             .collection()
             .get_face(index)
             .ok_or(Error::NoFace)?;
-        let bmp = face.rasterize(glyph_index).map_err(Error::Rasterize)?;
+        // Pass the grid metrics + emoji constraint width so color (emoji)
+        // glyphs are rasterized cell-fit (scaled to cover the cell box,
+        // aspect-preserving, centered). Emoji are width-2 in the terminal, so
+        // the constraint may cover two cells. Non-color glyphs ignore the
+        // constraint and render at natural size (see `rasterize_constrained`).
+        let bmp = face
+            .rasterize_constrained(glyph_index, Some((&self.metrics, EMOJI_CONSTRAINT_WIDTH)))
+            .map_err(Error::Rasterize)?;
 
         // Route by pixel format: BGRA color glyphs → color atlas, alpha8 text
         // glyphs → grayscale atlas.

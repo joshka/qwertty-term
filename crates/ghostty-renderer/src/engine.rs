@@ -13,7 +13,7 @@
 //! rebuild the buffers, then draws. See `docs/analysis/renderer-r4.md`.
 
 use ghostty_font::grid::Grid;
-use ghostty_font::{FontIndex, ShapedCell};
+use ghostty_font::{AtlasKind, FontIndex, ShapedCell};
 use ghostty_sprite::Sprite;
 use ghostty_vt::color::{Palette, Rgb};
 use ghostty_vt::snapshot::{CellStyle, SnapshotCell, SnapshotColor, SnapshotUnderline};
@@ -87,6 +87,9 @@ pub struct Engine {
     /// Per-slot "last synced atlas modified counter" so we only re-upload the
     /// grayscale atlas when it changed (upstream `frame.grayscale_modified`).
     grayscale_modified: Vec<usize>,
+    /// Per-slot "last synced color-atlas modified counter" (upstream
+    /// `frame.color_modified`), the color-atlas analog of `grayscale_modified`.
+    color_modified: Vec<usize>,
     /// Current pixel dimensions of the render target (grid size × cell size in
     /// the reduced cut: no window padding yet).
     screen_width: usize,
@@ -134,6 +137,7 @@ impl Engine {
             cell_width,
             cell_height,
             grayscale_modified: vec![0; slot_count],
+            color_modified: vec![0; slot_count],
             screen_width: 0,
             screen_height: 0,
         })
@@ -387,9 +391,37 @@ impl Engine {
                     );
                 }
             }
+            // A codepoint resolved to a non-primary (fallback) face — emoji and
+            // CJK live here. rustybuzz shapes against the *primary* face, whose
+            // glyph ids don't map into a fallback face, so shaping this cluster
+            // would sample the wrong (or a .notdef) glyph. Instead resolve the
+            // glyph through the fallback face's own cmap via `render_codepoint`,
+            // which is exact for the single-codepoint fallback scope (emoji,
+            // CJK). This is where color glyphs get routed to the color atlas.
+            FontIndex::Face { slot, .. } if slot != 0 => {
+                if let Ok(Some(g)) = grid.render_codepoint(cp) {
+                    if g.width == 0 || g.height == 0 {
+                        return;
+                    }
+                    self.push_text_cell(
+                        x,
+                        y,
+                        fg,
+                        alpha,
+                        &g,
+                        0,
+                        0,
+                        atlas_from_kind(g.atlas),
+                        false,
+                        false,
+                        Key::Text,
+                    );
+                }
+            }
             FontIndex::Face { .. } => {
-                // Shape this cell's grapheme (base char + combining marks) as a
-                // one-cell run. rustybuzz maps clusters → cell 0.
+                // Primary face: shape this cell's grapheme (base char +
+                // combining marks) as a one-cell run. rustybuzz maps clusters →
+                // cell 0.
                 let text: String = std::iter::once(cell.ch)
                     .chain(cell.combining.iter().copied())
                     .collect();
@@ -405,6 +437,11 @@ impl Engine {
                     if g.width == 0 || g.height == 0 {
                         continue;
                     }
+                    // Route the glyph to the texture it was rasterized into:
+                    // color (emoji/BGRA) glyphs sample the color atlas, text
+                    // outlines the grayscale atlas. The grid tags each
+                    // `CachedGlyph` with its `AtlasKind` (the atlas-selector
+                    // seam; see `docs/analysis/font-discovery.md` §8).
                     self.push_text_cell(
                         x,
                         y,
@@ -413,7 +450,7 @@ impl Engine {
                         &g,
                         sc.x_offset,
                         sc.y_offset,
-                        Atlas::Grayscale,
+                        atlas_from_kind(g.atlas),
                         false,
                         false,
                         Key::Text,
@@ -701,27 +738,34 @@ impl Engine {
         Ok(pixels)
     }
 
-    /// Upload the grayscale atlas into the *next* slot's texture if it changed
-    /// since we last synced that slot. Port of `syncAtlasTexture` +
-    /// `drawFrame`'s modified-counter gate. Must be called after `update_frame`
-    /// (which populates the atlas via glyph rendering) and before `draw_frame`.
+    /// Upload the grayscale **and** color atlases into the *next* slot's
+    /// textures if they changed since we last synced that slot. Port of
+    /// `syncAtlasTexture` (called once per atlas) + `drawFrame`'s
+    /// modified-counter gate (`grayscale_modified` / `color_modified`). Must be
+    /// called after `update_frame` (which populates both atlases via glyph
+    /// rendering) and before `draw_frame`.
     ///
-    /// The color-atlas seam: the reduced cut renders text into the grayscale
-    /// atlas only (emoji/color glyphs are deferred with the color atlas — see
-    /// `docs/analysis/font-shaping.md`). We still keep the 1×1 color texture
-    /// bound so the shader's two-atlas sampling is well-formed; no color glyph
-    /// is ever emitted (`Atlas::Grayscale` on every instance).
+    /// The grayscale atlas holds text outlines + sprites (1-byte alpha texels,
+    /// `R8Unorm`); the color atlas holds emoji / color glyphs (4-byte
+    /// premultiplied BGRA texels, `Bgra8Unorm`). Each glyph instance's
+    /// `CellText.atlas` selects which texture the shader samples.
     pub fn sync_atlas(&mut self, grid: &Grid) -> Result<(), MetalError> {
+        // The slot draw_frame will use next is (frame_index + 1) % count. We
+        // sync the slot that next_frame will hand out; peek it without
+        // consuming a permit.
+        let next_index = self.swap_chain.peek_next_index();
+
+        self.sync_grayscale(grid, next_index)?;
+        self.sync_color(grid, next_index)?;
+        Ok(())
+    }
+
+    /// Sync the grayscale atlas (`R8Unorm`, 1 byte/texel) into slot
+    /// `next_index`. Port of `syncAtlasTexture` for the grayscale atlas.
+    fn sync_grayscale(&mut self, grid: &Grid, next_index: usize) -> Result<(), MetalError> {
         let atlas = grid.atlas();
         let size = atlas.size() as usize;
         let modified = atlas.modified();
-
-        // The slot draw_frame will use next is (frame_index + 1) % count. We
-        // sync every slot lazily: simplest correct approach for sync mode
-        // (one slot in play) is to sync the slot that next_frame will hand out.
-        // Since next_frame advances the index, replicate that here without
-        // consuming a permit: peek the next index.
-        let next_index = self.swap_chain.peek_next_index();
 
         if modified <= self.grayscale_modified[next_index] {
             return Ok(());
@@ -745,6 +789,37 @@ impl Engine {
         }
         slot.grayscale
             .replace_region(0, 0, size, size, atlas.data())?;
+        Ok(())
+    }
+
+    /// Sync the color atlas (`Bgra8Unorm`, 4 bytes/texel) into slot
+    /// `next_index`. Port of `syncAtlasTexture` for the color atlas — identical
+    /// to the grayscale path except the pixel format is BGRA and the texel is
+    /// 4 bytes wide (the atlas's `data()` is already the tightly-packed BGRA
+    /// buffer `replace_region` expects).
+    fn sync_color(&mut self, grid: &Grid, next_index: usize) -> Result<(), MetalError> {
+        let atlas = grid.color_atlas();
+        let size = atlas.size() as usize;
+        let modified = atlas.modified();
+
+        if modified <= self.color_modified[next_index] {
+            return Ok(());
+        }
+        self.color_modified[next_index] = modified;
+
+        let slot = self.swap_chain.slot_mut(next_index);
+        if slot.color.width() != size || slot.color.height() != size {
+            slot.color = self.backend.new_texture(
+                crate::gpu::TextureOptions {
+                    format: crate::gpu::TextureFormat::Bgra8Unorm,
+                    usage: crate::gpu::TextureUsage::SHADER_READ,
+                },
+                size,
+                size,
+                None,
+            )?;
+        }
+        slot.color.replace_region(0, 0, size, size, atlas.data())?;
         Ok(())
     }
 }
@@ -880,6 +955,17 @@ fn default_uniforms() -> Uniforms {
         cursor_color: [0, 0, 0, 0],
         bg_color: [0, 0, 0, 255],
         bools: UniformBools::default(),
+    }
+}
+
+/// Map a font-grid [`AtlasKind`] onto the frozen wire [`Atlas`] selector. The
+/// grid tags each cached glyph with the atlas it was uploaded to; the shader
+/// reads the wire `atlas` field to pick `textureGrayscale` (0) vs
+/// `textureColor` (1).
+fn atlas_from_kind(kind: AtlasKind) -> Atlas {
+    match kind {
+        AtlasKind::Grayscale => Atlas::Grayscale,
+        AtlasKind::Color => Atlas::Color,
     }
 }
 

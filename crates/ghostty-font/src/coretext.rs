@@ -30,7 +30,121 @@ use objc2_core_text::{
 };
 
 use crate::embedded;
-use crate::metrics::FaceMetrics;
+use crate::metrics::{FaceMetrics, Metrics};
+
+/// The size and position of a glyph in cell-relative pixel space (baseline
+/// folded into `y`). Port of `Glyph.Size` (`Glyph.zig:24-29`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphSize {
+    pub width: f64,
+    pub height: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// The emoji cell-fit constraint. A reduced port of upstream's
+/// `RenderOptions.Constraint` (`Glyph.zig`) carrying only the branches the
+/// color-glyph (emoji) path uses: `size = .cover`, `align_* = .center`, and
+/// symmetric horizontal padding. `SharedGrid.renderGlyph` (upstream) applies
+/// exactly this constraint to every emoji glyph before rasterizing, which is
+/// what scales an Apple-Color-Emoji bitmap (authored far larger than a cell)
+/// down to cover the cell box while preserving aspect ratio and centering it.
+///
+/// The nerd-font-specific sizes (`fit`/`fit_cover1`/`stretch`), the `.icon`
+/// height metric, and the relative-scale-group machinery are intentionally
+/// omitted (nerd-font constraint tables are a separate deferral); for the
+/// emoji case the scale group is the glyph itself (`relative_* = identity`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EmojiConstraint {
+    pad_left: f64,
+    pad_right: f64,
+}
+
+impl EmojiConstraint {
+    /// The exact constraint upstream hardcodes for emoji in
+    /// `SharedGrid.renderGlyph`: `.cover`, centered on both axes, with a small
+    /// 2.5% horizontal pad so the glyph doesn't touch the cell edges.
+    pub const EMOJI: EmojiConstraint = EmojiConstraint {
+        pad_left: 0.025,
+        pad_right: 0.025,
+    };
+
+    /// Apply the constraint to `glyph` (cell-relative ink box) given `metrics`
+    /// and the number of cells `constraint_width` the glyph may occupy. Port of
+    /// `Constraint.constrain`/`constrainInner` reduced to the emoji case
+    /// (`size = .cover`, `align_* = .center`; the scale group is the glyph
+    /// itself). Returns the scaled + centered size/position.
+    pub fn constrain(
+        self,
+        glyph: GlyphSize,
+        metrics: &Metrics,
+        constraint_width: u32,
+    ) -> GlyphSize {
+        // The emoji constraint never stretches, so the scale group is the glyph
+        // itself (relative_* identity). `max_constraint_width` upstream is 2.
+        let min_constraint_width = constraint_width.clamp(1, 2);
+
+        let mut group = glyph;
+
+        // Prescribed scaling (`.cover`), preserving the group center.
+        let factor = self.cover_factor(group, metrics, min_constraint_width);
+        let center_x = group.x + group.width / 2.0;
+        let center_y = group.y + group.height / 2.0;
+        group.width *= factor;
+        group.height *= factor;
+        group.x = center_x - group.width / 2.0;
+        group.y = center_y - group.height / 2.0;
+
+        // Prescribed alignment (`center` on both axes).
+        group.y = self.aligned_y_center(group, metrics);
+        group.x = self.aligned_x_center(group, metrics, min_constraint_width);
+
+        group
+    }
+
+    /// The `.cover` scale factor (uniform, aspect-preserving): scale so the
+    /// glyph covers the padded target box, taking the smaller of the two axis
+    /// factors. Port of `scale_factors` for `size = .cover`.
+    fn cover_factor(self, group: GlyphSize, metrics: &Metrics, min_constraint_width: u32) -> f64 {
+        let pad_width_factor = min_constraint_width as f64 - (self.pad_left + self.pad_right);
+        // `pad_top`/`pad_bottom` are 0 for the emoji constraint.
+        let pad_height_factor = 1.0;
+
+        let target_width = pad_width_factor * metrics.face_width;
+        let target_height = pad_height_factor * metrics.face_height;
+
+        let width_factor = target_width / group.width;
+        let height_factor = target_height / group.height;
+        // `.cover`: min of the two, applied uniformly.
+        width_factor.min(height_factor)
+    }
+
+    /// Vertical center alignment. Port of `aligned_y` for `align_vertical =
+    /// .center`.
+    fn aligned_y_center(self, group: GlyphSize, metrics: &Metrics) -> f64 {
+        // pad_top/pad_bottom are 0 for emoji.
+        let start_y = metrics.face_y;
+        let end_y = metrics.face_y + (metrics.face_height - group.height);
+        (start_y + end_y) / 2.0
+    }
+
+    /// Horizontal center alignment. Port of `aligned_x` for `align_horizontal =
+    /// .center`.
+    fn aligned_x_center(
+        self,
+        group: GlyphSize,
+        metrics: &Metrics,
+        min_constraint_width: u32,
+    ) -> f64 {
+        let full_face_span =
+            metrics.face_width + ((min_constraint_width - 1) * metrics.cell_width) as f64;
+        let pad_left_dx = self.pad_left * metrics.face_width;
+        let pad_right_dx = self.pad_right * metrics.face_width;
+        let start_x = pad_left_dx;
+        let end_x = full_face_span - group.width - pad_right_dx;
+        start_x.max((start_x + end_x) / 2.0)
+    }
+}
 
 /// The pixel format of a rasterized [`Bitmap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,10 +502,31 @@ impl Face {
     /// Rasterize a single glyph into a CPU [`Bitmap`], mirroring upstream's
     /// `renderGlyph` bitmap-context configuration (coretext.zig:289-567).
     ///
-    /// The reduced path renders at the glyph's natural size (no nerd-font
-    /// constraint, no synthetic bold/italic, `thicken=false`). Returns a
-    /// zero-sized blank bitmap for glyphs with no ink (spaces, control chars).
+    /// Renders at the glyph's natural size (no nerd-font constraint, no
+    /// synthetic bold/italic, `thicken=false`). To apply the emoji cell-fit
+    /// constraint, use [`Face::rasterize_constrained`]. Returns a zero-sized
+    /// blank bitmap for glyphs with no ink (spaces, control chars).
     pub fn rasterize(&self, glyph_id: u32) -> Result<Bitmap, Error> {
+        self.rasterize_constrained(glyph_id, None)
+    }
+
+    /// Rasterize a glyph, optionally applying a cell-fit constraint.
+    ///
+    /// When `constraint` is `Some((metrics, constraint_width))` **and** the
+    /// glyph is a color (emoji) glyph, upstream's emoji constraint
+    /// ([`EmojiConstraint::EMOJI`]) is applied: the authored ink box (which for
+    /// Apple Color Emoji is far larger than a cell) is scaled to cover the cell
+    /// box preserving aspect ratio and centered, and the CoreGraphics draw is
+    /// scaled to match, so the rasterized bitmap is cell-sized. Non-color
+    /// glyphs are unaffected (they already fit the cell), matching upstream —
+    /// `SharedGrid.renderGlyph` only sets a constraint on the `.emoji`
+    /// presentation. Port of the `constrain(...)` block in
+    /// `face/coretext.zig:336-390`.
+    pub fn rasterize_constrained(
+        &self,
+        glyph_id: u32,
+        constraint: Option<(&Metrics, u32)>,
+    ) -> Result<Bitmap, Error> {
         let glyph16 = u16::try_from(glyph_id).map_err(|_| Error::NoSuchGlyph)?;
         let mut glyphs = [glyph16; 1];
         let glyphs_ptr = NonNull::new(glyphs.as_mut_ptr()).unwrap();
@@ -426,14 +561,49 @@ impl Face {
             });
         }
 
-        // 6. Sub-pixel canvas sizing (coretext.zig:396-413). The reduced path
-        // uses thicken=false so canvas_padding is 0. We keep no cell-centering
-        // (constraint work is deferred), so x/y are the raw ink origin.
-        let x = rect.origin.x;
-        let y = rect.origin.y;
-        let width = rect.size.width;
-        let height = rect.size.height;
+        // 5. Apply the emoji cell-fit constraint (coretext.zig:336-380). We
+        // fold the baseline into `y` (the constraint operates on cell-relative,
+        // not baseline-relative, positions), constrain, then read back the
+        // scaled size and cell-relative origin. When no constraint applies
+        // (non-color glyph, or no metrics supplied), this leaves the raw ink
+        // rect untouched — matching the reduced natural-size path.
+        let (width, height, x, y, scale_w, scale_h) = match constraint {
+            Some((metrics, constraint_width)) if is_color => {
+                let cell_baseline = f64::from(metrics.cell_baseline);
+                let constrained = EmojiConstraint::EMOJI.constrain(
+                    GlyphSize {
+                        width: rect.size.width,
+                        height: rect.size.height,
+                        x: rect.origin.x,
+                        y: rect.origin.y + cell_baseline,
+                    },
+                    metrics,
+                    constraint_width,
+                );
+                // Undo the baseline fold to get back a CoreGraphics-space y
+                // origin for canvas sizing (the +Y-up space `rect` lives in).
+                (
+                    constrained.width,
+                    constrained.height,
+                    constrained.x,
+                    constrained.y - cell_baseline,
+                    constrained.width / rect.size.width,
+                    constrained.height / rect.size.height,
+                )
+            }
+            // No constraint: natural size, identity scale.
+            _ => (
+                rect.size.width,
+                rect.size.height,
+                rect.origin.x,
+                rect.origin.y,
+                1.0,
+                1.0,
+            ),
+        };
 
+        // 6. Sub-pixel canvas sizing (coretext.zig:396-413). The reduced path
+        // uses thicken=false so canvas_padding is 0.
         let px_x = x.floor() as i32;
         let px_y = y.floor() as i32;
         let frac_x = x - x.floor();
@@ -531,16 +701,11 @@ impl Face {
             CGContext::set_gray_stroke_color(Some(&ctx), 0.0, 1.0);
         }
 
-        // 11. CTM translate then scale (coretext.zig:522-534). No padding, no
-        // stretch (scale is identity), so only the fractional translate.
+        // 11. CTM translate then scale (coretext.zig:522-534). The scale
+        // stretches the ink to the (possibly constrained) size: identity for
+        // unconstrained glyphs, and the emoji cover-scale for color glyphs.
         CGContext::translate_ctm(Some(&ctx), frac_x, frac_y);
-        // scale = (width/rect.w, height/rect.h) = identity in the reduced path,
-        // written explicitly to match upstream ordering.
-        CGContext::scale_ctm(
-            Some(&ctx),
-            width / rect.size.width,
-            height / rect.size.height,
-        );
+        CGContext::scale_ctm(Some(&ctx), scale_w, scale_h);
 
         // 12. Draw the glyph with negated bearings so its ink bottom-left lands
         // at CTM origin [0,0] (coretext.zig:542-545).
@@ -807,6 +972,82 @@ unsafe fn cg_bitmap_context_create(
 mod tests {
     use super::*;
     use crate::metrics::Metrics;
+
+    /// The exact grid metrics upstream uses in its `Glyph.zig` "Constraints"
+    /// test (JetBrains Mono at size 12, DPI 96). Only the fields the emoji
+    /// constraint reads are meaningful; the rest are filled to plausible values.
+    fn upstream_test_metrics() -> Metrics {
+        Metrics {
+            cell_width: 10,
+            cell_height: 22,
+            cell_baseline: 5,
+            underline_position: 19,
+            underline_thickness: 1,
+            strikethrough_position: 12,
+            strikethrough_thickness: 1,
+            overline_position: 0,
+            overline_thickness: 1,
+            box_thickness: 1,
+            cursor_thickness: 1,
+            cursor_height: 22,
+            icon_height: 21.12,
+            icon_height_single: 44.48 / 3.0,
+            face_width: 9.6,
+            face_height: 21.12,
+            face_y: 0.2,
+        }
+    }
+
+    /// Port of upstream's `Glyph.zig` "Constraints" test, emoji case: `🥸`
+    /// (U+1F978) from Apple Color Emoji, bbox `{20, 20, 0.46, 1}`, constrained
+    /// with the emoji constraint at width 2 → `{18.72, 18.72, 0.44, 1.4}`. This
+    /// pins our constraint math to upstream's exact numbers.
+    #[test]
+    fn emoji_constraint_matches_upstream() {
+        let metrics = upstream_test_metrics();
+        let glyph = GlyphSize {
+            width: 20.0,
+            height: 20.0,
+            x: 0.46,
+            y: 1.0,
+        };
+        let out = EmojiConstraint::EMOJI.constrain(glyph, &metrics, 2);
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(approx(out.width, 18.72), "width {}", out.width);
+        assert!(approx(out.height, 18.72), "height {}", out.height);
+        assert!(approx(out.x, 0.44), "x {}", out.x);
+        assert!(approx(out.y, 1.4), "y {}", out.y);
+    }
+
+    /// At constraint width 1 the `.cover` factor is bound by the narrower
+    /// (width) target: a square emoji can't cover the full cell height without
+    /// overflowing one cell horizontally, so it scales to the padded face
+    /// width, aspect preserved. This proves single-cell fit doesn't overflow.
+    #[test]
+    fn emoji_constraint_single_cell_bound_by_width() {
+        let metrics = upstream_test_metrics();
+        let glyph = GlyphSize {
+            width: 20.0,
+            height: 20.0,
+            x: 0.46,
+            y: 1.0,
+        };
+        let out = EmojiConstraint::EMOJI.constrain(glyph, &metrics, 1);
+        // Padded width target = (1 - 0.05) * face_width; cover uses min factor.
+        let target_width = (1.0 - 0.05) * metrics.face_width;
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(approx(out.width, target_width), "width {}", out.width);
+        assert!(approx(out.width, out.height), "aspect preserved: {out:?}");
+        // Fits within the face box on both axes (doesn't overflow the cell).
+        assert!(
+            out.width <= metrics.face_width + 1e-9,
+            "width fits: {out:?}"
+        );
+        assert!(
+            out.height <= metrics.face_height + 1e-9,
+            "height fits: {out:?}"
+        );
+    }
 
     #[test]
     fn load_embedded_face_has_glyphs() {
