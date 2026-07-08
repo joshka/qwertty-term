@@ -83,6 +83,10 @@ struct EngineHandler {
 
 impl HubHandler for EngineHandler {
     fn on_sync_reset(&mut self) {
+        // Poison resilience (app-hardening): if the parse thread poisoned the
+        // engine lock, this `if let Ok` simply skips the sync-reset rather than
+        // panicking the writer thread — the surface is already dead and the main
+        // thread's `Surface::engine` will observe the poison and banner the pane.
         if let Ok(mut e) = self.engine.lock() {
             e.reset_synchronized_output();
         }
@@ -176,6 +180,15 @@ impl TabIo {
         let sink: ghostty_termio::exec::Sink = {
             let engine = Arc::clone(&engine);
             Box::new(move |batch: &[u8]| {
+                // Poison resilience (app-hardening): this closure runs on the
+                // io-reader/parse thread. If a PRIOR batch's `e.write` panicked
+                // (the field-observed cascade), the lock is poisoned and this
+                // `if let Ok` skips applying further output rather than
+                // re-panicking here. The main thread's `Surface::engine` recovers
+                // the poisoned guard, marks the surface dead, and banners it — so
+                // the crash degrades to one dead pane, never a dead app. Note the
+                // panic that poisons the lock is the ORIGINAL bug; this path just
+                // stops it from cascading across threads/tabs.
                 if let Ok(mut e) = engine.lock() {
                     e.write(batch);
                 }

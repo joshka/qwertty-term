@@ -16,6 +16,7 @@ pub mod font_size;
 pub mod frame_dump;
 pub mod geometry;
 pub mod input;
+pub mod keybind;
 pub mod menu;
 pub mod scroll;
 pub mod selection;

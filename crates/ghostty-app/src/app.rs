@@ -35,7 +35,7 @@
 
 #![cfg(target_os = "macos")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -291,12 +291,84 @@ struct Surface {
     /// Per-pane wheel accumulator (sub-cell pixel remainder). Port of
     /// upstream `mouse.pending_scroll_y`.
     wheel: crate::scroll::WheelState,
+    /// Poison-resilience (app-hardening): set once this surface's engine mutex
+    /// is observed poisoned — i.e. some thread (the io-reader parse thread is
+    /// the field-observed culprit) panicked while holding the engine lock. A
+    /// dead surface has had its io shut down and shows a "terminal crashed"
+    /// banner; it is NOT closed, and it never panics the app. `Cell` so the
+    /// `&self` [`Surface::engine`] accessor can flip it on first poison
+    /// observation. See [`Surface::engine`] and [`Surface::mark_dead`].
+    dead: Cell<bool>,
+    /// The short reason shown in the crash banner (e.g. the panic that poisoned
+    /// the lock). `RefCell` for the same `&self`-accessor reason as `dead`.
+    dead_reason: RefCell<Option<String>>,
+    /// Whether the one-shot crash banner has already been painted into the
+    /// (recovered) engine. Prevents re-writing it every tick.
+    banner_drawn: Cell<bool>,
+}
+
+/// Lock an engine mutex, recovering a poisoned lock instead of panicking.
+///
+/// Returns the guard and whether the lock was poisoned. Poison means a thread
+/// panicked while holding this lock (the io-reader/parse thread is the
+/// field-observed culprit — see `crate::termio`). `PoisonError::into_inner`
+/// hands back the guard regardless: the engine's memory is always valid to
+/// read (Rust guarantees no cross-poison UB), so a poisoned engine is safe for
+/// a final render and a one-shot banner write. This is the whole poison-
+/// resilience mechanism; we do not switch mutex crates. Callers use the
+/// `poisoned` flag to mark the owning surface dead.
+fn lock_or_recover(engine: &Mutex<Engine>) -> (std::sync::MutexGuard<'_, Engine>, bool) {
+    match engine.lock() {
+        Ok(guard) => (guard, false),
+        Err(poison) => (poison.into_inner(), true),
+    }
 }
 
 impl Surface {
-    /// Lock the shared engine. Held only briefly per call.
+    /// Lock the shared engine, degrading a *poisoned* lock to a dead surface
+    /// instead of panicking the whole app.
+    ///
+    /// Poison resilience (app-hardening, field-observed cascade): the engine is
+    /// shared `Arc<Mutex<Engine>>` with this surface's io-reader/parse thread
+    /// (see the parse sink in `crate::termio`). If that thread panics *while
+    /// holding the lock* — a real field crash did exactly this — the mutex is
+    /// poisoned. The previous `.expect("engine mutex poisoned")` here turned the
+    /// main thread's very next lock into a panic that took down the entire app
+    /// with *every* tab. Now we instead recover the guard via
+    /// [`PoisonError::into_inner`]: the engine's bytes are still valid to READ
+    /// (Rust guarantees no memory-unsafety across a poison; at worst the
+    /// terminal grid is one half-applied batch stale — perfectly fine for a
+    /// final render), so we hand back a live guard and mark THIS surface dead.
+    /// The pace tick ([`Controller::tick`]) then shuts this pane's io down and
+    /// shows a "terminal crashed" banner; other panes/tabs are untouched.
+    ///
+    /// We do not switch mutex crates (the task forbids it) — `into_inner` on the
+    /// std `PoisonError` is the whole mechanism.
     fn engine(&self) -> std::sync::MutexGuard<'_, Engine> {
-        self.engine.lock().expect("engine mutex poisoned")
+        match lock_or_recover(&self.engine) {
+            (guard, false) => guard,
+            (guard, true) => {
+                // First observation of poison flips this surface to dead so the
+                // next tick tears its io down + banners it. The engine data is
+                // still readable, so return the recovered guard.
+                if !self.dead.get() {
+                    self.dead.set(true);
+                    *self.dead_reason.borrow_mut() =
+                        Some("engine thread panicked (lock poisoned)".to_string());
+                }
+                guard
+            }
+        }
+    }
+
+    /// Whether this surface has been marked dead by a poison observation.
+    fn is_dead(&self) -> bool {
+        self.dead.get()
+    }
+
+    /// The short crash reason, if dead.
+    fn dead_reason(&self) -> Option<String> {
+        self.dead_reason.borrow().clone()
     }
 
     /// Rebuild the render target + grid for this pane's current view size and
@@ -345,7 +417,18 @@ impl Surface {
     /// title/password state so the tab can reflect the *focused* pane's title in
     /// the window title.
     fn pump(&mut self) -> (bool, Option<bool>) {
+        // A poison-dead surface has (or is about to have) its io shut down; skip
+        // all io servicing for it. It is neither "exited" (which would close it)
+        // nor generating password events — it just shows its crash banner.
+        if self.is_dead() {
+            return (false, None);
+        }
+        // `take_output` locks the engine; if the parse thread poisoned the lock,
+        // `engine()` recovers it and flips `dead`, so re-check before touching io.
         let out = self.engine().take_output();
+        if self.is_dead() {
+            return (false, None);
+        }
         if !out.is_empty() {
             self.io.write(&out);
         }
@@ -365,6 +448,40 @@ impl Surface {
             }
         }
         (exited, password)
+    }
+
+    /// Bring a poison-dead surface to rest exactly once: shut its io down (the
+    /// parse thread is already gone, but this joins the writer/exit threads and
+    /// releases the pty) and paint a one-shot "terminal crashed" banner into the
+    /// (recovered) engine so the pane visibly reports the crash instead of
+    /// freezing on a stale frame. Idempotent via `banner_drawn`.
+    ///
+    /// Writing the banner through the recovered engine is safe: `Engine::write`
+    /// is pure Rust over memory the `Terminal` owns, so a poisoned-but-recovered
+    /// engine cannot be driven into memory-unsafety; the worst case is a cosmetic
+    /// glitch on a pane we are already tearing down. This is the "reuse/extend
+    /// the child-exited banner path" the task asks for — a child exit closes the
+    /// pane, but a *crash* keeps it open with this banner so the user sees why.
+    fn settle_dead(&mut self) {
+        if self.banner_drawn.get() {
+            return;
+        }
+        self.banner_drawn.set(true);
+        self.io.shutdown();
+
+        let reason = self.dead_reason().unwrap_or_else(|| "unknown".to_string());
+        // A simple, self-contained banner: reset the screen, move to home, and
+        // print a bold red line. Bytes only — no engine methods beyond `write`.
+        let banner = format!(
+            "\x1b[2J\x1b[H\x1b[1;31m[terminal crashed — {reason}]\x1b[0m\r\n\
+             \x1b[0mThis pane's engine thread panicked; its shell has been \
+             stopped.\r\nClose this pane to dismiss.\r\n",
+        );
+        // Lock, recovering the guard whether or not it is poisoned (it always is
+        // by the time we get here, but be robust): either way we get a live guard
+        // over the engine's owned memory and write the banner.
+        let (mut guard, _poisoned) = lock_or_recover(&self.engine);
+        guard.write(banner.as_bytes());
     }
 
     /// Render one frame into this pane's layer. `focused` selects the hollow
@@ -421,6 +538,36 @@ impl Surface {
             self.font.cell_width,
             self.font.cell_height,
         )
+    }
+
+    /// Apply a focus change to THIS surface (per-pane focus reporting,
+    /// app-hardening). Two effects, both per-SURFACE (previously the tab drove
+    /// them per-tab, so a split tab's password poll + mode-1004 reporting were
+    /// wrong for the unfocused panes):
+    ///
+    /// 1. `io.focus(focused)` starts/stops this pane's 200ms termios password
+    ///    poll (the hub's `Writer::focus` → `Exec.focusGained` timer flag).
+    /// 2. If this pane's program enabled focus reporting (mode 1004,
+    ///    `engine.focus_reporting()`), emit `CSI I` on focus-in / `CSI O` on
+    ///    focus-out to its pty — the bytes a 1004 app expects. This mirrors
+    ///    upstream `Surface.focusCallback` (which sets `io.focused` then, under
+    ///    mode 1004, writes `focus_in`/`focus_out`) and the reference spike's
+    ///    `Event::WindowFocused` handler. A dead (poisoned) pane is skipped — its
+    ///    io is shut down.
+    fn set_focus(&mut self, focused: bool) {
+        if self.is_dead() {
+            return;
+        }
+        self.io.focus(focused);
+        // Only emit the 1004 report if the program asked for it. `engine()`
+        // degrades a poisoned lock to a dead surface (and returns), so re-check.
+        let reporting = self.engine().focus_reporting();
+        if self.is_dead() || !reporting {
+            return;
+        }
+        // CSI I = focus in, CSI O = focus out (xterm mode 1004).
+        let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        self.io.write(bytes);
     }
 
     /// Snap this pane's viewport back to the live active area (offset 0) and
@@ -678,6 +825,10 @@ pub struct ControllerState {
     /// Wheel-scroll multipliers (`mouse-scroll-multiplier` config), clamped to
     /// upstream's valid range.
     scroll_multiplier: crate::scroll::ScrollMultiplier,
+    /// User `text:` keybindings parsed from `config.keybind` at startup
+    /// (`crate::keybind`). Resolved in the key path BEFORE the encoder, so a
+    /// bound chord sends its literal bytes instead of the encoder's default.
+    keybinds: crate::keybind::KeybindTable,
 }
 
 /// The controller handle passed to views and menu targets.
@@ -722,6 +873,7 @@ impl Controller {
                 discrete: config.mouse_scroll_multiplier.discrete,
             }
             .clamped(),
+            keybinds: crate::keybind::KeybindTable::parse(&config.keybind),
         })))
     }
 
@@ -881,6 +1033,28 @@ impl Controller {
         self.0.borrow_mut().registry.activate(tab);
     }
 
+    /// A tab's window gained/lost key status (per-pane focus reporting,
+    /// app-hardening). Route the focus change to that tab's currently-focused
+    /// pane ONLY — the pane the user is looking at — matching upstream
+    /// `Surface.focusCallback` semantics where a window losing key sends
+    /// focus-out to its focused surface and a window gaining key sends focus-in.
+    /// The other panes in the tab are already unfocused and stay that way.
+    ///
+    /// This is the window-level half; intra-tab pane switches are handled in
+    /// [`Self::focus_surface_in_tab`] / [`Self::new_split`] /
+    /// [`Self::close_surface`]. Together they make mode-1004 reporting + the
+    /// 200ms password poll per-SURFACE rather than the old per-TAB wiring.
+    pub fn tab_window_focus(&self, tab: TabId, focused: bool) {
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab) else {
+            return;
+        };
+        let focused_id = t.tree.focused();
+        if let Some(s) = t.surfaces.get_mut(&focused_id) {
+            s.set_focus(focused);
+        }
+    }
+
     // -- splits smoke/test accessors --------------------------------------
 
     /// The number of panes (surfaces) in the active tab (smoke/test only).
@@ -958,6 +1132,40 @@ impl Controller {
         if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
             s.engine().write(bytes);
         }
+    }
+
+    /// Poison a surface's engine lock (smoke/test only) by spawning a thread that
+    /// panics while holding it — reproducing the field-observed cascade where the
+    /// io-reader/parse thread crashes mid-lock. The controller must survive: the
+    /// next [`Controller::tick`] observes the poison, marks the surface dead,
+    /// shuts its io down, and banners it, while every other pane keeps working.
+    pub fn poison_surface_engine(&self, tab: TabId, surface: SurfaceId) {
+        let engine = {
+            let state = self.0.borrow();
+            state
+                .tabs
+                .get(&tab)
+                .and_then(|t| t.surfaces.get(&surface))
+                .map(|s| Arc::clone(&s.engine))
+        };
+        if let Some(engine) = engine {
+            let handle = std::thread::spawn(move || {
+                let _guard = engine.lock().expect("engine lock");
+                panic!("smoke: simulated parse-thread crash holding the engine lock");
+            });
+            // Join so the poison is in place before we return (the thread panics).
+            let _ = handle.join();
+        }
+    }
+
+    /// Whether a surface has been marked poison-dead (smoke/test only).
+    pub fn surface_is_dead(&self, tab: TabId, surface: SurfaceId) -> Option<bool> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.is_dead())
     }
 
     /// The active tab's divider paths in layout order (smoke/test only) — the
@@ -1108,6 +1316,40 @@ impl Controller {
             }
             None => Some((1, 1)),
         }
+    }
+
+    /// If the user has a `text:` keybind for `key`+`mods`, send its literal
+    /// bytes to `surface`'s pty and return `true` (consuming the key so it never
+    /// reaches the encoder). Returns `false` if no binding matches, so the caller
+    /// proceeds to normal encoding.
+    ///
+    /// This is the user-keybind counterpart to [`Self::handle_tab_action`] /
+    /// [`Self::handle_split_action`]: those intercept built-in nav chords in
+    /// `performKeyEquivalent:`; this intercepts arbitrary user `text:` chords in
+    /// the `keyDown:` path, BEFORE `interpretKeyEvents` / the encoder, so e.g.
+    /// `shift+enter=text:\x1b\r` sends ESC CR instead of the encoder's plain CR.
+    /// Sending bytes snaps the pane's viewport to the live area, same as a
+    /// normal keystroke.
+    pub fn try_text_keybind_to_surface(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+        key: ghostty_input::key::Key,
+        mods: crate::tabkeys::TabMods,
+    ) -> bool {
+        let mut state = self.0.borrow_mut();
+        let Some(bytes) = state.keybinds.resolve(key, mods).map(<[u8]>::to_vec) else {
+            return false;
+        };
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            s.snap_to_bottom();
+            s.io.write(&bytes);
+        }
+        true
     }
 
     /// Encode a raw key event and write it to `surface`'s PTY (within `tab`).
@@ -1284,8 +1526,23 @@ impl Controller {
             let Some(t) = state.tabs.get_mut(&tab) else {
                 return;
             };
+            // Per-pane focus reporting (app-hardening): remember the outgoing
+            // pane so we can send it focus-OUT and the incoming pane focus-IN.
+            let previous = t.tree.focused();
             if !t.tree.focus(surface) {
                 return;
+            }
+            // A real transition (different pane) drives the per-surface focus
+            // change: the newly-focused pane gets `focus(true)` (mode-1004 CSI I
+            // + password poll on), the previous one `focus(false)` (CSI O +
+            // poll off). Same-pane re-focus is a no-op for reporting.
+            if previous != surface {
+                if let Some(prev) = t.surfaces.get_mut(&previous) {
+                    prev.set_focus(false);
+                }
+                if let Some(next) = t.surfaces.get_mut(&surface) {
+                    next.set_focus(true);
+                }
             }
             t.focused_surface().map(|s| s.view.clone())
         };
@@ -1421,6 +1678,14 @@ impl Controller {
                     if surface_exited {
                         dead.push((*tid, *sid));
                     } else {
+                        // Poison-dead surface: settle it (shut io down + paint the
+                        // crash banner) once, then keep rendering so the banner
+                        // shows. It is deliberately NOT pushed onto `dead` — a
+                        // crashed pane stays open (unlike a clean child exit) so
+                        // the user sees why, and other panes/tabs are unaffected.
+                        if surface.is_dead() {
+                            surface.settle_dead();
+                        }
                         surface.render(*sid == focused);
                     }
                     if *sid == focused
@@ -1513,6 +1778,9 @@ impl Controller {
             capture_present,
             scrollback_offset: 0,
             wheel: crate::scroll::WheelState::default(),
+            dead: Cell::new(false),
+            dead_reason: RefCell::new(None),
+            banner_drawn: Cell::new(false),
         })
     }
 
@@ -1643,10 +1911,23 @@ impl Controller {
             let Some(t) = state.tabs.get_mut(&tab) else {
                 return;
             };
+            // The pane that was focused before this split loses focus to the new
+            // pane (per-pane focus reporting): send it focus-OUT.
+            let previous = t.tree.focused();
             t.container.addSubview(&surface.view);
             t.surfaces.insert(surface_id, surface);
             t.tree.split(surface_id, direction);
             t.relayout(controller_ptr, tab, mtm);
+            // `split` focuses the new pane. Route focus-out to the old pane and
+            // focus-in to the new one (mode-1004 + password poll, per surface).
+            if previous != surface_id
+                && let Some(prev) = t.surfaces.get_mut(&previous)
+            {
+                prev.set_focus(false);
+            }
+            if let Some(next) = t.surfaces.get_mut(&surface_id) {
+                next.set_focus(true);
+            }
         }
 
         // Focus the new pane (first responder) outside the borrow.
@@ -1711,16 +1992,29 @@ impl Controller {
             let Some(t) = state.tabs.get_mut(&tab) else {
                 return;
             };
+            // Per-pane focus reporting: note who was focused before the close so
+            // we only send focus-IN to the sibling if focus actually MOVED to it
+            // (closing an unfocused, e.g. crashed/exited, pane leaves focus put).
+            let previous_focus = t.tree.focused();
             match t.tree.close(surface) {
                 None => Outcome::CloseTab,
                 Some(new_focus) => {
                     // Remove the pane bundle (drops its view + joins io threads).
+                    // The closed pane's io is torn down, so no focus-out for it.
                     if let Some(dead) = t.surfaces.remove(&surface) {
                         dead.view.removeFromSuperview();
                     } else {
                         return; // already gone
                     }
                     t.relayout(controller_ptr, tab, mtm);
+                    // If focus moved to the sibling (the closed pane was the
+                    // focused one), send that sibling focus-IN (mode-1004 + poll).
+                    if previous_focus == surface
+                        && new_focus != surface
+                        && let Some(next) = t.surfaces.get_mut(&new_focus)
+                    {
+                        next.set_focus(true);
+                    }
                     let view = t.surfaces.get(&new_focus).map(|s| s.view.clone());
                     Outcome::Refocus(view)
                 }
@@ -1878,11 +2172,24 @@ define_class!(
     unsafe impl NSObjectProtocol for WindowDelegate {}
 
     unsafe impl NSWindowDelegate for WindowDelegate {
-        /// The window (tab) became key: mark its tab active in the controller.
+        /// The window (tab) became key: mark its tab active in the controller and
+        /// route focus-IN to its focused pane (per-pane mode-1004 reporting +
+        /// password poll). A focused-pane 1004 app sees `CSI I` on window focus.
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
             let ivars = self.ivars();
             ivars.controller.set_active(ivars.tab);
+            ivars.controller.tab_window_focus(ivars.tab, true);
+        }
+
+        /// The window (tab) resigned key (another window/app took focus): route
+        /// focus-OUT to this tab's focused pane only (`CSI O` under mode 1004,
+        /// password poll off). The other panes are already unfocused. This is the
+        /// window half of upstream `Surface.focusCallback(false)`.
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            let ivars = self.ivars();
+            ivars.controller.tab_window_focus(ivars.tab, false);
         }
 
         /// The window resized: reflow the tab to the new view size (and
@@ -1945,6 +2252,16 @@ pub struct DelegateIvars {
     /// Splits smoke phase state carried from phase 1 to phase 2: the tab under
     /// test and each pane's `(SurfaceId, unique marker)`.
     splits_state: RefCell<Option<SplitsSmokeState>>,
+    /// Keybind smoke (`GHOSTTY_APP_SMOKE_KEYBIND`): drive the seeded shift+enter
+    /// `text:` binding + a plain enter through the real key path and assert the
+    /// pty round-trip. See [`AppDelegate::run_keybind_smoke`].
+    smoke_keybind: bool,
+    /// Focus-reporting smoke (`GHOSTTY_APP_SMOKE_FOCUS`): two `cat -v` panes with
+    /// mode 1004 on; focus-switch and assert focus-in/out bytes reach the right
+    /// ptys. See [`AppDelegate::run_focus_smoke`].
+    smoke_focus: bool,
+    /// Focus smoke phase state: the tab + the two panes' `(SurfaceId)` ids.
+    focus_state: RefCell<Option<(TabId, SurfaceId, SurfaceId)>>,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -1985,11 +2302,17 @@ define_class!(
             let has_geometry = self.ivars().smoke_geometry;
             let has_tabkeys = self.ivars().smoke_tabkeys;
             let has_splits = self.ivars().smoke_splits;
+            let has_keybind = self.ivars().smoke_keybind;
+            let has_focus = self.ivars().smoke_focus;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
             } else if has_tabkeys {
                 self.schedule_tabkeys_smoke();
+            } else if has_keybind {
+                self.schedule_keybind_smoke();
+            } else if has_focus {
+                self.schedule_focus_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -2095,6 +2418,31 @@ define_class!(
         fn splits_smoke_check(&self, _timer: &AnyObject) {
             self.finish_splits_smoke();
         }
+
+        /// Keybind smoke phase 1: drive shift+enter (the seeded `text:` binding)
+        /// then a plain enter through the real window key path.
+        #[unsafe(method(ghosttyKeybindSmoke:))]
+        fn keybind_smoke(&self, _timer: &AnyObject) {
+            self.run_keybind_smoke();
+        }
+
+        /// Keybind smoke phase 2: assert the pty round-trip and exit 0/1.
+        #[unsafe(method(ghosttyKeybindSmokeCheck:))]
+        fn keybind_smoke_check(&self, _timer: &AnyObject) {
+            self.finish_keybind_smoke();
+        }
+
+        /// Focus smoke phase 1: split into 2 `cat -v` panes, enable mode 1004.
+        #[unsafe(method(ghosttyFocusSmoke:))]
+        fn focus_smoke(&self, _timer: &AnyObject) {
+            self.run_focus_smoke();
+        }
+
+        /// Focus smoke phase 2: focus-switch, assert focus-in/out bytes, exit.
+        #[unsafe(method(ghosttyFocusSmokeCheck:))]
+        fn focus_smoke_check(&self, _timer: &AnyObject) {
+            self.finish_focus_smoke();
+        }
     }
 );
 
@@ -2109,6 +2457,8 @@ impl AppDelegate {
         smoke_geometry: bool,
         smoke_tabkeys: bool,
         smoke_splits: bool,
+        smoke_keybind: bool,
+        smoke_focus: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -2118,6 +2468,9 @@ impl AppDelegate {
             smoke_tabkeys,
             smoke_splits,
             splits_state: RefCell::new(None),
+            smoke_keybind,
+            smoke_focus,
+            focus_state: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -2901,9 +3254,66 @@ impl AppDelegate {
             ));
         }
 
+        // --- Poison resilience (app-hardening): crash ONE pane's engine (the
+        // field-observed cascade — the parse thread panics holding the lock) and
+        // assert the whole app survives: that pane is marked dead + banners while
+        // every other pane keeps rendering and stays alive. ---
+        {
+            // All three panes are healthy before the crash.
+            for sid in [left, top_right, bottom_right] {
+                if controller.surface_is_dead(tab, sid) != Some(false) {
+                    fail(format!(
+                        "pane {sid:?} should be healthy before the poison test"
+                    ));
+                }
+            }
+            // Poison the top-right pane's engine lock.
+            controller.poison_surface_engine(tab, top_right);
+            // Drive one pace tick: it must NOT panic (pre-fix, the first
+            // `engine.lock().unwrap()` here took the whole app down). The tick
+            // observes the poison, marks the pane dead, shuts its io down, and
+            // paints the crash banner.
+            controller.tick();
+
+            if controller.surface_is_dead(tab, top_right) != Some(true) {
+                fail("the poisoned pane was not marked dead after a tick".into());
+            }
+            // Crucially, the app survived and the OTHER panes are still healthy
+            // and still present (the crash degraded to one dead SURFACE, not a
+            // dead app). The tab is unchanged (dead panes stay open, not closed).
+            if controller.surface_is_dead(tab, left) != Some(false)
+                || controller.surface_is_dead(tab, bottom_right) != Some(false)
+            {
+                fail("a crash in one pane wrongly marked a sibling pane dead".into());
+            }
+            if controller.active_surface_count() != Some(3) {
+                fail(format!(
+                    "the crashed pane must stay open (banner), not close: expected 3 \
+                     panes, saw {:?}",
+                    controller.active_surface_count()
+                ));
+            }
+            // The dead pane's engine now shows the crash banner (proof it settled
+            // and rendered a final state rather than freezing/crashing).
+            let banner_screen = controller
+                .surface_screen_text(tab, top_right)
+                .unwrap_or_default();
+            if !banner_screen.contains("terminal crashed") {
+                fail(format!(
+                    "the dead pane should show the 'terminal crashed' banner, saw:\n{banner_screen}"
+                ));
+            }
+            // A second tick still doesn't panic and doesn't re-close anything.
+            controller.tick();
+            if controller.active_surface_count() != Some(3) {
+                fail("a second tick after the crash disturbed the pane count".into());
+            }
+        }
+
         // --- Close-collapse: close the middle pane (top-right). The tree
         // collapses so the sibling (bottom-right) absorbs the right column →
-        // 2 panes remain. ---
+        // 2 panes remain. (This also cleanly closes the crashed pane, proving a
+        // dead pane is still closable.) ---
         controller.close_surface(tab, top_right);
         if controller.active_surface_count() != Some(2) {
             fail(format!(
@@ -2945,10 +3355,259 @@ impl AppDelegate {
              (each marker only in its own pane), directional focus walks the grid, \
              a divider drag resizes both adjacent panes' grids, wheel-scrolling one \
              pane back leaves the others pinned to the live area (per-pane scrollback \
-             isolation), closing the middle pane collapses to 2 with the sibling \
-             absorbing the space, and closing every pane closes the tab."
+             isolation), poisoning one pane's engine marks only that pane dead \
+             (crash banner) while the app + sibling panes survive, closing the \
+             middle pane collapses to 2 with the sibling absorbing the space, and \
+             closing every pane closes the tab."
         );
         std::process::exit(0);
+    }
+
+    /// Schedule the keybind smoke: let the shell draw its prompt, then run phase 1.
+    fn schedule_keybind_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyKeybindSmoke:));
+    }
+
+    /// Keybind smoke phase 1. The controller was seeded with
+    /// `shift+enter=text:zzKBMARKERzz` (see `main::run_window`). Deliver a
+    /// synthetic **Shift+Return** keyDown through the real window key path: it
+    /// must hit `TerminalView::keyDown:` → `try_handle_text_keybind` → the
+    /// controller's keybind table BEFORE the encoder, and send the literal marker
+    /// bytes to the focused pane's pty (so the shell echoes the marker). Then a
+    /// plain **Return** (no shift) must NOT match the binding and instead encode
+    /// to CR, submitting the line (so the marker runs → "command not found"
+    /// appears, proving plain enter still sends `\r`). Phase 2 asserts the screen.
+    fn run_keybind_smoke(&self) {
+        let mtm = self.mtm();
+        let app = NSApplication::sharedApplication(mtm);
+        let controller = &self.ivars().controller;
+
+        let win_num: isize = app
+            .keyWindow()
+            .or_else(|| controller.active_window())
+            .map(|w| w.windowNumber())
+            .unwrap_or(0);
+
+        // Shift+Return: the seeded `text:` binding fires (marker bytes → pty).
+        Self::send_keydown(
+            &app,
+            win_num,
+            KEYCODE_RETURN,
+            "\r",
+            NSEventModifierFlags::Shift,
+        );
+        // Plain Return: not bound → encoder sends CR → the marker line is
+        // submitted and runs.
+        Self::send_keydown(
+            &app,
+            win_num,
+            KEYCODE_RETURN,
+            "\r",
+            NSEventModifierFlags::empty(),
+        );
+
+        // Give the shell time to echo the marker + run it, then check.
+        self.schedule_selector(1.0, sel!(ghosttyKeybindSmokeCheck:));
+    }
+
+    /// Keybind smoke phase 2: the focused pane's screen must contain the marker
+    /// (proof shift+enter routed the `text:` bytes to the pty via the keybind
+    /// path). Because plain Return then submitted it, the marker appears at least
+    /// once (its echo). Exits 0/1.
+    fn finish_keybind_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let screen = controller.active_screen_text().unwrap_or_default();
+        const MARKER: &str = "zzKBMARKERzz";
+        let count = screen.matches(MARKER).count();
+        if count < 1 {
+            eprintln!(
+                "FAIL: keybind smoke — the shift+enter `text:` binding did not reach \
+                 the pty: marker '{MARKER}' absent from the focused pane. The keybind \
+                 path (keyDown → try_handle_text_keybind → controller) is broken.\n\
+                 ----- screen -----\n{screen}\n------------------"
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "OK: keybind smoke — shift+enter fired the seeded `text:` binding, \
+             sending its literal bytes to the focused pane's pty (marker '{MARKER}' \
+             found {count}x), and a plain enter fell through to the encoder (CR) to \
+             submit the line. The maintainer's exact `\\x1b\\r` bytes are unit-tested \
+             in keybind.rs."
+        );
+        std::process::exit(0);
+    }
+
+    /// Build + dispatch a synthetic keyDown `NSEvent` through the app responder
+    /// chain (`app.sendEvent`), the exact path a hardware keystroke takes to
+    /// `TerminalView::keyDown:`. `chars` is the event's characters string.
+    fn send_keydown(
+        app: &NSApplication,
+        win_num: isize,
+        keycode: u16,
+        chars: &str,
+        mods: NSEventModifierFlags,
+    ) {
+        let ns_chars = NSString::from_str(chars);
+        // SAFETY: standard keyDown NSEvent constructor; nil context; main-thread
+        // dispatch through the app like a real event.
+        unsafe {
+            let cls = objc2::class!(NSEvent);
+            let event: Option<Retained<objc2_app_kit::NSEvent>> = msg_send![
+                cls,
+                keyEventWithType: NSEventType::KeyDown,
+                location: NSPoint::new(0.0, 0.0),
+                modifierFlags: mods,
+                timestamp: 0.0_f64,
+                windowNumber: win_num,
+                context: std::ptr::null::<AnyObject>(),
+                characters: &*ns_chars,
+                charactersIgnoringModifiers: &*ns_chars,
+                isARepeat: false,
+                keyCode: keycode,
+            ];
+            if let Some(event) = event {
+                app.sendEvent(&event);
+            }
+        }
+    }
+
+    /// Schedule the focus-reporting smoke: let the first shell draw its prompt,
+    /// then run phase 1.
+    fn schedule_focus_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyFocusSmoke:));
+    }
+
+    /// Focus-reporting smoke phase 1 (per-pane mode-1004, app-hardening). Split
+    /// into two panes, run `cat -v` in each (so any bytes we send to a pane's pty
+    /// are echoed back with control chars made visible — ESC shows as `^[`), and
+    /// enable focus reporting (mode 1004) in BOTH engines by feeding the SM
+    /// sequence straight into each engine (so `focus_reporting()` is true without
+    /// needing the child to emit it). Phase 2 focus-switches and asserts the
+    /// focus-in/out bytes land at the right ptys.
+    fn run_focus_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = focus_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at focus smoke start".into());
+        };
+        // Split right → 2 panes; the new (right) pane is focused.
+        controller.new_split(tab, Direction::Right);
+        let (tab_id, surfaces) = controller
+            .active_surfaces()
+            .unwrap_or_else(|| fail("no surfaces after split".into()));
+        if surfaces.len() != 2 {
+            fail(format!("expected 2 panes, saw {}", surfaces.len()));
+        }
+        let (left, right) = (surfaces[0], surfaces[1]);
+
+        // Run `cat -v` in each pane so sent bytes echo back visibly (^[ for ESC).
+        controller.write_to_surface(tab_id, left, b"exec cat -v\n");
+        controller.write_to_surface(tab_id, right, b"exec cat -v\n");
+
+        // Enable mode 1004 in BOTH engines (feed the SM sequence directly so it
+        // sets the engine mode deterministically, without the child's help).
+        controller.feed_surface_output(tab_id, left, b"\x1b[?1004h");
+        controller.feed_surface_output(tab_id, right, b"\x1b[?1004h");
+
+        *self.ivars().focus_state.borrow_mut() = Some((tab_id, left, right));
+
+        // Give `cat -v` a beat to take over each pty, then focus-switch + assert.
+        self.schedule_selector(0.8, sel!(ghosttyFocusSmokeCheck:));
+    }
+
+    /// Focus-reporting smoke phase 2. The right pane is focused (mode 1004 now on
+    /// in both). Switch focus to the LEFT pane: that must send the RIGHT pane
+    /// focus-OUT (`CSI O`) and the LEFT pane focus-IN (`CSI I`), each delivered to
+    /// that pane's OWN pty (proof reporting is per-SURFACE, not per-tab). With
+    /// `cat -v` echoing, the left pane's screen shows `^[[I` and the right's shows
+    /// `^[[O`. Then switch back and assert the reverse. Exits 0/1.
+    fn finish_focus_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = focus_fail;
+        let (tab, left, right) = self
+            .ivars()
+            .focus_state
+            .borrow()
+            .unwrap_or_else(|| fail("focus smoke phase-2 state missing".into()));
+
+        // Sanity: right is focused coming out of the split.
+        if controller.active_focused_surface() != Some(right) {
+            fail("the newly-split (right) pane should be focused before the switch".into());
+        }
+
+        // Switch focus right → left: right gets CSI O, left gets CSI I.
+        controller.focus_surface_in_tab(tab, left);
+        // Let cat -v echo the bytes back and the engine render them.
+        Self::spin(0.4);
+
+        let left_screen = controller
+            .surface_screen_text(tab, left)
+            .unwrap_or_default();
+        let right_screen = controller
+            .surface_screen_text(tab, right)
+            .unwrap_or_default();
+        // `cat -v` renders ESC as `^[`, so CSI I = `^[[I`, CSI O = `^[[O`.
+        if !left_screen.contains("^[[I") {
+            fail(format!(
+                "focus-IN (CSI I → '^[[I') did not reach the newly-focused LEFT pane's \
+                 pty.\n--- left screen ---\n{left_screen}"
+            ));
+        }
+        if !right_screen.contains("^[[O") {
+            fail(format!(
+                "focus-OUT (CSI O → '^[[O') did not reach the un-focused RIGHT pane's \
+                 pty.\n--- right screen ---\n{right_screen}"
+            ));
+        }
+        // Cross-check: the focus-in went to LEFT only (right didn't get a spurious
+        // CSI I from this switch beyond what it may already show), and left got
+        // its CSI I. The decisive per-surface property is that each pane received
+        // the correct direction — asserted above.
+
+        // Switch back left → right: left gets CSI O, right gets CSI I.
+        controller.focus_surface_in_tab(tab, right);
+        Self::spin(0.4);
+        let left_screen2 = controller
+            .surface_screen_text(tab, left)
+            .unwrap_or_default();
+        let right_screen2 = controller
+            .surface_screen_text(tab, right)
+            .unwrap_or_default();
+        if !right_screen2.contains("^[[I") {
+            fail(format!(
+                "focus-IN did not reach the RIGHT pane after switching back.\n\
+                 --- right screen ---\n{right_screen2}"
+            ));
+        }
+        if !left_screen2.contains("^[[O") {
+            fail(format!(
+                "focus-OUT did not reach the LEFT pane after switching away.\n\
+                 --- left screen ---\n{left_screen2}"
+            ));
+        }
+
+        println!(
+            "OK: focus smoke — with mode 1004 on in two panes, switching pane focus \
+             delivers CSI I (focus-in) to the newly-focused pane's pty and CSI O \
+             (focus-out) to the previously-focused pane's pty, per SURFACE. Switching \
+             back delivers the reverse. Per-pane focus reporting works."
+        );
+        std::process::exit(0);
+    }
+
+    /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
+    /// (the smoke drives assertions synchronously between focus switches, but the
+    /// pty round-trip + render happen on the run loop). Runs the default run loop
+    /// in short slices.
+    fn spin(secs: f64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
+        while std::time::Instant::now() < deadline {
+            let rl = objc2_foundation::NSRunLoop::currentRunLoop();
+            let until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.02);
+            rl.runUntilDate(&until);
+        }
     }
 
     /// Schedule a one-shot `selector` on `self` `secs` out.
@@ -3052,6 +3711,12 @@ fn splits_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a focus smoke failure and exit non-zero.
+fn focus_fail(msg: String) -> ! {
+    eprintln!("FAIL: focus smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -3062,6 +3727,7 @@ fn tabkeys_fail(msg: String) -> ! {
 // macOS physical (Carbon `kVK_*`) keycodes used by the tab-keys smoke's
 // synthetic events. Layout-independent, matching `crate::input::keymap`.
 const KEYCODE_TAB: u16 = 0x30; // kVK_Tab
+const KEYCODE_RETURN: u16 = 0x24; // kVK_Return
 const KEYCODE_I: u16 = 0x22; // kVK_ANSI_I
 const KEYCODE_1: u16 = 0x12; // kVK_ANSI_1
 const KEYCODE_3: u16 = 0x14; // kVK_ANSI_3
@@ -3137,8 +3803,13 @@ fn smoke_marker(script: &str) -> String {
 /// drive the built-in tab chords via real `performKeyEquivalent:` events, assert
 /// the active-tab index after each, exit); `smoke_splits` instead runs the
 /// splits smoke (split right + down into 3 panes, assert isolated shells,
-/// directional focus, divider resize, and close-collapse, exit). Returns after
-/// the run loop exits.
+/// directional focus, divider resize, and close-collapse, exit); `smoke_keybind`
+/// instead runs the keybind smoke (seed the maintainer's shift+enter `text:`
+/// binding, drive shift+enter + plain enter through the real key path, assert
+/// the pty round-trip, exit); `smoke_focus` instead runs the per-pane
+/// focus-reporting smoke (two `cat -v` panes with mode 1004 on; focus-switch and
+/// assert focus-in/out bytes reach the right ptys, exit). Returns after the run
+/// loop exits.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     config: &crate::config::Config,
@@ -3147,6 +3818,8 @@ pub fn run(
     smoke_geometry: bool,
     smoke_tabkeys: bool,
     smoke_splits: bool,
+    smoke_keybind: bool,
+    smoke_focus: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -3161,6 +3834,8 @@ pub fn run(
         smoke_geometry,
         smoke_tabkeys,
         smoke_splits,
+        smoke_keybind,
+        smoke_focus,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
@@ -3171,6 +3846,9 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::arrow_key_bytes;
+    use super::lock_or_recover;
+    use crate::engine::Engine;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn arrow_key_bytes_match_upstream_alternate_scroll_sequences() {
@@ -3180,5 +3858,77 @@ mod tests {
         // Application mode (DECCKM on): SS3 A / SS3 B.
         assert_eq!(arrow_key_bytes(true, true), b"\x1bOA");
         assert_eq!(arrow_key_bytes(false, true), b"\x1bOB");
+    }
+
+    /// Poison resilience (app-hardening): reproduce the field-observed cascade —
+    /// a thread panics while holding one surface's engine lock, poisoning it —
+    /// and assert (1) recovering that lock does NOT panic (the app survives), (2)
+    /// the poison is observed so the owning surface can be marked dead, (3) the
+    /// recovered engine's state is still readable for a final render, and (4) a
+    /// *second* surface's engine (a separate `Arc<Mutex<Engine>>`) is entirely
+    /// unaffected — it locks cleanly and keeps working.
+    ///
+    /// This exercises the exact mechanism `Surface::engine` uses
+    /// (`lock_or_recover` → `PoisonError::into_inner` + a dead flag). The full
+    /// `Controller`/`Surface` path additionally needs AppKit (`TerminalView`) and
+    /// a live pty, so the controller-survives-and-banners assertion is covered by
+    /// the windowed splits smoke; this unit test pins the resilience primitive.
+    #[test]
+    fn poisoned_engine_lock_degrades_to_dead_surface_not_dead_app() {
+        // Two independent surfaces' engines (the real per-surface sharing shape).
+        let crashed: Arc<Mutex<Engine>> = Arc::new(Mutex::new(Engine::new(20, 3)));
+        let survivor: Arc<Mutex<Engine>> = Arc::new(Mutex::new(Engine::new(20, 3)));
+
+        // Seed distinct content, then poison ONLY the first engine's lock by
+        // panicking a spawned thread while it holds the guard (exactly what the
+        // io-reader/parse thread did in the field).
+        {
+            let mut e = crashed.lock().unwrap();
+            e.write(b"crashed-pane");
+        }
+        {
+            let mut e = survivor.lock().unwrap();
+            e.write(b"live-pane");
+        }
+        let poisoner = {
+            let crashed = Arc::clone(&crashed);
+            std::thread::spawn(move || {
+                let _guard = crashed.lock().unwrap();
+                panic!("simulated parse-thread crash while holding the engine lock");
+            })
+        };
+        // The spawned thread panics; joining it returns Err but must not unwind
+        // into us — the main thread stays alive, mirroring the app surviving.
+        assert!(
+            poisoner.join().is_err(),
+            "poisoner thread should have panicked"
+        );
+
+        // (1)+(2): recovering the poisoned lock does not panic and reports the
+        // poison, so the owning surface would be marked dead.
+        let (crashed_guard, was_poisoned) = lock_or_recover(&crashed);
+        assert!(
+            was_poisoned,
+            "the crashed surface's lock must be observed as poisoned (→ mark dead)"
+        );
+        // (3): its engine state is still readable for the final render / banner.
+        assert!(
+            crashed_guard.screen_dump().contains("crashed-pane"),
+            "the recovered engine must still be readable for a final render"
+        );
+        drop(crashed_guard);
+
+        // (4): the OTHER surface's engine is untouched — it locks cleanly (not
+        // poisoned) and keeps working, proving the crash did not cascade.
+        let (mut survivor_guard, survivor_poisoned) = lock_or_recover(&survivor);
+        assert!(
+            !survivor_poisoned,
+            "an unrelated surface's lock must remain healthy after another's crash"
+        );
+        assert!(survivor_guard.screen_dump().contains("live-pane"));
+        // And it can still accept new output — a live, working pane. Use a fresh
+        // line so the short 20-col grid doesn't wrap the marker.
+        survivor_guard.write(b"\r\nok");
+        assert!(survivor_guard.screen_dump().contains("ok"));
     }
 }

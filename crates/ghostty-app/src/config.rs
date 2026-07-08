@@ -41,6 +41,17 @@ pub struct Config {
     /// table: `[mouse-scroll-multiplier]` with `precision`/`discrete` keys.
     #[serde(rename = "mouse-scroll-multiplier")]
     pub mouse_scroll_multiplier: MouseScrollMultiplier,
+    /// User keybindings, each `"<trigger>=text:<value>"` — a TOML-array-friendly
+    /// spelling of ghostty's repeatable `keybind = <trigger>=<action>` config
+    /// key. Only the `text:` action subset is supported (see
+    /// [`crate::keybind`]); the trigger is `+`-joined modifiers + a key name,
+    /// and the `text:` value uses ghostty's escape sequences (`\x1b`, `\r`, `\e`,
+    /// `\\`, …). The maintainer's real binding is
+    /// `"shift+enter=text:\\x1b\\r"`. Unknown actions/keys are logged and
+    /// skipped, never fatal. Parsed into a [`crate::keybind::KeybindTable`] at
+    /// startup (`crate::app::Controller::new`).
+    #[serde(default)]
+    pub keybind: Vec<String>,
 }
 
 /// The `[mouse-scroll-multiplier]` config table. Field defaults match
@@ -84,6 +95,15 @@ const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
 # [mouse-scroll-multiplier]
 # precision = 1.0
 # discrete = 3.0
+
+# Keybindings. Each entry is "<trigger>=text:<value>": a `+`-joined chord
+# (modifiers shift/ctrl/alt/cmd + a key name like enter/tab/escape/space, a
+# letter, a digit, f1-f12, or an arrow) that sends literal <value> bytes to the
+# focused pane, BEFORE the normal key encoder. Only the `text:` action is
+# supported. The value uses ghostty's escapes: \x1b (ESC), \r, \n, \t, \e (ESC),
+# \\ (backslash). Unknown triggers/actions are ignored with a warning.
+# Example (send ESC+CR on Shift+Enter — many TUIs read this as "soft newline"):
+# keybind = ["shift+enter=text:\\x1b\\r"]
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -157,6 +177,36 @@ mod tests {
         );
         assert_eq!(config.mouse_scroll_multiplier.precision, 1.0);
         assert_eq!(config.mouse_scroll_multiplier.discrete, 3.0);
+        assert!(config.keybind.is_empty());
+    }
+
+    #[test]
+    fn parses_keybind_array_including_maintainer_binding() {
+        // TOML-friendly array spelling; the maintainer's real binding needs the
+        // backslashes escaped in the TOML string, so `\\x1b\\r` in the file is
+        // the two-token `\x1b\r` value the keybind parser then unescapes.
+        let toml = r#"keybind = ["shift+enter=text:\\x1b\\r", "ctrl+a=text:\\e[H"]"#;
+        let config = parse(toml).unwrap();
+        assert_eq!(
+            config.keybind,
+            vec![
+                "shift+enter=text:\\x1b\\r".to_string(),
+                "ctrl+a=text:\\e[H".to_string()
+            ]
+        );
+        // End-to-end: the array parses into a live table with the right bytes.
+        let table = crate::keybind::KeybindTable::parse(&config.keybind);
+        assert_eq!(table.len(), 2);
+        assert_eq!(
+            table.resolve(
+                ghostty_input::key::Key::Enter,
+                crate::tabkeys::TabMods {
+                    shift: true,
+                    ..Default::default()
+                }
+            ),
+            Some(&b"\x1b\r"[..])
+        );
     }
 
     #[test]

@@ -31,10 +31,19 @@
 //!   exit 0/1.
 //! - `GHOSTTY_APP_SMOKE_SPLITS=1` — run the splits smoke: split the pane right
 //!   then down (3 panes), assert 3 isolated shells (each marker only in its own
-//!   pane), directional focus navigation, divider-driven per-pane resize, and
-//!   close-collapse (middle pane close → 2 panes; close all → tab closes), then
-//!   exit 0/1. Pair with `GHOSTTY_APP_ASSERT_PRESENT=1` to also assert each pane
-//!   presented real ink in its own rect.
+//!   pane), directional focus navigation, divider-driven per-pane resize,
+//!   poison-resilience (crash one pane's engine → it alone dies + banners, app +
+//!   siblings survive), and close-collapse (middle pane close → 2 panes; close
+//!   all → tab closes), then exit 0/1. Pair with `GHOSTTY_APP_ASSERT_PRESENT=1`
+//!   to also assert each pane presented real ink in its own rect.
+//! - `GHOSTTY_APP_SMOKE_KEYBIND=1` — run the keybind smoke: seed the maintainer's
+//!   `shift+enter=text:...` binding, drive Shift+Return + plain Return through the
+//!   real key path, and assert shift+enter's `text:` bytes reached the focused
+//!   pane's pty while plain enter still submitted (CR), then exit 0/1.
+//! - `GHOSTTY_APP_SMOKE_FOCUS=1` — run the per-pane focus-reporting smoke: two
+//!   `cat -v` panes with mode 1004 enabled; focus-switch and assert the focus-in
+//!   (`CSI I`) / focus-out (`CSI O`) bytes reach the correct per-surface ptys,
+//!   then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -83,7 +92,7 @@ fn run_offscreen_smoke() {
 
 #[cfg(target_os = "macos")]
 fn run_window() {
-    let config = ghostty_app::config::load();
+    let mut config = ghostty_app::config::load();
     let smoke_ms = std::env::var("GHOSTTY_APP_SMOKE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -104,6 +113,24 @@ fn run_window() {
     // Splits smoke: split into 3 panes, assert isolated shells / directional
     // focus / divider resize / close-collapse, then exit (see app::run).
     let smoke_splits = std::env::var_os("GHOSTTY_APP_SMOKE_SPLITS").is_some();
+    // Keybind smoke: seed the maintainer's `text:` binding on shift+enter, drive
+    // it (and a plain enter) through the real key path, assert the pty round-trip
+    // (see app::run). The binding is injected here so the smoke is self-contained
+    // (no user config file needed); it uses a visible marker so the assertion can
+    // read it off the screen.
+    let smoke_keybind = std::env::var_os("GHOSTTY_APP_SMOKE_KEYBIND").is_some();
+    if smoke_keybind {
+        // A marker-carrying `text:` value so shift+enter's bytes are observable
+        // in the pane; the real maintainer binding (`\x1b\r`) is unit-tested for
+        // exact bytes in `keybind.rs`.
+        config
+            .keybind
+            .push("shift+enter=text:zzKBMARKERzz".to_string());
+    }
+    // Focus-reporting smoke: two panes running `cat -v` with mode 1004 enabled;
+    // focus-switch between them and assert the focus-in/out bytes reach the right
+    // ptys (see app::run).
+    let smoke_focus = std::env::var_os("GHOSTTY_APP_SMOKE_FOCUS").is_some();
     ghostty_app::app::run(
         &config,
         smoke_ms,
@@ -111,6 +138,8 @@ fn run_window() {
         smoke_geometry,
         smoke_tabkeys,
         smoke_splits,
+        smoke_keybind,
+        smoke_focus,
     );
 }
 

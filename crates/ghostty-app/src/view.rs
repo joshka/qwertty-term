@@ -71,6 +71,19 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let raw = raw_from_nsevent(event, false);
+
+            // User `text:` keybinds intercept HERE, before `interpretKeyEvents`
+            // and the encoder — the same "before the encoder" discipline the tab
+            // / split chords use in `performKeyEquivalent:`, but for chords like
+            // `shift+enter` that reliably arrive as `keyDown:` (not key
+            // equivalents). A matched binding sends its literal bytes and
+            // consumes the event, so e.g. `shift+enter=text:\x1b\r` sends ESC CR
+            // instead of the IME/encoder's plain CR. Only exact-match chords
+            // resolve, so unbound keys fall straight through unchanged.
+            if self.try_handle_text_keybind(event) {
+                return;
+            }
+
             self.ivars().preedit.borrow_mut().begin_key_event();
 
             // SAFETY: standard NSResponder call on the main thread.
@@ -377,6 +390,19 @@ impl TerminalView {
         // Consume regardless of whether a tab switch happened (e.g. the 1-tab
         // no-op case): a resolved chord must never fall through to the encoder.
         true
+    }
+
+    /// If `event` matches a user `text:` keybind, send its bytes to this
+    /// surface's pty (via the controller) and return `true` (consuming it before
+    /// the encoder). Otherwise `false`. Uses the same layout-independent physical
+    /// keycode + four-modifier bitset the built-in tables use. Called at the top
+    /// of `keyDown:`.
+    fn try_handle_text_keybind(&self, event: &NSEvent) -> bool {
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| c.try_text_keybind_to_surface(tab, surface, key, mods))
+            .unwrap_or(false)
     }
 
     /// Encode any committed text + the key event, then close the per-keyDown
