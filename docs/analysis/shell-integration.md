@@ -243,7 +243,7 @@ prompt because `PS0` — bash's nearest analogue to a preexec hook — runs
 *before* the command, so a cwd change mid-pipeline is invisible until
 precmd). This OSC 7 payload format
 (`kitty-shell-cwd://host/path`) is what `docs/analysis` / the app's
-`pwd_path_from_osc7` parser (already wired, per `crates/qwertty-term-app/src/engine.rs`)
+`pwd_path_from_osc7` parser (already wired, per `crates/qwertty-term/src/engine.rs`)
 expects.
 
 **Bar-cursor-at-prompt (DECSCUSR, the maintainer's question).** Confirmed:
@@ -335,7 +335,7 @@ The Rust port's shape (`resources_dir()` in `shell_integration.rs`):
 
 ## App wiring (chunk G's one permitted app touch)
 
-`crates/qwertty-term-app/src/termio.rs`'s `TabIo::spawn` constructs
+`crates/qwertty-term/src/termio.rs`'s `TabIo::spawn` constructs
 `qwertty_term_termio::exec::Config` directly. Chunk G adds a
 `qwertty_term_termio::shell_integration::setup(...)` call between building the
 base env (`std::env::vars().collect()`, from the M2-E env-inherit fix) and

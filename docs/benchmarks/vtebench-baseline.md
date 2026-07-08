@@ -7,7 +7,7 @@ comparisons. This is the scoreboard for upcoming perf work (dirty tracking, SIMD
 ## Re-running
 
 ```sh
-scripts/bench-vtebench.sh                    # qwertty-term (builds qwertty-term-app --release)
+scripts/bench-vtebench.sh                    # qwertty-term (builds qwertty-term --release)
 scripts/bench-vtebench.sh --terminal ghostty # real Ghostty.app for the A/B column
 ```
 
@@ -28,7 +28,7 @@ below into `work/vtebench-upstream` (git-ignored scratch, not vendored) if missi
 | suite knobs | vtebench defaults: 1 MiB min sample, 10 s per suite, 1 warmup     |
 
 Both terminals ran as real GUI windows driven non-interactively: qwertty-term via the
-`QWERTTY_TERM_COMMAND` override in `crates/qwertty-term-app/src/termio.rs`, Ghostty via its `--command`
+`QWERTTY_TERM_COMMAND` override in `crates/qwertty-term/src/termio.rs`, Ghostty via its `--command`
 config with `--quit-after-last-window-closed`. This is the full GUI lane, not an engine-only
 fallback.
 

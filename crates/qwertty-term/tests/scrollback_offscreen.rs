@@ -1,6 +1,6 @@
 //! Offscreen scrollback evidence test (no GUI, no Metal, no PTY).
 //!
-//! Drives the real `qwertty_term_app::engine::Engine` (a thin wrapper over the real
+//! Drives the real `qwertty_term::engine::Engine` (a thin wrapper over the real
 //! `qwertty-term-vt` terminal), fills the scrollback of a small grid with uniquely
 //! numbered lines, and asserts that the windowed snapshot the render path
 //! consumes (`snapshot_window(offset)`) shows *history* rows when the viewport
@@ -9,13 +9,13 @@
 //! This exercises exactly the seam the wheel-scroll ladder drives: a per-pane
 //! `scrollback_offset` fed into `snapshot_window`. The AppKit `scrollWheel:` →
 //! `Controller::wheel_to_surface` plumbing on top is covered by the pure
-//! `qwertty_term_app::scroll` unit tests (the decision ladder + accumulator math)
+//! `qwertty_term::scroll` unit tests (the decision ladder + accumulator math)
 //! and the windowed splits smoke; this test proves the offset actually pulls
 //! the correct history rows into the rendered frame.
 
-use qwertty_term_app::engine::Engine;
-use qwertty_term_app::input::mouse::{self, MouseContext};
-use qwertty_term_app::scroll::{ScrollMultiplier, WheelOutcome, WheelState, decide};
+use qwertty_term::engine::Engine;
+use qwertty_term::input::mouse::{self, MouseContext};
+use qwertty_term::scroll::{ScrollMultiplier, WheelOutcome, WheelState, decide};
 use qwertty_term_input::key_mods::Mods;
 use qwertty_term_input::mouse::{Action, Button};
 use qwertty_term_input::mouse_encode::MouseEvent;

@@ -8,7 +8,7 @@
 //! The "engine" here is a minimal stand-in that mirrors the app's contract:
 //! a byte buffer behind a `Mutex` the sink applies to and the "pace tick"
 //! reads — the same "apply behind the lock the renderer takes" topology the
-//! app uses (§3.3), without pulling in `qwertty-term-app` (macOS-only).
+//! app uses (§3.3), without pulling in `qwertty-term` (macOS-only).
 
 #![cfg(unix)]
 

@@ -8,10 +8,10 @@
 //! so it is `#[ignore]`d by default. Run it from a logged-in desktop session:
 //!
 //! ```sh
-//! cargo test -p qwertty-term-app --test focus_smoke -- --ignored --nocapture
+//! cargo test -p qwertty-term --test focus_smoke -- --ignored --nocapture
 //! ```
 //!
-//! Under the hood it launches the app binary with `QWERTTY_TERM_APP_SMOKE_FOCUS=1`.
+//! Under the hood it launches the app binary with `QWERTTY_TERM_SMOKE_FOCUS=1`.
 //! The app splits into two panes, runs `cat -v` in each, enables mode 1004, then
 //! focus-switches and asserts the focus-in/out bytes land at the right ptys
 //! (exit 0 pass / 1 fail). See `app::run` / `AppDelegate::run_focus_smoke`.
@@ -20,19 +20,19 @@
 
 use std::process::Command;
 
-/// The compiled `qwertty-term-app` binary under test (Cargo sets `CARGO_BIN_EXE_*`).
-const BIN: &str = env!("CARGO_BIN_EXE_qwertty-term-app");
+/// The compiled `qwertty-term` binary under test (Cargo sets `CARGO_BIN_EXE_*`).
+const BIN: &str = env!("CARGO_BIN_EXE_qwertty-term");
 
 #[test]
 #[ignore = "needs a GUI (windowserver) session: builds a real NSApplication + Metal renderer + 2 shells"]
 fn windowed_per_pane_focus_reporting() {
     let status = Command::new(BIN)
         .arg("--window")
-        .env("QWERTTY_TERM_APP_SMOKE_FOCUS", "1")
+        .env("QWERTTY_TERM_SMOKE_FOCUS", "1")
         // Safety net: if the smoke sequence somehow stalls, don't hang the suite.
-        .env("QWERTTY_TERM_APP_SMOKE_MS", "20000")
+        .env("QWERTTY_TERM_SMOKE_MS", "20000")
         .status()
-        .expect("failed to launch qwertty-term-app binary");
+        .expect("failed to launch qwertty-term binary");
 
     assert!(
         status.success(),

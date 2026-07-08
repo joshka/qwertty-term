@@ -74,7 +74,7 @@ impl KeybindTable {
                     bindings.push(binding);
                 }
                 Err(reason) => {
-                    eprintln!("qwertty-term-app: ignoring keybind '{entry}': {reason}");
+                    eprintln!("qwertty-term: ignoring keybind '{entry}': {reason}");
                 }
             }
         }

@@ -10,10 +10,10 @@
 //! logged-in desktop session:
 //!
 //! ```sh
-//! cargo test -p qwertty-term-app --test keybind_smoke -- --ignored --nocapture
+//! cargo test -p qwertty-term --test keybind_smoke -- --ignored --nocapture
 //! ```
 //!
-//! Under the hood it launches the app binary with `QWERTTY_TERM_APP_SMOKE_KEYBIND=1`,
+//! Under the hood it launches the app binary with `QWERTTY_TERM_SMOKE_KEYBIND=1`,
 //! which seeds `shift+enter=text:zzKBMARKERzz`, drives synthetic Shift+Return then
 //! plain Return through the real window key path, and asserts the marker reached
 //! the pty (exit 0 pass / 1 fail). See `app::run` / `AppDelegate::run_keybind_smoke`.
@@ -23,19 +23,19 @@
 
 use std::process::Command;
 
-/// The compiled `qwertty-term-app` binary under test (Cargo sets `CARGO_BIN_EXE_*`).
-const BIN: &str = env!("CARGO_BIN_EXE_qwertty-term-app");
+/// The compiled `qwertty-term` binary under test (Cargo sets `CARGO_BIN_EXE_*`).
+const BIN: &str = env!("CARGO_BIN_EXE_qwertty-term");
 
 #[test]
 #[ignore = "needs a GUI (windowserver) session: builds a real NSApplication + Metal renderer + a shell"]
 fn windowed_text_keybind_round_trip() {
     let status = Command::new(BIN)
         .arg("--window")
-        .env("QWERTTY_TERM_APP_SMOKE_KEYBIND", "1")
+        .env("QWERTTY_TERM_SMOKE_KEYBIND", "1")
         // Safety net: if the smoke sequence somehow stalls, don't hang the suite.
-        .env("QWERTTY_TERM_APP_SMOKE_MS", "20000")
+        .env("QWERTTY_TERM_SMOKE_MS", "20000")
         .status()
-        .expect("failed to launch qwertty-term-app binary");
+        .expect("failed to launch qwertty-term binary");
 
     assert!(
         status.success(),

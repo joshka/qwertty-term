@@ -1,4 +1,4 @@
-//! `qwertty-term-app`: the native macOS AppKit host for the qwertty-term terminal
+//! `qwertty-term`: the native macOS AppKit host for the qwertty-term terminal
 //! (renderer chunk R5).
 //!
 //! Binary crate with a thin library face so the platform-independent logic

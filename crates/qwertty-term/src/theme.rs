@@ -284,7 +284,7 @@ foreground = #ffffff
 
     #[test]
     fn resolves_absolute_path_as_is() {
-        let dir = std::env::temp_dir().join("qwertty-term-app-theme-test-absolute");
+        let dir = std::env::temp_dir().join("qwertty-term-theme-test-absolute");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("MyTheme");
         fs::write(&path, "background = #010203\n").unwrap();

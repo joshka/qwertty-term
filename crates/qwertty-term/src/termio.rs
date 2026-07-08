@@ -234,7 +234,7 @@ impl TabIo {
             let n = self.dropped_writes.fetch_add(1, Ordering::Relaxed);
             if n.is_multiple_of(64) {
                 eprintln!(
-                    "qwertty-term-app: pty write queue full, dropped {} input chunk(s)",
+                    "qwertty-term: pty write queue full, dropped {} input chunk(s)",
                     n + 1
                 );
             }

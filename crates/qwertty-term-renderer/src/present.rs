@@ -16,7 +16,7 @@
 //! [`TimerPacer`](crate::swap_chain::TimerPacer) (the "tick a draw" shape
 //! CVDisplayLink later swaps into), but AppKit requires the actual draw to run
 //! on the main thread (Metal command submission + CoreAnimation `contents`
-//! assignment are main-thread affairs), so `qwertty-term-app` drives the tick from
+//! assignment are main-thread affairs), so `qwertty-term` drives the tick from
 //! an `NSTimer` on the main run loop rather than the background-thread
 //! `TimerPacer`. This module therefore only supplies the *draw+attach* half; the
 //! *when-to-draw* half lives in the host next to its run loop.

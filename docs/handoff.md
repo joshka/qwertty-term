@@ -18,7 +18,7 @@ described commits even if the workspace looks idle.
   `~/local/ghostty-main/macos/build/ReleaseLocal/Ghostty.app`).
 
 Queued next (user-approved): selection gestures (double-click word / triple line) +
-OSC-synced tab titles (one qwertty-term-app chunk, launch after splits-2 integrates);
+OSC-synced tab titles (one qwertty-term chunk, launch after splits-2 integrates);
 CVDisplayLink pacing; dense_cells re-bench after simd-perf lands. Also pending: user
 pastes `work/betamax-thread-prompt.md` (MB1) and the jj thread
 (`~/local/jj/work/qwertty-term-jj-failures-thread.md`).
@@ -90,7 +90,7 @@ Evidence: bold ink coverage 1.335× regular; offscreen test `bold_italic_pixels.
 Visual-parity sweep landed on `main` (all field-reported): **glyph baseline fix** (text was
 `cell_baseline` px too low — cursor was never wrong), **top-band root cause** (sub-cell
 surface remainder exposed at the visual top by flipped-layer gravity; surface now pinned
-under the titlebar + window bg painted terminal-colored; `QWERTTY_TERM_APP_SMOKE_GEOMETRY`
+under the titlebar + window bg painted terminal-colored; `QWERTTY_TERM_SMOKE_GEOMETRY`
 asserts the 1→2→1-tab transition), and **default-font parity** (vendored upstream's exact
 JetBrainsMono variable + italic-variable + SymbolsNerdFontMono, hash-manifested like the
 shell scripts; nerd-symbols is an explicit fallback slot ahead of discovery; metrics
@@ -99,7 +99,7 @@ natural size. Emoji, tabs-only-at-2+, bar cursor: confirmed good by maintainer.
 
 ## Earlier state (2026-07-08 evening)
 
-**The app runs the REAL stack end-to-end**: `cargo run -p qwertty-term-app` = native AppKit
+**The app runs the REAL stack end-to-end**: `cargo run -p qwertty-term` = native AppKit
 window (tabs/menu/theme/selection/IME), Metal rendering (contentsScale fixed — presented-
 pixel assertions now in the smoke), and the genuine termio architecture (rustix PTY,
 two-stage Exec pipeline, ADR-002 thread loop, 135.8 MiB/s into the live engine).
@@ -111,7 +111,7 @@ smokes that assert what the user actually experiences.
 
 ## Earlier 2026-07-08 state
 
-**M1 CERTIFIED** (see port-status Milestones). **M3 essentially complete**: `qwertty-term-app`
+**M1 CERTIFIED** (see port-status Milestones). **M3 essentially complete**: `qwertty-term`
 runs — native AppKit window, Metal via the full ported stack, native tabs with OSC7 pwd
 inheritance, menu, kitty+legacy key encoding, IME. All three de-risk spike decisions
 RATIFIED (ADR-002 threads+polling; FFI Swift-adaptation GO; raw AppKit). In flight:

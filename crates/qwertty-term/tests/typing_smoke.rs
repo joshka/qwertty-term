@@ -9,11 +9,11 @@
 //! desktop session:
 //!
 //! ```sh
-//! cargo test -p qwertty-term-app --test typing_smoke -- --ignored --nocapture
+//! cargo test -p qwertty-term --test typing_smoke -- --ignored --nocapture
 //! ```
 //!
 //! Under the hood it launches the app binary with
-//! `QWERTTY_TERM_APP_SMOKE_TYPE="echo <marker>\n"`; the app types that through the
+//! `QWERTTY_TERM_SMOKE_TYPE="echo <marker>\n"`; the app types that through the
 //! real keyDown path, waits for the shell round-trip, asserts the marker shows
 //! up in the engine's screen text, and exits 0 (pass) / 1 (fail). See
 //! `app::run` / `AppDelegate::run_type_smoke`.
@@ -22,8 +22,8 @@
 
 use std::process::Command;
 
-/// The compiled `qwertty-term-app` binary under test (Cargo sets `CARGO_BIN_EXE_*`).
-const BIN: &str = env!("CARGO_BIN_EXE_qwertty-term-app");
+/// The compiled `qwertty-term` binary under test (Cargo sets `CARGO_BIN_EXE_*`).
+const BIN: &str = env!("CARGO_BIN_EXE_qwertty-term");
 
 #[test]
 #[ignore = "needs a GUI (windowserver) session: builds a real NSApplication + Metal renderer"]
@@ -34,18 +34,18 @@ fn windowed_typing_round_trip() {
 
     let status = Command::new(BIN)
         .arg("--window")
-        .env("QWERTTY_TERM_APP_SMOKE_TYPE", &script)
+        .env("QWERTTY_TERM_SMOKE_TYPE", &script)
         // Assert on the *presented* IOSurface pixels, not just the engine's text
         // buffer: this catches the "window shows only the theme background, zero
         // glyphs" bug (presentation geometry / contentsScale / re-present),
         // which the engine-text-only check could not see.
-        .env("QWERTTY_TERM_APP_ASSERT_PRESENT", "1")
+        .env("QWERTTY_TERM_ASSERT_PRESENT", "1")
         // Safety net: if the synthetic-input path somehow never fires, don't
         // hang the test suite — the app's own check timer exits well before
         // this, but a stuck run should still die.
-        .env("QWERTTY_TERM_APP_SMOKE_MS", "10000")
+        .env("QWERTTY_TERM_SMOKE_MS", "10000")
         .status()
-        .expect("failed to launch qwertty-term-app binary");
+        .expect("failed to launch qwertty-term binary");
 
     assert!(
         status.success(),

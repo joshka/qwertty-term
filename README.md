@@ -13,7 +13,7 @@ baselines: faster than Ghostty 1.3.1 in 9 of 10 suites on the same machine
 (`docs/benchmarks/`).
 
 ```sh
-cargo run -p qwertty-term-app --release          # the terminal
+cargo run -p qwertty-term --release          # the terminal
 cargo run -p frame-capture -- --help        # headless VT-bytes → PNG (embeddability demo)
 cargo test --workspace                      # ~1500 engine tests + differential + smokes
 ```

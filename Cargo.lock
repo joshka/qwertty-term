@@ -2892,7 +2892,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qwertty-term-app"
+name = "qwertty-term"
 version = "0.0.0"
 dependencies = [
  "base64",

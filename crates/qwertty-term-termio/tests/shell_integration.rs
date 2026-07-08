@@ -48,7 +48,7 @@ fn find_zsh() -> Option<String> {
 /// `cond` is satisfied or the deadline passes. `stream` is only ever touched
 /// from this (the test) thread -- the parse sink just appends to `capture` --
 /// so plain ownership is enough; no `Arc<Mutex<_>>` needed (`Terminal` isn't
-/// `Send`/`Sync` the way `qwertty-term-app`'s `Engine` wrapper is, since it isn't
+/// `Send`/`Sync` the way `qwertty-term`'s `Engine` wrapper is, since it isn't
 /// wrapped with that crate's documented-sound `unsafe impl Send`).
 fn pump_until(
     stream: &mut Stream<TerminalHandler>,
@@ -77,7 +77,7 @@ fn pump_until(
 }
 
 /// Spawn a real zsh with shell integration wired exactly the way
-/// `TabIo::spawn` (`crates/qwertty-term-app/src/termio.rs`) wires it: build
+/// `TabIo::spawn` (`crates/qwertty-term/src/termio.rs`) wires it: build
 /// `QWERTTY_TERM_SHELL_FEATURES` via `setup_features`, then force `Shell::Zsh`
 /// through `shell_integration::setup` to get the ZDOTDIR-redirected env.
 #[test]

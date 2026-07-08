@@ -22,9 +22,9 @@
 # via `--silent --dat` instead.
 #
 # How each terminal is driven non-interactively:
-#   qwertty-term  QWERTTY_TERM_COMMAND env override (crates/qwertty-term-app/src/
+#   qwertty-term  QWERTTY_TERM_COMMAND env override (crates/qwertty-term/src/
 #               termio.rs) runs `/bin/sh -c <runner>` instead of $SHELL; the
-#               app quits when the child exits. QWERTTY_TERM_APP_SMOKE_MS is set as
+#               app quits when the child exits. QWERTTY_TERM_SMOKE_MS is set as
 #               a hard-timeout backstop.
 #   ghostty     /Applications/Ghostty.app binary launched directly with
 #               `--command=<runner> --quit-after-last-window-closed=true`,
@@ -151,13 +151,13 @@ run_with_timeout() {
 echo "==> running vtebench inside $TERMINAL (budget ${BUDGET_SECS}s)"
 case "$TERMINAL" in
 qwertty-term)
-    echo "==> building qwertty-term-app (release)"
-    cargo build --release --quiet -p qwertty-term-app \
+    echo "==> building qwertty-term (release)"
+    cargo build --release --quiet -p qwertty-term \
         --manifest-path "$REPO_ROOT/Cargo.toml"
     QWERTTY_TERM_COMMAND="/bin/sh $RUNNER" \
-        QWERTTY_TERM_APP_SMOKE_MS=$((BUDGET_SECS * 1000)) \
+        QWERTTY_TERM_SMOKE_MS=$((BUDGET_SECS * 1000)) \
         run_with_timeout $((BUDGET_SECS + 30)) \
-        "$REPO_ROOT/target/release/qwertty-term-app" || true
+        "$REPO_ROOT/target/release/qwertty-term" || true
     ;;
 ghostty)
     [[ -x "$GHOSTTY_APP_BUNDLE" ]] || {

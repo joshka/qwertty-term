@@ -4,8 +4,8 @@ Chunk R5 of `docs/plans/m3-first-pixels.md`: replace the egui host with a native
 macOS `NSApplication`/`NSWindow` that renders the terminal through the Metal
 stack (R1–R4), with **native window tabs** (each tab its own engine + PTY), a
 menu bar, and the `NSTextInputClient` input path proven by the R5 de-risk spike
-(`docs/analysis/appkit-input.md`). It lands a new crate, `crates/qwertty-term-app`
-(binary `qwertty-term-app`), plus additive-only presentation wiring in
+(`docs/analysis/appkit-input.md`). It lands a new crate, `crates/qwertty-term`
+(binary `qwertty-term`), plus additive-only presentation wiring in
 `crates/qwertty-term-renderer`. The egui spike (`crates/spike`) is untouched
 reference material.
 
@@ -121,7 +121,7 @@ unit-tested.
    back, and asserts real glyph coverage over the default background (and that
    the readback size matches the geometry math). Exits 0 on success, 0 on a
    graceful no-Metal skip, non-zero on failure. **Runs green on this machine.**
-3. **Windowed auto-exit**: `QWERTTY_TERM_APP_SMOKE_MS=<ms>` launches the real
+3. **Windowed auto-exit**: `QWERTTY_TERM_SMOKE_MS=<ms>` launches the real
    `NSApplication`, opens a window+tab (spawning a PTY+shell, building the Metal
    renderer, running the pace loop, constructing the menu), and cleanly
    terminates after `<ms>`. **Runs green (exit 0) repeatedly**, proving
@@ -129,7 +129,7 @@ unit-tested.
 
 ### Windowed synthetic-input smoke (needs a GUI session)
 
-`QWERTTY_TERM_APP_SMOKE_TYPE="echo <marker>\n"` launches the real window and, after
+`QWERTTY_TERM_SMOKE_TYPE="echo <marker>\n"` launches the real window and, after
 the shell draws its prompt, delivers **synthetic `NSEvent` keystrokes through
 the AppKit responder chain** (`app.sendEvent`) — exercising the full
 frontmost/key → `keyDown:` → `NSTextInputClient`/encode → PTY → engine → screen
@@ -144,19 +144,19 @@ alongside the cooperative `activate()` in `applicationDidFinishLaunching`.
 Wired as an `#[ignore]`d cargo test (needs a windowserver session):
 
 ```sh
-cargo test -p qwertty-term-app --test typing_smoke -- --ignored --nocapture
+cargo test -p qwertty-term --test typing_smoke -- --ignored --nocapture
 ```
 
 Or run the binary directly:
 
 ```sh
-QWERTTY_TERM_APP_SMOKE_TYPE='echo zz-marker\n' cargo run -p qwertty-term-app -- --window
+QWERTTY_TERM_SMOKE_TYPE='echo zz-marker\n' cargo run -p qwertty-term -- --window
 ```
 
 ### Manual test steps (needs a human at a GUI session)
 
 ```sh
-cargo run -p qwertty-term-app --bin qwertty-term-app          # or: --window
+cargo run -p qwertty-term --bin qwertty-term          # or: --window
 ```
 
 Then try:

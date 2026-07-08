@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 #[test]
 fn spawned_shell_inherits_path() {
     // Drive the same TabIo config path the app uses, headless.
-    let engine = Arc::new(Mutex::new(qwertty_term_app::engine::Engine::new(80, 24)));
-    let io = qwertty_term_app::termio::TabIo::spawn(Arc::clone(&engine), 80, 24, 8, 16, None)
+    let engine = Arc::new(Mutex::new(qwertty_term::engine::Engine::new(80, 24)));
+    let io = qwertty_term::termio::TabIo::spawn(Arc::clone(&engine), 80, 24, 8, 16, None)
         .expect("spawn");
     // `command -v ls` requires a working PATH lookup in the shell itself.
     io.write(b"command -v ls >/dev/null && echo ENV-$((40+2))-MARKER\n");

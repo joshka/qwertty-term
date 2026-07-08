@@ -5,7 +5,7 @@ Surveyed and ported against ghostty commit `2da015cd6`
 `38e49a232`, and `docs/analysis/termio-foundations.md` records that the termio
 foundation files are byte-identical between the two). The Rust port lives in
 `crates/qwertty-term-termio/src/hub.rs` (the `Termio` hub + promoted `Thread` loop)
-and rewires `crates/qwertty-term-app` onto it. This is M2 chunk E from
+and rewires `crates/qwertty-term` onto it. This is M2 chunk E from
 `docs/plans/m2-termio.md`; it builds on chunk D
 (`docs/analysis/termio-exec.md`), the mailbox contract
 (`docs/adr/002-termio-runtime.md`, binding), and the runtime spike
@@ -18,7 +18,7 @@ Zig references (all line numbers against `2da015cd6`):
 | `src/termio/Termio.zig`          | 761 | `qwertty-term-termio/src/hub.rs` (`Termio`) |
 | `src/termio/Thread.zig`          | 531 | `qwertty-term-termio/src/hub.rs` (`Thread`) |
 | `src/termio/Options.zig`         | 41  | folded into `Termio::spawn` args       |
-| `src/Surface.zig` (io lifecycle) | ref | `qwertty-term-app/src/app.rs` `Tab` (ref)   |
+| `src/Surface.zig` (io lifecycle) | ref | `qwertty-term/src/app.rs` `Tab` (ref)   |
 
 ## 1. What `Termio.zig` is (the hub's role)
 
@@ -250,4 +250,4 @@ clear and asserts a render is released within ~1s.
   chunk D did).
 - The error-screen "pty exhausted" banner rendering (Surface-level, chunk M).
 - The spike (`crates/spike`) keeps `portable-pty` — it is scaffolding, per plan
-  decision (only `qwertty-term-app` swaps).
+  decision (only `qwertty-term` swaps).

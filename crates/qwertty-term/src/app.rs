@@ -275,7 +275,7 @@ struct Surface {
     /// The terminal's default background as `(r, g, b)` — the presented-frame
     /// coverage baseline.
     default_bg: (u8, u8, u8),
-    /// Debug frame-dump (env `QWERTTY_TERM_APP_DUMP_FRAME`), if enabled.
+    /// Debug frame-dump (env `QWERTTY_TERM_DUMP_FRAME`), if enabled.
     frame_dump: Option<crate::frame_dump::FrameDump>,
     /// Max per-pixel L1 delta from `default_bg` in the most recently *presented*
     /// frame.
@@ -457,7 +457,7 @@ impl Surface {
             match event {
                 IoEvent::ChildExited { exit_code, .. } => {
                     if exit_code != 0 {
-                        eprintln!("qwertty-term-app: shell exited with code {exit_code}");
+                        eprintln!("qwertty-term: shell exited with code {exit_code}");
                     }
                     exited = true;
                 }
@@ -1169,7 +1169,7 @@ impl Controller {
     /// The active tab's most recently *presented* frame coverage: the max
     /// per-pixel L1 delta from the theme background in the last frame actually
     /// attached to the CoreAnimation layer (smoke/test only; only populated
-    /// when presented-pixel capture is enabled — `QWERTTY_TERM_APP_ASSERT_PRESENT`
+    /// when presented-pixel capture is enabled — `QWERTTY_TERM_ASSERT_PRESENT`
     /// or a frame dump). `None` if there is no active tab. A value near `0`
     /// means the presented surface was blank (background only); a large value
     /// means real glyph/foreground pixels reached the layer.
@@ -1401,7 +1401,7 @@ impl Controller {
 
     /// A specific surface's presented-frame coverage (max background delta) —
     /// the presented-pixel smoke reads this to confirm each pane rendered ink in
-    /// its own rect (smoke/test; needs `QWERTTY_TERM_APP_ASSERT_PRESENT`).
+    /// its own rect (smoke/test; needs `QWERTTY_TERM_ASSERT_PRESENT`).
     pub fn surface_present_delta(&self, tab: TabId, surface: SurfaceId) -> Option<i32> {
         let state = self.0.borrow();
         state
@@ -1512,7 +1512,7 @@ impl Controller {
 
     /// A surface's most-recent presented-frame mean luma (smoke/test only) —
     /// the dimming smoke asserts an unfocused pane's luma sits below its focused
-    /// baseline. Needs `QWERTTY_TERM_APP_ASSERT_PRESENT` (capture on).
+    /// baseline. Needs `QWERTTY_TERM_ASSERT_PRESENT` (capture on).
     pub fn surface_present_luma(&self, tab: TabId, surface: SurfaceId) -> Option<f64> {
         let state = self.0.borrow();
         state
@@ -2112,7 +2112,7 @@ impl Controller {
 
         let frame_dump = crate::frame_dump::FrameDump::from_env();
         let capture_present =
-            frame_dump.is_some() || std::env::var_os("QWERTTY_TERM_APP_ASSERT_PRESENT").is_some();
+            frame_dump.is_some() || std::env::var_os("QWERTTY_TERM_ASSERT_PRESENT").is_some();
 
         let controller_ptr: *const Controller = self;
         let view = TerminalView::new(mtm, tab, surface, controller_ptr);
@@ -2715,33 +2715,33 @@ pub struct DelegateIvars {
     /// then assert echoes/output before exiting. Empty = disabled. See
     /// [`AppDelegate::run_type_smoke`].
     smoke_type: RefCell<String>,
-    /// Tab-strip geometry smoke (`QWERTTY_TERM_APP_SMOKE_GEOMETRY`): dump + assert the
+    /// Tab-strip geometry smoke (`QWERTTY_TERM_SMOKE_GEOMETRY`): dump + assert the
     /// window geometry across the 1-tab → 2-tab → 1-tab transition, then exit.
     /// See [`AppDelegate::run_geometry_smoke`].
     smoke_geometry: bool,
-    /// Tab-navigation keybind smoke (`QWERTTY_TERM_APP_SMOKE_TABKEYS`): open 3 tabs,
+    /// Tab-navigation keybind smoke (`QWERTTY_TERM_SMOKE_TABKEYS`): open 3 tabs,
     /// drive the built-in tab chords, and assert the active-tab index after each
     /// (plus the pty-encoding regression: tab chords send nothing, plain Tab /
     /// Shift+Tab still encode). See [`AppDelegate::run_tabkeys_smoke`].
     smoke_tabkeys: bool,
-    /// Splits smoke (`QWERTTY_TERM_APP_SMOKE_SPLITS`): split right then down (3 panes),
+    /// Splits smoke (`QWERTTY_TERM_SMOKE_SPLITS`): split right then down (3 panes),
     /// assert 3 live shells with isolated input, directional focus walk, divider
     /// resize, and close-collapse. See [`AppDelegate::run_splits_smoke`].
     smoke_splits: bool,
     /// Splits smoke phase state carried from phase 1 to phase 2: the tab under
     /// test and each pane's `(SurfaceId, unique marker)`.
     splits_state: RefCell<Option<SplitsSmokeState>>,
-    /// Keybind smoke (`QWERTTY_TERM_APP_SMOKE_KEYBIND`): drive the seeded shift+enter
+    /// Keybind smoke (`QWERTTY_TERM_SMOKE_KEYBIND`): drive the seeded shift+enter
     /// `text:` binding + a plain enter through the real key path and assert the
     /// pty round-trip. See [`AppDelegate::run_keybind_smoke`].
     smoke_keybind: bool,
-    /// Focus-reporting smoke (`QWERTTY_TERM_APP_SMOKE_FOCUS`): two `cat -v` panes with
+    /// Focus-reporting smoke (`QWERTTY_TERM_SMOKE_FOCUS`): two `cat -v` panes with
     /// mode 1004 on; focus-switch and assert focus-in/out bytes reach the right
     /// ptys. See [`AppDelegate::run_focus_smoke`].
     smoke_focus: bool,
     /// Focus smoke phase state: the tab + the two panes' `(SurfaceId)` ids.
     focus_state: RefCell<Option<(TabId, SurfaceId, SurfaceId)>>,
-    /// Search smoke (`QWERTTY_TERM_APP_SMOKE_SEARCH`): fill scrollback with 3
+    /// Search smoke (`QWERTTY_TERM_SMOKE_SEARCH`): fill scrollback with 3
     /// markers, Cmd+F, type the needle, assert the counter reads 3, navigate,
     /// and assert Escape restores PTY input. See [`AppDelegate::run_search_smoke`].
     smoke_search: bool,
@@ -3096,7 +3096,7 @@ impl AppDelegate {
         // only the theme background, zero glyphs" bug (presentation geometry /
         // never-re-presenting), which the old assertion sailed past because it
         // read the engine, never the screen.
-        if std::env::var_os("QWERTTY_TERM_APP_ASSERT_PRESENT").is_some() {
+        if std::env::var_os("QWERTTY_TERM_ASSERT_PRESENT").is_some() {
             // 40 matches the offscreen smoke's coverage floor: a blank clear
             // leaves max-delta ~0; a single rasterized glyph pushes it well
             // past this.
@@ -3671,8 +3671,8 @@ impl AppDelegate {
         }
 
         // --- Presented-pixel coverage: each pane rendered ink in its own rect.
-        // Only when capture is enabled (QWERTTY_TERM_APP_ASSERT_PRESENT). ---
-        if std::env::var_os("QWERTTY_TERM_APP_ASSERT_PRESENT").is_some() {
+        // Only when capture is enabled (QWERTTY_TERM_ASSERT_PRESENT). ---
+        if std::env::var_os("QWERTTY_TERM_ASSERT_PRESENT").is_some() {
             const COVERAGE_FLOOR: i32 = 40;
             for (sid, _) in &markers {
                 let delta = controller.surface_present_delta(tab, *sid).unwrap_or(0);
@@ -3860,7 +3860,7 @@ impl AppDelegate {
         // drops when it is UNFOCUSED (multi-pane tab) and returns when focused,
         // and a pane in a single-pane tab is never dimmed. Only when capture is
         // enabled (readback). ---
-        if std::env::var_os("QWERTTY_TERM_APP_ASSERT_PRESENT").is_some() {
+        if std::env::var_os("QWERTTY_TERM_ASSERT_PRESENT").is_some() {
             // Re-feed a screenful of bright text into the left pane's engine and
             // sample the *peak* presented luma over a few ticks: the running shell
             // may redraw/scroll and the parse→snapshot→present→readback pipeline

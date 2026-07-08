@@ -1,6 +1,6 @@
 //! Debug frame-dump for the windowed present path (env-gated).
 //!
-//! When `QWERTTY_TERM_APP_DUMP_FRAME` is set to a path prefix, the window host reads
+//! When `QWERTTY_TERM_DUMP_FRAME` is set to a path prefix, the window host reads
 //! back the presented IOSurface after every Nth present and writes it to
 //! `<prefix>-<seq>.png`. This is the decisive experiment for the "blank window"
 //! class of bugs: it captures *exactly the bytes attached to the CoreAnimation
@@ -26,15 +26,15 @@ pub struct FrameDump {
 impl FrameDump {
     /// Build the dump config from the environment, or `None` if disabled.
     ///
-    /// `QWERTTY_TERM_APP_DUMP_FRAME` — path prefix (enables dumping).
-    /// `QWERTTY_TERM_APP_DUMP_EVERY` — dump every Nth present (default 30, ~0.5s at
+    /// `QWERTTY_TERM_DUMP_FRAME` — path prefix (enables dumping).
+    /// `QWERTTY_TERM_DUMP_EVERY` — dump every Nth present (default 30, ~0.5s at
     /// 60Hz); clamped to at least 1.
     pub fn from_env() -> Option<Self> {
-        let prefix = std::env::var("QWERTTY_TERM_APP_DUMP_FRAME").ok()?;
+        let prefix = std::env::var("QWERTTY_TERM_DUMP_FRAME").ok()?;
         if prefix.is_empty() {
             return None;
         }
-        let every = std::env::var("QWERTTY_TERM_APP_DUMP_EVERY")
+        let every = std::env::var("QWERTTY_TERM_DUMP_EVERY")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30)
@@ -61,10 +61,10 @@ impl FrameDump {
         self.seq += 1;
         match encode_png_bgra(bgra, width, height) {
             Ok(png) => match std::fs::File::create(&path).and_then(|mut f| f.write_all(&png)) {
-                Ok(()) => eprintln!("QWERTTY_TERM_APP_DUMP_FRAME: wrote {path} ({width}x{height})"),
-                Err(e) => eprintln!("QWERTTY_TERM_APP_DUMP_FRAME: write {path} failed: {e}"),
+                Ok(()) => eprintln!("QWERTTY_TERM_DUMP_FRAME: wrote {path} ({width}x{height})"),
+                Err(e) => eprintln!("QWERTTY_TERM_DUMP_FRAME: write {path} failed: {e}"),
             },
-            Err(e) => eprintln!("QWERTTY_TERM_APP_DUMP_FRAME: encode failed: {e}"),
+            Err(e) => eprintln!("QWERTTY_TERM_DUMP_FRAME: encode failed: {e}"),
         }
     }
 }
