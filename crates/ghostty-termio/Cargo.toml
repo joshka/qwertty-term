@@ -7,9 +7,10 @@ repository.workspace = true
 description = "Terminal IO foundations ported from Ghostty: PTY primitive plus termio message/mailbox/backend plumbing"
 publish = false
 
-# M2 chunks A+B (docs/plans/m2-termio.md). Analysis:
-# docs/analysis/termio-foundations.md. The mailbox implements the binding
-# API contract from docs/adr/002-termio-runtime.md.
+# M2 chunks A+B+D (docs/plans/m2-termio.md). Analysis:
+# docs/analysis/termio-foundations.md (A+B), docs/analysis/termio-exec.md (D).
+# The mailbox implements the binding API contract from
+# docs/adr/002-termio-runtime.md.
 
 [dependencies]
 # The terminal core: Message carries terminal::ScrollViewport 1:1 with
@@ -17,10 +18,21 @@ publish = false
 ghostty-vt = { path = "../ghostty-vt" }
 
 # PTY + termios syscalls (plan decision 1: rustix, not portable-pty — we
-# need IUTF8, termios polling, and exact TIOCSWINSZ semantics).
-rustix = { version = "1", features = ["fs", "process", "pty", "stdio", "termios"] }
+# need IUTF8, termios polling, and exact TIOCSWINSZ semantics). `pipe` is the
+# Exec (chunk D) read-thread quit pipe; `net` gives poll() for the gather
+# stage.
+rustix = { version = "1", features = [
+    "event",
+    "fs",
+    "pipe",
+    "process",
+    "pty",
+    "stdio",
+    "termios",
+] }
 
 # Only for what rustix deliberately does not wrap: sigaction (the fork-child
-# signal reset in pty::child), fork/exec/waitpid in the real-shell test, and
-# close-by-raw-fd in the fork child.
+# signal reset in pty::child), fork/exec/waitpid (Exec spawn + exit watcher),
+# close-by-raw-fd in the fork child, getpwuid/getlogin (macOS login shell),
+# and pthread QoS on the pipeline threads.
 libc = "0.2"
