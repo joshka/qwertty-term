@@ -20,7 +20,7 @@ use serde::Deserialize;
 
 /// The config keys the app understands. Field names are the TOML keys directly
 /// (hyphenated, matching ghostty's own option-name convention).
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
     /// A ghostty theme name (or absolute path to a theme file), resolved via
@@ -52,6 +52,61 @@ pub struct Config {
     /// startup (`crate::app::Controller::new`).
     #[serde(default)]
     pub keybind: Vec<String>,
+    /// The opacity (opposite of transparency) of an *unfocused* split pane, in
+    /// `[0.15, 1.0]` (values outside are clamped by [`Config::unfocused_split_opacity`],
+    /// matching upstream `Config.zig:4684`). Default 0.7. A value of 1 disables
+    /// dimming. Only affects panes in a multi-pane tab; the focused pane and
+    /// single-pane tabs never dim. Mirrors ghostty's `unfocused-split-opacity`
+    /// (`Config.zig:1071`).
+    #[serde(rename = "unfocused-split-opacity")]
+    pub unfocused_split_opacity: f64,
+    /// The color to dim an unfocused split toward, as `#RRGGBB`/`RRGGBB` or an
+    /// X11 color name (parsed via [`ghostty_vt::color::Rgb::parse`]). When unset,
+    /// defaults to the terminal background (upstream `unfocused-split-fill ??
+    /// background`, `Config.zig:1080`). An unparseable value is ignored (falls
+    /// back to background).
+    #[serde(rename = "unfocused-split-fill")]
+    pub unfocused_split_fill: Option<String>,
+}
+
+/// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
+pub const DEFAULT_UNFOCUSED_SPLIT_OPACITY: f64 = 0.7;
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            theme: None,
+            copy_on_select: false,
+            font_size: None,
+            font_family: None,
+            mouse_scroll_multiplier: MouseScrollMultiplier::default(),
+            keybind: Vec::new(),
+            unfocused_split_opacity: DEFAULT_UNFOCUSED_SPLIT_OPACITY,
+            unfocused_split_fill: None,
+        }
+    }
+}
+
+impl Config {
+    /// The `unfocused-split-opacity`, clamped to `[0.15, 1.0]` exactly as
+    /// upstream does (`Config.zig:4684`:
+    /// `@min(1.0, @max(0.15, unfocused-split-opacity))`).
+    pub fn unfocused_split_opacity(&self) -> f64 {
+        self.unfocused_split_opacity.clamp(0.15, 1.0)
+    }
+
+    /// The parsed `unfocused-split-fill` color, or `None` to use the terminal
+    /// background. An unparseable value logs and falls back to `None`.
+    pub fn unfocused_split_fill(&self) -> Option<ghostty_vt::color::Rgb> {
+        let raw = self.unfocused_split_fill.as_deref()?;
+        match ghostty_vt::color::Rgb::parse(raw) {
+            Ok(rgb) => Some(rgb),
+            Err(_) => {
+                eprintln!("ignoring invalid unfocused-split-fill: {raw:?}");
+                None
+            }
+        }
+    }
 }
 
 /// The `[mouse-scroll-multiplier]` config table. Field defaults match
@@ -104,6 +159,14 @@ const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
 # \\ (backslash). Unknown triggers/actions are ignored with a warning.
 # Example (send ESC+CR on Shift+Enter — many TUIs read this as "soft newline"):
 # keybind = ["shift+enter=text:\\x1b\\r"]
+
+# Opacity of an unfocused split pane (multi-pane tabs only). 1.0 disables the
+# dimming; values are clamped to [0.15, 1.0]. Default 0.7.
+# unfocused-split-opacity = 0.7
+
+# Color unfocused splits are dimmed toward (an X11 color name or RRGGBB hex).
+# Defaults to the terminal background when unset.
+# unfocused-split-fill = "black"
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -178,6 +241,47 @@ mod tests {
         assert_eq!(config.mouse_scroll_multiplier.precision, 1.0);
         assert_eq!(config.mouse_scroll_multiplier.discrete, 3.0);
         assert!(config.keybind.is_empty());
+        // Unfocused-split dimming: upstream defaults (opacity 0.7, no fill).
+        assert_eq!(config.unfocused_split_opacity, 0.7);
+        assert_eq!(config.unfocused_split_opacity(), 0.7);
+        assert_eq!(config.unfocused_split_fill, None);
+        assert_eq!(config.unfocused_split_fill(), None);
+    }
+
+    #[test]
+    fn parses_unfocused_split_keys() {
+        let toml = "unfocused-split-opacity = 0.5\nunfocused-split-fill = \"#112233\"\n";
+        let config = parse(toml).unwrap();
+        assert_eq!(config.unfocused_split_opacity, 0.5);
+        assert_eq!(config.unfocused_split_opacity(), 0.5);
+        assert_eq!(
+            config.unfocused_split_fill(),
+            Some(ghostty_vt::color::Rgb::new(0x11, 0x22, 0x33))
+        );
+    }
+
+    #[test]
+    fn unfocused_split_opacity_clamps_out_of_range() {
+        // Below 0.15 clamps up; above 1.0 clamps down (upstream Config.zig:4684).
+        let low = parse("unfocused-split-opacity = 0.0\n").unwrap();
+        assert_eq!(low.unfocused_split_opacity(), 0.15);
+        let high = parse("unfocused-split-opacity = 2.0\n").unwrap();
+        assert_eq!(high.unfocused_split_opacity(), 1.0);
+        // A negative value clamps to the floor too.
+        let neg = parse("unfocused-split-opacity = -1.0\n").unwrap();
+        assert_eq!(neg.unfocused_split_opacity(), 0.15);
+    }
+
+    #[test]
+    fn unfocused_split_fill_accepts_x11_name_and_ignores_garbage() {
+        let named = parse("unfocused-split-fill = \"black\"\n").unwrap();
+        assert_eq!(
+            named.unfocused_split_fill(),
+            Some(ghostty_vt::color::Rgb::new(0, 0, 0))
+        );
+        // An unparseable value falls back to None (background).
+        let bad = parse("unfocused-split-fill = \"not-a-color-zzz\"\n").unwrap();
+        assert_eq!(bad.unfocused_split_fill(), None);
     }
 
     #[test]

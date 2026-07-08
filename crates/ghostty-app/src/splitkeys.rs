@@ -42,6 +42,13 @@ pub enum SplitAction {
     GotoSplit(Direction),
     /// Move focus to the previous / next split in flatten order (wraps).
     GotoAdjacent(Sequential),
+    /// Toggle zoom on the focused split (fills the tab, hides the rest).
+    ToggleZoom,
+    /// Resize the focused split's containing split in the given direction by a
+    /// fixed pixel step.
+    ResizeSplit(Direction),
+    /// Reset every split ratio to its leaf-count weight.
+    EqualizeSplits,
 }
 
 /// One entry in the built-in table: an exact `(key, mods)` trigger → action.
@@ -112,7 +119,46 @@ pub static DEFAULT_SPLIT_BINDINGS: &[SplitKeyBinding] = &[
         mods: MODS_CTRL_ALT,
         action: SplitAction::GotoSplit(Direction::Right),
     },
+    // --- toggle zoom (cmd+shift+enter; upstream `ctrlOrSuper(shift)+enter`,
+    //     Config.zig 6857-6861 → super+shift on macOS) ---
+    SplitKeyBinding {
+        key: Key::Enter,
+        mods: MODS_CMD_SHIFT,
+        action: SplitAction::ToggleZoom,
+    },
+    // --- resize split (cmd+ctrl+shift+arrows, 10px; Config.zig 6671-6695) ---
+    SplitKeyBinding {
+        key: Key::ArrowUp,
+        mods: MODS_CMD_CTRL_SHIFT,
+        action: SplitAction::ResizeSplit(Direction::Up),
+    },
+    SplitKeyBinding {
+        key: Key::ArrowDown,
+        mods: MODS_CMD_CTRL_SHIFT,
+        action: SplitAction::ResizeSplit(Direction::Down),
+    },
+    SplitKeyBinding {
+        key: Key::ArrowLeft,
+        mods: MODS_CMD_CTRL_SHIFT,
+        action: SplitAction::ResizeSplit(Direction::Left),
+    },
+    SplitKeyBinding {
+        key: Key::ArrowRight,
+        mods: MODS_CMD_CTRL_SHIFT,
+        action: SplitAction::ResizeSplit(Direction::Right),
+    },
+    // --- equalize splits (cmd+ctrl+=; Config.zig 7050-7054) ---
+    SplitKeyBinding {
+        key: Key::Equal,
+        mods: MODS_CMD_CTRL,
+        action: SplitAction::EqualizeSplits,
+    },
 ];
+
+/// The fixed pixel step a `resize_split` chord moves the divider by (upstream's
+/// default `.{ direction, 10 }`, Config.zig 6671-6695). In *points*; the
+/// controller scales to device pixels for the tree op.
+pub const RESIZE_STEP_PT: f64 = 10.0;
 
 // Modifier combos used above. `super_` is Cmd on macOS.
 const MODS_CMD: TabMods = TabMods {
@@ -144,6 +190,18 @@ const MODS_CTRL_ALT: TabMods = TabMods {
     ctrl: true,
     alt: true,
     super_: false,
+};
+const MODS_CMD_CTRL_SHIFT: TabMods = TabMods {
+    shift: true,
+    ctrl: true,
+    alt: false,
+    super_: true,
+};
+const MODS_CMD_CTRL: TabMods = TabMods {
+    shift: false,
+    ctrl: true,
+    alt: false,
+    super_: true,
 };
 
 /// Resolve a physical key + modifier state to a built-in split action, or `None`
@@ -202,6 +260,42 @@ mod tests {
         assert_eq!(
             resolve(Key::ArrowRight, MODS_CTRL_ALT),
             Some(SplitAction::GotoSplit(Direction::Right))
+        );
+    }
+
+    #[test]
+    fn cmd_shift_enter_toggles_zoom() {
+        assert_eq!(
+            resolve(Key::Enter, MODS_CMD_SHIFT),
+            Some(SplitAction::ToggleZoom)
+        );
+    }
+
+    #[test]
+    fn cmd_ctrl_shift_arrows_resize() {
+        assert_eq!(
+            resolve(Key::ArrowUp, MODS_CMD_CTRL_SHIFT),
+            Some(SplitAction::ResizeSplit(Direction::Up))
+        );
+        assert_eq!(
+            resolve(Key::ArrowDown, MODS_CMD_CTRL_SHIFT),
+            Some(SplitAction::ResizeSplit(Direction::Down))
+        );
+        assert_eq!(
+            resolve(Key::ArrowLeft, MODS_CMD_CTRL_SHIFT),
+            Some(SplitAction::ResizeSplit(Direction::Left))
+        );
+        assert_eq!(
+            resolve(Key::ArrowRight, MODS_CMD_CTRL_SHIFT),
+            Some(SplitAction::ResizeSplit(Direction::Right))
+        );
+    }
+
+    #[test]
+    fn cmd_ctrl_equal_equalizes() {
+        assert_eq!(
+            resolve(Key::Equal, MODS_CMD_CTRL),
+            Some(SplitAction::EqualizeSplits)
         );
     }
 

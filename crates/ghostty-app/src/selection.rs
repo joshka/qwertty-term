@@ -202,6 +202,109 @@ pub fn tint_matches(
     }
 }
 
+/// Unfocused-split dimming: an RGB fill color and the overlay alpha to blend it
+/// over the pane. Mirrors upstream's SwiftUI overlay (`SurfaceView.swift`
+/// 193-200): a `Rectangle().fill(unfocusedSplitFill).opacity(1 - opacity)` drawn
+/// above an unfocused split pane. `fill` defaults to the terminal background
+/// (`unfocused-split-fill ?? background`); `overlay_alpha` is `1 - opacity`
+/// where `opacity` is the (clamped `[0.15, 1.0]`) `unfocused-split-opacity`
+/// config (default 0.7 → overlay alpha 0.3).
+///
+/// The visual result of compositing `fill` at `overlay_alpha` over a pane pixel
+/// `p` is `p*(1 - overlay_alpha) + fill*overlay_alpha`. We replicate that CPU-
+/// side by blending every visible cell's resolved fg/bg toward `fill` — the same
+/// "swap the snapshot cells' colors before the renderer sees them" mechanism the
+/// selection/search tints use, so no renderer changes are needed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DimColors {
+    /// The dim fill color (`unfocused-split-fill ?? background`).
+    pub fill: Rgb,
+    /// The overlay alpha to blend `fill` in by, in `[0.0, 0.85]` (= `1 -
+    /// opacity`, opacity clamped to `[0.15, 1.0]`). 0 disables dimming.
+    pub overlay_alpha: f64,
+    /// The concrete RGB the renderer uses for a `Default` foreground when the
+    /// snapshot carries none (`ghostty-renderer`'s `FrameOptions::default_fg`,
+    /// `0xd8d8d8`). The dim must resolve `Default` fg the *same way the renderer
+    /// will paint it* so the CPU tint matches the presented pixels — resolving
+    /// `Default` to black (as the inverse-selection path does) would leave
+    /// bright default-fg text undimmed on screen.
+    pub default_fg_fallback: Rgb,
+    /// The concrete RGB used for a `Default` background when the snapshot carries
+    /// none (the surface's terminal background).
+    pub default_bg_fallback: Rgb,
+}
+
+/// Fully resolve a snapshot color to the concrete RGB the renderer will paint:
+/// `Default` → `default` fallback (or the window's dynamic default), `Palette(n)`
+/// → `palette[n]`, `Rgb` → itself. Mirrors `ghostty-renderer`'s `resolve_color`.
+fn resolve_rgb(
+    c: SnapshotColor,
+    palette: &ghostty_vt::color::Palette,
+    window_default: Option<Rgb>,
+    fallback: Rgb,
+) -> Rgb {
+    match c {
+        SnapshotColor::Default => window_default.unwrap_or(fallback),
+        SnapshotColor::Palette(n) => palette[n as usize],
+        SnapshotColor::Rgb { r, g, b } => Rgb::new(r, g, b),
+    }
+}
+
+/// Blend `base` toward `fill` by `alpha` (`out = base*(1-alpha) + fill*alpha`),
+/// matching alpha compositing of a `fill`-colored overlay.
+fn blend(base: Rgb, fill: Rgb, alpha: f64) -> SnapshotColor {
+    let mix = |a: u8, b: u8| -> u8 {
+        (a as f64 * (1.0 - alpha) + b as f64 * alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    SnapshotColor::Rgb {
+        r: mix(base.r, fill.r),
+        g: mix(base.g, fill.g),
+        b: mix(base.b, fill.b),
+    }
+}
+
+/// Dim every cell of `window` toward `colors.fill` by `colors.overlay_alpha`,
+/// replicating upstream's unfocused-split overlay CPU-side. A no-op when the
+/// alpha is ~0. Runs as a final tint pass in the render path for unfocused panes
+/// of a multi-pane tab only (the caller gates on `is_split && !focused`).
+///
+/// Each cell's fg/bg is *fully resolved* to the RGB the renderer would paint
+/// (via [`resolve_rgb`] over the window's palette + defaults) and then blended
+/// toward `fill`. Resolving before blending is what makes the CPU tint match the
+/// presented pixels — a `Default` fg resolves to the renderer's bright default
+/// (`0xd8d8d8`), so bright text visibly dims, and palette-indexed colors dim too
+/// (not just direct-RGB cells).
+pub fn dim_window(window: &mut SnapshotWindow, colors: DimColors) {
+    if colors.overlay_alpha <= f64::EPSILON {
+        return;
+    }
+    let window_default_fg = window.default_fg;
+    let window_default_bg = window.default_bg;
+    let palette = window.palette;
+    let fill = colors.fill;
+    let alpha = colors.overlay_alpha;
+    for row in window.window.iter_mut() {
+        for cell in row.cells.iter_mut() {
+            let fg = resolve_rgb(
+                cell.style.fg,
+                &palette,
+                window_default_fg,
+                colors.default_fg_fallback,
+            );
+            let bg = resolve_rgb(
+                cell.style.bg,
+                &palette,
+                window_default_bg,
+                colors.default_bg_fallback,
+            );
+            cell.style.fg = blend(fg, fill, alpha);
+            cell.style.bg = blend(bg, fill, alpha);
+        }
+    }
+}
+
 /// Resolve a symbolic [`SnapshotColor::Default`] to a concrete RGB using the
 /// window's default fg/bg (falling back to a mid-gray/black pair if the
 /// terminal has no dynamic default set — matching the renderer's own
@@ -409,6 +512,124 @@ mod tests {
         );
         // A cell outside every match (row 2) is untouched.
         assert_eq!(window.window[2].cells[0].style, CellStyle::default());
+    }
+
+    // ---- dim_window ------------------------------------------------------
+
+    /// A `DimColors` with the given fill/alpha and neutral (black) default
+    /// fallbacks — the tests set explicit RGB or the window's own defaults.
+    fn dim(fill: Rgb, alpha: f64) -> DimColors {
+        DimColors {
+            fill,
+            overlay_alpha: alpha,
+            default_fg_fallback: Rgb::new(0, 0, 0),
+            default_bg_fallback: Rgb::new(0, 0, 0),
+        }
+    }
+
+    #[test]
+    fn dim_blends_cells_toward_fill() {
+        // A white fg (255) blended toward black fill (0) at alpha 0.3 → 178.5→178.
+        let mut window = blank_window(2, 1);
+        window.window[0].cells[0].style.fg = SnapshotColor::Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        window.window[0].cells[0].style.bg = SnapshotColor::Rgb { r: 0, g: 0, b: 0 };
+        let colors = dim(Rgb::new(0, 0, 0), 0.3);
+        dim_window(&mut window, colors);
+        // fg: 255*0.7 + 0*0.3 = 178.5 → 178 (round-half-to-even/away: 178 or 179).
+        let fg = window.window[0].cells[0].style.fg;
+        match fg {
+            SnapshotColor::Rgb { r, .. } => assert!((178..=179).contains(&r), "got {r}"),
+            other => panic!("expected rgb, got {other:?}"),
+        }
+        // bg already black → stays black.
+        assert_eq!(
+            window.window[0].cells[0].style.bg,
+            SnapshotColor::Rgb { r: 0, g: 0, b: 0 }
+        );
+    }
+
+    #[test]
+    fn dim_toward_white_fill_brightens_black() {
+        let mut window = blank_window(1, 1);
+        window.window[0].cells[0].style.fg = SnapshotColor::Rgb { r: 0, g: 0, b: 0 };
+        let colors = dim(Rgb::new(255, 255, 255), 0.5);
+        dim_window(&mut window, colors);
+        // 0*0.5 + 255*0.5 = 127.5 → 128.
+        if let SnapshotColor::Rgb { r, .. } = window.window[0].cells[0].style.fg {
+            assert!((127..=128).contains(&r), "got {r}");
+        } else {
+            panic!("expected rgb");
+        }
+    }
+
+    #[test]
+    fn dim_zero_alpha_is_noop() {
+        let mut window = blank_window(3, 2);
+        window.window[0].cells[0].style.fg = SnapshotColor::Rgb {
+            r: 10,
+            g: 20,
+            b: 30,
+        };
+        let before = window.window[0].cells[0].style;
+        dim_window(&mut window, dim(Rgb::new(0, 0, 0), 0.0));
+        assert_eq!(window.window[0].cells[0].style, before);
+    }
+
+    #[test]
+    fn dim_resolves_default_against_window_defaults() {
+        // A Default fg with the window default fg = white, dimmed to black at
+        // alpha 1.0 → fully black.
+        let mut window = blank_window(1, 1);
+        window.default_fg = Some(Rgb::new(255, 255, 255));
+        window.window[0].cells[0].style.fg = SnapshotColor::Default;
+        dim_window(&mut window, dim(Rgb::new(0, 0, 0), 1.0));
+        assert_eq!(
+            window.window[0].cells[0].style.fg,
+            SnapshotColor::Rgb { r: 0, g: 0, b: 0 }
+        );
+    }
+
+    #[test]
+    fn dim_uses_fallback_for_default_fg_when_window_has_none() {
+        // No window default fg → the renderer fallback (bright 0xd8d8d8) is what
+        // gets dimmed, not black. At alpha 1.0 toward black fill → fully black,
+        // but at alpha 0.0 it must resolve to the *fallback*, proving the
+        // fallback (not black) is the base.
+        let mut window = blank_window(1, 1);
+        window.window[0].cells[0].style.fg = SnapshotColor::Default;
+        let colors = DimColors {
+            fill: Rgb::new(0, 0, 0),
+            overlay_alpha: 0.5,
+            default_fg_fallback: Rgb::new(0xd8, 0xd8, 0xd8),
+            default_bg_fallback: Rgb::new(0, 0, 0),
+        };
+        dim_window(&mut window, colors);
+        // 0xd8 (216) * 0.5 + 0 * 0.5 = 108.
+        if let SnapshotColor::Rgb { r, .. } = window.window[0].cells[0].style.fg {
+            assert!((107..=108).contains(&r), "got {r} (expected ~108)");
+        } else {
+            panic!("expected rgb");
+        }
+    }
+
+    #[test]
+    fn dim_resolves_palette_indices() {
+        // Palette index 1 in the default palette is #CC6666 (204,102,102).
+        // Dimmed toward black at alpha 0.5 → (102,51,51).
+        let mut window = blank_window(1, 1);
+        window.window[0].cells[0].style.fg = SnapshotColor::Palette(1);
+        dim_window(&mut window, dim(Rgb::new(0, 0, 0), 0.5));
+        if let SnapshotColor::Rgb { r, g, b } = window.window[0].cells[0].style.fg {
+            assert!((101..=102).contains(&r), "r={r}");
+            assert!((50..=51).contains(&g), "g={g}");
+            assert!((50..=51).contains(&b), "b={b}");
+        } else {
+            panic!("expected rgb");
+        }
     }
 
     #[test]

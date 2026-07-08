@@ -280,6 +280,10 @@ struct Surface {
     /// Max per-pixel L1 delta from `default_bg` in the most recently *presented*
     /// frame.
     last_present_delta: i32,
+    /// Mean Rec.601 luma of the most recently *presented* frame (`[0, 255]`).
+    /// The dimming smoke asserts an unfocused pane's mean luma drops below the
+    /// focused baseline. Only updated when `capture_present` is on.
+    last_present_luma: f64,
     /// Whether the render path reads the presented frame back each tick.
     capture_present: bool,
     /// This pane's scrollback viewport offset in rows *up from the bottom*
@@ -315,6 +319,11 @@ struct Surface {
     /// Match-highlight tint colors (amber matches, salmon current), from the
     /// selection-tint family. Static defaults for slice 1.
     match_colors: crate::selection::MatchColors,
+    /// Unfocused-split dimming colors for this pane: the fill (configured, or
+    /// this surface's own background) + overlay alpha. Applied in
+    /// [`Surface::render`] when the pane is an unfocused member of a multi-pane
+    /// tab. See [`crate::selection::dim_window`].
+    dim_colors: crate::selection::DimColors,
 }
 
 /// Lock an engine mutex, recovering a poisoned lock instead of panicking.
@@ -496,8 +505,11 @@ impl Surface {
 
     /// Render one frame into this pane's layer. `focused` selects the hollow
     /// (unfocused) vs. solid cursor via `FrameOptions.focused` — the renderer
-    /// draws a hollow box for an unfocused pane at no extra cost.
-    fn render(&mut self, focused: bool) {
+    /// draws a hollow box for an unfocused pane at no extra cost. `is_split` is
+    /// whether this pane's tab has more than one pane; when it does and this pane
+    /// is unfocused, the snapshot is dimmed toward the fill color (upstream
+    /// `unfocused-split-opacity`, replicated CPU-side like the selection tint).
+    fn render(&mut self, focused: bool, is_split: bool) {
         if self.render.is_none() {
             return;
         }
@@ -526,6 +538,14 @@ impl Surface {
                 self.match_colors,
             );
         }
+        // Unfocused-split dimming: the final CPU-side tint pass, applied only to
+        // an unfocused pane of a multi-pane tab (upstream's `isSplit &&
+        // !isFocusedSurface` gate). Blends every cell toward the fill color at
+        // the overlay alpha, replicating upstream's translucent overlay. The
+        // focused pane and single-pane tabs are never dimmed.
+        if is_split && !focused {
+            crate::selection::dim_window(&mut window, self.dim_colors);
+        }
         let snapshot = FullSnapshot::from_window(window);
         let render = self.render.as_mut().expect("checked above");
         let opts = FrameOptions {
@@ -541,6 +561,7 @@ impl Surface {
             let (sw, sh) = render.screen_size();
             if let Ok(Some(pixels)) = render.draw_and_present_readback(self.view.host_layer()) {
                 self.last_present_delta = crate::frame_dump::max_bg_delta(&pixels, self.default_bg);
+                self.last_present_luma = crate::frame_dump::mean_luma(&pixels);
                 if let Some(dump) = self.frame_dump.as_mut()
                     && dump.should_dump()
                 {
@@ -883,14 +904,24 @@ impl Tab {
         let divider_px = (DIVIDER_THICKNESS_PT * scale).round();
         let layout = self.tree.layout(container_px, divider_px);
 
-        // Position each pane view + reflow its grid.
-        for (id, rect) in &layout.panes {
-            if let Some(surface) = self.surfaces.get_mut(id) {
+        // Position each pane view + reflow its grid. When a pane is zoomed, the
+        // layout contains only that one pane; every other pane must be hidden so
+        // it doesn't show through the zoomed pane (the zoomed pane covers the
+        // whole container). Hiding is toggled per surface each layout so an
+        // unzoom re-shows them all.
+        for (id, surface) in self.surfaces.iter_mut() {
+            if let Some(rect) = layout.panes.get(id) {
                 surface.scale = scale;
                 surface.rect = *rect;
                 let frame = crate::splitview::ns_rect_from_tree(*rect, scale);
                 surface.view.setFrame(frame);
+                surface.view.setHidden(false);
                 surface.reflow();
+            } else {
+                // Not in the current layout (a non-zoomed pane while another is
+                // zoomed): hide it. It keeps its grid/io so an unzoom restores it
+                // instantly; it simply isn't drawn.
+                surface.view.setHidden(true);
             }
         }
 
@@ -962,6 +993,13 @@ pub struct ControllerState {
     /// (`crate::keybind`). Resolved in the key path BEFORE the encoder, so a
     /// bound chord sends its literal bytes instead of the encoder's default.
     keybinds: crate::keybind::KeybindTable,
+    /// Unfocused-split dimming overlay alpha (`1 - unfocused-split-opacity`,
+    /// clamped). 0 disables dimming (opacity 1.0). Applied to unfocused panes of
+    /// multi-pane tabs only.
+    unfocused_dim_alpha: f64,
+    /// The configured `unfocused-split-fill` color, if any. When `None`, each
+    /// surface dims toward its own terminal background (upstream default).
+    unfocused_dim_fill: Option<ghostty_vt::color::Rgb>,
 }
 
 /// The controller handle passed to views and menu targets.
@@ -1007,6 +1045,10 @@ impl Controller {
             }
             .clamped(),
             keybinds: crate::keybind::KeybindTable::parse(&config.keybind),
+            // Overlay alpha = 1 - opacity (upstream `SurfaceView.swift` getter),
+            // opacity clamped to [0.15, 1.0]. Opacity 1.0 → alpha 0 → no dimming.
+            unfocused_dim_alpha: 1.0 - config.unfocused_split_opacity(),
+            unfocused_dim_fill: config.unfocused_split_fill(),
         })))
     }
 
@@ -1466,6 +1508,62 @@ impl Controller {
             t.tree.set_ratio(path, ratio);
             t.relayout(controller_ptr, tab, mtm);
         }
+    }
+
+    /// A surface's most-recent presented-frame mean luma (smoke/test only) —
+    /// the dimming smoke asserts an unfocused pane's luma sits below its focused
+    /// baseline. Needs `GHOSTTY_APP_ASSERT_PRESENT` (capture on).
+    pub fn surface_present_luma(&self, tab: TabId, surface: SurfaceId) -> Option<f64> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.last_present_luma)
+    }
+
+    /// Whether a surface's view is hidden (smoke/test only) — a zoomed tab hides
+    /// every non-zoomed pane.
+    pub fn surface_is_hidden(&self, tab: TabId, surface: SurfaceId) -> Option<bool> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.view.isHidden())
+    }
+
+    /// The active tab's zoomed surface, if any (smoke/test only).
+    pub fn active_zoomed_surface(&self) -> Option<SurfaceId> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).and_then(|t| t.tree.zoomed())
+    }
+
+    /// The pixel rect of a surface within its tab (device pixels) — the zoom
+    /// smoke asserts a zoomed pane fills the whole container (smoke/test only).
+    pub fn surface_rect(&self, tab: TabId, surface: SurfaceId) -> Option<crate::splits::Rect> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.rect)
+    }
+
+    /// The active tab's whole container rect in device pixels (smoke/test only).
+    pub fn active_container_rect(&self) -> Option<crate::splits::Rect> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        let t = state.tabs.get(&tab)?;
+        let scale = t.window.backingScaleFactor();
+        let bounds = t.container.bounds();
+        Some(crate::splits::Rect::new(
+            0.0,
+            0.0,
+            bounds.size.width * scale,
+            bounds.size.height * scale,
+        ))
     }
 
     /// Execute a built-in tab-navigation action against the active window's
@@ -1929,6 +2027,11 @@ impl Controller {
             let mut dead = Vec::new();
             for (tid, tab) in state.tabs.iter_mut() {
                 let focused = tab.tree.focused();
+                // Whether this tab has more than one pane — the gate for
+                // unfocused-split dimming (upstream `isSplit`). A zoomed tab
+                // renders only one pane (the zoomed one), which is focused, so
+                // no dimming applies while zoomed regardless.
+                let is_split = tab.tree.len() > 1;
                 let mut password_focused = false;
                 for (sid, surface) in tab.surfaces.iter_mut() {
                     let (surface_exited, password) = surface.pump();
@@ -1943,7 +2046,7 @@ impl Controller {
                         if surface.is_dead() {
                             surface.settle_dead();
                         }
-                        surface.render(*sid == focused);
+                        surface.render(*sid == focused, is_split);
                     }
                     if *sid == focused
                         && let Some(active) = password
@@ -1978,13 +2081,15 @@ impl Controller {
         scale: f64,
         cwd: Option<&std::path::Path>,
     ) -> Option<Surface> {
-        let (family, default_size, startup_colors, selection_colors) = {
+        let (family, default_size, startup_colors, selection_colors, dim_alpha, dim_fill) = {
             let s = self.0.borrow();
             (
                 s.font_family.clone(),
                 s.default_font_size,
                 s.startup_colors.clone(),
                 s.selection_colors,
+                s.unfocused_dim_alpha,
+                s.unfocused_dim_fill,
             )
         };
 
@@ -2032,6 +2137,7 @@ impl Controller {
             default_bg,
             frame_dump,
             last_present_delta: 0,
+            last_present_luma: 0.0,
             capture_present,
             scrollback_offset: 0,
             wheel: crate::scroll::WheelState::default(),
@@ -2041,6 +2147,25 @@ impl Controller {
             search: crate::search::SearchState::default(),
             search_overlay: None,
             match_colors: crate::selection::MatchColors::default(),
+            dim_colors: crate::selection::DimColors {
+                // Dim toward the configured fill, else this surface's own
+                // terminal background (upstream `unfocused-split-fill ??
+                // background`).
+                fill: dim_fill.unwrap_or_else(|| {
+                    ghostty_vt::color::Rgb::new(default_bg.0, default_bg.1, default_bg.2)
+                }),
+                overlay_alpha: dim_alpha,
+                // Resolve `Default` fg/bg the way the renderer paints them so the
+                // CPU dim matches the presented pixels: fg falls back to the
+                // renderer's `FrameOptions::default_fg` (0xd8d8d8), bg to this
+                // surface's terminal background.
+                default_fg_fallback: ghostty_vt::color::Rgb::new(0xd8, 0xd8, 0xd8),
+                default_bg_fallback: ghostty_vt::color::Rgb::new(
+                    default_bg.0,
+                    default_bg.1,
+                    default_bg.2,
+                ),
+            },
         })
     }
 
@@ -2134,6 +2259,9 @@ impl Controller {
             SplitAction::NewSplit(dir) => self.new_split(tab, dir),
             SplitAction::GotoSplit(dir) => self.goto_split(tab, dir),
             SplitAction::GotoAdjacent(seq) => self.goto_adjacent(tab, seq),
+            SplitAction::ToggleZoom => self.toggle_split_zoom(tab),
+            SplitAction::ResizeSplit(dir) => self.resize_split(tab, dir),
+            SplitAction::EqualizeSplits => self.equalize_splits(tab),
         }
     }
 
@@ -2199,11 +2327,19 @@ impl Controller {
     /// Move focus to the spatially-adjacent pane of `tab` in `direction`, if one
     /// exists. No-op otherwise (mirrors upstream's performable check).
     pub fn goto_split(&self, tab: TabId, direction: Direction) {
-        let target = {
-            let state = self.0.borrow();
-            let Some(t) = state.tabs.get(&tab) else {
+        // Directional navigation unzooms (upstream `ghosttyDidFocusSplit` with
+        // `split-preserve-zoom` off, its default — we don't expose that config).
+        // Unzoom first so the spatial neighbour is computed against the real
+        // split layout (a zoomed layout has only one pane → no neighbours).
+        let (target, was_zoomed) = {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab) else {
                 return;
             };
+            let was_zoomed = t.tree.is_zoomed();
+            if was_zoomed {
+                t.tree.unzoom();
+            }
             let bounds = t.container.bounds();
             let scale = t.window.backingScaleFactor();
             let container_px = crate::splits::Rect::new(
@@ -2214,8 +2350,18 @@ impl Controller {
             );
             let divider_px = (DIVIDER_THICKNESS_PT * scale).round();
             let layout = t.tree.layout(container_px, divider_px);
-            t.tree.neighbor(direction, &layout)
+            (t.tree.neighbor(direction, &layout), was_zoomed)
         };
+        // If we unzoomed, re-lay-out to reveal the restored split (upstream
+        // unzooms on directional nav regardless of whether a neighbour exists).
+        if was_zoomed {
+            let mtm = self.0.borrow().mtm;
+            let controller_ptr: *const Controller = self;
+            let mut state = self.0.borrow_mut();
+            if let Some(t) = state.tabs.get_mut(&tab) {
+                t.relayout(controller_ptr, tab, mtm);
+            }
+        }
         if let Some(target) = target {
             self.focus_surface_in_tab(tab, target);
         }
@@ -2223,13 +2369,86 @@ impl Controller {
 
     /// Move focus to the previous / next pane of `tab` in flatten order (wraps).
     pub fn goto_adjacent(&self, tab: TabId, seq: Sequential) {
-        let target = {
-            let state = self.0.borrow();
-            state.tabs.get(&tab).and_then(|t| t.tree.adjacent(seq))
+        // Like directional nav, prev/next unzooms (upstream default).
+        let (target, was_zoomed) = {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab) else {
+                return;
+            };
+            let was_zoomed = t.tree.is_zoomed();
+            if was_zoomed {
+                t.tree.unzoom();
+            }
+            (t.tree.adjacent(seq), was_zoomed)
         };
+        if was_zoomed {
+            let mtm = self.0.borrow().mtm;
+            let controller_ptr: *const Controller = self;
+            let mut state = self.0.borrow_mut();
+            if let Some(t) = state.tabs.get_mut(&tab) {
+                t.relayout(controller_ptr, tab, mtm);
+            }
+        }
         if let Some(target) = target {
             self.focus_surface_in_tab(tab, target);
         }
+    }
+
+    /// Toggle zoom on `tab`'s focused pane (upstream `toggle_split_zoom`): the
+    /// focused pane fills the whole content area (all others hidden), or, if it
+    /// was already zoomed, restores the split layout. A single-pane tab can't
+    /// zoom (no-op). Re-lays-out so the zoomed pane reflows to the full container
+    /// and the hidden panes are removed from view; focus stays on the same pane.
+    pub fn toggle_split_zoom(&self, tab: TabId) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab) else {
+            return;
+        };
+        t.tree.toggle_zoom();
+        t.relayout(controller_ptr, tab, mtm);
+    }
+
+    /// Resize `tab`'s focused split in `direction` by the fixed step (upstream
+    /// `resize_split`, 10pt): move the nearest ancestor split of the matching
+    /// axis, then re-lay-out both adjacent panes (engine + PTY resize). Resets
+    /// zoom. No-op if there's no matching-axis split to resize.
+    pub fn resize_split(&self, tab: TabId, direction: Direction) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab) else {
+            return;
+        };
+        let scale = t.window.backingScaleFactor();
+        let bounds = t.container.bounds();
+        let container_px = crate::splits::Rect::new(
+            0.0,
+            0.0,
+            bounds.size.width * scale,
+            bounds.size.height * scale,
+        );
+        let divider_px = (DIVIDER_THICKNESS_PT * scale).round();
+        // The step is in points; scale to device pixels to match the tree's
+        // pixel-space geometry (same convention as `drag_divider`).
+        let step_px = crate::splitkeys::RESIZE_STEP_PT * scale;
+        t.tree
+            .resize_dir(direction, step_px, container_px, divider_px);
+        t.relayout(controller_ptr, tab, mtm);
+    }
+
+    /// Equalize `tab`'s splits (upstream `equalize_splits`): every split's ratio
+    /// becomes its children's leaf-count weight, then re-lay-out. Preserves zoom.
+    pub fn equalize_splits(&self, tab: TabId) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab) else {
+            return;
+        };
+        t.tree.equalize();
+        t.relayout(controller_ptr, tab, mtm);
     }
 
     /// Close a surface (pane) within `tab`: collapse its parent split so the
@@ -3495,6 +3714,207 @@ impl AppDelegate {
             ));
         }
 
+        // --- Slice 2: equalize, resize chords, zoom, and unfocused dimming.
+        // Tree here is `left | (top_right / bottom_right)`; the root split (path
+        // []) was just dragged to 0.25. ---
+
+        // Equalize: the root's right child is a *cross-axis* (vertical) split, so
+        // it counts as weight 1 → root ratio returns to 0.5 (leaf 0 vs. the
+        // vertical subtree). The nested vertical split equalizes to 0.5 too.
+        let (eq_left_before, _) = controller
+            .surface_grid(tab, left)
+            .unwrap_or_else(|| fail("no grid for left before equalize".into()));
+        controller.equalize_splits(tab);
+        let (eq_left_after, _) = controller
+            .surface_grid(tab, left)
+            .unwrap_or_else(|| fail("no grid for left after equalize".into()));
+        // Left was shrunk to 25% by the drag; equalize restores it to ~50%, so
+        // its column count must grow back.
+        if eq_left_after <= eq_left_before {
+            fail(format!(
+                "equalize did not restore the left pane toward 50% \
+                 (cols {eq_left_before} -> {eq_left_after})"
+            ));
+        }
+        // After equalize the left and the right column should be near-equal width
+        // (root ratio 0.5). Assert the left is within ~15% of the right column's
+        // width by comparing columns (top_right spans the right column's width).
+        let (left_cols, _) = controller.surface_grid(tab, left).unwrap();
+        let (right_cols, _) = controller.surface_grid(tab, top_right).unwrap();
+        let ratio = left_cols as f64 / (left_cols + right_cols) as f64;
+        if !(0.35..=0.65).contains(&ratio) {
+            fail(format!(
+                "after equalize the split should be ~50/50, saw left/right col \
+                 ratio {ratio:.2} ({left_cols} vs {right_cols})"
+            ));
+        }
+
+        // Resize chord: shrink the left pane with a `resize_split` Left step
+        // (cmd+ctrl+shift+left). It moves the root horizontal split; the left
+        // pane's columns must drop and the right column's must grow (WINCH both).
+        let (rc_left_before, _) = controller.surface_grid(tab, left).unwrap();
+        let (rc_right_before, _) = controller.surface_grid(tab, top_right).unwrap();
+        controller.resize_split(tab, Direction::Left);
+        let (rc_left_after, _) = controller.surface_grid(tab, left).unwrap();
+        let (rc_right_after, _) = controller.surface_grid(tab, top_right).unwrap();
+        if rc_left_after >= rc_left_before {
+            fail(format!(
+                "resize_split Left did not shrink the left pane \
+                 ({rc_left_before} -> {rc_left_after})"
+            ));
+        }
+        if rc_right_after <= rc_right_before {
+            fail(format!(
+                "resize_split Left did not grow the right column \
+                 ({rc_right_before} -> {rc_right_after})"
+            ));
+        }
+        // Re-equalize so the geometry is symmetric for the zoom/dimming checks.
+        controller.equalize_splits(tab);
+
+        // Zoom: focus the middle pane (top_right) and toggle zoom. It must fill
+        // the whole container; the other panes hide; the tree records the zoom.
+        controller.focus_surface_in_tab(tab, top_right);
+        controller.toggle_split_zoom(tab);
+        if controller.active_zoomed_surface() != Some(top_right) {
+            fail("toggle_split_zoom did not record the middle pane as zoomed".into());
+        }
+        let container = controller
+            .active_container_rect()
+            .unwrap_or_else(|| fail("no container rect while zoomed".into()));
+        let zoomed_rect = controller
+            .surface_rect(tab, top_right)
+            .unwrap_or_else(|| fail("no rect for zoomed pane".into()));
+        // The zoomed pane fills the container (within 1px of each dimension).
+        if (zoomed_rect.w - container.w).abs() > 1.0 || (zoomed_rect.h - container.h).abs() > 1.0 {
+            fail(format!(
+                "zoomed pane should fill the container {container:?}, saw {zoomed_rect:?}"
+            ));
+        }
+        // The other two panes are hidden while zoomed.
+        for sid in [left, bottom_right] {
+            if controller.surface_is_hidden(tab, sid) != Some(true) {
+                fail(format!(
+                    "pane {sid:?} should be hidden while another is zoomed"
+                ));
+            }
+        }
+        if controller.surface_is_hidden(tab, top_right) != Some(false) {
+            fail("the zoomed pane must be visible".into());
+        }
+
+        // Unzoom via a second toggle → frames restored exactly (all panes shown).
+        let left_rect_before_zoom = controller.surface_rect(tab, left);
+        controller.toggle_split_zoom(tab);
+        if controller.active_zoomed_surface().is_some() {
+            fail("second toggle_split_zoom did not unzoom".into());
+        }
+        for sid in [left, top_right, bottom_right] {
+            if controller.surface_is_hidden(tab, sid) != Some(false) {
+                fail(format!("pane {sid:?} should be visible after unzoom"));
+            }
+        }
+        // The left pane's rect returns to what it was before zooming (the split
+        // layout is preserved through zoom/unzoom).
+        if let (Some(before), Some(after)) =
+            (left_rect_before_zoom, controller.surface_rect(tab, left))
+            && ((before.w - after.w).abs() > 1.0 || (before.h - after.h).abs() > 1.0)
+        {
+            fail(format!(
+                "unzoom did not restore the split layout: left rect {before:?} -> {after:?}"
+            ));
+        }
+
+        // Zoom + a new split unzooms-then-splits (upstream `inserting` resets
+        // zoom). Zoom the left pane, then create a split; the tree must not be
+        // zoomed afterward and the pane count grows.
+        controller.focus_surface_in_tab(tab, left);
+        controller.toggle_split_zoom(tab);
+        if controller.active_zoomed_surface() != Some(left) {
+            fail("failed to zoom the left pane".into());
+        }
+        controller.new_split(tab, Direction::Right);
+        if controller.active_zoomed_surface().is_some() {
+            fail("creating a split should have unzoomed (upstream inserting resets zoom)".into());
+        }
+        if controller.active_surface_count() != Some(4) {
+            fail(format!(
+                "zoom + new_split should yield 4 panes, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+        // Close the pane we just added to return to the 3-pane layout for the
+        // dimming + remaining checks. The new pane is the focused one.
+        let new_pane = controller
+            .active_focused_surface()
+            .unwrap_or_else(|| fail("no focused pane after zoom+split".into()));
+        controller.close_surface(tab, new_pane);
+        if controller.active_surface_count() != Some(3) {
+            fail(format!(
+                "expected 3 panes after closing the extra, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+
+        // --- Unfocused dimming: with capture on, a pane's presented mean luma
+        // drops when it is UNFOCUSED (multi-pane tab) and returns when focused,
+        // and a pane in a single-pane tab is never dimmed. Only when capture is
+        // enabled (readback). ---
+        if std::env::var_os("GHOSTTY_APP_ASSERT_PRESENT").is_some() {
+            // Re-feed a screenful of bright text into the left pane's engine and
+            // sample the *peak* presented luma over a few ticks: the running shell
+            // may redraw/scroll and the parse→snapshot→present→readback pipeline
+            // lags a frame, so the ink's brightness shows up on the peak frame,
+            // not necessarily the last. This makes the measurement robust to shell
+            // interference and readback lag while still isolating the dim effect
+            // (focused = undimmed, so its peak is brighter than the unfocused,
+            // dimmed peak of the same ink).
+            let bright: String = std::iter::repeat_n("#", 32 * 40)
+                .collect::<String>()
+                .as_bytes()
+                .chunks(32)
+                .map(|c| format!("{}\r\n", std::str::from_utf8(c).unwrap()))
+                .collect();
+            let peak_luma = |c: &Controller| -> f64 {
+                c.feed_surface_output(tab, left, bright.as_bytes());
+                let mut peak = 0.0f64;
+                for _ in 0..8 {
+                    c.tick();
+                    if let Some(l) = c.surface_present_luma(tab, left) {
+                        peak = peak.max(l);
+                    }
+                }
+                peak
+            };
+
+            // Focus the left pane → renders undimmed. Peak luma is the bright ink.
+            controller.focus_surface_in_tab(tab, left);
+            let focused_luma = peak_luma(controller);
+
+            // Focus a different pane so `left` becomes unfocused → dimmed. The
+            // same ink now dims toward the dark background at overlay alpha 0.3.
+            controller.focus_surface_in_tab(tab, bottom_right);
+            let dimmed_luma = peak_luma(controller);
+
+            if dimmed_luma + 2.0 >= focused_luma {
+                fail(format!(
+                    "unfocused-split dimming did not reduce the left pane's mean luma \
+                     (focused {focused_luma:.2}, unfocused {dimmed_luma:.2})"
+                ));
+            }
+
+            // Re-focus the left pane → dimming lifts, luma returns to the bright
+            // baseline (within a small tolerance).
+            controller.focus_surface_in_tab(tab, left);
+            let refocused_luma = peak_luma(controller);
+            if refocused_luma + 2.0 < focused_luma {
+                fail(format!(
+                    "re-focusing the left pane did not restore its brightness \
+                     (was {focused_luma:.2}, now {refocused_luma:.2})"
+                ));
+            }
+        }
+
         // --- Per-pane scrollback isolation: fill the left pane's scrollback,
         // scroll IT back with wheel-up events, and assert only that pane's
         // viewport offset moved (the top-right pane stays pinned to the live
@@ -3639,8 +4059,12 @@ impl AppDelegate {
         println!(
             "OK: splits smoke — split-right + split-down build 3 isolated shells \
              (each marker only in its own pane), directional focus walks the grid, \
-             a divider drag resizes both adjacent panes' grids, wheel-scrolling one \
-             pane back leaves the others pinned to the live area (per-pane scrollback \
+             a divider drag resizes both adjacent panes' grids, equalize restores \
+             even ratios, a resize_split chord shrinks/grows adjacent panes (WINCH), \
+             zoom fills the container + hides the rest and unzoom restores the \
+             layout exactly, zoom+new_split unzooms-then-splits, unfocused panes dim \
+             (mean luma drops, restored on refocus), wheel-scrolling one pane back \
+             leaves the others pinned to the live area (per-pane scrollback \
              isolation), poisoning one pane's engine marks only that pane dead \
              (crash banner) while the app + sibling panes survive, closing the \
              middle pane collapses to 2 with the sibling absorbing the space, and \

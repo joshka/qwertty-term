@@ -41,11 +41,20 @@
 //!   split's axis + ratio into per-leaf rects — upstream `Spatial` slots (the
 //!   divider gaps are inserted by the caller, since they're AppKit geometry).
 //!
+//! # Slice 2 (this file)
+//!
+//! - **zoom** ([`SplitTree::toggle_zoom`] + the `zoomed` field): a zoomed leaf
+//!   fills the whole container; [`SplitTree::layout`] renders only it. Reset by
+//!   insert/close/resize, preserved by equalize — upstream `toggle_split_zoom`.
+//! - **equalize** ([`SplitTree::equalize`]): each split's ratio becomes the
+//!   leaf-count weight of its children — upstream `equalized`.
+//! - **directional resize** ([`SplitTree::resize_dir`]): move the nearest
+//!   ancestor split of the matching axis by a pixel step — upstream
+//!   `resize_split`.
+//!
 //! # Deferred (see `docs/analysis/splits.md`)
 //!
-//! Zoom (`toggle_split_zoom` + the `zoomed` node), equalize, and
-//! programmatic `resize_split` keybinds are out of slice 1; the tree carries no
-//! `zoomed` field yet.
+//! Drag-to-reparent and session save/restore remain out of scope.
 
 use std::collections::HashMap;
 
@@ -196,11 +205,21 @@ pub struct Layout {
     pub dividers: Vec<Divider>,
 }
 
-/// The split tree for one tab: the node tree plus the currently focused leaf.
+/// The split tree for one tab: the node tree plus the currently focused leaf,
+/// plus the optionally-zoomed leaf.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitTree {
     root: Node,
     focused: SurfaceId,
+    /// The leaf currently *zoomed* to fill the whole container, if any. When
+    /// `Some`, [`SplitTree::layout`] renders only that leaf (upstream
+    /// `TerminalSplitTreeView` renders `tree.zoomed ?? tree.root`). Upstream's
+    /// `zoomed` is a `Node?`, but zoom always targets a single leaf in practice
+    /// (`toggle_split_zoom` zooms the focused surface), so a `SurfaceId` is the
+    /// faithful reduction. Reset by insert/close/resize; preserved by equalize;
+    /// reset by directional navigation (upstream default, `split-preserve-zoom`
+    /// off — we don't expose that config). See `docs/analysis/splits.md`.
+    zoomed: Option<SurfaceId>,
 }
 
 impl SplitTree {
@@ -210,6 +229,7 @@ impl SplitTree {
         SplitTree {
             root: Node::Leaf(id),
             focused: id,
+            zoomed: None,
         }
     }
 
@@ -269,6 +289,9 @@ impl SplitTree {
         }));
         replace_leaf(&mut self.root, target, replacement);
         self.focused = new;
+        // Upstream `inserting` "always reset[s] the zoomed state of the tree"
+        // (SplitTree.swift 124-129).
+        self.zoomed = None;
     }
 
     /// Close a surface: remove its leaf and collapse its parent split so the
@@ -295,6 +318,12 @@ impl SplitTree {
         let sibling_focus = sibling_leaf(&self.root, id);
 
         remove_leaf(&mut self.root, id);
+
+        // Upstream `removing` clears `zoomed` only if the *removed* node was the
+        // zoomed one (SplitTree.swift 152-153); a different pane's zoom survives.
+        if self.zoomed == Some(id) {
+            self.zoomed = None;
+        }
 
         if self.focused == id {
             self.focused = sibling_focus.unwrap_or_else(|| {
@@ -383,15 +412,114 @@ impl SplitTree {
         if let Some(Node::Split(split)) = node_at_path_mut(&mut self.root, path) {
             let new = split.ratio + delta / span;
             split.ratio = clamp_ratio(new);
+            // Upstream resize "always reset[s] the zoomed state"
+            // (SplitTree.swift 250, 332).
+            self.zoomed = None;
         }
     }
 
     /// Set the ratio of the split at `path` directly (used by an absolute
-    /// divider drag that computes the new ratio itself). Clamped.
+    /// divider drag that computes the new ratio itself). Clamped. Like all
+    /// resize ops, resets zoom.
     pub fn set_ratio(&mut self, path: &[bool], ratio: f64) {
         if let Some(Node::Split(split)) = node_at_path_mut(&mut self.root, path) {
             split.ratio = clamp_ratio(ratio);
+            self.zoomed = None;
         }
+    }
+
+    /// The currently zoomed surface, if any. When `Some`, [`layout`](Self::layout)
+    /// renders only this leaf filling the whole container.
+    pub fn zoomed(&self) -> Option<SurfaceId> {
+        self.zoomed
+    }
+
+    /// Whether any pane is zoomed.
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed.is_some()
+    }
+
+    /// Toggle zoom on the *focused* surface (upstream `toggle_split_zoom`,
+    /// BaseTerminalController.swift 677-694): if it is already the zoomed pane,
+    /// unzoom; otherwise zoom it — but only when the tree actually has splits
+    /// (`isSplit`; a single-pane tab can't zoom). Returns whether the tree is
+    /// zoomed afterwards.
+    pub fn toggle_zoom(&mut self) -> bool {
+        if self.zoomed == Some(self.focused) {
+            self.zoomed = None;
+        } else if self.len() > 1 {
+            self.zoomed = Some(self.focused);
+        }
+        self.is_zoomed()
+    }
+
+    /// Clear any zoom (used by directional navigation, which unzooms — upstream
+    /// `ghosttyDidFocusSplit` with `split-preserve-zoom` off).
+    pub fn unzoom(&mut self) {
+        self.zoomed = None;
+    }
+
+    /// Directional resize (upstream `resize_split`, SplitTree.swift 245-333):
+    /// find the nearest ancestor split of the focused leaf whose axis matches
+    /// the resize direction (horizontal for left/right, vertical for up/down),
+    /// and move its ratio by `pixels` against that split's own slot extent.
+    /// `left`/`up` shrink the first (left/top) child; `right`/`down` grow it.
+    /// Clamped to `[0.1, 0.9]`. Resets zoom. No-op if no matching ancestor split
+    /// exists (e.g. resizing horizontally in a purely-vertical stack).
+    ///
+    /// `container` is the whole tree's pixel rect and `divider` the strip
+    /// thickness — needed to compute the target split's slot extent so the pixel
+    /// delta maps to the same ratio delta a divider drag would.
+    pub fn resize_dir(&mut self, direction: Direction, pixels: f64, container: Rect, divider: f64) {
+        let want_axis = direction.axis();
+        // Path from root to the focused leaf.
+        let Some(path) = leaf_path(&self.root, self.focused) else {
+            return;
+        };
+        // Walk up from the leaf to the nearest ancestor split of the wanted axis.
+        let mut best: Option<Vec<bool>> = None;
+        for prefix_len in (0..path.len()).rev() {
+            let prefix = &path[..prefix_len];
+            if let Some(Node::Split(s)) = node_at_path(&self.root, prefix)
+                && s.axis == want_axis
+            {
+                best = Some(prefix.to_vec());
+                break;
+            }
+        }
+        let Some(target) = best else {
+            return;
+        };
+        // The target split's own slot extent along its axis.
+        let Some((split_rect, axis)) = self.split_rect(&target, container, divider) else {
+            return;
+        };
+        let span = match axis {
+            Axis::Horizontal => (split_rect.w - divider).max(1.0),
+            Axis::Vertical => (split_rect.h - divider).max(1.0),
+        };
+        // left/up shrink the first child; right/down grow it.
+        let delta = match direction {
+            Direction::Left | Direction::Up => -pixels,
+            Direction::Right | Direction::Down => pixels,
+        };
+        if let Some(Node::Split(split)) = node_at_path_mut(&mut self.root, &target) {
+            split.ratio = clamp_ratio(split.ratio + delta / span);
+        }
+        self.zoomed = None;
+    }
+
+    /// Equalize all splits so each split's ratio reflects the relative leaf-count
+    /// weight of its two children (upstream `equalized`, SplitTree.swift 236-730).
+    /// Preserves zoom (upstream returns `.init(root: newRoot, zoomed: zoomed)`).
+    ///
+    /// The weight of a subtree *for a given direction* is: a leaf is 1; a split
+    /// of the *same* axis contributes the sum of its children's weights; a split
+    /// of a *different* axis counts as 1. Each split's new ratio is
+    /// `leftWeight / (leftWeight + rightWeight)`. Ported verbatim from
+    /// `weightForDirection` + `equalizeWithWeight`.
+    pub fn equalize(&mut self) {
+        equalize_node(&mut self.root);
     }
 
     /// The pixel rect the split at `path` (false=first / true=second at each
@@ -428,6 +556,19 @@ impl SplitTree {
     /// is just calling this again with a new `container` — ratios are preserved,
     /// so panes redistribute proportionally.
     pub fn layout(&self, container: Rect, divider: f64) -> Layout {
+        // A zoomed pane fills the whole container; no other panes or dividers are
+        // laid out (upstream `TerminalSplitTreeView` renders `zoomed ?? root`).
+        // The zoomed id is always a live leaf (reset on close), but guard anyway.
+        if let Some(zoomed) = self.zoomed
+            && self.contains(zoomed)
+        {
+            let mut panes = HashMap::new();
+            panes.insert(zoomed, container);
+            return Layout {
+                panes,
+                dividers: Vec::new(),
+            };
+        }
         let mut panes = HashMap::new();
         let mut dividers = Vec::new();
         layout_node(
@@ -562,6 +703,82 @@ fn node_at_path_mut<'a>(mut node: &'a mut Node, path: &[bool]) -> Option<&'a mut
         }
     }
     Some(node)
+}
+
+/// Follow a `false=first / true=second` path to a node, immutably.
+fn node_at_path<'a>(mut node: &'a Node, path: &[bool]) -> Option<&'a Node> {
+    for &second in path {
+        match node {
+            Node::Split(s) => {
+                node = if second { &s.second } else { &s.first };
+            }
+            Node::Leaf(_) => return None,
+        }
+    }
+    Some(node)
+}
+
+/// The `false=first / true=second` path from the root to the leaf `target`, or
+/// `None` if it isn't present.
+fn leaf_path(node: &Node, target: SurfaceId) -> Option<Vec<bool>> {
+    fn go(node: &Node, target: SurfaceId, acc: &mut Vec<bool>) -> bool {
+        match node {
+            Node::Leaf(id) => *id == target,
+            Node::Split(s) => {
+                acc.push(false);
+                if go(&s.first, target, acc) {
+                    return true;
+                }
+                acc.pop();
+                acc.push(true);
+                if go(&s.second, target, acc) {
+                    return true;
+                }
+                acc.pop();
+                false
+            }
+        }
+    }
+    let mut acc = Vec::new();
+    if go(node, target, &mut acc) {
+        Some(acc)
+    } else {
+        None
+    }
+}
+
+/// The equalization weight of a subtree *for a given split axis*: a leaf is 1; a
+/// split of the same axis contributes the sum of its children's weights; a split
+/// of a different axis counts as 1. Ported verbatim from upstream
+/// `weightForDirection` (SplitTree.swift 719-729).
+fn weight_for_axis(node: &Node, axis: Axis) -> usize {
+    match node {
+        Node::Leaf(_) => 1,
+        Node::Split(s) => {
+            if s.axis == axis {
+                weight_for_axis(&s.first, axis) + weight_for_axis(&s.second, axis)
+            } else {
+                1
+            }
+        }
+    }
+}
+
+/// Recursively equalize a node: for each split, set its ratio to
+/// `leftWeight / (leftWeight + rightWeight)` where the weights are
+/// [`weight_for_axis`] of the two children *for this split's own axis*, then
+/// recurse. Ported from upstream `equalizeWithWeight` (SplitTree.swift 685-715).
+fn equalize_node(node: &mut Node) {
+    if let Node::Split(s) = node {
+        let left_weight = weight_for_axis(&s.first, s.axis);
+        let right_weight = weight_for_axis(&s.second, s.axis);
+        let total = left_weight + right_weight;
+        if total > 0 {
+            s.ratio = clamp_ratio(left_weight as f64 / total as f64);
+        }
+        equalize_node(&mut s.first);
+        equalize_node(&mut s.second);
+    }
 }
 
 /// The two child rects a split of `axis`/`ratio` produces within `rect`,
@@ -880,5 +1097,214 @@ mod tests {
         let layout = tree.layout(Rect::new(0.0, 0.0, 200.0, 100.0), 0.0);
         assert!((layout.panes[&s(0)].w - 140.0).abs() < 1e-9);
         assert!((layout.panes[&s(1)].w - 60.0).abs() < 1e-9);
+    }
+
+    // ---- zoom ------------------------------------------------------------
+
+    #[test]
+    fn single_pane_cannot_zoom() {
+        let mut tree = SplitTree::leaf(s(0));
+        assert!(!tree.toggle_zoom());
+        assert!(!tree.is_zoomed());
+        assert_eq!(tree.zoomed(), None);
+    }
+
+    #[test]
+    fn zoom_fills_the_container_and_hides_others() {
+        // 0 | 1, focus 1, zoom → only 1 fills the container, no dividers.
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        assert_eq!(tree.focused(), s(1));
+        assert!(tree.toggle_zoom());
+        assert_eq!(tree.zoomed(), Some(s(1)));
+        let container = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let layout = tree.layout(container, 4.0);
+        assert_eq!(layout.panes.len(), 1);
+        assert_eq!(layout.panes[&s(1)], container);
+        assert!(layout.dividers.is_empty());
+    }
+
+    #[test]
+    fn toggle_zoom_twice_restores_the_layout() {
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        let before = tree.layout(Rect::new(0.0, 0.0, 204.0, 100.0), 4.0);
+        tree.toggle_zoom();
+        assert!(tree.is_zoomed());
+        tree.toggle_zoom();
+        assert!(!tree.is_zoomed());
+        let after = tree.layout(Rect::new(0.0, 0.0, 204.0, 100.0), 4.0);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn splitting_resets_zoom() {
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        tree.toggle_zoom();
+        assert!(tree.is_zoomed());
+        tree.split(s(2), Direction::Down);
+        assert!(!tree.is_zoomed());
+    }
+
+    #[test]
+    fn resize_resets_zoom() {
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        tree.toggle_zoom();
+        tree.set_ratio(&[], 0.3);
+        assert!(!tree.is_zoomed());
+    }
+
+    #[test]
+    fn closing_the_zoomed_pane_clears_zoom_other_close_preserves_it() {
+        // 0 | (1 / 2). Zoom 1, close 2 (a different pane) → still zoomed on 1.
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        tree.split(s(2), Direction::Down);
+        tree.focus(s(1));
+        tree.toggle_zoom();
+        assert_eq!(tree.zoomed(), Some(s(1)));
+        tree.focus(s(2));
+        tree.close(s(2));
+        assert_eq!(tree.zoomed(), Some(s(1)));
+        // Now close the zoomed pane itself → zoom clears.
+        tree.close(s(1));
+        assert!(!tree.is_zoomed());
+    }
+
+    // ---- equalize --------------------------------------------------------
+
+    #[test]
+    fn equalize_two_panes_is_half() {
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        tree.set_ratio(&[], 0.8);
+        tree.equalize();
+        let layout = tree.layout(Rect::new(0.0, 0.0, 100.0, 100.0), 0.0);
+        assert!((layout.panes[&s(0)].w - 50.0).abs() < 1e-9);
+        assert!((layout.panes[&s(1)].w - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn equalize_weights_by_leaf_count_same_axis() {
+        // A horizontal chain 0 | 1 | 2 built as 0 | (1 | 2): the root's right
+        // child is a same-axis split (2 leaves), so root ratio = 1/(1+2) = 1/3.
+        // The nested split (1 | 2) equalizes to 0.5.
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right); // 0 | 1, focus 1
+        tree.split(s(2), Direction::Right); // 0 | (1 | 2), focus 2
+        tree.equalize();
+        // Root ratio = 1/3, so leaf 0 gets 1/3 of the width; each of 1,2 gets 1/3.
+        let layout = tree.layout(Rect::new(0.0, 0.0, 300.0, 100.0), 0.0);
+        assert!((layout.panes[&s(0)].w - 100.0).abs() < 1e-6);
+        assert!((layout.panes[&s(1)].w - 100.0).abs() < 1e-6);
+        assert!((layout.panes[&s(2)].w - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn equalize_cross_axis_child_counts_as_one() {
+        // 0 | (1 / 2): the root is horizontal; its right child is a *vertical*
+        // split (cross-axis) → counts as weight 1. Root ratio = 1/(1+1) = 0.5.
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right); // 0 | 1
+        tree.split(s(2), Direction::Down); // 0 | (1 / 2)
+        tree.set_ratio(&[], 0.8);
+        tree.equalize();
+        let layout = tree.layout(Rect::new(0.0, 0.0, 200.0, 200.0), 0.0);
+        // Left pane gets half the width despite the right side holding 2 leaves.
+        assert!((layout.panes[&s(0)].w - 100.0).abs() < 1e-6);
+        // The nested vertical split equalizes to 0.5 → each right pane 100 tall.
+        assert!((layout.panes[&s(1)].h - 100.0).abs() < 1e-6);
+        assert!((layout.panes[&s(2)].h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn equalize_preserves_zoom() {
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        tree.focus(s(0));
+        tree.toggle_zoom();
+        assert_eq!(tree.zoomed(), Some(s(0)));
+        tree.equalize();
+        assert_eq!(tree.zoomed(), Some(s(0)));
+    }
+
+    // ---- directional resize ---------------------------------------------
+
+    #[test]
+    fn resize_dir_moves_matching_axis_ancestor() {
+        // 0 | 1, focus 1. Resize right (grow the first/left child) → ratio up.
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        let container = Rect::new(0.0, 0.0, 100.0, 100.0);
+        tree.focus(s(1));
+        tree.resize_dir(Direction::Right, 10.0, container, 0.0);
+        // Root ratio 0.5 + 10/100 = 0.6 → left pane 60 wide.
+        let layout = tree.layout(container, 0.0);
+        assert!((layout.panes[&s(0)].w - 60.0).abs() < 1e-6);
+        // Resize left shrinks it back.
+        tree.resize_dir(Direction::Left, 10.0, container, 0.0);
+        let layout = tree.layout(container, 0.0);
+        assert!((layout.panes[&s(0)].w - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resize_dir_finds_the_nearest_matching_ancestor() {
+        // 0 | (1 / 2), focus 2 (bottom-right). A vertical resize (up/down) hits
+        // the nested vertical split; a horizontal resize (left/right) walks past
+        // it to the root horizontal split.
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        tree.split(s(2), Direction::Down);
+        let container = Rect::new(0.0, 0.0, 200.0, 200.0);
+        tree.focus(s(2));
+        // Down grows the top child (1) of the nested vertical split.
+        tree.resize_dir(Direction::Down, 20.0, container, 0.0);
+        let layout = tree.layout(container, 0.0);
+        // Nested split slot is the right column (100 wide, 200 tall). ratio
+        // 0.5 + 20/200 = 0.6 → top pane 120 tall.
+        assert!((layout.panes[&s(1)].h - 120.0).abs() < 1e-6);
+        // Right grows the left child (0) of the root horizontal split.
+        tree.resize_dir(Direction::Right, 20.0, container, 0.0);
+        let layout = tree.layout(container, 0.0);
+        assert!((layout.panes[&s(0)].w - 120.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resize_dir_noop_when_no_matching_axis_ancestor() {
+        // 0 / 1 (vertical only), focus 1. A horizontal resize has no matching
+        // ancestor → no change.
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Down);
+        let container = Rect::new(0.0, 0.0, 100.0, 100.0);
+        tree.focus(s(1));
+        let before = tree.layout(container, 0.0);
+        tree.resize_dir(Direction::Left, 10.0, container, 0.0);
+        let after = tree.layout(container, 0.0);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn resize_dir_clamps() {
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        let container = Rect::new(0.0, 0.0, 100.0, 100.0);
+        tree.focus(s(1));
+        tree.resize_dir(Direction::Right, 1000.0, container, 0.0);
+        let layout = tree.layout(container, 0.0);
+        assert!((layout.panes[&s(0)].w - 90.0).abs() < 1e-6); // clamped to 0.9
+    }
+
+    #[test]
+    fn leaf_path_locates_leaves() {
+        // 0 | (1 / 2): 0 at [false], 1 at [true,false], 2 at [true,true].
+        let mut tree = SplitTree::leaf(s(0));
+        tree.split(s(1), Direction::Right);
+        tree.split(s(2), Direction::Down);
+        assert_eq!(leaf_path(&tree.root, s(0)), Some(vec![false]));
+        assert_eq!(leaf_path(&tree.root, s(1)), Some(vec![true, false]));
+        assert_eq!(leaf_path(&tree.root, s(2)), Some(vec![true, true]));
+        assert_eq!(leaf_path(&tree.root, s(9)), None);
     }
 }

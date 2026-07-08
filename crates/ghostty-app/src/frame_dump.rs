@@ -85,6 +85,21 @@ pub fn max_bg_delta(bgra: &[u8], bg: (u8, u8, u8)) -> i32 {
     max_delta
 }
 
+/// Mean Rec. 601 luma of a BGRA pixel buffer in `[0.0, 255.0]`
+/// (`0.299R + 0.587G + 0.114B`). Used by the splits smoke to measure a pane's
+/// overall brightness: an unfocused-dimmed pane's mean luma sits measurably
+/// below the same pane when focused.
+pub fn mean_luma(bgra: &[u8]) -> f64 {
+    let mut sum = 0.0f64;
+    let mut n = 0u64;
+    for px in bgra.chunks_exact(4) {
+        let (b, g, r) = (px[0] as f64, px[1] as f64, px[2] as f64);
+        sum += 0.299 * r + 0.587 * g + 0.114 * b;
+        n += 1;
+    }
+    if n == 0 { 0.0 } else { sum / n as f64 }
+}
+
 /// Encode a BGRA pixel buffer as an 8-bit RGBA truecolor PNG with no
 /// compression (stored DEFLATE blocks). Dependency-free.
 fn encode_png_bgra(bgra: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {

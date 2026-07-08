@@ -208,19 +208,49 @@ unmodified keys never resolve here — they reach the PTY encoder untouched
 - All pre-existing smokes pass unchanged: offscreen, geometry (1→2→1 tab
   chrome), typing (+ presented pixels), tab-keys.
 
-## Deferred (slice 2+)
+## Slice 2 (landed)
 
-- **Zoom** (`toggle_split_zoom`): upstream renders `tree.zoomed ?? tree.root`
-  — a zoomed pane temporarily takes the whole container. Our tree carries no
-  `zoomed` field yet; adding one + a chord is additive.
-- **Equalize**: upstream `equalized()` sets each split's ratio by relative
-  leaf-count weight.
-- **`resize_split` keybinds** (`cmd+ctrl+shift+arrows`, Config.zig 6671+):
-  the tree op exists (`SplitTree::resize`); only the chords are unwired.
+All verified against upstream `2da015cd6`; see `splits.rs` / `selection.rs` /
+`splitkeys.rs` / `config.rs` doc comments for per-item citations.
+
+- **Unfocused dimming** (`unfocused-split-opacity` default 0.7, clamped
+  `[0.15,1.0]` at Config.zig:4684; `unfocused-split-fill` default `null` →
+  background). Upstream draws a `Rectangle().fill(fill).opacity(1 - opacity)`
+  over an unfocused split pane (`SurfaceView.swift` 193-200, gate `isSplit &&
+  !isFocusedSurface`). Replicated CPU-side in `selection::dim_window`: every
+  cell's *fully-resolved* fg/bg (Default→renderer's `0xd8d8d8`/bg,
+  Palette→palette, Rgb→self — matching the renderer's `resolve_color`) is
+  blended toward `fill` by `overlay_alpha = 1 - opacity`. Applied in
+  `Surface::render` only when the tab has >1 pane and the pane is unfocused; the
+  focused pane and single-pane tabs never dim. Config keys parse + clamp in
+  `config.rs`.
+- **Zoom** (`toggle_split_zoom`, `cmd+shift+enter` = upstream
+  `ctrlOrSuper(shift)+enter`, Config.zig:6857). Added `zoomed: Option<SurfaceId>`
+  to `SplitTree`; `layout` renders only the zoomed leaf (upstream
+  `TerminalSplitTreeView` `zoomed ?? root`). `relayout` hides the other panes'
+  views. Unzoom triggers verified & ported: **insert resets zoom**
+  (SplitTree.swift:124-129), **resize resets zoom** (:250/332), **close clears
+  zoom iff the removed node was zoomed** (:152-153), **equalize preserves zoom**
+  (:239), **directional navigation unzooms** (`ghosttyDidFocusSplit`, default
+  `split-preserve-zoom` off — we don't expose that config). `isSplit` required
+  to zoom (single pane can't zoom).
+- **`resize_split`** (`cmd+ctrl+shift+arrows`, 10pt step, Config.zig:6671-6695).
+  `SplitTree::resize_dir` walks up from the focused leaf to the nearest ancestor
+  split of the matching axis (horizontal for left/right, vertical for up/down),
+  moves its ratio by the pixel delta against that split's own slot extent,
+  clamped `[0.1,0.9]`; resets zoom. No-op if no matching-axis ancestor.
+- **`equalize_splits`** (`cmd+ctrl+=`, Config.zig:7050-7054). `SplitTree::equalize`
+  is a verbatim port of `equalizeWithWeight`+`weightForDirection`
+  (SplitTree.swift:685-729): each split's ratio = leftWeight/(leftWeight+rightWeight)
+  where a subtree's weight *for an axis* is a leaf=1, a same-axis split=sum of
+  children, a cross-axis split=1. Preserves zoom.
+
+## Still deferred
+
 - **Drag-to-reparent** (upstream's `TerminalSplitOperation.drop` zones) and
   session save/restore (upstream's `Codable` tree).
-- **Unfocused dimming** (`unfocused-split-opacity`/`-fill`): hollow cursor is
-  in; the translucent overlay is not.
-- **Per-pane focus reporting** (`TabIo::focus` → mode 1004 + password poll):
-  pre-existing gap — the app never wired window focus either; splits make it
-  more visible. Should be wired for focused-pane transitions in a follow-up.
+- **`split-preserve-zoom` config** (Config.zig:1102): navigation currently
+  always unzooms (upstream's default); the `navigation` opt-in isn't exposed.
+- **Zoom titlebar indicator**: upstream shows a reset-zoom accessory button
+  (`TerminalWindow.swift` `surfaceIsZoomed`); we hide the other panes but add no
+  titlebar chrome (consistent with our minimal chrome — deviation documented).
