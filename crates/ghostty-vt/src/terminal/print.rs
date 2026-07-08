@@ -424,7 +424,16 @@ impl Terminal {
                     let page = self.screen().cursor_page();
                     if let Some(cps) = (*page).lookup_grapheme(prev_cell) {
                         for &cp2 in &*cps {
-                            debug_assert!(!grapheme_break(previous_codepoint, cp2, &mut state));
+                            // The grapheme_break call advances `state` (and
+                            // previous_codepoint) through prev's cluster; this
+                            // side effect is load-bearing and must run in every
+                            // build profile. Bind the result first, then assert
+                            // separately so `debug_assert!` compiling out in
+                            // release does not skip the state advance (Zig's
+                            // `assert(!graphemeBreak(...))` — the call's effect on
+                            // `&state` is required, not just the assertion).
+                            let did_break = grapheme_break(previous_codepoint, cp2, &mut state);
+                            debug_assert!(!did_break);
                             previous_codepoint = cp2;
                         }
                     }
