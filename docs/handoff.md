@@ -6,22 +6,20 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-10 (second sweep)
+## State as of 2026-07-10 (third batch: perf + search + embeddability)
 
-**Field-quality sweep complete except lig-engine (in flight).** Landed on main since the
-splits entry below: **wheel scrolling** (upstream ladder: reporting bytes unchanged /
-alternate-scroll arrows per DECCKM / per-pane scrollback viewport with precision-delta
-accumulation, snap-on-keystroke; known gap: cursor renders at stale position when scrolled
-back — upstream hides it); **fuzz-resize** (resize-interleaved cargo-fuzz target + seeded
-10k-interleaving property test in the release lane; 242k execs clean); **app hardening**
-(engine poison → dead pane + banner, app survives — proven in the splits smoke; minimal
-`keybind = text:` subset incl. Josh's shift+enter; per-pane mode-1004 focus reporting);
-**family-styles** (FiraCode's real Bold via discovery, synthetic ladder behind);
-**font-fidelity** (Apple Color Emoji pre-seeded fallback exactly like upstream
-SharedGridSet.zig:335-354; byte-backed named faces via kCTFontURLAttribute so rustybuzz
-shapes them; nerd-font constraint table codegen'd via `cargo xtask gen-nerd-constraints`,
-math byte-exact vs upstream's Glyph.zig oracle). **In flight: lig-engine** — run-based
-shaping in the render engine so multi-cell ligatures display live (font layer proven).
+Four lanes landed: **per-row dirty tracking** (upstream render.zig full-rebuild conditions
+mirrored; equality-proven vs full redraw across 6 scenarios; 2x faster single-row frames;
+scrolled-back cursor now hidden), **Cmd+F search UI** (overlay + incremental PageListSearch,
+3.2ms/10k lines synchronous, upstream highlight colors, per-pane; one additive vt
+constructor), **vtebench lane** (`scripts/bench-vtebench.sh`, pinned v0.3.1;
+`docs/benchmarks/vtebench-baseline.md`: **ghostty-rs faster in 9/10 suites vs Ghostty
+1.3.1**, dense_cells the one loss at 1.36x; pty-drain caveat documented), **MB2
+frame-capture example** (public-APIs-only bytes→PNG, deterministic; 6-item API-polish list
+for MB5 in its report; MB1 unblocked — paste `work/betamax-thread-prompt.md` into a
+betamax session). Restart-audit also recovered 3 orphaned commits (font-shaping analysis
+doc, workspace-lifecycle + SendMessage-scoping playbook rules) — landed. jj-failure-modes
+thread prompt written to `~/local/jj/work/ghostty-rs-jj-failures-thread.md`.
 
 ## Earlier 2026-07-10 (second sweep)
 

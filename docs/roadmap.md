@@ -137,8 +137,11 @@ macOS, renders THROUGH this stack for ghostty-identical output. Work splits acro
 
 ## M6 — Long tail & deferred
 
-- [ ] Perf to parity (SIMD utf8/decode, wide-run batching; currently 0.52–0.63x)
-- [ ] Search thread wrapper + window search UI
+- [ ] Perf to parity (SIMD utf8/decode, wide-run batching; engine 0.52–0.63x vs ref) —
+      whole-app vtebench now WINS 9/10 suites vs Ghostty 1.3.1 (docs/benchmarks/, 2026-07-10;
+      dirty tracking landed same day)
+- [x] Search UI — DONE 2026-07-10 (cmd+f overlay, incremental, per-pane; sync 3.2ms/10k
+      lines; thread wrapper deferred until scrollback demands it)
 - [ ] Glyph APC protocol (2.2k, needs F2) · kitty unicode placeholders (U=1) · file/shm media ·
   animation
 - [ ] tmux control mode (4.3k) · XTGETTCAP/DECRQSS full · OSC 21 effects
