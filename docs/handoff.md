@@ -6,6 +6,27 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
+## IN FLIGHT at session pause (2026-07-10, usage limits)
+
+Three chunk workspaces have agents finishing independently; each was told to gate +
+`jj describe`. Next session: integrate each per the recipe (rebase -d main, gate incl.
+release lane + smokes, bookmark move, docs), in any order; check `jj log` for their
+described commits even if the workspace looks idle.
+
+- `work/simd-perf` — "Perf: plain-text fast path + SIMD utf8 + print batching" (ghostty-vt;
+  differential corpus is the referee; expect memchr/simdutf8 deps).
+- `work/splits-2` — "Splits slice 2: unfocused dimming, zoom, resize chords, equalize"
+  (ghostty-app; priority ladder dimming > zoom > resize > equalize).
+- `work/bench-upstream` — "Bench: Ghostty main@91f66da24 lane — three-way vtebench
+  comparison" (scripts + docs/benchmarks; prebuilt app at
+  `~/local/ghostty-main/macos/build/ReleaseLocal/Ghostty.app`).
+
+Queued next (user-approved): selection gestures (double-click word / triple line) +
+OSC-synced tab titles (one ghostty-app chunk, launch after splits-2 integrates);
+CVDisplayLink pacing; dense_cells re-bench after simd-perf lands. Also pending: user
+pastes `work/betamax-thread-prompt.md` (MB1) and the jj thread
+(`~/local/jj/work/ghostty-rs-jj-failures-thread.md`).
+
 ## State as of 2026-07-10 (third batch: perf + search + embeddability)
 
 Four lanes landed: **per-row dirty tracking** (upstream render.zig full-rebuild conditions
