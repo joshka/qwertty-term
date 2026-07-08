@@ -12,6 +12,8 @@
 //! frame it consumes a [`RenderSnapshot`] and a `ghostty-font` [`Grid`] to
 //! rebuild the buffers, then draws. See `docs/analysis/renderer-r4.md`.
 
+use std::collections::HashMap;
+
 use ghostty_font::grid::Grid;
 use ghostty_font::{AtlasKind, FontIndex, ShapedCell, Style};
 use ghostty_sprite::Sprite;
@@ -63,6 +65,25 @@ impl Default for FrameOptions {
     }
 }
 
+/// Cache key for a shaped text run: the resolved face (a [`FontIndex`], which
+/// uniquely names the styled face including its `wght`/style) plus the exact
+/// codepoint sequence fed to the shaper. Two runs with the same face and the
+/// same codepoints shape identically regardless of where they sit on the grid,
+/// so the key is position-independent — the analog of upstream's
+/// `font/shaper/Cache.zig` run hash (font index + codepoints + style), reduced
+/// to our single-size single-collection scope.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RunKey {
+    index: FontIndex,
+    codepoints: Vec<char>,
+}
+
+/// A memoized shaped run: the shaper output for a [`RunKey`]. Caching the
+/// *output* (not a live `Shaper`, which borrows the face bytes) lets an
+/// unchanged run skip re-shaping on the next full-redraw frame. Upstream caches
+/// `[]font.shape.Cell` keyed by the run hash; this is the same idea.
+type RunCache = HashMap<RunKey, Vec<ShapedCell>>;
+
 /// The cell engine. Owns the CPU-side [`Contents`], the [`Uniforms`], the
 /// [`SwapChain`], and the three first-pixels pipelines.
 pub struct Engine {
@@ -94,6 +115,11 @@ pub struct Engine {
     /// the reduced cut: no window padding yet).
     screen_width: usize,
     screen_height: usize,
+    /// Shaped-run memoization (upstream `font_shaper_cache`). Persists across
+    /// frames so an unchanged run is re-shaped only when its content changes;
+    /// keeps steady-state cost near the per-cell path even though the reduced
+    /// cut rebuilds every visible row every frame.
+    run_cache: RunCache,
 }
 
 impl Engine {
@@ -140,6 +166,7 @@ impl Engine {
             color_modified: vec![0; slot_count],
             screen_width: 0,
             screen_height: 0,
+            run_cache: RunCache::new(),
         })
     }
 
@@ -206,10 +233,22 @@ impl Engine {
             )
         });
 
+        // The cursor column, when the cursor is drawn and on this row. Upstream
+        // breaks shaper runs at the cursor position (`run.zig` cursor_x
+        // handling) so a ligature never spans the cursor — the cursor overlay
+        // then draws over separate, un-ligated cells. We mirror that: a run
+        // breaks before and after `cursor_x` on the cursor's row. Only applies
+        // when a cursor is actually shown (`cursor_style` resolved).
+        let cursor_row_col = match (cursor.as_ref(), cursor_style.as_ref()) {
+            (Some(c), Some(_)) => Some((c.row, c.col)),
+            _ => None,
+        };
+
         // Rebuild each row.
         for y in 0..rows {
             let row = snapshot.row(y);
-            self.rebuild_row(y, row, grid, palette, default_fg, default_bg);
+            let cursor_x = cursor_row_col.and_then(|(cr, cc)| (cr == y).then_some(cc));
+            self.rebuild_row(y, row, grid, palette, default_fg, default_bg, cursor_x);
         }
 
         // Cursor.
@@ -247,9 +286,16 @@ impl Engine {
         self.uniforms.bools.use_linear_correction = false;
     }
 
-    /// Rebuild one row: per-cell background colors + shaped foreground glyphs +
-    /// decorations. Port of `rebuildRow` reduced to the snapshot model (no
-    /// selection/search/highlight/link/preedit branches).
+    /// Rebuild one row: per-cell background colors + decorations (per-cell,
+    /// like upstream), then shaped foreground glyphs placed by *run*. Port of
+    /// `rebuildRow` reduced to the snapshot model (no selection/search/
+    /// highlight/link/preedit branches).
+    ///
+    /// Decorations (underline/overline/strikethrough) and background stay
+    /// per-cell — upstream draws them per-cell too, independent of run
+    /// segmentation. Foreground glyphs go through [`Engine::rebuild_row_runs`],
+    /// which groups consecutive cells into shaper runs so multi-cell ligatures
+    /// (`->`, `=>`, `==`) form on screen.
     #[allow(clippy::too_many_arguments)]
     fn rebuild_row(
         &mut self,
@@ -259,20 +305,18 @@ impl Engine {
         palette: &Palette,
         default_fg: Rgb,
         default_bg: Rgb,
+        cursor_x: Option<usize>,
     ) {
         let cols = self.contents.cols();
 
-        // Per-cell background + decorations, plus the resolved fg used for
-        // glyphs shaped below. We shape style-homogeneous runs of non-spacer
-        // cells (a run breaks on a style change, matching upstream's
-        // comparableStyle break; sprite cells break implicitly since they
-        // shape one glyph at a time via render_codepoint).
+        // --- Per-cell background + decorations (unchanged from the per-cell
+        //     path; upstream keeps these per-cell regardless of runs). ---
         let mut x = 0usize;
         while x < cols && x < row.len() {
             let cell = &row[x];
 
-            // Spacer tail of a wide glyph: no bg fill, no glyph (the lead cell
-            // painted it). Advance one.
+            // Spacer tail of a wide glyph: no bg fill, no decoration (the lead
+            // cell painted it). Advance one.
             if cell.is_spacer() {
                 x += 1;
                 continue;
@@ -288,7 +332,7 @@ impl Engine {
             self.contents
                 .set_bg_cell(y, x, [bg.r, bg.g, bg.b, bg_alpha]);
 
-            // Invisible cells: bg only, no foreground (matches xterm/upstream).
+            // Invisible cells: bg only, no decoration.
             if style.invisible {
                 x += 1;
                 continue;
@@ -315,13 +359,10 @@ impl Engine {
             if style.overline {
                 self.add_decoration(x, y, Sprite::Overline, fg, alpha, grid, Key::Overline);
             }
-
-            // Glyph. Sprite codepoints (box drawing etc.) and single glyphs are
-            // handled by render_codepoint; text runs shape one contiguous run
-            // of same-style cells.
-            self.add_cell_glyph(x, y, row, grid, fg, alpha);
-
-            // Strikethrough draws last (over text).
+            // Strikethrough draws last (over text). It's added after the run
+            // glyphs below (glyph order within a row list doesn't affect the
+            // GPU blend — each instance is an independent quad — but keep the
+            // upstream ordering intent: strikethrough over text).
             if style.strikethrough {
                 self.add_decoration(
                     x,
@@ -336,49 +377,179 @@ impl Engine {
 
             x += 1;
         }
+
+        // --- Foreground glyphs by run (multi-cell ligatures form here). ---
+        self.rebuild_row_runs(y, row, grid, palette, default_fg, default_bg, cursor_x);
     }
 
-    /// Shape+rasterize the glyph(s) for the cell at `x`, adding [`CellText`]
-    /// instances. Port of the `addGlyph` path, reduced to per-cell shaping (the
-    /// reduced Shaper takes a `&str`; we shape each cell's grapheme in
-    /// isolation, which is exact for the monospace ASCII/CJK/box scope and
-    /// avoids threading run segmentation through the snapshot model — style-run
-    /// segmentation is preserved by the fact that each cell carries its own
-    /// resolved fg).
-    fn add_cell_glyph(
+    /// Segment `row` into shaper runs and emit glyphs for each. A run is a
+    /// maximal span of consecutive non-spacer cells that share:
+    ///
+    /// - the same **foreground style** (bold/italic/fg color/faint/invisible),
+    ///   mirroring upstream's `comparableStyle` break (background differences
+    ///   don't break a run — they're per-cell above);
+    /// - the same **resolved font index** (a style change or a codepoint that
+    ///   resolves to a different face breaks the run — this also isolates
+    ///   sprite cells and fallback/emoji cells into their own runs, matching
+    ///   upstream where a font-index change breaks the run and special/sprite
+    ///   fonts shape trivially as `codepoint == glyph`);
+    /// - and it does **not span the cursor**: the run breaks before and after
+    ///   `cursor_x` (upstream `run.zig` cursor handling) so a ligature never
+    ///   forms across the cursor cell.
+    ///
+    /// Each text run is shaped once (through the run cache) with the run's face;
+    /// glyphs are placed by cluster (`cell_x`), leaving ligature-continuation
+    /// cells glyph-less. Sprite / fallback runs take the non-shaped per-cell
+    /// path (they're single-cell runs).
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild_row_runs(
+        &mut self,
+        y: usize,
+        row: &[SnapshotCell],
+        grid: &mut Grid,
+        palette: &Palette,
+        default_fg: Rgb,
+        default_bg: Rgb,
+        cursor_x: Option<usize>,
+    ) {
+        let cols = self.contents.cols().min(row.len());
+
+        let mut x = 0usize;
+        while x < cols {
+            let cell = &row[x];
+
+            // Spacer: covered by a prior lead cell's glyph; never starts a run.
+            if cell.is_spacer() {
+                x += 1;
+                continue;
+            }
+
+            let style = &cell.style;
+            // Blank / invisible cells emit no glyph and don't extend a run.
+            let cp = cell.ch as u32;
+            if style.invisible || cp == 0 || cell.ch == ' ' {
+                x += 1;
+                continue;
+            }
+
+            let fg = resolve_colors(style, cp, palette, default_fg, default_bg).0;
+            let alpha: u8 = if style.faint { 128 } else { 255 };
+            let font_style = style_of(style);
+
+            // Resolve the lead cell's font index; it classifies the run.
+            let Some(index) = grid.get_index_styled(cp, font_style) else {
+                x += 1;
+                continue;
+            };
+
+            // Sprite and non-primary (fallback/emoji) cells are single-cell:
+            // they don't shape as a run (upstream shapes special fonts as
+            // codepoint==glyph, and a fallback face's glyph ids don't map into
+            // the primary shaping). Emit one glyph and advance.
+            let is_shapeable_primary = matches!(index, FontIndex::Face { slot: 0, .. });
+            if !is_shapeable_primary {
+                self.emit_nonprimary_cell(x, y, index, cp, font_style, grid, fg, alpha);
+                x += 1;
+                continue;
+            }
+
+            // Grow a text run over consecutive cells that keep the same
+            // foreground style, resolve to the SAME primary index, and don't
+            // cross the cursor. The run breaks at BOTH edges of the cursor cell
+            // (upstream `run.zig`): the extension from cell `k` to `k+1` is
+            // forbidden if either `k` or `k+1` is the cursor, so the cursor cell
+            // is always alone or at a run edge and no ligature spans it.
+            let run_start = x;
+            let mut run_end = x + 1; // exclusive
+            while run_end < cols {
+                // Cursor break at either edge of the boundary being crossed:
+                // last-included cell (run_end-1) is the cursor, or the next cell
+                // (run_end) is the cursor.
+                if cursor_x == Some(run_end) || cursor_x == Some(run_end - 1) {
+                    break;
+                }
+                let next = &row[run_end];
+                if next.is_spacer() {
+                    // A spacer belongs to the wide lead already inside the run;
+                    // include it so the run's cell span stays contiguous (the
+                    // shaper gets no codepoint for it — see codepoint gather).
+                    run_end += 1;
+                    continue;
+                }
+                let ncp = next.ch as u32;
+                if next.style.invisible || ncp == 0 || next.ch == ' ' {
+                    break;
+                }
+                // Same foreground style?
+                if !comparable_style(style, &next.style) {
+                    break;
+                }
+                // Same primary face for this codepoint?
+                match grid.get_index_styled(ncp, style_of(&next.style)) {
+                    Some(FontIndex::Face { slot: 0, style: s }) if s == font_style => {}
+                    _ => break,
+                }
+                run_end += 1;
+            }
+
+            // Gather the run's codepoints with **run-relative** cell-X clusters
+            // (`cx - run_start`), so the shaper output — and thus the cache
+            // entry — is position-independent within the row (upstream hashes
+            // relative cluster positions). The placement offset `run_start` is
+            // added back in `emit_text_run`. Spacers contribute no codepoint
+            // (the wide lead's advance covers them).
+            let mut clusters: Vec<(char, u32)> = Vec::with_capacity(run_end - run_start);
+            let mut codepoints: Vec<char> = Vec::with_capacity(run_end - run_start);
+            for (cx, c) in row.iter().enumerate().take(run_end).skip(run_start) {
+                if c.is_spacer() {
+                    continue;
+                }
+                let rel = (cx - run_start) as u32;
+                clusters.push((c.ch, rel));
+                codepoints.push(c.ch);
+                // Grapheme continuation codepoints share the cell's cluster
+                // (upstream adds each grapheme codepoint with the same cluster).
+                for &g in &c.combining {
+                    clusters.push((g, rel));
+                    codepoints.push(g);
+                }
+            }
+
+            self.emit_text_run(
+                y,
+                run_start,
+                index,
+                &clusters,
+                &codepoints,
+                grid,
+                fg,
+                alpha,
+                row,
+            );
+
+            x = run_end;
+        }
+    }
+
+    /// Emit the glyph for a single non-primary cell (sprite, or a
+    /// fallback/emoji face). Mirrors the old per-cell path's sprite and
+    /// `slot != 0` branches.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_nonprimary_cell(
         &mut self,
         x: usize,
         y: usize,
-        row: &[SnapshotCell],
+        index: FontIndex,
+        cp: u32,
+        font_style: Style,
         grid: &mut Grid,
         fg: Rgb,
         alpha: u8,
     ) {
-        let cell = &row[x];
-        let cp = cell.ch as u32;
-
-        // Blank cell: nothing to draw (space renders as an empty glyph anyway;
-        // skip to avoid a zero-size instance).
-        if cp == 0 || cell.ch == ' ' {
-            return;
-        }
-
-        // Map the cell's bold/italic attributes to a font style. The resolver
-        // then picks the styled face (or aliases back to regular when the style
-        // has no glyph for this codepoint). Sprites (box drawing / powerline)
-        // ignore style: `get_index_styled`'s step-3 sprite dispatch returns the
-        // sprite index regardless, so graphics elements stay sprites.
-        let style = style_of(&cell.style);
-
-        // Resolve to a font index. Sprite codepoints route to the procedural
-        // rasterizer; text codepoints shape through rustybuzz.
-        let Some(index) = grid.get_index_styled(cp, style) else {
-            return;
-        };
-
         match index {
             FontIndex::Sprite => {
-                // Sprite: codepoint == glyph id, no shaping.
+                // Sprite: codepoint == glyph id, no shaping. Apply the Nerd
+                // constraint via render_codepoint (which routes nerd PUA cps).
                 if let Ok(Some(g)) = grid.render_codepoint(cp) {
                     if g.width == 0 || g.height == 0 {
                         return;
@@ -398,15 +569,10 @@ impl Engine {
                     );
                 }
             }
-            // A codepoint resolved to a non-primary (fallback) face — emoji and
-            // CJK live here. rustybuzz shapes against the *primary* face, whose
-            // glyph ids don't map into a fallback face, so shaping this cluster
-            // would sample the wrong (or a .notdef) glyph. Instead resolve the
-            // glyph through the fallback face's own cmap via `render_codepoint`,
-            // which is exact for the single-codepoint fallback scope (emoji,
-            // CJK). This is where color glyphs get routed to the color atlas.
-            FontIndex::Face { slot, .. } if slot != 0 => {
-                if let Ok(Some(g)) = grid.render_codepoint_styled(cp, style) {
+            // Fallback/emoji face: resolve the glyph through the face's own
+            // cmap (shaping against the primary would sample wrong ids).
+            _ => {
+                if let Ok(Some(g)) = grid.render_codepoint_styled(cp, font_style) {
                     if g.width == 0 || g.height == 0 {
                         return;
                     }
@@ -418,58 +584,6 @@ impl Engine {
                         &g,
                         0,
                         0,
-                        atlas_from_kind(g.atlas),
-                        false,
-                        false,
-                        Key::Text,
-                    );
-                }
-            }
-            FontIndex::Face { .. } => {
-                // Primary face: shape this cell's grapheme (base char +
-                // combining marks) as a one-cell run. rustybuzz maps clusters →
-                // cell 0.
-                let text: String = std::iter::once(cell.ch)
-                    .chain(cell.combining.iter().copied())
-                    .collect();
-                let shaped = match self.shape_cell(grid, index, &text) {
-                    Some(s) => s,
-                    // No byte-backed shaper for the resolved face — this is a
-                    // name-loaded system face (e.g. a config `font-family` like
-                    // "FiraCode Nerd Font Mono"), whose primary `Face` carries no
-                    // `source_bytes`. Dropping the glyph here is what made whole
-                    // classes of default-fg text invisible while decorations
-                    // (sprite path) and bold/italic (byte-backed embedded style
-                    // faces) still drew (field bug: "via" gone, eza headers show
-                    // only their underline). Fall back to per-codepoint CoreText
-                    // rendering via the face's own cmap — no ligatures/kerning
-                    // for named faces (deferred), but the glyph is drawn.
-                    None => {
-                        self.render_cell_unshaped(x, y, cp, style, grid, fg, alpha);
-                        return;
-                    }
-                };
-                for sc in shaped {
-                    let g = match grid.render_glyph(index, sc.glyph_index) {
-                        Ok(g) => g,
-                        Err(_) => continue,
-                    };
-                    if g.width == 0 || g.height == 0 {
-                        continue;
-                    }
-                    // Route the glyph to the texture it was rasterized into:
-                    // color (emoji/BGRA) glyphs sample the color atlas, text
-                    // outlines the grayscale atlas. The grid tags each
-                    // `CachedGlyph` with its `AtlasKind` (the atlas-selector
-                    // seam; see `docs/analysis/font-discovery.md` §8).
-                    self.push_text_cell(
-                        x,
-                        y,
-                        fg,
-                        alpha,
-                        &g,
-                        sc.x_offset,
-                        sc.y_offset,
                         atlas_from_kind(g.atlas),
                         false,
                         false,
@@ -478,6 +592,113 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Shape a primary-face text run once (through the run cache) and emit its
+    /// glyphs, each placed at its cluster's cell-X. Port of the primary-face
+    /// arm of upstream's shaped-glyph emission: one glyph per output cluster,
+    /// continuation cells (2nd half of a whole-ligature) left glyph-less.
+    ///
+    /// Falls back to the unshaped per-codepoint path for a byte-less face
+    /// (name-loaded system faces whose primary `Face` has no `source_bytes`),
+    /// preserving the default-fg-ink fix for named families that can't shape.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_text_run(
+        &mut self,
+        y: usize,
+        run_start: usize,
+        index: FontIndex,
+        clusters: &[(char, u32)],
+        codepoints: &[char],
+        grid: &mut Grid,
+        fg: Rgb,
+        alpha: u8,
+        row: &[SnapshotCell],
+    ) {
+        if clusters.is_empty() {
+            return;
+        }
+
+        // Shape (or reuse) the run. `None` => the face has no byte-backed
+        // shaper; fall back to per-codepoint CoreText rendering per cell.
+        // Clusters/`cell_x` are run-relative; the absolute grid column is
+        // `run_start + rel`.
+        let shaped = match self.shape_run_cached(grid, index, clusters, codepoints) {
+            Some(s) => s,
+            None => {
+                for &(ch, rel) in clusters {
+                    let cx = run_start + rel as usize;
+                    // Only render the base char of each cell (combining marks
+                    // can't be placed without shaping; deferred, as before).
+                    // Detect a base cell by matching the row cell's `ch`.
+                    if row.get(cx).map(|c| c.ch) == Some(ch) {
+                        self.render_cell_unshaped(
+                            cx,
+                            y,
+                            ch as u32,
+                            grid_style_of(index),
+                            grid,
+                            fg,
+                            alpha,
+                        );
+                    }
+                }
+                return;
+            }
+        };
+
+        for sc in shaped {
+            let cx = run_start + sc.cell_x as usize;
+            // Apply the Nerd Fonts per-codepoint constraint for PUA icon cells
+            // (keyed by the ORIGINATING codepoint at this cell, matching
+            // upstream where the codepoint range gates the constraint). A PUA
+            // icon shapes as a single-cell run so this is well-defined.
+            let cp_here = row.get(cx).map(|c| c.ch as u32).unwrap_or(0);
+            let g = match grid.render_glyph_nerd(index, sc.glyph_index, cp_here) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            if g.width == 0 || g.height == 0 {
+                continue;
+            }
+            self.push_text_cell(
+                cx,
+                y,
+                fg,
+                alpha,
+                &g,
+                sc.x_offset,
+                sc.y_offset,
+                atlas_from_kind(g.atlas),
+                cells::no_min_contrast(cp_here),
+                false,
+                Key::Text,
+            );
+        }
+    }
+
+    /// Look up (or shape and cache) a run's glyphs. Returns `None` for a face
+    /// with no byte-backed shaper.
+    fn shape_run_cached(
+        &mut self,
+        grid: &Grid,
+        index: FontIndex,
+        clusters: &[(char, u32)],
+        codepoints: &[char],
+    ) -> Option<Vec<ShapedCell>> {
+        let key = RunKey {
+            index,
+            codepoints: codepoints.to_vec(),
+        };
+        if let Some(cached) = self.run_cache.get(&key) {
+            return Some(cached.clone());
+        }
+        // Cache miss: shape now. A byte-less face yields `None` (not cached, so
+        // a later byte-backed load could still shape — but faces don't change
+        // identity mid-session, so this is just correctness insurance).
+        let shaped = self.shape_run(grid, index, clusters)?;
+        self.run_cache.insert(key, shaped.clone());
+        Some(shaped)
     }
 
     /// Render one cell's glyph without shaping, resolving the codepoint through
@@ -524,23 +745,29 @@ impl Engine {
         }
     }
 
-    /// Shape one cell's text into shaped cells via the face resolved at
-    /// `index`. Returns `None` if the face has no byte-backed shaper
-    /// (name-loaded system faces; deferred).
+    /// Shape a run's `(char, cell_x)` cluster sequence into shaped cells via the
+    /// face resolved at `index`. Returns `None` if the face has no byte-backed
+    /// shaper (name-loaded system faces; the caller then renders unshaped).
     ///
-    /// Shaping against the *resolved* (styled) face — not always the primary —
-    /// means a bold/italic cell shapes with its own face, so the shaper applies
-    /// that face's `wght` variation (see [`ghostty_font::Shaper::new`]) and its
-    /// own cmap/GSUB. For JetBrains Mono the four styles share a glyph set, but
-    /// this keeps advances and any style-specific substitutions correct.
-    fn shape_cell(&self, grid: &Grid, index: FontIndex, text: &str) -> Option<Vec<ShapedCell>> {
+    /// Shaping against the *resolved* (styled) face means a bold/italic run
+    /// shapes with its own face, so the shaper applies that face's `wght`
+    /// variation (see [`ghostty_font::Shaper::new`]) and its own cmap/GSUB. The
+    /// caller supplies cell-X as the cluster (upstream's cluster == cell X under
+    /// `BufferClusterLevel::Characters`), so a multi-cell ligature keeps one
+    /// glyph per output cluster placed at the originating cell.
+    fn shape_run(
+        &self,
+        grid: &Grid,
+        index: FontIndex,
+        clusters: &[(char, u32)],
+    ) -> Option<Vec<ShapedCell>> {
         let face = grid
             .resolver()
             .collection()
             .get_face(index)
             .unwrap_or_else(|| grid.resolver().collection().primary());
         let mut shaper = ghostty_font::Shaper::new(face)?;
-        Some(shaper.shape_run(text))
+        Some(shaper.shape_run_with_clusters(clusters.iter().copied()))
     }
 
     /// Render a decoration sprite (underline/strikethrough/overline) into the
@@ -1057,6 +1284,44 @@ fn style_of(style: &CellStyle) -> Style {
         (false, true) => Style::Italic,
         (true, true) => Style::BoldItalic,
     }
+}
+
+/// The font [`Style`] a resolved [`FontIndex`] belongs to (for the byte-less
+/// fallback path, which needs the style to re-resolve the codepoint's glyph
+/// through the styled face's cmap). Sprite indices are style-agnostic; report
+/// `Regular` (the fallback path never runs for sprites anyway).
+fn grid_style_of(index: FontIndex) -> Style {
+    match index {
+        FontIndex::Face { style, .. } => style,
+        FontIndex::Sprite => Style::Regular,
+    }
+}
+
+/// Whether two cells share a *comparable* foreground style for run-breaking
+/// purposes — the analog of upstream `run.zig`'s `comparableStyle`, adapted to
+/// our model where a run carries **one** resolved `fg` for all its glyphs.
+///
+/// Upstream computes each glyph cell's fg independently, so its `comparableStyle`
+/// can ignore background. We share one fg across the run, so we must break
+/// whenever the *effective* foreground would differ. The effective fg depends on
+/// `fg`, `inverse` (swaps in `bg`), and — when inverse is set — `bg` too; and
+/// on `faint` (alpha). We therefore break on any of `bold`/`italic` (font face),
+/// `faint`/`invisible` (alpha/skip), `inverse`, `fg`, and `bg`. This is stricter
+/// than upstream (it may split a run where upstream wouldn't, e.g. a background
+/// color change), which only loses ligature opportunities across those
+/// boundaries — never produces a wrong glyph or color.
+///
+/// Decorations (underline/overline/strikethrough) draw per-cell independently
+/// and don't need to break the glyph run (upstream keys `comparableStyle` on
+/// shaping/fg attributes, not decorations).
+fn comparable_style(a: &CellStyle, b: &CellStyle) -> bool {
+    a.bold == b.bold
+        && a.italic == b.italic
+        && a.faint == b.faint
+        && a.invisible == b.invisible
+        && a.inverse == b.inverse
+        && a.fg == b.fg
+        && a.bg == b.bg
 }
 
 /// The underline sprite for a snapshot underline style.
