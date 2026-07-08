@@ -33,6 +33,13 @@ pub const GHOSTTY_FORMATTER_FORMAT_PLAIN: c_int = 0;
 pub const GHOSTTY_FORMATTER_FORMAT_VT: c_int = 1;
 pub const GHOSTTY_FORMATTER_FORMAT_HTML: c_int = 2;
 
+/// `GhosttyTerminalOption` (terminal.h) — keys for `ghostty_terminal_set`.
+pub const GHOSTTY_TERMINAL_OPT_USERDATA: c_int = 0;
+/// Callback invoked when the terminal needs to write reply bytes back to the
+/// pty (DECRQM/DSR/DA/kitty-keyboard-query/etc.). Round-2 addition: wires up
+/// the reply channel the harness previously left unregistered.
+pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: c_int = 1;
+
 /// Opaque `struct GhosttyTerminalImpl` behind `GhosttyTerminal`.
 #[repr(C)]
 pub struct GhosttyTerminalImpl {
@@ -162,6 +169,17 @@ impl Default for GhosttyFormatterTerminalOptions {
     }
 }
 
+/// `GhosttyTerminalWritePtyFn` (terminal.h). Called synchronously during
+/// `ghostty_terminal_vt_write` whenever the reference engine produces reply
+/// bytes (DECRQM `$y`, DSR/CPR, kitty-keyboard query, DECRQSS, etc.). `data`
+/// is only valid for the duration of the call.
+pub type GhosttyTerminalWritePtyFn = unsafe extern "C" fn(
+    terminal: GhosttyTerminal,
+    userdata: *mut c_void,
+    data: *const u8,
+    len: usize,
+);
+
 unsafe extern "C" {
     /// Create a terminal. `allocator` may be NULL for the default allocator.
     pub fn ghostty_terminal_new(
@@ -172,6 +190,15 @@ unsafe extern "C" {
 
     /// Free a terminal. NULL is a no-op.
     pub fn ghostty_terminal_free(terminal: GhosttyTerminal);
+
+    /// Set an option on the terminal (callbacks + userdata). `value` is
+    /// passed directly for pointer-typed options (callbacks, userdata);
+    /// NULL clears the option to its default.
+    pub fn ghostty_terminal_set(
+        terminal: GhosttyTerminal,
+        option: c_int,
+        value: *const c_void,
+    ) -> c_int;
 
     /// Feed raw VT bytes. Never fails; malformed input is logged internally.
     pub fn ghostty_terminal_vt_write(terminal: GhosttyTerminal, data: *const u8, len: usize);

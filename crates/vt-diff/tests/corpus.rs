@@ -87,7 +87,15 @@ fn run_case_caught(label: &str, cols: u16, rows: u16, input: &[u8]) -> Option<St
 }
 
 /// Run one case through both engines; returns a failure description if any
-/// of the three comparisons (text, cursor, formatter) diverge.
+/// of the four comparisons (text, cursor, formatter, reply bytes) diverge.
+///
+/// Reply-byte diffing (`reference.output()` vs `rust.output()`) compares the
+/// bytes each engine writes back to the pty in response to queries (DECRQM,
+/// DSR/DA, kitty-keyboard query, DECRQSS, ...). This only works because
+/// `ReferenceTerminal` registers `GHOSTTY_TERMINAL_OPT_WRITE_PTY` (see
+/// `src/reference.rs`) — without that callback the reference silently drops
+/// all reply bytes and this comparison would spuriously fail for every case
+/// exercising a query sequence.
 fn run_case(label: &str, cols: u16, rows: u16, input: &[u8]) -> Option<String> {
     let mut reference = ReferenceTerminal::new(cols, rows);
     let mut rust = RustTerminal::new(cols, rows);
@@ -98,8 +106,10 @@ fn run_case(label: &str, cols: u16, rows: u16, input: &[u8]) -> Option<String> {
     let ud = rust.dump();
     let rf = vt_diff::normalize_screen_text(&reference.raw_text());
     let uf = vt_diff::normalize_screen_text(&rust.formatter_raw_text());
+    let ro = reference.output();
+    let uo = rust.output();
 
-    if rd == ud && rf == uf {
+    if rd == ud && rf == uf && ro == uo {
         return None;
     }
     let mut msg = format!("=== {label} ({cols}x{rows}) ===\n");
@@ -121,6 +131,14 @@ fn run_case(label: &str, cols: u16, rows: u16, input: &[u8]) -> Option<String> {
         let _ = write!(
             msg,
             "FORMATTER diverged:\n--- reference ---\n{rf}\n--- rust ---\n{uf}\n"
+        );
+    }
+    if ro != uo {
+        let _ = write!(
+            msg,
+            "REPLY diverged:\n--- reference ---\n{:?}\n--- rust ---\n{:?}\n",
+            String::from_utf8_lossy(ro),
+            String::from_utf8_lossy(uo)
         );
     }
     Some(msg)
@@ -197,24 +215,72 @@ fn assert_case_agrees(rel: &str) {
     }
 }
 
-/// KNOWN DIVERGENCE: overwriting the spacer-tail cell of a wide character
-/// panics the Rust engine in debug builds.
+// `regression_wide_spacer_overwrite` (spacer-tail overwrite panic) was
+// removed here: fixed upstream in commit df799546902f ("Fix spacer-tail
+// overwrite panic; un-skip corpus case"), which also removed the case's
+// `SKIP` file — `wrap_semantics/wide_spacer_overwrite` is exercised by the
+// main `corpus_agrees` sweep now like any other case.
+
+/// KNOWN DIVERGENCE: DA2 (secondary device attributes, `CSI > c`) reports a
+/// firmware/patch-version of 10 in the Rust port vs upstream's documented
+/// default of 0.
 ///
-/// Input: print `中` at 1;1 (head col 1, spacer tail col 2), `CUP 1;2`, print
-/// `X`. The Zig reference clears the wide head and prints `X` at column 2
-/// (row becomes ` X`). Its `printCell` `.spacer_tail` branch pre-sets
-/// `cell.wide = .narrow` under `runtime_safety` — with the comment "So
-/// integrity checks pass. We fix this up later" — *before* calling
-/// `clearCells` on the head (ghostty `src/terminal/Terminal.zig`, ~line
-/// 1160). The Rust port (`print_cell_fix_wide`, `Wide::SpacerTail` branch in
-/// `crates/ghostty-vt/src/terminal/print.rs`) omitted that pre-set, so the
-/// debug integrity check that runs inside `clear_cells_page` still sees a
-/// `SpacerTail` whose left neighbor is no longer `Wide` and panics with
-/// `InvalidSpacerTailLocation` (`crates/ghostty-vt/src/page/page_impl.rs:940`).
+/// Input: `CSI > c`. Reference replies `\x1b[>1;0;0c`; Rust replies
+/// `\x1b[>1;10;0c`. Upstream's `Secondary` struct
+/// (`ghostty/src/terminal/device_attributes.zig:80-94`) defaults
+/// `firmware_version: u16 = 0` (pinned by its own inline test
+/// `"secondary default"`, line 208, asserting exactly `"\x1b[>1;0;0c"`). The
+/// Rust port's `device_attributes` handler
+/// (`crates/ghostty-vt/src/stream.rs`, `DeviceAttributesReq::Secondary` arm)
+/// hardcodes `\x1b[>1;10;0c` with the comment "VT220-ish, version 10" — no
+/// upstream basis for `10` was found; it appears to be an invented value.
 ///
-/// The reference is right; the Rust port needs the same
-/// transient-state fix. Remove this test + the case's `SKIP` file when fixed.
+/// The reference (and upstream default) is right; the Rust port's literal
+/// should be `0`. Remove this test + the case's `SKIP` file when fixed. Two
+/// real-app captures (`real_apps/nvim_edit` is unrelated; `real_apps/tmux_session`,
+/// which issues a DA2 query on startup) carry `SKIP` for this same root
+/// cause.
 #[test]
-fn regression_wide_spacer_overwrite() {
-    assert_case_agrees("wrap_semantics/wide_spacer_overwrite");
+#[ignore]
+fn regression_da2_firmware_version_mismatch() {
+    assert_case_agrees("reply_diffing/da2_secondary_version");
+}
+
+/// KNOWN DIVERGENCE: DECRQSS SGR (`DCS $ q m ST`) is answered by the Rust
+/// core engine but ignored by the reference.
+///
+/// Input: `\x1bP$qm\x1b\\` (request current SGR attributes). Reference
+/// writes nothing back; Rust replies `\x1bP1$r0m\x1b\\` (or a fuller SGR
+/// param list when attributes are set).
+///
+/// This is not a parity bug in the classic sense — it's a **scope**
+/// mismatch. Upstream's DECRQSS *response* logic
+/// (`ghostty/src/termio/stream_handler.zig:475-540`, the `.decrqss` arm)
+/// lives entirely in the **app-level termio handler**, not in
+/// `terminal/Terminal.zig` (the core the Rust `ghostty-vt` crate — and the
+/// `libghostty-vt` C API this harness links — actually ports). Confirmed by
+/// `grep`: `Terminal.zig` defines no `dcsHook`/`decrqss` handling at all;
+/// only `terminal/dcs.zig` parses the *request* into a `.decrqss` enum
+/// variant, which the core's `Stream` dispatches to `handler.vt(...)` — a
+/// hook only `stream_handler.zig` (app layer) implements. So the reference
+/// terminal here (built from the core alone) correctly has no way to answer
+/// DECRQSS, matching its scope; the Rust port's `decrqss` method in
+/// `crates/ghostty-vt/src/stream.rs` ported the app-layer response logic
+/// into the vt-core crate, which is out of scope for a `Terminal`/core port
+/// and produces output no core-only C-API consumer (like this harness, or
+/// any other libghostty-vt embedder) should expect.
+///
+/// Resolution is a scoping decision, not just a bug fix: either (a) move
+/// `decrqss` response formatting out of `ghostty-vt`'s core `Stream`/
+/// `TerminalHandler` into whatever layer will eventually mirror
+/// `termio/stream_handler.zig` (leaving the core silent, matching the
+/// reference exactly), or (b) if `ghostty-vt` intentionally broadens scope
+/// to include this, document that divergence from libghostty-vt explicitly
+/// rather than silently disagreeing. Remove this test + the case's `SKIP`
+/// file once resolved either way. `real_apps/nvim_edit` (nvim probes DECRQSS
+/// twice on startup) carries `SKIP` for this same root cause.
+#[test]
+#[ignore]
+fn regression_decrqss_answered_by_core_engine() {
+    assert_case_agrees("reply_diffing/decrqss_sgr_scope");
 }

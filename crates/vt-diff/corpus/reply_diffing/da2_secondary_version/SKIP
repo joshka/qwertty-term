@@ -1,0 +1,1 @@
+DA2 (CSI > c) firmware/patch-version field: Rust hardcodes 10, reference/upstream default is 0. See regression_da2_firmware_version_mismatch in tests/corpus.rs.
