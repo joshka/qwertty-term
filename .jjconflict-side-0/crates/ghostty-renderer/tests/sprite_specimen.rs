@@ -1,11 +1,15 @@
-//! R4 acceptance test: FIRST PIXELS.
+//! Sprite specimen sheet: one row per procedural-glyph family, rendered
+//! offscreen, with an ink-per-row assertion.
 //!
-//! Drives a real `ghostty_vt::Terminal` through a `Stream` with a scripted
-//! session (colored prompt, "hello 世界", a box-drawing line, a cursor at a
-//! known cell), snapshots it, builds GPU buffers via the cell engine, draws an
-//! offscreen frame into an IOSurface-backed target, waits for completion, and
-//! reads the pixels back — asserting per-cell expectations against the rendered
-//! output. No window is involved.
+//! Drives a real `ghostty_vt::Terminal` through a `Stream`, feeding a specimen
+//! sheet — rows 0–2: box drawing (light, double, rounded); row 3: block
+//! elements/shades and braille; row 4: powerline separators; row 5: legacy
+//! computing symbols; row 6: diagonals and dashes. It snapshots the terminal,
+//! builds GPU buffers via the cell engine, draws an offscreen frame into an
+//! IOSurface-backed target, and reads the pixels back. The assertion is
+//! deliberately coarse: every specimen row must contain ink (coverage above
+//! background) in at least one cell — visual quality is judged from the PNG
+//! dumped to `target/sprite-specimen.png`. No window is involved.
 //!
 //! Skips gracefully (prints `SKIP:`) when no Metal device is present, matching
 //! the R1/R2/R3 GPU-test convention.
@@ -91,14 +95,18 @@ fn sprite_specimen_offscreen_readback() {
         }
     };
 
-    // --- Font substrate: JetBrains Mono for text/box, a CJK system face for
-    //     the wide characters (JetBrains Mono has no CJK glyphs). ---
+    // --- Font substrate: embedded JetBrains Mono supplies the metrics (cell
+    //     size); the specimen glyphs themselves are drawn by the procedural
+    //     sprite renderer, not rasterized from the font. ---
     let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
     let metrics = Metrics::calc(text_face.face_metrics());
     let (cw, ch) = (metrics.cell_width, metrics.cell_height);
     let mut grid = make_grid(text_face);
 
-    // --- Terminal: the specimen sheet, one row per procedural-glyph family. ---
+    // --- Terminal: the specimen sheet, one row per procedural-glyph family.
+    //     Rows 0-2: box drawing (light, double, rounded corners); row 3: block
+    //     elements/shades and braille; row 4: powerline separators; row 5:
+    //     legacy computing symbols; row 6: diagonals and dashes. ---
     let cols = 30u16;
     let rows = 8u16;
     let term = Terminal::new(Options {
@@ -118,8 +126,9 @@ fn sprite_specimen_offscreen_readback() {
         "\u{1FB00}\u{1FB01}\u{1FB3B}\u{1FB44} \u{1FB95}\u{1FB98}\u{1FB99} legacy\r\n".as_bytes(),
     );
     stream.feed("\u{2571}\u{2572}\u{2573} \u{2504}\u{2508}\u{254C} dash/diag".as_bytes());
-    // Move the cursor to a known, empty cell on row 2 (0-indexed row 2, col 3).
-    // CUP is 1-indexed: row 3, col 4.
+    // Park the cursor at a fixed cell (0-indexed row 2, col 3; CUP is
+    // 1-indexed) so the rendered cursor overlay is deterministic instead of
+    // trailing the last feed.
     stream.feed(b"\x1b[3;4H");
     let term = stream.handler.terminal;
 
