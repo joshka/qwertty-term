@@ -6,7 +6,20 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-09
+## State as of 2026-07-09 (later)
+
+**"Font feels thin" root-caused and fixed: bold/italic never rendered.** A text-weight
+chunk first PROVED rasterization flags, alpha-blending mode, pixel formats, and the
+cell-text shader byte-match upstream's macOS defaults (fixing one real find: color atlas
+now `Bgra8UnormSrgb` like upstream — emoji were washed out; regression pin added). Triage
+then found the render path dropped SnapshotCell bold/italic entirely and the collection
+had only a Regular face. Now: full style table per upstream's default mechanism
+(`SharedGridSet.zig` — Bold = variable font at `wght=700`, Italic = embedded italic
+variable, BoldItalic = italic@700; synthetic-bold stroke kept as documented fallback),
+style-aware glyph cache + shaping, (bold,italic)→Style threaded through the engine.
+Evidence: bold ink coverage 1.335× regular; offscreen test `bold_italic_pixels.rs`.
+
+## Earlier 2026-07-09
 
 Visual-parity sweep landed on `main` (all field-reported): **glyph baseline fix** (text was
 `cell_baseline` px too low — cursor was never wrong), **top-band root cause** (sub-cell
