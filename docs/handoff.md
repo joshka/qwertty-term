@@ -6,7 +6,41 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-10
+## State as of 2026-07-10 (second sweep)
+
+**Field-quality sweep complete except lig-engine (in flight).** Landed on main since the
+splits entry below: **wheel scrolling** (upstream ladder: reporting bytes unchanged /
+alternate-scroll arrows per DECCKM / per-pane scrollback viewport with precision-delta
+accumulation, snap-on-keystroke; known gap: cursor renders at stale position when scrolled
+back — upstream hides it); **fuzz-resize** (resize-interleaved cargo-fuzz target + seeded
+10k-interleaving property test in the release lane; 242k execs clean); **app hardening**
+(engine poison → dead pane + banner, app survives — proven in the splits smoke; minimal
+`keybind = text:` subset incl. Josh's shift+enter; per-pane mode-1004 focus reporting);
+**family-styles** (FiraCode's real Bold via discovery, synthetic ladder behind);
+**font-fidelity** (Apple Color Emoji pre-seeded fallback exactly like upstream
+SharedGridSet.zig:335-354; byte-backed named faces via kCTFontURLAttribute so rustybuzz
+shapes them; nerd-font constraint table codegen'd via `cargo xtask gen-nerd-constraints`,
+math byte-exact vs upstream's Glyph.zig oracle). **In flight: lig-engine** — run-based
+shaping in the render engine so multi-cell ligatures display live (font layer proven).
+
+## Earlier 2026-07-10 (second sweep)
+
+**Field-quality sweep complete except lig-engine (in flight).** Landed on main since the
+splits entry below: **wheel scrolling** (upstream ladder: reporting bytes unchanged /
+alternate-scroll arrows per DECCKM / per-pane scrollback viewport with precision-delta
+accumulation, snap-on-keystroke; known gap: cursor renders at stale position when scrolled
+back — upstream hides it); **fuzz-resize** (resize-interleaved cargo-fuzz target + seeded
+10k-interleaving property test in the release lane; 242k execs clean); **app hardening**
+(engine poison → dead pane + banner, app survives — proven in the splits smoke; minimal
+`keybind = text:` subset incl. Josh's shift+enter; per-pane mode-1004 focus reporting);
+**family-styles** (FiraCode's real Bold via discovery, synthetic ladder behind);
+**font-fidelity** (Apple Color Emoji pre-seeded fallback exactly like upstream
+SharedGridSet.zig:335-354; byte-backed named faces via kCTFontURLAttribute so rustybuzz
+shapes them; nerd-font constraint table codegen'd via `cargo xtask gen-nerd-constraints`,
+math byte-exact vs upstream's Glyph.zig oracle). **In flight: lig-engine** — run-based
+shaping in the render engine so multi-cell ligatures display live (font layer proven).
+
+## Earlier 2026-07-10
 
 **Splits slice 1 landed** (`docs/analysis/splits.md`): Tab refactored to a Surface tree
 (engine+TabIo+view per pane); cmd+d / cmd+shift+d (+ upstream's ctrl+shift+o/e aliases),

@@ -94,6 +94,12 @@ existing row-dirty flags.
 - [ ] Full config port (Config.zig 10.9k + subsystems ~14.5k) + `+import-ghostty-config` — LOW
   priority per Josh
 - [ ] IME/preedit plumbing (renderer already models preedit)
+- [x] Minimal `keybind = text:` subset — DONE 2026-07-10 (trigger grammar subset from
+      Binding.zig, `text:` action only; structured for the full port to absorb)
+- [x] Tab-nav keybinds — DONE 2026-07-09 (ctrl+tab, cmd+1-9 physical, cmd+shift+brackets)
+- [x] Minimal `keybind = text:` subset — DONE 2026-07-10 (trigger grammar subset from
+      Binding.zig, `text:` action only; structured for the full port to absorb)
+- [x] Tab-nav keybinds — DONE 2026-07-09 (ctrl+tab, cmd+1-9 physical, cmd+shift+brackets)
 
 ## M5 — The .app (ghostty-ffi + macOS shell)
 
@@ -102,7 +108,10 @@ existing row-dirty flags.
 - [ ] C ABI mirroring include/ghostty.h (~1.2k header; c/ bindings 14.8k Zig as reference)
 - [ ] Adapt macos/Sources Swift (37k; single-window subset first: SurfaceView, window,
       clipboard, secure input)
-- [ ] Quick terminal, splits, full menu-keybind sync, OSC-synced tab titles — after single
+- [x] Splits slice 1 — DONE 2026-07-10 in the native Rust app (surface tree, cmd+d /
+      cmd+shift+d, focus nav, divider resize, close-collapse, per-pane io/focus/scrollback;
+      `docs/analysis/splits.md`; slice 2 = zoom/equalize/resize-chords)
+- [ ] Quick terminal, full menu-keybind sync, OSC-synced tab titles — after single
       window works (NOTE: basic native NSWindow tabs + minimal menu land EARLY, in M3's R5
       window swap — see docs/plans/m3-first-pixels.md)
 
