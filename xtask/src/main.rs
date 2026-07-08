@@ -1,3 +1,4 @@
+mod gen_nerd_constraints;
 mod gen_unicode;
 
 use std::{
@@ -17,8 +18,15 @@ fn main() -> Result<()> {
     match args.next().as_deref() {
         Some("bundle") => bundle(args.any(|arg| arg == "--release")),
         Some("gen-unicode") => gen_unicode::run(),
+        Some("gen-nerd-constraints") => {
+            let rest: Vec<String> = args.collect();
+            gen_nerd_constraints::run(&rest)
+        }
         _ => {
-            eprintln!("usage: cargo run -p xtask -- <bundle [--release] | gen-unicode>");
+            eprintln!(
+                "usage: cargo run -p xtask -- <bundle [--release] | gen-unicode | \
+                 gen-nerd-constraints [path]>"
+            );
             Ok(())
         }
     }

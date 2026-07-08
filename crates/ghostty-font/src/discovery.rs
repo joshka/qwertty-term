@@ -255,6 +255,31 @@ pub fn discover_family_style(family: &str, bold: bool, italic: bool, size_px: f6
     candidate.load(size_px).ok()
 }
 
+/// Discover the top-ranked member of a **named family**, loaded at `size_px`.
+///
+/// This is the plain family-only analog of [`discover_family_style`] (no
+/// bold/italic/monospace traits): it runs `discover({ family })` and loads the
+/// first candidate. It is upstream's mechanism for pre-seeding the default
+/// collection with the system emoji font on macOS
+/// (`SharedGridSet.zig:340-354`: discover `family = "Apple Color Emoji"` and add
+/// it as a `.fallback` face, so the OS-native emoji font is always preferred over
+/// a third-party emoji font the user may have installed — e.g. Noto Color
+/// Emoji). Upstream *does* reference the family name here explicitly, and this
+/// mirrors that (cited: `SharedGridSet.zig:342`), rather than inventing a new
+/// special case in the ranking.
+///
+/// Returns `None` if the family isn't installed (the caller then skips the
+/// fallback — on macOS Apple Color Emoji ships with the OS, so this is only
+/// `None` in degenerate environments).
+pub fn discover_family(family: &str, size_px: f64) -> Option<Face> {
+    let desc = Descriptor {
+        family: Some(family.to_string()),
+        size: size_px as f32,
+        ..Default::default()
+    };
+    discover(&desc).into_iter().next()?.load(size_px).ok()
+}
+
 /// Discover a fallback face for `desc`, honoring the codepoint-search paths
 /// (`CoreText.discoverFallback`, discovery.zig:385-447).
 ///

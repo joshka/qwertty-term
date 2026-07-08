@@ -54,6 +54,7 @@ pub mod atlas;
 pub mod backend;
 #[cfg(target_os = "macos")]
 pub mod collection;
+pub mod constraint;
 #[cfg(target_os = "macos")]
 pub mod coretext;
 #[cfg(target_os = "macos")]
@@ -64,6 +65,7 @@ pub mod embedded;
 #[cfg(target_os = "macos")]
 pub mod grid;
 pub mod metrics;
+pub mod nerd_font_constraints;
 pub mod presentation;
 #[cfg(target_os = "macos")]
 pub mod resolver;

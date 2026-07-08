@@ -13,143 +13,38 @@
 //! sfnt-table reconciliation rule (§2), the rasterization pipeline and bitmap
 //! context config (§3), and color-glyph detection (§4).
 //!
-//! Out of scope (deferred, per the plan): nerd-font `constrain(...)`, sbix
-//! pixel quantization, synthetic italic/bold *wiring* (the transforms are
-//! present but not exposed on the reduced API), the full discovery `Score`
-//! ranking, and shaping.
+//! Out of scope (deferred, per the plan): sbix pixel quantization, and the full
+//! discovery `Score` ranking's variable-axis arm. The nerd-font `constrain(...)`
+//! path is now implemented (see `crate::constraint` + `crate::nerd_font_constraints`,
+//! applied here via [`Face::rasterize_constrained`]), as is byte-backed shaping
+//! for name-loaded faces (see [`Face::load_by_name`] + `crate::shaper`).
 
 #![cfg(target_os = "macos")]
 
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use objc2_core_foundation::{
-    CFData, CFDictionary, CFMutableDictionary, CFNumber, CFRetained, CFString, CFType, CGFloat,
-    CGPoint, CGRect, CGSize,
+    CFData, CFDictionary, CFMutableDictionary, CFNumber, CFRetained, CFString, CFType, CFURL,
+    CFURLPathStyle, CGFloat, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
     CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo, CGTextDrawingMode,
 };
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation,
-    CTFontSymbolicTraits, CTFontTableOptions, kCTFontVariationAttribute,
+    CTFontSymbolicTraits, CTFontTableOptions, kCTFontURLAttribute, kCTFontVariationAttribute,
 };
 
+use crate::constraint::{Constraint, GlyphSize};
 use crate::embedded;
 use crate::metrics::{FaceMetrics, Metrics};
 
-/// The size and position of a glyph in cell-relative pixel space (baseline
-/// folded into `y`). Port of `Glyph.Size` (`Glyph.zig:24-29`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GlyphSize {
-    pub width: f64,
-    pub height: f64,
-    pub x: f64,
-    pub y: f64,
-}
-
-/// The emoji cell-fit constraint. A reduced port of upstream's
-/// `RenderOptions.Constraint` (`Glyph.zig`) carrying only the branches the
-/// color-glyph (emoji) path uses: `size = .cover`, `align_* = .center`, and
-/// symmetric horizontal padding. `SharedGrid.renderGlyph` (upstream) applies
-/// exactly this constraint to every emoji glyph before rasterizing, which is
-/// what scales an Apple-Color-Emoji bitmap (authored far larger than a cell)
-/// down to cover the cell box while preserving aspect ratio and centering it.
-///
-/// The nerd-font-specific sizes (`fit`/`fit_cover1`/`stretch`), the `.icon`
-/// height metric, and the relative-scale-group machinery are intentionally
-/// omitted (nerd-font constraint tables are a separate deferral); for the
-/// emoji case the scale group is the glyph itself (`relative_* = identity`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EmojiConstraint {
-    pad_left: f64,
-    pad_right: f64,
-}
-
-impl EmojiConstraint {
-    /// The exact constraint upstream hardcodes for emoji in
-    /// `SharedGrid.renderGlyph`: `.cover`, centered on both axes, with a small
-    /// 2.5% horizontal pad so the glyph doesn't touch the cell edges.
-    pub const EMOJI: EmojiConstraint = EmojiConstraint {
-        pad_left: 0.025,
-        pad_right: 0.025,
-    };
-
-    /// Apply the constraint to `glyph` (cell-relative ink box) given `metrics`
-    /// and the number of cells `constraint_width` the glyph may occupy. Port of
-    /// `Constraint.constrain`/`constrainInner` reduced to the emoji case
-    /// (`size = .cover`, `align_* = .center`; the scale group is the glyph
-    /// itself). Returns the scaled + centered size/position.
-    pub fn constrain(
-        self,
-        glyph: GlyphSize,
-        metrics: &Metrics,
-        constraint_width: u32,
-    ) -> GlyphSize {
-        // The emoji constraint never stretches, so the scale group is the glyph
-        // itself (relative_* identity). `max_constraint_width` upstream is 2.
-        let min_constraint_width = constraint_width.clamp(1, 2);
-
-        let mut group = glyph;
-
-        // Prescribed scaling (`.cover`), preserving the group center.
-        let factor = self.cover_factor(group, metrics, min_constraint_width);
-        let center_x = group.x + group.width / 2.0;
-        let center_y = group.y + group.height / 2.0;
-        group.width *= factor;
-        group.height *= factor;
-        group.x = center_x - group.width / 2.0;
-        group.y = center_y - group.height / 2.0;
-
-        // Prescribed alignment (`center` on both axes).
-        group.y = self.aligned_y_center(group, metrics);
-        group.x = self.aligned_x_center(group, metrics, min_constraint_width);
-
-        group
-    }
-
-    /// The `.cover` scale factor (uniform, aspect-preserving): scale so the
-    /// glyph covers the padded target box, taking the smaller of the two axis
-    /// factors. Port of `scale_factors` for `size = .cover`.
-    fn cover_factor(self, group: GlyphSize, metrics: &Metrics, min_constraint_width: u32) -> f64 {
-        let pad_width_factor = min_constraint_width as f64 - (self.pad_left + self.pad_right);
-        // `pad_top`/`pad_bottom` are 0 for the emoji constraint.
-        let pad_height_factor = 1.0;
-
-        let target_width = pad_width_factor * metrics.face_width;
-        let target_height = pad_height_factor * metrics.face_height;
-
-        let width_factor = target_width / group.width;
-        let height_factor = target_height / group.height;
-        // `.cover`: min of the two, applied uniformly.
-        width_factor.min(height_factor)
-    }
-
-    /// Vertical center alignment. Port of `aligned_y` for `align_vertical =
-    /// .center`.
-    fn aligned_y_center(self, group: GlyphSize, metrics: &Metrics) -> f64 {
-        // pad_top/pad_bottom are 0 for emoji.
-        let start_y = metrics.face_y;
-        let end_y = metrics.face_y + (metrics.face_height - group.height);
-        (start_y + end_y) / 2.0
-    }
-
-    /// Horizontal center alignment. Port of `aligned_x` for `align_horizontal =
-    /// .center`.
-    fn aligned_x_center(
-        self,
-        group: GlyphSize,
-        metrics: &Metrics,
-        min_constraint_width: u32,
-    ) -> f64 {
-        let full_face_span =
-            metrics.face_width + ((min_constraint_width - 1) * metrics.cell_width) as f64;
-        let pad_left_dx = self.pad_left * metrics.face_width;
-        let pad_right_dx = self.pad_right * metrics.face_width;
-        let start_x = pad_left_dx;
-        let end_x = full_face_span - group.width - pad_right_dx;
-        start_x.max((start_x + end_x) / 2.0)
-    }
-}
+// The glyph constraint types (`GlyphSize`, `Constraint`, and the sizing/
+// alignment enums) and the full constrain math now live in `crate::constraint`
+// (the complete port of `Glyph.zig`'s `RenderOptions.Constraint`). Nerd Font
+// PUA icons additionally use the generated per-codepoint table in
+// `crate::nerd_font_constraints`.
 
 /// The pixel format of a rasterized [`Bitmap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,10 +139,21 @@ pub struct Face {
     /// The underlying CTFont (retained).
     font: CFRetained<CTFont>,
     /// The raw font bytes this face was loaded from, if we have them. Present
-    /// for embedded fonts and used for the table-derived half of the metrics
-    /// reconciliation (see [`Face::face_metrics`]). `None` for system fonts
-    /// loaded by name, where we rely on CoreText's table copies instead.
-    source_bytes: Option<&'static [u8]>,
+    /// for embedded fonts (as a zero-copy `Arc` over the `'static` slice) and,
+    /// as of the byte-backed-named-faces work, for **name-loaded** faces whose
+    /// backing file we read via the CoreText font URL attribute
+    /// (`kCTFontURLAttribute`). Used for the table-derived half of the metrics
+    /// reconciliation (see [`Face::face_metrics`]) and — critically — to build a
+    /// `rustybuzz::Face` for real shaping (ligatures). `None` only when the
+    /// backing bytes can't be obtained (e.g. a discovered system face with no
+    /// file URL), where we rely on CoreText's table copies and unshaped
+    /// per-codepoint rendering.
+    source_bytes: Option<Arc<[u8]>>,
+    /// The face index within `source_bytes` for a font *collection* (`.ttc`).
+    /// 0 for a single-face file or the embedded fonts. Used to select the right
+    /// subface when building the rustybuzz shaper and the ttf-parser metrics
+    /// face (a `.ttc` holds several faces in one byte buffer).
+    face_index: u32,
     /// Whether the face can contain color glyphs (symbolic-traits gate +
     /// sbix presence). See coretext.zig:103-107, 890-968.
     color: Option<ColorState>,
@@ -311,7 +217,18 @@ impl Face {
             || name.to_lowercase().contains(&resolved.to_lowercase());
 
         if matched && !name.is_empty() {
-            Ok(Face::from_ct_font(font, None))
+            // Give the named face its backing bytes so it can be shaped
+            // (rustybuzz needs the raw font data) and so ttf-parser can supply
+            // the table-derived metrics. Read the font FILE via CoreText's URL
+            // attribute (`kCTFontURLAttribute`) and resolve the face index for a
+            // `.ttc` collection. A face we can't back with bytes still works
+            // through CoreText's table copies + the unshaped render path.
+            let (bytes, face_index) = font_file_bytes(&font).unzip();
+            Ok(Face::from_ct_font_indexed(
+                font,
+                bytes,
+                face_index.unwrap_or(0),
+            ))
         } else {
             Face::load_embedded(size_px)
         }
@@ -452,7 +369,11 @@ impl Face {
             self.font
                 .copy_with_attributes(size_px as CGFloat, std::ptr::null(), None)
         };
-        Ok(Face::from_ct_font(font, self.source_bytes))
+        Ok(Face::from_ct_font_indexed(
+            font,
+            self.source_bytes.clone(),
+            self.face_index,
+        ))
     }
 
     /// Return a **synthetic italic** copy of this face: the same CTFont with the
@@ -472,7 +393,11 @@ impl Face {
             self.font
                 .copy_with_attributes(size as CGFloat, &ITALIC_SKEW, None)
         };
-        Ok(Face::from_ct_font(font, self.source_bytes))
+        Ok(Face::from_ct_font_indexed(
+            font,
+            self.source_bytes.clone(),
+            self.face_index,
+        ))
     }
 
     /// Load a face from in-memory font bytes at `size_px` pixels.
@@ -500,7 +425,7 @@ impl Face {
         let font =
             unsafe { CTFont::with_font_descriptor(&desc, size_px as CGFloat, std::ptr::null()) };
 
-        Ok(Face::from_ct_font(font, Some(bytes)))
+        Ok(Face::from_ct_font(font, Some(Arc::from(bytes))))
     }
 
     /// Copy an existing `CTFont` at a new pixel size into a [`Face`]
@@ -518,7 +443,15 @@ impl Face {
         Ok(Face::from_ct_font(copy, None))
     }
 
-    fn from_ct_font(font: CFRetained<CTFont>, source_bytes: Option<&'static [u8]>) -> Face {
+    fn from_ct_font(font: CFRetained<CTFont>, source_bytes: Option<Arc<[u8]>>) -> Face {
+        Face::from_ct_font_indexed(font, source_bytes, 0)
+    }
+
+    fn from_ct_font_indexed(
+        font: CFRetained<CTFont>,
+        source_bytes: Option<Arc<[u8]>>,
+        face_index: u32,
+    ) -> Face {
         // SAFETY: font is a valid CTFont.
         let traits = unsafe { font.symbolic_traits() };
         let color = if traits.contains(CTFontSymbolicTraits::TraitColorGlyphs) {
@@ -534,6 +467,7 @@ impl Face {
         Face {
             font,
             source_bytes,
+            face_index,
             color,
             wght: None,
             synthetic_bold: None,
@@ -559,8 +493,15 @@ impl Face {
     /// `rustybuzz::Face` over the same bytes (decision 1); for name-loaded
     /// faces, byte-backed shaping is a deferred completeness pass (a CoreText
     /// shaper, or copying CoreText's table data, would be needed).
-    pub fn source_bytes(&self) -> Option<&'static [u8]> {
-        self.source_bytes
+    pub fn source_bytes(&self) -> Option<&[u8]> {
+        self.source_bytes.as_deref()
+    }
+
+    /// The face index within [`Face::source_bytes`] for a `.ttc` collection
+    /// (0 for a single-face file or the embedded fonts). The shaper and metrics
+    /// face use this to select the correct subface.
+    pub fn face_index(&self) -> u32 {
+        self.face_index
     }
 
     /// True if the face can contain color glyphs.
@@ -693,7 +634,7 @@ impl Face {
     ///
     /// When `constraint` is `Some((metrics, constraint_width))` **and** the
     /// glyph is a color (emoji) glyph, upstream's emoji constraint
-    /// ([`EmojiConstraint::EMOJI`]) is applied: the authored ink box (which for
+    /// ([`Constraint::EMOJI`]) is applied: the authored ink box (which for
     /// Apple Color Emoji is far larger than a cell) is scaled to cover the cell
     /// box preserving aspect ratio and centered, and the CoreGraphics draw is
     /// scaled to match, so the rasterized bitmap is cell-sized. Non-color
@@ -704,7 +645,7 @@ impl Face {
     pub fn rasterize_constrained(
         &self,
         glyph_id: u32,
-        constraint: Option<(&Metrics, u32)>,
+        constraint: Option<(Constraint, &Metrics, u32)>,
     ) -> Result<Bitmap, Error> {
         let glyph16 = u16::try_from(glyph_id).map_err(|_| Error::NoSuchGlyph)?;
         let mut glyphs = [glyph16; 1];
@@ -751,16 +692,18 @@ impl Face {
             });
         }
 
-        // 5. Apply the emoji cell-fit constraint (coretext.zig:336-380). We
-        // fold the baseline into `y` (the constraint operates on cell-relative,
-        // not baseline-relative, positions), constrain, then read back the
-        // scaled size and cell-relative origin. When no constraint applies
-        // (non-color glyph, or no metrics supplied), this leaves the raw ink
-        // rect untouched — matching the reduced natural-size path.
+        // 5. Apply the glyph constraint (coretext.zig:336-380, upstream's
+        // `RenderOptions.Constraint.constrain`). The caller chooses the
+        // constraint: emoji get the fixed `.cover`+center constraint, Nerd Font
+        // PUA icons get their per-codepoint table constraint (Item 3), and
+        // everything else passes `None` for natural size. We fold the baseline
+        // into `y` (the constraint operates on cell-relative, not
+        // baseline-relative, positions), constrain, then read back the scaled
+        // size and cell-relative origin.
         let (width, height, x, y, scale_w, scale_h) = match constraint {
-            Some((metrics, constraint_width)) if is_color => {
+            Some((c, metrics, constraint_width)) if c.does_anything() => {
                 let cell_baseline = f64::from(metrics.cell_baseline);
-                let constrained = EmojiConstraint::EMOJI.constrain(
+                let constrained = c.constrain(
                     GlyphSize {
                         width: rect.size.width,
                         height: rect.size.height,
@@ -781,7 +724,7 @@ impl Face {
                     constrained.height / rect.size.height,
                 )
             }
-            // No constraint: natural size, identity scale.
+            // No (or no-op) constraint: natural size, identity scale.
             _ => (
                 rect.size.width,
                 rect.size.height,
@@ -956,12 +899,20 @@ impl Face {
         let (ct_cell_width, ct_ascii_height) = self.ascii_measurements();
         let ct_ic_width = self.ic_width();
 
-        if let Some(bytes) = self.source_bytes {
-            // Table half: reuse F1's derivation against the same bytes. This is
-            // byte-for-byte the tables CoreText copies out, so ascent/descent/
-            // line_gap/underline/strikethrough/cap/ex are identical to what
-            // upstream's getMetrics table arms would produce.
-            let face = ttf_parser::Face::parse(bytes, 0).expect("embedded/known font parses");
+        // Table half: reuse F1's derivation against the same bytes if we have
+        // them AND ttf-parser can parse them (embedded fonts always parse;
+        // name-loaded faces usually do too, but a `.ttc` face index or exotic
+        // font that ttf-parser rejects falls through to the CoreText-accessor
+        // arm rather than panicking).
+        let table_parse = self
+            .source_bytes
+            .as_deref()
+            .and_then(|bytes| ttf_parser::Face::parse(bytes, self.face_index).ok());
+
+        if let Some(face) = table_parse {
+            // This is byte-for-byte the tables CoreText copies out, so
+            // ascent/descent/line_gap/underline/strikethrough/cap/ex are
+            // identical to what upstream's getMetrics table arms would produce.
             let table_metrics = crate::tables::face_metrics(&face, px_per_em);
 
             FaceMetrics {
@@ -1112,6 +1063,69 @@ fn has_table(font: &CTFont, tag: &[u8; 4]) -> bool {
     }
 }
 
+/// The CTFont's PostScript name, or `None`.
+fn post_script_name(font: &CTFont) -> Option<String> {
+    // SAFETY: font is a valid CTFont; the accessor returns a retained CFString.
+    let cf = unsafe { font.post_script_name() };
+    Some(cf.to_string())
+}
+
+/// Read the font FILE backing `font` and the face index within it.
+///
+/// This is the byte-backed-named-faces mechanism (Item 2): a face obtained by
+/// name from CoreText has no in-memory bytes, but its descriptor carries a file
+/// URL (`kCTFontURLAttribute`) pointing at the on-disk `.ttf`/`.otf`/`.ttc`. We
+/// read that file so the face can be shaped (rustybuzz needs the raw data) and
+/// so ttf-parser can supply table-derived metrics.
+///
+/// For a `.ttc` **collection**, the returned index selects the subface whose
+/// PostScript name matches `font` (a collection holds several faces in one
+/// file). Returns `None` if the URL attribute is absent (e.g. a purely
+/// system-synthesized font) or the file can't be read — the caller then keeps
+/// the byte-less (unshaped) path.
+fn font_file_bytes(font: &CTFont) -> Option<(Arc<[u8]>, u32)> {
+    // The URL attribute lives on the font's descriptor.
+    // SAFETY: font is valid; CTFontCopyFontDescriptor returns a retained desc.
+    let desc = unsafe { font.font_descriptor() };
+    // SAFETY: kCTFontURLAttribute is a valid static key.
+    let key = unsafe { kCTFontURLAttribute };
+    // SAFETY: desc is valid; attribute() returns a retained CFType or None.
+    let attr = unsafe { desc.attribute(key) }?;
+    let url = attr.downcast_ref::<CFURL>()?;
+    let path = url.file_system_path(CFURLPathStyle::CFURLPOSIXPathStyle)?;
+    let bytes = std::fs::read(path.to_string()).ok()?;
+    let bytes: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+
+    // Resolve the face index within a collection by matching PostScript names.
+    let index = collection_face_index(&bytes, font).unwrap_or(0);
+    Some((bytes, index))
+}
+
+/// For a font collection (`.ttc`), the index of the subface whose PostScript
+/// name matches `font`; `Some(0)` for a single-face file. `None` if nothing
+/// matches (the caller defaults to index 0).
+fn collection_face_index(bytes: &[u8], font: &CTFont) -> Option<u32> {
+    let count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1).max(1);
+    if count == 1 {
+        return Some(0);
+    }
+    let want = post_script_name(font)?;
+    for i in 0..count {
+        let Ok(face) = ttf_parser::Face::parse(bytes, i) else {
+            continue;
+        };
+        let ps = face
+            .names()
+            .into_iter()
+            .find(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+            .and_then(|n| n.to_string());
+        if ps.as_deref() == Some(want.as_str()) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Create a `CGColorSpace` from one of the named-colorspace CFString constants.
 fn named_color_space(name: &CFString) -> Option<CFRetained<CGColorSpace>> {
     CGColorSpace::with_name(Some(name))
@@ -1209,7 +1223,7 @@ mod tests {
             x: 0.46,
             y: 1.0,
         };
-        let out = EmojiConstraint::EMOJI.constrain(glyph, &metrics, 2);
+        let out = Constraint::EMOJI.constrain(glyph, &metrics, 2);
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
         assert!(approx(out.width, 18.72), "width {}", out.width);
         assert!(approx(out.height, 18.72), "height {}", out.height);
@@ -1230,7 +1244,7 @@ mod tests {
             x: 0.46,
             y: 1.0,
         };
-        let out = EmojiConstraint::EMOJI.constrain(glyph, &metrics, 1);
+        let out = Constraint::EMOJI.constrain(glyph, &metrics, 1);
         // Padded width target = (1 - 0.05) * face_width; cover uses min factor.
         let target_width = (1.0 - 0.05) * metrics.face_width;
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;

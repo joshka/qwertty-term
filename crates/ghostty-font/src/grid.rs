@@ -100,11 +100,25 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Which constraint to apply when rasterizing a glyph. Part of the glyph cache
+/// key (upstream keys `renderGlyph` by `opts`, which carries the constraint) so
+/// the same glyph rendered natural-size vs constrained caches separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ConstraintKind {
+    /// No constraint for a text/outline glyph, but color (emoji) glyphs still
+    /// get the fixed emoji `.cover` constraint (the historical default).
+    DefaultColorEmoji,
+    /// The Nerd Fonts per-codepoint constraint for `cp` (Item 3). Applied to PUA
+    /// icon codepoints whose `nerd_font_constraints::get_constraint` is `Some`.
+    Nerd(u32),
+}
+
 /// Key for the glyph render cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct GlyphKey {
     index: FontIndex,
     glyph: u32,
+    constraint: ConstraintKind,
 }
 
 /// The reduced shared font grid: resolver + grayscale/color atlases + caches.
@@ -214,9 +228,42 @@ impl Grid {
         index: FontIndex,
         glyph_index: u32,
     ) -> Result<CachedGlyph, Error> {
+        self.render_glyph_with(index, glyph_index, ConstraintKind::DefaultColorEmoji)
+    }
+
+    /// Render (and cache) a codepoint's glyph applying the **Nerd Fonts**
+    /// per-codepoint constraint (Item 3) if `cp` has one. For a PUA icon
+    /// codepoint whose `nerd_font_constraints::get_constraint(cp)` is `Some`,
+    /// the glyph is scaled/aligned per the table (so oversized/misaligned
+    /// powerline + devicon icons render at the correct cell-fit size); otherwise
+    /// this behaves exactly like [`Grid::render_glyph`]. Applies regardless of
+    /// which face resolved the codepoint (nerd-patched primary OR nerd-symbols
+    /// fallback), matching upstream where the codepoint range — not the font —
+    /// gates the constraint (`renderer/generic.zig:3189`).
+    pub fn render_glyph_nerd(
+        &mut self,
+        index: FontIndex,
+        glyph_index: u32,
+        cp: u32,
+    ) -> Result<CachedGlyph, Error> {
+        let kind = if crate::nerd_font_constraints::get_constraint(cp).is_some() {
+            ConstraintKind::Nerd(cp)
+        } else {
+            ConstraintKind::DefaultColorEmoji
+        };
+        self.render_glyph_with(index, glyph_index, kind)
+    }
+
+    fn render_glyph_with(
+        &mut self,
+        index: FontIndex,
+        glyph_index: u32,
+        constraint: ConstraintKind,
+    ) -> Result<CachedGlyph, Error> {
         let key = GlyphKey {
             index,
             glyph: glyph_index,
+            constraint,
         };
         if let Some(g) = self.glyph_cache.get(&key) {
             return Ok(*g);
@@ -224,7 +271,7 @@ impl Grid {
 
         let glyph = match index {
             FontIndex::Sprite => self.render_sprite(glyph_index)?,
-            FontIndex::Face { .. } => self.render_face_glyph(index, glyph_index)?,
+            FontIndex::Face { .. } => self.render_face_glyph(index, glyph_index, constraint)?,
         };
         self.glyph_cache.insert(key, glyph);
         Ok(glyph)
@@ -272,7 +319,11 @@ impl Grid {
                 }
             }
         };
-        Ok(Some(self.render_glyph(index, glyph_index)?))
+        // Apply the Nerd Fonts constraint for PUA icon codepoints (Item 3):
+        // this single-codepoint cmap path is how nerd icons resolved from the
+        // nerd-symbols fallback (and single-codepoint primary lookups) reach the
+        // rasterizer, so it's where the constraint must be gated by `cp`.
+        Ok(Some(self.render_glyph_nerd(index, glyph_index, cp)?))
     }
 
     /// Rasterize a face glyph and upload it, growing the atlas on `AtlasFull`.
@@ -280,19 +331,34 @@ impl Grid {
         &mut self,
         index: FontIndex,
         glyph_index: u32,
+        constraint: ConstraintKind,
     ) -> Result<CachedGlyph, Error> {
         let face = self
             .resolver
             .collection()
             .get_face(index)
             .ok_or(Error::NoFace)?;
-        // Pass the grid metrics + emoji constraint width so color (emoji)
-        // glyphs are rasterized cell-fit (scaled to cover the cell box,
-        // aspect-preserving, centered). Emoji are width-2 in the terminal, so
-        // the constraint may cover two cells. Non-color glyphs ignore the
-        // constraint and render at natural size (see `rasterize_constrained`).
+        // Choose the constraint (upstream `renderer/generic.zig:3189` +
+        // `SharedGrid.renderGlyph`): a Nerd Fonts PUA icon codepoint gets its
+        // table constraint; otherwise a color (emoji) glyph gets the fixed
+        // emoji `.cover` constraint and text glyphs get none. `constraint_width`
+        // is 2 (emoji and multi-cell icons may span two cells; the constraint's
+        // own `max_constraint_width` clamps it back to 1 where required — the
+        // table sets `max_constraint_width = 1` for single-cell icons).
+        let is_color = face.has_color();
+        let constraint_arg: Option<(crate::constraint::Constraint, &Metrics, u32)> =
+            match constraint {
+                ConstraintKind::Nerd(cp) => crate::nerd_font_constraints::get_constraint(cp)
+                    .map(|c| (c, &self.metrics, EMOJI_CONSTRAINT_WIDTH)),
+                ConstraintKind::DefaultColorEmoji if is_color => Some((
+                    crate::constraint::Constraint::EMOJI,
+                    &self.metrics,
+                    EMOJI_CONSTRAINT_WIDTH,
+                )),
+                ConstraintKind::DefaultColorEmoji => None,
+            };
         let bmp = face
-            .rasterize_constrained(glyph_index, Some((&self.metrics, EMOJI_CONSTRAINT_WIDTH)))
+            .rasterize_constrained(glyph_index, constraint_arg)
             .map_err(Error::Rasterize)?;
 
         // Route by pixel format: BGRA color glyphs → color atlas, alpha8 text

@@ -56,29 +56,34 @@ pub struct ShapedCell {
 /// Holds a `rustybuzz::Face` built over the primary face's bytes (decision 1:
 /// "rustybuzz::Face over the same font bytes"). Shaping a run reuses the
 /// buffer via `take`/return, matching rustybuzz's ownership model.
-pub struct Shaper {
-    face: rustybuzz::Face<'static>,
+pub struct Shaper<'a> {
+    face: rustybuzz::Face<'a>,
     /// Pixels per em for scaling design-unit positions to pixels.
     px_per_em: f64,
     /// Reusable buffer (rustybuzz consumes and returns it on each shape call).
     buf: Option<UnicodeBuffer>,
 }
 
-impl Shaper {
+impl<'a> Shaper<'a> {
     /// Build a shaper over `face`, which must have source bytes available
-    /// (`Face::source_bytes`). Returns `None` for byte-less system faces
-    /// (deferred: see `Face::source_bytes`).
+    /// (`Face::source_bytes`). Returns `None` only for faces whose backing bytes
+    /// couldn't be obtained (e.g. a synthesized system face with no file URL);
+    /// the caller then renders unshaped per-codepoint. The shaper borrows the
+    /// face's bytes for `'a`, so `face` must outlive it (it always does — the
+    /// shaper is built, used, and dropped within a single cell-shaping call).
     ///
-    /// If `face` carries a `wght` variation instance (a bold face materialized
-    /// from a variable font, see [`Face::wght`]), the same variation is applied
-    /// to the rustybuzz face so shaped glyph ids match the instance CoreText
-    /// rasterizes. Without this, the shaper would shape against the default
-    /// (`wght=400`) instance while the raster is bold — the ids happen to align
-    /// for JetBrains Mono's non-ligature glyphs, but applying the variation
-    /// keeps positioning (advances) correct for the bold instance too.
-    pub fn new(face: &Face) -> Option<Shaper> {
+    /// For a `.ttc` collection the face's recorded [`Face::face_index`] selects
+    /// the correct subface. If `face` carries a `wght` variation instance (a
+    /// bold face materialized from a variable font, see [`Face::wght`]), the
+    /// same variation is applied to the rustybuzz face so shaped glyph ids match
+    /// the instance CoreText rasterizes. Without this, the shaper would shape
+    /// against the default (`wght=400`) instance while the raster is bold — the
+    /// ids happen to align for JetBrains Mono's non-ligature glyphs, but
+    /// applying the variation keeps positioning (advances) correct for the bold
+    /// instance too.
+    pub fn new(face: &'a Face) -> Option<Shaper<'a>> {
         let bytes = face.source_bytes()?;
-        let mut shaper = Shaper::from_bytes(bytes, 0, face.size_px())?;
+        let mut shaper = Shaper::from_bytes(bytes, face.face_index(), face.size_px())?;
         if let Some(wght) = face.wght() {
             shaper.face.set_variations(&[rustybuzz::Variation {
                 tag: ttf_parser::Tag::from_bytes(b"wght"),
@@ -91,11 +96,11 @@ impl Shaper {
     /// Build a shaper directly from font bytes, a face index (for `.ttc`
     /// collections), and a pixels-per-em size.
     ///
-    /// The bytes must outlive the shaper (`'static`). This is the primitive
-    /// [`Shaper::new`] builds on; it is public so callers can shape from a
-    /// byte buffer they own (e.g. a fallback font not yet wired into the
+    /// The bytes must outlive the shaper (borrowed for `'a`). This is the
+    /// primitive [`Shaper::new`] builds on; it is public so callers can shape
+    /// from a byte buffer they own (e.g. a fallback font not yet wired into the
     /// reduced `Collection`).
-    pub fn from_bytes(bytes: &'static [u8], face_index: u32, px_per_em: f64) -> Option<Shaper> {
+    pub fn from_bytes(bytes: &'a [u8], face_index: u32, px_per_em: f64) -> Option<Shaper<'a>> {
         let rb = rustybuzz::Face::from_slice(bytes, face_index)?;
         Some(Shaper {
             face: rb,
@@ -202,9 +207,10 @@ fn glyph_positions_of(glyphs: &rustybuzz::GlyphBuffer) -> &[rustybuzz::GlyphPosi
 mod tests {
     use super::*;
 
-    fn shaper() -> Shaper {
-        let face = Face::load_embedded(16.0).expect("load embedded");
-        Shaper::new(&face).expect("embedded face has source bytes")
+    /// An embedded JetBrains Mono face; keep it alive in the test scope, then
+    /// build the shaper over it (the shaper borrows the face's bytes).
+    fn face() -> Face {
+        Face::load_embedded(16.0).expect("load embedded")
     }
 
     /// Latin 1:1 case (analog of upstream's Latin cluster-mapping test): N
@@ -212,7 +218,8 @@ mod tests {
     /// strictly increasing cell X.
     #[test]
     fn ascii_maps_one_to_one() {
-        let mut s = shaper();
+        let f = face();
+        let mut s = Shaper::new(&f).expect("embedded face shaper");
         let cells = s.shape_run("hello");
         assert_eq!(cells.len(), 5, "expected 5 glyphs for 'hello'");
         for (i, c) in cells.iter().enumerate() {
@@ -236,7 +243,8 @@ mod tests {
     /// `first_pixels_font_substrate` integration test using a CJK system font.
     #[test]
     fn wide_char_maps_to_single_cell() {
-        let mut s = shaper();
+        let f = face();
+        let mut s = Shaper::new(&f).expect("embedded face shaper");
         // One char occupying cell 0; the caller would mark cell 1 as a spacer.
         let cells = s.shape_run_with_clusters([('M', 0)]);
         assert_eq!(cells.len(), 1, "one glyph");
@@ -247,7 +255,8 @@ mod tests {
     /// An em dash shapes to a single glyph in a single cell.
     #[test]
     fn em_dash_single_glyph() {
-        let mut s = shaper();
+        let f = face();
+        let mut s = Shaper::new(&f).expect("embedded face shaper");
         let cells = s.shape_run("—"); // U+2014
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].cell_x, 0);

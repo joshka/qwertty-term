@@ -8,19 +8,28 @@
 //! did not), plain filenames and dates — while bold/italic/colored text drew
 //! fine.
 //!
-//! Root cause: a name-loaded [`Face`] carries no `source_bytes`, so the shaper
-//! ([`ghostty_font::Shaper::new`]) returned `None`, and the renderer's
+//! Original root cause: a name-loaded [`Face`] carried no `source_bytes`, so the
+//! shaper ([`ghostty_font::Shaper::new`]) returned `None`, and the renderer's
 //! primary-face glyph path (`Engine::add_cell_glyph`) dropped the glyph
 //! entirely instead of falling back to per-codepoint CoreText rendering.
 //! Decorations survived (sprite path), and bold/italic survived (the default
 //! style table fills those slots with *embedded*, byte-backed faces) — so only
 //! default-fg regular text on the primary face went dark.
 //!
+//! Fix history: this first landed by adding an *unshaped* per-codepoint CoreText
+//! fallback for byte-less faces (so the glyph drew even without a shaper). The
+//! byte-backed-named-faces work then gave name-loaded faces their backing bytes
+//! (read via the CoreText font URL attribute), so a named family like FiraCode
+//! now takes the **shaped** path (`Shaper::new` succeeds) — enabling ligatures —
+//! and still inks. The unshaped fallback remains for faces that genuinely lack
+//! bytes (e.g. a purely synthesized system face with no file URL).
+//!
 //! These assertions lock the FiraCode (named-family) path so it can never go
 //! silently dark again: a plain, SGR-free glyph on the Aardvark-Ink themed
-//! background must ink, with the embedded font and (skip-if-not-installed) a
-//! named family alike. The eza-header case (underline + text) is asserted too:
-//! the cell's ink must exceed a bare-underline-only baseline.
+//! background must ink — now through the shaped path — with the embedded font
+//! and (skip-if-not-installed) a named family alike. The eza-header case
+//! (underline + text) is asserted too: the cell's ink must exceed a
+//! bare-underline-only baseline.
 //!
 //! Skips gracefully (`SKIP:`) when no Metal device is present.
 

@@ -19,20 +19,21 @@ use ghostty_font::{CodepointResolver, Collection, FontIndex, Grid, Shaper};
 
 const SIZE_PX: f64 = 16.0;
 
-/// Build the reduced substrate: a grid over the embedded font plus a shaper.
-fn substrate() -> (Grid, Shaper, Metrics) {
+/// Build the reduced substrate: a grid over the embedded font plus the face the
+/// shaper borrows. The caller builds the shaper via `Shaper::new(&shaper_face)`
+/// so the borrowed bytes stay alive for the shaper's lifetime.
+fn substrate() -> (Grid, Face, Metrics) {
     let primary = Face::load_embedded(SIZE_PX).expect("load embedded JetBrains Mono");
     let metrics = Metrics::calc(primary.face_metrics());
 
     // The shaper needs its own face handle (rustybuzz reads the same bytes).
     let shaper_face = Face::load_embedded(SIZE_PX).expect("load embedded for shaper");
-    let shaper = Shaper::new(&shaper_face).expect("embedded face has source bytes");
 
     let collection = Collection::new(primary);
     let resolver = CodepointResolver::new(collection);
     let grid = Grid::new(resolver, metrics).expect("build grid");
 
-    (grid, shaper, metrics)
+    (grid, shaper_face, metrics)
 }
 
 /// Assert a cached glyph sits inside the atlas and has plausible geometry for
@@ -60,7 +61,8 @@ fn assert_in_atlas(g: &CachedGlyph, atlas_size: u32, label: &str) {
 
 #[test]
 fn hello_maps_one_to_one_into_atlas() {
-    let (mut grid, mut shaper, _m) = substrate();
+    let (mut grid, shaper_face, _m) = substrate();
+    let mut shaper = Shaper::new(&shaper_face).expect("embedded face shaper");
 
     // Shape the ASCII run.
     let cells = shaper.shape_run("hello");
@@ -108,7 +110,8 @@ fn hello_maps_one_to_one_into_atlas() {
 
 #[test]
 fn em_dash_single_cell_from_face() {
-    let (mut grid, mut shaper, _m) = substrate();
+    let (mut grid, shaper_face, _m) = substrate();
+    let mut shaper = Shaper::new(&shaper_face).expect("embedded face shaper");
 
     let cells = shaper.shape_run("—"); // U+2014 EM DASH
     assert_eq!(cells.len(), 1, "em dash is a single glyph");
@@ -202,7 +205,7 @@ fn wide_cjk_is_one_glyph_into_atlas() {
 
 #[test]
 fn box_drawing_comes_from_sprite() {
-    let (mut grid, _shaper, _m) = substrate();
+    let (mut grid, _shaper_face, _m) = substrate();
 
     // U+2500 BOX DRAWINGS LIGHT HORIZONTAL is a sprite codepoint. It bypasses
     // shaping entirely (codepoint == glyph for special fonts).
@@ -230,7 +233,8 @@ fn box_drawing_comes_from_sprite() {
 /// in-bounds atlas region and the atlas actually received writes.
 #[test]
 fn full_line_every_cell_gets_a_region() {
-    let (mut grid, mut shaper, _m) = substrate();
+    let (mut grid, shaper_face, _m) = substrate();
+    let mut shaper = Shaper::new(&shaper_face).expect("embedded face shaper");
 
     let atlas_size = grid.atlas().size();
     let before_modified = grid.atlas().modified();

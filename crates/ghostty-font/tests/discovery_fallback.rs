@@ -39,6 +39,75 @@ fn default_chain_grid_no_discovery() -> Grid {
     Grid::new(resolver, metrics).expect("build grid")
 }
 
+/// Build a grid over the real default chain (`new_with_default_fallbacks`,
+/// which pre-seeds the macOS Apple Color Emoji fallback) WITH discovery enabled.
+/// This is the exact shape the app uses for the no-`font-family` default, and
+/// the one that exercises the emoji-discovery-parity fix (Item 1).
+fn default_chain_grid() -> Grid {
+    let primary = Face::load_embedded(SIZE_PX).expect("load embedded JetBrains Mono");
+    let metrics = Metrics::calc(primary.face_metrics());
+    let collection =
+        Collection::new_with_default_fallbacks(primary, SIZE_PX).expect("build default collection");
+    let resolver = CodepointResolver::new(collection);
+    Grid::new(resolver, metrics).expect("build grid")
+}
+
+/// Emoji-presentation codepoints (🦀 U+1F980, 🥋 U+1F94B, ✅ U+2705) resolve to
+/// **Apple Color Emoji** — the OS-native emoji font — via the pre-seeded
+/// collection fallback, NOT a user-installed third-party emoji font (e.g. Noto
+/// Color Emoji, which has ~10x the glyph count and would otherwise win the
+/// discovery Score tiebreak). This is the Item-1 field-bug parity assertion.
+///
+/// Apple Color Emoji ships with macOS, so this asserts hard (no skip-if-missing).
+/// Matches the ground truth from `ghostty +show-face --cp=0x1F980` on the same
+/// machine (upstream mechanism: `SharedGridSet.zig:335-354`).
+#[test]
+fn emoji_resolves_to_apple_color_emoji() {
+    let mut g = default_chain_grid();
+    for cp in [0x1F980u32, 0x1F94B, 0x2705] {
+        let idx = g
+            .get_index(cp)
+            .unwrap_or_else(|| panic!("U+{cp:X} must resolve"));
+        let face = g.resolver().collection().get_face(idx).expect("face");
+        assert_eq!(
+            face.family_name(),
+            "Apple Color Emoji",
+            "U+{cp:X} must resolve to Apple Color Emoji, got {:?}",
+            face.family_name()
+        );
+        assert!(face.has_color(), "U+{cp:X} emoji face must be a color face");
+    }
+}
+
+/// Inverse guard: a **text-presentation** symbol (U+270C VICTORY HAND, which is
+/// emoji-*capable* but text-presentation by default) must NOT resolve to the
+/// color Apple Color Emoji fallback. The pre-seeded emoji fallback is a color
+/// face marked `fallback = true`, so upstream's presentation asymmetry rejects
+/// it for a default-text request; resolution falls through to a text font.
+/// Ground truth: `ghostty +show-face --cp=0x270C` picks a text Nerd Font on this
+/// machine, never Apple Color Emoji.
+#[test]
+fn text_presentation_symbol_avoids_color_emoji_fallback() {
+    let mut g = default_chain_grid();
+    // Default presentation (no VS16): must be a TEXT face.
+    if let Some(idx) = g.get_index(0x270C) {
+        let face = g.resolver().collection().get_face(idx).expect("face");
+        assert_ne!(
+            face.family_name(),
+            "Apple Color Emoji",
+            "text-presentation U+270C must not resolve to the color emoji fallback"
+        );
+        assert!(
+            !face.has_color(),
+            "text-presentation U+270C resolved to a color face ({:?})",
+            face.family_name()
+        );
+    } else {
+        // No text font on this machine has U+270C: acceptable, but Apple Color
+        // Emoji must still not have satisfied it (it didn't, since idx is None).
+    }
+}
+
 /// 😀 (U+1F600) resolves to a discovered color face and rasterizes as a
 /// non-empty BGRA glyph in the color atlas.
 #[test]

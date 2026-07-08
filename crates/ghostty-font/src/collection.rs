@@ -150,8 +150,37 @@ impl Collection {
 
         let symbols = crate::coretext::Face::load_embedded_symbols_nerd_font(size_px)?;
         collection.add_fallback(Style::Regular, symbols);
+
+        // macOS: pre-seed the system emoji font as a fallback so emoji resolve
+        // to Apple Color Emoji at the collection step, ahead of any runtime
+        // discovery (which ranks by glyph count and would otherwise prefer a
+        // user-installed Noto Color Emoji). Upstream: SharedGridSet.zig:335-354.
+        collection.add_apple_emoji_fallback(size_px);
         Ok(collection)
     }
+
+    /// macOS-only: discover the system **Apple Color Emoji** font by family name
+    /// and add it as a `.regular`, `fallback = true` entry.
+    ///
+    /// Direct port of upstream `SharedGridSet.zig:335-354`: "On macOS, always
+    /// search for and add the Apple Emoji font as our preferred emoji font for
+    /// fallback … in case people add other emoji fonts to their system, we
+    /// always want to prefer the official one." This is the load-bearing fix for
+    /// the field bug where U+1F980 (🦀) etc. resolved to a user-installed Noto
+    /// Color Emoji (more glyphs → wins the discovery Score tiebreak) instead of
+    /// Apple Color Emoji. A no-op if the font can't be discovered (never expected
+    /// on macOS, where it ships with the OS).
+    #[cfg(target_os = "macos")]
+    fn add_apple_emoji_fallback(&mut self, size_px: f64) {
+        if let Some(face) = crate::discovery::discover_family("Apple Color Emoji", size_px) {
+            self.add_fallback(Style::Regular, face);
+        }
+    }
+
+    /// Non-macOS: no system Apple emoji font to pre-seed (upstream adds the
+    /// embedded Noto emoji fonts on those platforms instead). No-op here.
+    #[cfg(not(target_os = "macos"))]
+    fn add_apple_emoji_fallback(&mut self, _size_px: f64) {}
 
     /// Create a collection for a **configured `font-family`** (`primary`), whose
     /// bold/italic/bold-italic slots are filled from the family's *own* styled
@@ -281,6 +310,11 @@ impl Collection {
 
         let symbols = Face::load_embedded_symbols_nerd_font(size_px)?;
         collection.add_fallback(Style::Regular, symbols);
+
+        // macOS system emoji fallback (SharedGridSet.zig:335-354), same as the
+        // no-family default chain: emoji resolve to Apple Color Emoji here rather
+        // than a user-installed third-party emoji font via discovery.
+        collection.add_apple_emoji_fallback(size_px);
 
         Ok(collection)
     }
