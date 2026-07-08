@@ -6,7 +6,19 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-08 (evening)
+## State as of 2026-07-09
+
+Visual-parity sweep landed on `main` (all field-reported): **glyph baseline fix** (text was
+`cell_baseline` px too low — cursor was never wrong), **top-band root cause** (sub-cell
+surface remainder exposed at the visual top by flipped-layer gravity; surface now pinned
+under the titlebar + window bg painted terminal-colored; `GHOSTTY_APP_SMOKE_GEOMETRY`
+asserts the 1→2→1-tab transition), and **default-font parity** (vendored upstream's exact
+JetBrainsMono variable + italic-variable + SymbolsNerdFontMono, hash-manifested like the
+shell scripts; nerd-symbols is an explicit fallback slot ahead of discovery; metrics
+unchanged). Known gap: nerd-font `constrain()` sizing table unported — PUA icons render at
+natural size. Emoji, tabs-only-at-2+, bar cursor: confirmed good by maintainer.
+
+## Earlier state (2026-07-08 evening)
 
 **The app runs the REAL stack end-to-end**: `cargo run -p ghostty-app` = native AppKit
 window (tabs/menu/theme/selection/IME), Metal rendering (contentsScale fixed — presented-
