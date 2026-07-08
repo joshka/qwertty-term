@@ -68,6 +68,13 @@ cargo test -p ghostty-vt --release --all-targets  # RELEASE LANE (added 2026-07-
 cargo test -p vt-diff --features reference    # when engine code changed
 markdownlint-cli2 "**/*.md" "!target"          # when docs changed
 # then: ledger row update + roadmap checkbox, one commit, move main again
+# CWD DISCIPLINE (added 2026-07-10 after an empty docs commit + eaten edits): the shell's
+# cwd silently resets between commands (harness resets, cd in subshells). A jj command
+# from the repo ROOT hits the wrong working copy — empty commits, relative-path reads of
+# ancient root files. EVERY command block that runs jj or reads repo files MUST begin
+# with an explicit `cd .../work/<workspace> &&`. Before update-stale, back up any
+# un-snapshotted edits (update-stale discards them); use `command cp` (cp/rm are
+# interactive-aliased).
 # FINAL HANDOVER CHECK (added 2026-07-08 after a stale-checkout shipped conflict
 # markers to the user): after the LAST jj op of the integration, re-run
 #   jj st && grep -rn '<<<<<<<' crates/ --include='*.rs' | head
