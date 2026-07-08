@@ -8,13 +8,11 @@
 
 ## IN FLIGHT at session pause (2026-07-10, usage limits)
 
-Three chunk workspaces have agents finishing independently; each was told to gate +
+One chunk workspace has an agent finishing independently; each was told to gate +
 `jj describe`. Next session: integrate each per the recipe (rebase -d main, gate incl.
 release lane + smokes, bookmark move, docs), in any order; check `jj log` for their
 described commits even if the workspace looks idle.
 
-- `work/simd-perf` — "Perf: plain-text fast path + SIMD utf8 + print batching" (ghostty-vt;
-  differential corpus is the referee; expect memchr/simdutf8 deps).
 - `work/bench-upstream` — "Bench: Ghostty main@91f66da24 lane — three-way vtebench
   comparison" (scripts + docs/benchmarks; prebuilt app at
   `~/local/ghostty-main/macos/build/ReleaseLocal/Ghostty.app`).
