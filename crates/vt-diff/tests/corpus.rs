@@ -241,7 +241,6 @@ fn assert_case_agrees(rel: &str) {
 /// which issues a DA2 query on startup) carry `SKIP` for this same root
 /// cause.
 #[test]
-#[ignore]
 fn regression_da2_firmware_version_mismatch() {
     assert_case_agrees("reply_diffing/da2_secondary_version");
 }

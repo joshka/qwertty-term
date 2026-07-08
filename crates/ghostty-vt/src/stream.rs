@@ -1817,8 +1817,10 @@ impl Handler for TerminalHandler {
             // advertises: 62;22 at minimum). We emit the widely-compatible
             // `\e[?62;22c`.
             DeviceAttributesReq::Primary => self.write_pty(b"\x1b[?62;22c"),
-            // Secondary: `\e[>1;10;0c` (VT220-ish, version 10).
-            DeviceAttributesReq::Secondary => self.write_pty(b"\x1b[>1;10;0c"),
+            // Secondary: `\e[>1;0;0c` — upstream's Secondary{} defaults
+            // firmware_version = 0 (device_attributes.zig:80-94, pinned by its
+            // own test). Corpus round 2 caught this port hardcoding 10.
+            DeviceAttributesReq::Secondary => self.write_pty(b"\x1b[>1;0;0c"),
             // Tertiary: DECRPTUI, empty unit id.
             DeviceAttributesReq::Tertiary => self.write_pty(b"\x1bP!|00000000\x1b\\"),
         }
