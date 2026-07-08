@@ -6,7 +6,19 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-08
+## State as of 2026-07-08 (evening)
+
+**The app runs the REAL stack end-to-end**: `cargo run -p ghostty-app` = native AppKit
+window (tabs/menu/theme/selection/IME), Metal rendering (contentsScale fixed — presented-
+pixel assertions now in the smoke), and the genuine termio architecture (rustix PTY,
+two-stage Exec pipeline, ADR-002 thread loop, 135.8 MiB/s into the live engine).
+M2 spine A/B/C/D/E+J DONE. **The M2 exit test (maintainer drives it for an hour) is OPEN.**
+Remaining M2: G shell-integration, F stream-handler delta, M/N Surface-completeness items
+absorbed-or-pending (see roadmap). Two field regressions were found by the maintainer and
+fixed same-day (app activation/key-window; missing contentsScale) — both now covered by
+smokes that assert what the user actually experiences.
+
+## Earlier 2026-07-08 state
 
 **M1 CERTIFIED** (see port-status Milestones). **M3 essentially complete**: `ghostty-app`
 runs — native AppKit window, Metal via the full ported stack, native tabs with OSC7 pwd
