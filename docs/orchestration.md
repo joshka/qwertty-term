@@ -62,6 +62,9 @@ jj log -r "$CH" --no-graph -T 'if(conflict, "CONFLICT", "clean")'
 jj bookmark move main --to "$CH" && jj new main
 # GATE (all must pass BEFORE the bookmark stays):
 cargo check --workspace --all-targets && cargo test --workspace && cargo fmt --check
+cargo test -p ghostty-vt --release --all-targets  # RELEASE LANE (added 2026-07-09: the
+    # maintainer daily-drives --release; two field bugs — a cursor_absolute panic and a
+    # grapheme debug_assert side-effect — were invisible to the all-debug gate)
 cargo test -p vt-diff --features reference    # when engine code changed
 markdownlint-cli2 "**/*.md" "!target"          # when docs changed
 # then: ledger row update + roadmap checkbox, one commit, move main again
