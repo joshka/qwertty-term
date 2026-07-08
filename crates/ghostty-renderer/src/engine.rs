@@ -811,7 +811,11 @@ impl Engine {
         if slot.color.width() != size || slot.color.height() != size {
             slot.color = self.backend.new_texture(
                 crate::gpu::TextureOptions {
-                    format: crate::gpu::TextureFormat::Bgra8Unorm,
+                    // `*_srgb` so the GPU auto-linearizes on sample: the
+                    // ATLAS_COLOR shader branch assumes premultiplied *linear*
+                    // texels. Matches upstream `initAtlasTexture`
+                    // (`.bgra => .bgra8unorm_srgb`).
+                    format: crate::gpu::TextureFormat::Bgra8UnormSrgb,
                     usage: crate::gpu::TextureUsage::SHADER_READ,
                 },
                 size,

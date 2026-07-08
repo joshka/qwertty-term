@@ -137,9 +137,14 @@ impl<B: GpuBackend> FrameSlot<B> {
             1,
             None,
         )?;
+        // The color (emoji) atlas uses an `*_srgb` format so the GPU
+        // auto-linearizes texels on sample; the cell-text fragment shader's
+        // ATLAS_COLOR branch assumes it receives premultiplied *linear* colors.
+        // Matches upstream `initAtlasTexture` (`.bgra => .bgra8unorm_srgb`,
+        // Metal.zig ~ line 374). A non-srgb format double-encodes emoji.
         let color = backend.new_texture(
             TextureOptions {
-                format: TextureFormat::Bgra8Unorm,
+                format: TextureFormat::Bgra8UnormSrgb,
                 usage: TextureUsage::SHADER_READ,
             },
             1,

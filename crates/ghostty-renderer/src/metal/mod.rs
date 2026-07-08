@@ -378,4 +378,38 @@ mod tests {
             .new_sampler(SamplerOptions::default())
             .expect("sampler");
     }
+
+    /// Regression pin for the default blend/format choices that govern text
+    /// weight. Upstream's macOS default is `alpha-blending = native`
+    /// (`isLinear() == false`), which selects the *non-srgb* render target so
+    /// the GPU does not gamma-encode after blending — the perceptual
+    /// ("thicker") blend. If a future change flips the blend default to linear,
+    /// or maps an atlas to the wrong srgb-ness, text weight silently regresses
+    /// and this test fails.
+    #[test]
+    fn default_blend_formats_match_upstream_native() {
+        let Some(metal) = test_metal() else { return };
+
+        // Default config is macOS `native`: non-linear -> non-srgb target.
+        assert_eq!(
+            metal.target_pixel_format(),
+            MTLPixelFormat::BGRA8Unorm,
+            "native (default) blending must render into a non-srgb target"
+        );
+
+        // The color (emoji) atlas is always srgb (upstream `initAtlasTexture`)
+        // so the GPU auto-linearizes texels for the shader's linear assumption.
+        assert_eq!(
+            super::pixel_format_for(TextureFormat::Bgra8UnormSrgb),
+            MTLPixelFormat::BGRA8Unorm_sRGB,
+            "color atlas must map to an srgb pixel format"
+        );
+        // The grayscale (text mask) atlas is always non-srgb: a raw coverage
+        // mask, not a gamma-encoded color.
+        assert_eq!(
+            super::pixel_format_for(TextureFormat::R8Unorm),
+            MTLPixelFormat::R8Unorm,
+            "grayscale atlas must stay a raw (non-srgb) coverage mask"
+        );
+    }
 }
