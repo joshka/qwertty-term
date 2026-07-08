@@ -14,6 +14,7 @@
 
 #![cfg(target_os = "macos")]
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ghostty_renderer::engine::{Engine as RenderEngine, FrameOptions};
@@ -22,7 +23,7 @@ use ghostty_renderer::snapshot::FullSnapshot;
 use crate::engine::Engine;
 use crate::font;
 use crate::geometry;
-use crate::pty::PtySession;
+use crate::termio::TabIo;
 
 /// One BGRA pixel.
 #[derive(Clone, Copy)]
@@ -43,33 +44,35 @@ pub fn run() -> Result<bool, String> {
     // A modest grid.
     let (cols, rows) = (40usize, 12usize);
 
-    // Real engine + real PTY.
-    let mut engine = Engine::new(cols, rows);
-    let mut pty =
-        PtySession::spawn(cols as u16, rows as u16).map_err(|e| format!("spawn pty: {e}"))?;
+    // Real engine (shared with the termio parse thread) + the real termio
+    // stack (rustix pty + read pipeline + writer loop). This is the exact IO
+    // path the window uses, minus the NSWindow.
+    let engine = Arc::new(Mutex::new(Engine::new(cols, rows)));
+    let io = TabIo::spawn(Arc::clone(&engine), cols as u16, rows as u16, cw, ch, None)
+        .map_err(|e| format!("spawn termio: {e}"))?;
 
-    // Drive a scripted command that emits deterministic visible text.
-    pty.write_all(b"printf 'GHOSTTY-RS-SMOKE-OK\\n'\n")
-        .map_err(|e| format!("pty write: {e}"))?;
+    // Give the shell a beat to draw its prompt, then drive a scripted command
+    // that emits deterministic visible text.
+    std::thread::sleep(Duration::from_millis(200));
+    io.write(b"printf 'GHOSTTY-RS-SMOKE-OK\\n'\n");
 
-    // Pump output until we see our marker or time out.
+    // The parse thread feeds the engine off-thread; poll the shared engine for
+    // the marker (and drain any engine replies back to the pty).
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_marker = false;
     while Instant::now() < deadline {
-        // Drain engine replies back to the PTY (DA/DSR handshakes).
-        let out = engine.take_output();
-        if !out.is_empty() {
-            let _ = pty.write_all(&out);
-        }
-        if let Some(chunk) = pty.try_read() {
-            engine.write(&chunk);
-            if engine.screen_dump().contains("GHOSTTY-RS-SMOKE-OK") {
+        {
+            let mut e = engine.lock().unwrap();
+            let out = e.take_output();
+            if !out.is_empty() {
+                io.write(&out);
+            }
+            if e.screen_dump().contains("GHOSTTY-RS-SMOKE-OK") {
                 saw_marker = true;
                 break;
             }
-        } else {
-            std::thread::sleep(Duration::from_millis(10));
         }
+        std::thread::sleep(Duration::from_millis(10));
     }
     if !saw_marker {
         return Err("timed out waiting for shell output marker".to_string());
@@ -84,8 +87,9 @@ pub fn run() -> Result<bool, String> {
         }
     };
 
-    // Snapshot → render → readback.
-    let window = engine.snapshot_window(0);
+    // Snapshot → render → readback. Take the snapshot under the engine lock,
+    // then drop it before the Metal draw.
+    let window = engine.lock().unwrap().snapshot_window(0);
     let snapshot = FullSnapshot::from_window(window);
     render.update_frame(&snapshot, &mut grid, FrameOptions::default());
     render

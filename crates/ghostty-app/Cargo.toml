@@ -20,8 +20,10 @@ ghostty-vt = { path = "../ghostty-vt" }
 ghostty-input = { path = "../ghostty-input" }
 ghostty-font = { path = "../ghostty-font" }
 ghostty-renderer = { path = "../ghostty-renderer" }
-# Interim PTY (chunk M2-A replaces this later); reuses the spike's pattern.
-portable-pty = "0.9.0"
+# The real terminal IO stack (M2 chunk E): rustix PTY + the two-stage read
+# pipeline + the ADR-002 mailbox writer loop. Replaces the interim
+# `portable-pty` path (`src/pty.rs`, now deleted).
+ghostty-termio = { path = "../ghostty-termio" }
 # Small TOML config (theme / copy-on-select / font-size), a trimmed copy of the
 # spike's config module (the spike's is `pub(crate)`, so it can't be reused via
 # a path dep without modifying the spike).

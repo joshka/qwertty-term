@@ -7,21 +7,27 @@
 //! - [`Controller`] (`Rc<RefCell<ControllerState>>`): the shared brain. Owns the
 //!   [`TabRegistry`](crate::tabs::TabRegistry) and the per-tab [`Tab`] bundles,
 //!   the config, and the input config. Menu actions and view keystrokes call
-//!   into it. Single-threaded (main thread), so `Rc`/`RefCell`, not `Arc`/`Mutex`
-//!   — everything terminal-side lives on the run loop; only the PTY reader
-//!   threads (inside [`PtySession`](crate::pty::PtySession)) are off-thread, and
-//!   they communicate through an mpsc channel the pace loop drains.
-//! - [`Tab`]: one terminal — a vt [`Engine`](crate::engine::Engine), a
-//!   [`PtySession`], a render [`RenderEngine`](ghostty_renderer::engine::Engine),
-//!   a [`FontGrid`](crate::font::FontGrid), a [`FontSize`](crate::font_size::FontSize),
+//!   into it. The controller itself is single-threaded (main thread), so
+//!   `Rc`/`RefCell`. The terminal engine, however, is shared with the termio io
+//!   threads as `Arc<Mutex<Engine>>` (M2 chunk E): the parse thread applies pty
+//!   output behind that lock, and the main pace tick locks it to render + drain
+//!   replies (the upstream `processOutput`-under-`renderer_state.mutex` design,
+//!   see `docs/analysis/termio-hub.md` §3).
+//! - [`Tab`]: one terminal — a shared [`Engine`](crate::engine::Engine) behind
+//!   an `Arc<Mutex>`, a [`TabIo`](crate::termio::TabIo) (the real termio stack:
+//!   rustix pty + two-stage read pipeline + mailbox writer loop), a render
+//!   [`RenderEngine`](ghostty_renderer::engine::Engine), a
+//!   [`FontGrid`](crate::font::FontGrid), a [`FontSize`](crate::font_size::FontSize),
 //!   an owning `NSWindow` + [`TerminalView`](crate::view::TerminalView), and the
 //!   current grid dims.
 //! - [`AppDelegate`]: builds the menu, opens the first window, starts the pace
 //!   timer, and (for smoke) schedules an auto-exit.
 //!
 //! Pacing: an `NSTimer` on the main run loop ticks ~every 16 ms (plan decision
-//! 3, timer-first). Each tick drains every tab's PTY output into its engine and
-//! redraws via [`RenderEngine::draw_and_present`]. AppKit owns `NSApplication.run`
+//! 3, timer-first). The termio parse thread feeds each tab's engine off-thread
+//! (behind the engine mutex); each tick locks the engine to render via
+//! [`RenderEngine::draw_and_present`], drains engine reply bytes to the pty, and
+//! handles child-exit events. AppKit owns `NSApplication.run`
 //! (the appkit-input verdict), so the draw must run on the main thread — hence a
 //! run-loop timer rather than the renderer's background-thread `TimerPacer`.
 //! CVDisplayLink is a later swap-in behind this same tick shape (deferred; noted
@@ -33,6 +39,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -52,9 +59,9 @@ use crate::font_size::FontSize;
 use crate::geometry;
 use crate::input::translate::{InputConfig, RawKeyEvent};
 use crate::menu::{MenuAction, TopMenu};
-use crate::pty::PtySession;
-use crate::selection::{ScreenRange, SelectionColors, tint_selection};
+use crate::selection::{SelectionColors, tint_selection};
 use crate::tabs::{self, TabId, TabRegistry};
+use crate::termio::{IoEvent, TabIo};
 use crate::view::TerminalView;
 use ghostty_renderer::engine::{Engine as RenderEngine, FrameOptions};
 use ghostty_renderer::snapshot::FullSnapshot;
@@ -63,12 +70,16 @@ use ghostty_renderer::snapshot::FullSnapshot;
 const INITIAL_WIDTH: f64 = 800.0;
 const INITIAL_HEIGHT: f64 = 480.0;
 
-/// One terminal tab: engine + PTY + renderer + window/view.
+/// One terminal tab: engine + termio IO + renderer + window/view.
 struct Tab {
-    /// The vt engine (parser + terminal state).
-    engine: Engine,
-    /// The PTY + child shell.
-    pty: PtySession,
+    /// The vt engine (parser + terminal state), shared with the termio parse
+    /// thread. The parse thread locks it to apply pty output; the main pace
+    /// tick locks it to render + drain replies (`docs/analysis/termio-hub.md`
+    /// §3).
+    engine: Arc<Mutex<Engine>>,
+    /// The real terminal IO stack (rustix pty + read pipeline + mailbox writer
+    /// loop). Dropping it joins the io threads.
+    io: TabIo,
     /// The render engine (cell buffers + Metal draw), if a Metal device exists.
     render: Option<RenderEngine>,
     /// The font grid the renderer shapes through.
@@ -123,8 +134,15 @@ struct Tab {
 }
 
 impl Tab {
+    /// Lock the shared engine. Held only briefly per call (a snapshot, a
+    /// resize, or a state read) so the parse thread's line-rate feed is barely
+    /// contended (`docs/analysis/termio-hub.md` §3.3).
+    fn engine(&self) -> std::sync::MutexGuard<'_, Engine> {
+        self.engine.lock().expect("engine mutex poisoned")
+    }
+
     /// Rebuild the render target + grid for the current view size and scale,
-    /// resizing the engine + PTY to match. Called on creation and resize.
+    /// resizing the engine + pty to match. Called on creation and resize.
     fn reflow(&mut self) {
         // Keep the host layer's contentsScale in lockstep with the backing
         // scale. The presented IOSurface is device-pixel-sized while the
@@ -138,8 +156,13 @@ impl Tab {
         if cols != self.cols || rows != self.rows {
             self.cols = cols;
             self.rows = rows;
-            self.engine.resize(cols, rows);
-            let _ = self.pty.resize(cols as u16, rows as u16);
+            self.engine().resize(cols, rows);
+            self.io.resize(
+                cols as u16,
+                rows as u16,
+                self.font.cell_width,
+                self.font.cell_height,
+            );
         }
     }
 
@@ -167,17 +190,49 @@ impl Tab {
         }
     }
 
-    /// Pump available PTY output into the engine and drain engine replies back
-    /// to the PTY. Returns whether the child shell has exited.
+    /// Per-tick IO servicing. The termio parse thread already fed pty output
+    /// into the engine off-thread; here we (1) drain engine reply bytes
+    /// (DSR/DA/CPR) back to the pty and (2) act on surface events. Returns
+    /// whether the child shell exited (so the caller closes the tab).
     fn pump(&mut self) -> bool {
-        while let Some(chunk) = self.pty.try_read() {
-            self.engine.write(&chunk);
-        }
-        let out = self.engine.take_output();
+        // Drain engine replies under the lock, then release before writing to
+        // the pty (the write goes through the mailbox, not the engine lock).
+        let out = self.engine().take_output();
         if !out.is_empty() {
-            let _ = self.pty.write_all(&out);
+            self.io.write(&out);
         }
-        self.pty.child_exited()
+
+        // Surface events from the io threads (child-exit / password).
+        let mut exited = false;
+        for event in self.io.drain_events() {
+            match event {
+                IoEvent::ChildExited { exit_code, .. } => {
+                    // Match the interim behavior: the tab closes when its shell
+                    // exits. Log the code so a non-zero exit is visible.
+                    if exit_code != 0 {
+                        eprintln!("ghostty-app: shell exited with code {exit_code}");
+                    }
+                    exited = true;
+                }
+                IoEvent::PasswordInput(active) => {
+                    // Surfacing-only for M2-E: reflect it in the window title
+                    // suffix (a lock icon marker) so the state is visible.
+                    self.set_password_marker(active);
+                }
+            }
+        }
+        exited
+    }
+
+    /// Reflect password-input state in the window title (M2-E surfacing). A
+    /// lock marker is appended while a program is reading a secret.
+    fn set_password_marker(&self, active: bool) {
+        let base = self
+            .engine()
+            .title()
+            .unwrap_or_else(|| "ghostty-rs".to_string());
+        let title = if active { format!("{base} 🔒") } else { base };
+        self.window.setTitle(&NSString::from_str(&title));
     }
 
     /// Render one frame into the view's layer.
@@ -185,8 +240,17 @@ impl Tab {
         if self.render.is_none() {
             return;
         }
-        let mut window = self.engine.snapshot_window(0);
-        if let Some(range) = self.selection_screen_range() {
+        // Snapshot + resolve the selection range under one lock acquisition,
+        // then release before the Metal draw (which doesn't touch the engine).
+        let (mut window, range) = {
+            let engine = self.engine();
+            let window = engine.snapshot_window(0);
+            let range = engine
+                .selection()
+                .and_then(|(start, end, rect)| engine.screen_range(start, end, rect));
+            (window, range)
+        };
+        if let Some(range) = range {
             tint_selection(&mut window, range, self.selection_colors);
         }
         let snapshot = FullSnapshot::from_window(window);
@@ -211,15 +275,6 @@ impl Tab {
         } else {
             let _ = render.draw_and_present(self.view.host_layer());
         }
-    }
-
-    /// The engine's current selection, resolved to absolute screen
-    /// coordinates the render path can test cells against, or `None` if there
-    /// is no selection. Pin resolution (`point_from_pin`) walks the pagelist,
-    /// so this is done once per frame here rather than per cell.
-    fn selection_screen_range(&self) -> Option<ScreenRange> {
-        let (start, end, rectangle) = self.engine.selection()?;
-        self.engine.screen_range(start, end, rectangle)
     }
 
     /// Convert a device-pixel viewport position into a `(col, row)` cell
@@ -316,7 +371,7 @@ impl Controller {
             state
                 .tabs
                 .get(&parent)
-                .and_then(|t| t.engine.pwd())
+                .and_then(|t| t.engine().pwd())
                 .and_then(|p| tabs::inherit_pwd(Some(&p)))
         };
         self.spawn_tab(pwd, Some(parent))
@@ -368,7 +423,7 @@ impl Controller {
     pub fn active_screen_text(&self) -> Option<String> {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
-        state.tabs.get(&tab).map(|t| t.engine.screen_dump())
+        state.tabs.get(&tab).map(|t| t.engine().screen_dump())
     }
 
     /// The active tab's most recently *presented* frame coverage: the max
@@ -411,19 +466,19 @@ impl Controller {
         let mut state = self.0.borrow_mut();
         let cfg = state.input_config;
         if let Some(t) = state.tabs.get_mut(&tab) {
-            let opts = t.engine.key_encode_options();
+            let opts = t.engine().key_encode_options();
             let bytes = crate::input::translate::encode_raw(raw, &cfg, opts);
             if !bytes.is_empty() {
-                let _ = t.pty.write_all(&bytes);
+                t.io.write(&bytes);
             }
         }
     }
 
-    /// Send already-composed text (IME commit) to `tab`'s PTY.
+    /// Send already-composed text (IME commit) to `tab`'s pty.
     pub fn send_text_to_tab(&self, tab: TabId, text: &str) {
-        let mut state = self.0.borrow_mut();
-        if let Some(t) = state.tabs.get_mut(&tab) {
-            let _ = t.pty.write_all(text.as_bytes());
+        let state = self.0.borrow();
+        if let Some(t) = state.tabs.get(&tab) {
+            t.io.write(text.as_bytes());
         }
     }
 
@@ -460,12 +515,12 @@ impl Controller {
 
         if button == Some(ghostty_input::mouse::Button::Left) {
             let reporting_active =
-                t.engine.mouse_event() != ghostty_input::mouse_encode::MouseEvent::None;
+                t.engine().mouse_event() != ghostty_input::mouse_encode::MouseEvent::None;
             let selection_allowed = !reporting_active || mods.shift;
             if selection_allowed {
                 match action {
                     ghostty_input::mouse::Action::Press => {
-                        t.engine.clear_selection();
+                        t.engine().clear_selection();
                         t.selection_anchor = None;
                         if let Some(cell) = t.cell_at(x, y) {
                             t.selection_anchor = Some(cell);
@@ -475,20 +530,22 @@ impl Controller {
                         if t.mouse_button_down
                             && let Some(anchor) = t.selection_anchor
                             && let Some(cell) = t.cell_at(x, y)
-                            && let (Some(start), Some(end)) = (
-                                t.engine.pin_at(anchor.0, anchor.1),
-                                t.engine.pin_at(cell.0, cell.1),
-                            )
                         {
-                            t.engine.select(start, end, false);
+                            let mut engine = t.engine();
+                            if let (Some(start), Some(end)) = (
+                                engine.pin_at(anchor.0, anchor.1),
+                                engine.pin_at(cell.0, cell.1),
+                            ) {
+                                engine.select(start, end, false);
+                            }
                         }
                     }
                     ghostty_input::mouse::Action::Release => {
-                        if copy_on_select
-                            && t.selection_anchor.is_some()
-                            && let Some(text) = t.engine.selection_string()
-                        {
-                            crate::clipboard::write(&text);
+                        if copy_on_select && t.selection_anchor.is_some() {
+                            let text = t.engine().selection_string();
+                            if let Some(text) = text {
+                                crate::clipboard::write(&text);
+                            }
                         }
                         t.selection_anchor = None;
                     }
@@ -496,9 +553,13 @@ impl Controller {
             }
         }
 
+        let (event_mode, format) = {
+            let engine = t.engine();
+            (engine.mouse_event(), engine.mouse_format())
+        };
         let ctx = crate::input::mouse::MouseContext {
-            event_mode: t.engine.mouse_event(),
-            format: t.engine.mouse_format(),
+            event_mode,
+            format,
             screen_width: (t.cols * t.font.cell_width as usize) as f64,
             screen_height: (t.rows * t.font.cell_height as usize) as f64,
             cell_width: t.font.cell_width as f64,
@@ -508,7 +569,7 @@ impl Controller {
         let bytes =
             crate::input::mouse::encode(action, button, mods, x, y, &ctx, &mut t.last_mouse_cell);
         if !bytes.is_empty() {
-            let _ = t.pty.write_all(&bytes);
+            t.io.write(&bytes);
         }
     }
 
@@ -548,7 +609,7 @@ impl Controller {
         let Some(tab) = self.active_tab() else { return };
         let state = self.0.borrow();
         if let Some(t) = state.tabs.get(&tab)
-            && let Some(text) = t.engine.selection_string()
+            && let Some(text) = t.engine().selection_string()
         {
             crate::clipboard::write(&text);
         }
@@ -561,9 +622,9 @@ impl Controller {
         let Some(text) = crate::clipboard::read() else {
             return;
         };
-        let mut state = self.0.borrow_mut();
-        if let Some(t) = state.tabs.get_mut(&tab) {
-            let payload = if t.engine.bracketed_paste() {
+        let state = self.0.borrow();
+        if let Some(t) = state.tabs.get(&tab) {
+            let payload = if t.engine().bracketed_paste() {
                 let mut p = Vec::with_capacity(text.len() + 12);
                 p.extend_from_slice(b"\x1b[200~");
                 p.extend_from_slice(text.as_bytes());
@@ -572,7 +633,7 @@ impl Controller {
             } else {
                 text.into_bytes()
             };
-            let _ = t.pty.write_all(&payload);
+            t.io.write(&payload);
         }
     }
 
@@ -655,8 +716,18 @@ impl Controller {
             .map(|c| (c.r, c.g, c.b))
             .unwrap_or((0x18, 0x18, 0x18));
 
-        let engine = Engine::with_colors(cols, rows, startup_colors);
-        let pty = PtySession::spawn_in_dir(cols as u16, rows as u16, cwd.as_deref()).ok()?;
+        let engine = Arc::new(Mutex::new(Engine::with_colors(cols, rows, startup_colors)));
+        // Spawn the real termio stack: rustix pty + read pipeline + writer loop.
+        // The parse thread feeds `engine` behind its mutex (see `crate::termio`).
+        let io = TabIo::spawn(
+            Arc::clone(&engine),
+            cols as u16,
+            rows as u16,
+            cw,
+            ch,
+            cwd.as_deref(),
+        )
+        .ok()?;
         let render = RenderEngine::new(cw, ch).ok();
 
         // Debug frame dump + presented-pixel capture (both env-gated; off in
@@ -681,7 +752,7 @@ impl Controller {
 
         let mut tab = Tab {
             engine,
-            pty,
+            io,
             render,
             font: fg,
             font_size,

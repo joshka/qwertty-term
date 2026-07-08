@@ -26,6 +26,20 @@ pub struct Engine {
     stream: Stream<TerminalHandler>,
 }
 
+// SAFETY (M2 chunk E, `docs/analysis/termio-hub.md` §3.3): `ghostty-vt`'s
+// `Terminal`/`Screen`/`PageList` are not auto-`Send` because the pagelist
+// threads raw pointers (`*mut Row`, `*mut Cell`, …) through its bump-allocated
+// pages. Those pointers reference ONLY memory transitively owned by the
+// `Terminal` itself — there is no thread-local, process-global, or externally
+// shared state behind them, and they move atomically with the `Terminal` when
+// it moves. The app shares the engine as `Arc<Mutex<Engine>>`: the mutex
+// serializes every access (the termio parse thread applies output; the main
+// pace tick renders + drains replies), so the engine is only ever touched by
+// one thread at a time and never observed mid-mutation across threads. Under
+// that exclusive-access discipline moving the engine between threads is sound.
+// This assertion is scoped to the app's wrapper, not upstream's `Terminal`.
+unsafe impl Send for Engine {}
+
 impl Engine {
     /// Create a new engine with the given grid size.
     pub fn new(cols: usize, rows: usize) -> Self {
@@ -79,6 +93,22 @@ impl Engine {
     /// Resize the grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.terminal_mut().resize(clamp_dim(cols), clamp_dim(rows));
+    }
+
+    /// Whether synchronized output (mode 2026) is currently active. When set,
+    /// a program has asked the terminal to buffer rendering until it clears the
+    /// mode; the termio hub's 1s reset timer force-clears a stuck one.
+    pub fn synchronized_output(&self) -> bool {
+        self.mode(Mode::SynchronizedOutput)
+    }
+
+    /// Force-clear synchronized output (mode 2026). Called from the termio
+    /// hub's 1s sync-reset timer so a wedged program can't freeze rendering
+    /// (see `docs/analysis/termio-hub.md` §4).
+    pub fn reset_synchronized_output(&mut self) {
+        self.terminal_mut()
+            .modes
+            .set(Mode::SynchronizedOutput, false);
     }
 
     pub fn cols(&self) -> usize {

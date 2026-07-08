@@ -17,10 +17,14 @@ pub mod frame_dump;
 pub mod geometry;
 pub mod input;
 pub mod menu;
-pub mod pty;
 pub mod selection;
 pub mod tabs;
 pub mod theme;
+
+// The real terminal IO stack binding (M2 chunk E). `ghostty-termio` is POSIX
+// (rustix/libc fork+pty), so gate on unix; the app itself is macOS-only.
+#[cfg(unix)]
+pub mod termio;
 
 // macOS-only: the font grid + AppKit shell + render presentation path.
 #[cfg(target_os = "macos")]

@@ -26,27 +26,33 @@
 //!   terminal-touching mailbox handlers are a `dyn FnMut`/`Notifier` seam
 //!   filled by chunk E.
 //!
+//! * [`hub`] — the Termio hub + the promoted writer `Thread` loop
+//!   (`src/termio/Termio.zig` + `src/termio/Thread.zig`): the [`hub::Termio`]
+//!   state-container/wiring point that spawns the `Exec`, spins the io-writer
+//!   loop on its own OS thread (threads + `polling` per ADR-002, promoted from
+//!   `spike-runtime`), runs the 25ms resize-coalesce / 1s sync-output-reset /
+//!   200ms termios timers, and hands back a cloneable [`hub::Writer`]. The
+//!   terminal-touching side (sync reset, renderer wakeup) is a
+//!   [`hub::HubHandler`] seam the caller fills (M2 chunk E).
+//!
 //! Deliberately NOT here (deferred):
 //!
 //! * `termio/Options.zig` — a field bag of pointers into config / renderer /
-//!   surface subsystems that don't exist yet; it ports as the argument struct
-//!   of `Termio::init` in chunk E.
-//! * `termio/Thread.zig` — the full writer event loop (threads + `polling` per
-//!   ADR-002) and with it the `Driver`/`Handler` runtime seam; chunk E
-//!   promotes those from `spike-runtime` next to the real loop. Chunk D ports
-//!   only the minimal writer-loop glue its tests need ([`exec::WriterLoop`]).
-//!   The mailbox half of the seam ([`mailbox::Waker`]) landed with chunk B.
+//!   surface subsystems; it is folded into [`hub::Termio::spawn`]'s arguments
+//!   rather than ported as a standalone struct.
 //! * Windows (`WindowsPty`/ConPTY) and iOS (`NullPty`) — no such targets in
 //!   scope; `PosixPty` only.
 
 pub mod backend;
 pub mod exec;
+pub mod hub;
 pub mod mailbox;
 pub mod message;
 pub mod pty;
 pub mod size;
 
 pub use exec::{Command, Config, Exec, Notifier, Subprocess, ThreadData, WriterLoop};
+pub use hub::{HubHandler, NullHandler, Termio, Writer};
 pub use mailbox::{CAPACITY, Receiver, Sender, TrySendError, Waker, channel};
 pub use message::Message;
 pub use pty::{Mode, Pty, Winsize};
