@@ -15,8 +15,6 @@ described commits even if the workspace looks idle.
 
 - `work/simd-perf` — "Perf: plain-text fast path + SIMD utf8 + print batching" (ghostty-vt;
   differential corpus is the referee; expect memchr/simdutf8 deps).
-- `work/splits-2` — "Splits slice 2: unfocused dimming, zoom, resize chords, equalize"
-  (ghostty-app; priority ladder dimming > zoom > resize > equalize).
 - `work/bench-upstream` — "Bench: Ghostty main@91f66da24 lane — three-way vtebench
   comparison" (scripts + docs/benchmarks; prebuilt app at
   `~/local/ghostty-main/macos/build/ReleaseLocal/Ghostty.app`).
