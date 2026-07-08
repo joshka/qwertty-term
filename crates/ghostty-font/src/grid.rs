@@ -276,6 +276,29 @@ impl Grid {
             PixelFormat::Bgra => AtlasKind::Color,
         };
 
+        // Baseline shift: `Bitmap::bearing_y` is measured from the glyph's
+        // **baseline** (the CoreGraphics drawing origin CoreText returns bounds
+        // relative to), but a `CachedGlyph::offset_y` must be **cell-bottom
+        // relative** — the distance the shader subtracts from `cell_size.y`.
+        // Upstream `renderGlyph` (coretext.zig, `2da015cd6`) folds this in
+        // before deriving `offset_y`:
+        //
+        //   // We need to add the baseline position before passing to the
+        //   // constrain function since it operates on cell-relative positions,
+        //   // not baseline.
+        //   .y = rect.origin.y + cell_baseline
+        //   ...
+        //   const offset_y = px_y + px_height;  // cell-bottom → ink-top
+        //
+        // Our reduced `rasterize` doesn't take `grid_metrics`, so we apply the
+        // integer `cell_baseline` here instead. Because `cell_baseline` is a
+        // whole pixel, adding it after `px_y = floor(y)` is arithmetically
+        // identical to upstream adding it before the floor (the fractional part
+        // and thus the rasterized pixels are unchanged). Sprites are drawn into
+        // a full-cell canvas and are already cell-relative, so they do NOT get
+        // this term (see `render_sprite`).
+        let cell_baseline = self.metrics.cell_baseline as i32;
+
         // Blank glyph (space, control): a zero-size region with no ink.
         if bmp.width == 0 || bmp.height == 0 {
             return Ok(CachedGlyph {
@@ -284,7 +307,7 @@ impl Grid {
                 width: 0,
                 height: 0,
                 offset_x: bmp.bearing_x,
-                offset_y: bmp.bearing_y,
+                offset_y: bmp.bearing_y + cell_baseline,
                 atlas: kind,
             });
         }
@@ -297,7 +320,7 @@ impl Grid {
             width: bmp.width,
             height: bmp.height,
             offset_x: bmp.bearing_x,
-            offset_y: bmp.bearing_y,
+            offset_y: bmp.bearing_y + cell_baseline,
             atlas: kind,
         })
     }

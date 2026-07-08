@@ -159,11 +159,16 @@ pub enum PixelFormat {
 
 /// A rasterized glyph bitmap in CPU memory.
 ///
-/// Positions mirror upstream `font.Glyph` (coretext.zig:559-566): `bearing_x`
-/// is the distance from the left of the cell to the left of the ink box, and
-/// `bearing_y` is the distance from the **bottom** of the cell to the **top**
-/// of the ink box (baseline-relative, +Y up). Atlas upload is the caller's
-/// responsibility (F6/renderer).
+/// `bearing_x` is the distance from the left of the cell to the left of the ink
+/// box. `bearing_y` is the distance from the glyph's **baseline** to the **top**
+/// of the ink box (+Y up), i.e. `floor(rect.origin.y) + px_height`, since
+/// CoreText returns the ink rect relative to the baseline (the drawing origin).
+///
+/// This is NOT yet cell-relative: to obtain the cell-bottom-relative `offset_y`
+/// the shader expects, the caller adds `metrics.cell_baseline` (upstream folds
+/// that in inside `renderGlyph`, coretext.zig; the reduced `rasterize` has no
+/// metrics, so `Grid::render_face_glyph` applies it). Atlas upload is the
+/// caller's responsibility (F6/renderer).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitmap {
     /// Width in pixels.
