@@ -297,10 +297,17 @@ impl Face {
         }
     }
 
-    /// Load the embedded JetBrains Mono at `size_px` pixels, via
+    /// Load the embedded JetBrains Mono (variable weight, default `wght=400`
+    /// instance) at `size_px` pixels, via
     /// `CTFontManagerCreateFontDescriptorFromData` (coretext.zig:51-70).
     pub fn load_embedded(size_px: f64) -> Result<Face, Error> {
-        Face::load_from_bytes(embedded::JETBRAINS_MONO, size_px)
+        Face::load_from_bytes(embedded::JETBRAINS_MONO_VARIABLE, size_px)
+    }
+
+    /// Load the embedded nerd-symbols fallback font (upstream's
+    /// `symbols_nerd_font`) at `size_px` pixels.
+    pub fn load_embedded_symbols_nerd_font(size_px: f64) -> Result<Face, Error> {
+        Face::load_from_bytes(embedded::SYMBOLS_NERD_FONT_MONO, size_px)
     }
 
     /// Load a face from in-memory font bytes at `size_px` pixels.

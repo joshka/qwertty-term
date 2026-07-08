@@ -43,7 +43,7 @@
 //! use ghostty_font::{embedded, metrics::Metrics, tables};
 //! use ttf_parser::Face;
 //!
-//! let face = Face::parse(embedded::JETBRAINS_MONO, 0).unwrap();
+//! let face = Face::parse(embedded::JETBRAINS_MONO_VARIABLE, 0).unwrap();
 //! let face_metrics = tables::face_metrics(&face, 16.0);
 //! let metrics = Metrics::calc(face_metrics);
 //! assert!(metrics.cell_width > 0);
@@ -91,30 +91,44 @@ pub use shaper::{ShapedCell, Shaper};
 
 #[cfg(test)]
 mod smoke_test {
-    //! Smoke test: load embedded JetBrains Mono via ttf-parser, derive
-    //! `Metrics`, and assert plausible + pinned cell width/height/baseline.
+    //! Smoke test: load the embedded JetBrains Mono **variable** font (the
+    //! `wght` axis's default instance, `wght=400`, since neither ttf-parser
+    //! nor this test set explicit variation coordinates) via ttf-parser,
+    //! derive `Metrics`, and assert plausible + pinned cell
+    //! width/height/baseline.
     //!
     //! Values below were computed by running this exact derivation
     //! (`tables::face_metrics` + `Metrics::calc`) against
-    //! `embedded::JETBRAINS_MONO` at 16px; they are pinned here as a
-    //! regression guard. They are **not** cross-checked against ghostty's
-    //! own CoreText-derived output for this exact font/size combination —
-    //! doing so would require running the Zig build with CoreText on this
-    //! machine's font-rendering stack, which is out of scope for this
-    //! chunk. Documented as unverified-vs-upstream per the task brief; the
-    //! derivation *logic* (this crate's `tables::face_metrics` and
-    //! `metrics::Metrics::calc`) is a line-for-line port of
-    //! `coretext.zig::getMetrics` + `Metrics.zig::calc`, so any divergence
-    //! from upstream would have to come from ttf-parser's measurement of
-    //! this specific font differing from CoreText's, not from the
-    //! derivation math.
+    //! `embedded::JETBRAINS_MONO_VARIABLE` at 16px; they are pinned here as a
+    //! regression guard. **Old vs new (default-font-parity re-vendor):** the
+    //! previously-pinned values (against the static, non-variable
+    //! `JetBrainsMonoNoNF-Regular.ttf`) were byte-for-byte identical to the
+    //! ones below — `cell_width: 10, cell_height: 21, cell_baseline: 5,
+    //! underline_position: 18, underline_thickness: 1,
+    //! strikethrough_position: 11, strikethrough_thickness: 1` — because the
+    //! static regular weight and the variable font's default `wght=400`
+    //! instance share the same hhea/OS/2 metrics and glyph outlines at that
+    //! instance. So this pin did **not** need to change; it is re-derived
+    //! here against the new embedded bytes purely to keep the regression
+    //! guard honest about which file it covers.
+    //!
+    //! They are **not** cross-checked against ghostty's own CoreText-derived
+    //! output for this exact font/size combination — doing so would require
+    //! running the Zig build with CoreText on this machine's font-rendering
+    //! stack, which is out of scope for this chunk. Documented as
+    //! unverified-vs-upstream per the task brief; the derivation *logic*
+    //! (this crate's `tables::face_metrics` and `metrics::Metrics::calc`) is
+    //! a line-for-line port of `coretext.zig::getMetrics` +
+    //! `Metrics.zig::calc`, so any divergence from upstream would have to
+    //! come from ttf-parser's measurement of this specific font differing
+    //! from CoreText's, not from the derivation math.
 
     use super::*;
     use ttf_parser::Face;
 
     #[test]
     fn jetbrains_mono_smoke_test() {
-        let face = Face::parse(embedded::JETBRAINS_MONO, 0).expect("parse embedded font");
+        let face = Face::parse(embedded::JETBRAINS_MONO_VARIABLE, 0).expect("parse embedded font");
 
         let face_metrics = tables::face_metrics(&face, 16.0);
         let metrics = Metrics::calc(face_metrics);

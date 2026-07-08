@@ -103,6 +103,27 @@ impl Collection {
         }
     }
 
+    /// Create a collection with `primary` as the first (non-fallback) regular
+    /// face, plus upstream's explicit nerd-symbols fallback slot
+    /// (`SharedGridSet.zig`: `symbols_nerd_font` is added as a `.regular`,
+    /// `fallback = true` entry immediately after the primary/bold/italic
+    /// faces, ahead of any discovery-found fallback). `size_px` loads the
+    /// embedded nerd-symbols font at the same render size as `primary`.
+    ///
+    /// This is the parity-default constructor real Ghostty's `SharedGridSet`
+    /// uses when building the default (no font-family configured) grid: a
+    /// PUA nerd-font codepoint resolves to this embedded fallback face
+    /// *without* going through system discovery, exactly mirroring upstream.
+    pub fn new_with_default_fallbacks(
+        primary: Face,
+        size_px: f64,
+    ) -> Result<Collection, crate::coretext::Error> {
+        let mut collection = Collection::new(primary);
+        let symbols = crate::coretext::Face::load_embedded_symbols_nerd_font(size_px)?;
+        collection.add_fallback(Style::Regular, symbols);
+        Ok(collection)
+    }
+
     /// Append a user (non-fallback) face for `style`, returning its
     /// [`FontIndex`] (upstream `add`, Collection.zig:112).
     pub fn add(&mut self, style: Style, face: Face) -> FontIndex {

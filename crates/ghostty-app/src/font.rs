@@ -60,7 +60,15 @@ pub fn build(family: Option<&str>, size_px: f64) -> Result<FontGrid, FontError> 
     .map_err(FontError::Face)?;
     let metrics = Metrics::calc(face.face_metrics());
     let (cell_width, cell_height) = (metrics.cell_width, metrics.cell_height);
-    let resolver = CodepointResolver::new(Collection::new(face));
+    // Explicit nerd-symbols fallback slot ahead of discovery, mirroring
+    // upstream's `SharedGridSet` default-chain construction (see
+    // `Collection::new_with_default_fallbacks`). The embedded nerd-symbols
+    // font is a vendored, drift-tested asset (`embedded::SYMBOLS_NERD_FONT_MONO`
+    // / `tests/font_manifest.rs`), so a load failure here would indicate a
+    // corrupted binary rather than a recoverable runtime condition.
+    let collection =
+        Collection::new_with_default_fallbacks(face, size_px).map_err(FontError::Face)?;
+    let resolver = CodepointResolver::new(collection);
     let grid = Grid::new(resolver, metrics).map_err(FontError::Grid)?;
     Ok(FontGrid {
         grid,

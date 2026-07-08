@@ -261,11 +261,11 @@ fn ic_width(face: &Face, px_per_unit: f64, _cell_width: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedded::JETBRAINS_MONO;
+    use crate::embedded::JETBRAINS_MONO_VARIABLE;
 
     #[test]
     fn extracts_plausible_metrics() {
-        let face = Face::parse(JETBRAINS_MONO, 0).unwrap();
+        let face = Face::parse(JETBRAINS_MONO_VARIABLE, 0).unwrap();
         let metrics = face_metrics(&face, 16.0);
 
         assert!(metrics.cell_width > 0.0);

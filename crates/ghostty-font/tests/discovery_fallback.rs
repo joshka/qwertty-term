@@ -12,7 +12,7 @@
 use ghostty_font::coretext::{Face, PixelFormat};
 use ghostty_font::grid::AtlasKind;
 use ghostty_font::metrics::Metrics;
-use ghostty_font::{CodepointResolver, Collection, Grid};
+use ghostty_font::{CodepointResolver, Collection, FontIndex, Grid, Style};
 
 const SIZE_PX: f64 = 16.0;
 
@@ -22,6 +22,20 @@ fn grid() -> Grid {
     let primary = Face::load_embedded(SIZE_PX).expect("load embedded JetBrains Mono");
     let metrics = Metrics::calc(primary.face_metrics());
     let resolver = CodepointResolver::new(Collection::new(primary));
+    Grid::new(resolver, metrics).expect("build grid")
+}
+
+/// Build a grid matching the real default-font-parity chain: primary
+/// (embedded JetBrains Mono variable) + the explicit embedded nerd-symbols
+/// fallback slot (`Collection::new_with_default_fallbacks`), with discovery
+/// **disabled**. This is the shape that proves the nerd-symbols slot resolves
+/// PUA codepoints on its own, without ever consulting system discovery.
+fn default_chain_grid_no_discovery() -> Grid {
+    let primary = Face::load_embedded(SIZE_PX).expect("load embedded JetBrains Mono");
+    let metrics = Metrics::calc(primary.face_metrics());
+    let collection = Collection::new_with_default_fallbacks(primary, SIZE_PX)
+        .expect("build default collection with nerd-symbols fallback");
+    let resolver = CodepointResolver::without_discovery(collection);
     Grid::new(resolver, metrics).expect("build grid")
 }
 
@@ -129,6 +143,96 @@ fn nerd_font_codepoint_resolves_if_present() {
             );
         }
     }
+}
+
+// ============================================================================
+// Default-font-parity: explicit nerd-symbols fallback slot (no discovery).
+// ============================================================================
+
+/// U+E725 (a Nerd Fonts devicon-range glyph, not a sprite-dispatched
+/// codepoint and NOT present in JetBrains Mono itself — confirmed via
+/// `fontTools` cmap inspection of both vendored files) must resolve to the
+/// embedded nerd-symbols fallback face, with discovery entirely disabled.
+/// This is the parity claim: real Ghostty's default chain (`SharedGridSet`)
+/// adds `symbols_nerd_font` as a static fallback ahead of system discovery,
+/// so a PUA nerd glyph resolves from the *bundled* font, never the system.
+///
+/// (Note: U+E0A0, the classic Nerd Fonts "branch" glyph mentioned as an
+/// example in the task brief, turns out to already be present in JetBrains
+/// Mono's own cmap in this vendored variable build, so it resolves from the
+/// *primary* face (slot 0) rather than the fallback — correct per upstream's
+/// precedence rules [user/primary faces beat fallback faces], but it doesn't
+/// exercise the fallback slot, hence U+E725 here instead.)
+#[test]
+fn nerd_pua_devicon_resolves_via_embedded_symbols_without_discovery() {
+    let mut g = default_chain_grid_no_discovery();
+    let idx = g
+        .get_index(0xE725)
+        .expect("U+E725 resolves via the embedded nerd-symbols fallback");
+
+    match idx {
+        FontIndex::Face { style, slot } => {
+            assert_eq!(style, Style::Regular);
+            assert!(
+                slot >= 1,
+                "expected the nerd-symbols fallback slot (slot > 0), got slot {slot}"
+            );
+        }
+        FontIndex::Sprite => panic!("U+E725 is not a sprite codepoint, got Sprite"),
+    }
+
+    // It must actually rasterize (grayscale outline glyph).
+    let glyph = g
+        .render_codepoint(0xE725)
+        .expect("render succeeds")
+        .expect("U+E725 renders");
+    assert_eq!(glyph.atlas, AtlasKind::Grayscale);
+    assert!(
+        glyph.width > 0 && glyph.height > 0,
+        "U+E725 rasterized empty"
+    );
+}
+
+/// U+F015 (a classic Nerd/Font-Awesome "home" glyph, also not sprite-
+/// dispatched) resolves the same way: embedded nerd-symbols fallback, no
+/// discovery required.
+#[test]
+fn nerd_pua_home_resolves_via_embedded_symbols_without_discovery() {
+    let mut g = default_chain_grid_no_discovery();
+    let idx = g
+        .get_index(0xF015)
+        .expect("U+F015 resolves via the embedded nerd-symbols fallback");
+    match idx {
+        FontIndex::Face { style, slot } => {
+            assert_eq!(style, Style::Regular);
+            assert!(slot >= 1, "expected a fallback slot, got slot {slot}");
+        }
+        FontIndex::Sprite => panic!("U+F015 is not a sprite codepoint, got Sprite"),
+    }
+}
+
+/// Sprite precedence: U+E0B0 (POWERLINE RIGHT ARROW) is *both* a
+/// ghostty-sprite-dispatched codepoint AND present in the nerd-symbols font.
+/// The resolver must still pick the sprite (step 3 of `getIndex` runs before
+/// any font/collection lookup), exactly mirroring upstream's
+/// `CodepointResolver.getIndex` ordering — the explicit nerd-symbols fallback
+/// slot must NOT shadow the procedural sprite renderer for codepoints both
+/// cover.
+#[test]
+fn sprite_takes_precedence_over_embedded_symbols_fallback() {
+    let mut g = default_chain_grid_no_discovery();
+    let idx = g.get_index(0xE0B0).expect("U+E0B0 resolves");
+    assert_eq!(
+        idx,
+        FontIndex::Sprite,
+        "box-drawing/powerline-core codepoints must resolve to the sprite \
+         renderer even when the embedded nerd-symbols font also has the glyph"
+    );
+
+    // Same check for a box-drawing codepoint (U+2500), which the symbols font
+    // very likely also covers.
+    let idx_box = g.get_index(0x2500).expect("U+2500 resolves");
+    assert_eq!(idx_box, FontIndex::Sprite, "box drawing must be a sprite");
 }
 
 /// Score determinism: resolving the same emoji twice from fresh grids yields the
