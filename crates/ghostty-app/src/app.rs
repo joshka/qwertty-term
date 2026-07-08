@@ -46,8 +46,8 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSColor, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowTabbingMode,
+    NSColor, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -60,6 +60,8 @@ use crate::geometry;
 use crate::input::translate::{InputConfig, RawKeyEvent};
 use crate::menu::{MenuAction, TopMenu};
 use crate::selection::{SelectionColors, tint_selection};
+use crate::splitkeys::SplitAction;
+use crate::splits::{Direction, Sequential, SplitTree, SurfaceId};
 use crate::tabkeys::TabAction;
 use crate::tabs::{self, TabId, TabRegistry};
 use crate::termio::{IoEvent, TabIo};
@@ -232,88 +234,67 @@ impl WindowGeometry {
     }
 }
 
-/// One terminal tab: engine + termio IO + renderer + window/view.
-struct Tab {
-    /// The vt engine (parser + terminal state), shared with the termio parse
-    /// thread. The parse thread locks it to apply pty output; the main pace
-    /// tick locks it to render + drain replies (`docs/analysis/termio-hub.md`
-    /// §3).
+/// One pane within a tab: the multiplied unit of (view + engine + io). A
+/// single-leaf tab has exactly one of these; a split tab has one per pane, keyed
+/// by [`SurfaceId`] in [`Tab::surfaces`].
+struct Surface {
+    /// The vt engine (parser + terminal state), shared with this surface's
+    /// termio parse thread. The parse thread locks it to apply pty output; the
+    /// main pace tick locks it to render + drain replies
+    /// (`docs/analysis/termio-hub.md` §3).
     engine: Arc<Mutex<Engine>>,
-    /// The real terminal IO stack (rustix pty + read pipeline + mailbox writer
-    /// loop). Dropping it joins the io threads.
+    /// This surface's own terminal IO stack (rustix pty + read pipeline + mailbox
+    /// writer loop). Dropping it joins the io threads.
     io: TabIo,
     /// The render engine (cell buffers + Metal draw), if a Metal device exists.
+    /// One per surface (multiple already coexist across tabs today).
     render: Option<RenderEngine>,
     /// The font grid the renderer shapes through.
     font: FontGrid,
     /// The current font size (drives font grid rebuilds).
     font_size: FontSize,
-    /// The owning window (one NSWindow per tab; macOS groups them as tabs).
-    window: Retained<NSWindow>,
-    /// The terminal view hosting the render layer + input.
+    /// This pane's own terminal view (its layer is the presented IOSurface).
     view: Retained<TerminalView>,
-    /// The window's delegate (keeps the controller's active tab in sync with
-    /// the OS key window). AppKit holds window delegates weakly, so the `Tab`
-    /// owns this to keep it alive for the window's lifetime.
-    _window_delegate: Retained<WindowDelegate>,
-    /// Current grid dimensions.
+    /// Current grid dimensions (fit to this pane's rect, not the whole window).
     cols: usize,
     rows: usize,
     /// Backing scale (contentsScale) last applied.
     scale: f64,
+    /// This pane's current pixel rect within the tab container (device pixels),
+    /// last applied by the layout pass. Used for divider resize + neighbour
+    /// geometry.
+    rect: crate::splits::Rect,
     /// Last reported mouse cell (motion dedup for mouse reporting).
     last_mouse_cell: Option<(i64, i64)>,
     /// Whether a mouse button is currently held (for out-of-viewport motion).
     mouse_button_down: bool,
-    /// The cell the current selection drag started at, if a drag is in
-    /// progress. `None` when no drag is live (a fresh press starts one; a
-    /// release ends it). The live selection value itself is engine-owned
-    /// (`Engine::select`/`selection`); this is just drag-in-progress state.
+    /// The cell the current selection drag started at, if a drag is in progress.
     selection_anchor: Option<(usize, usize)>,
-    /// Selection highlight colors resolved from the tab's theme at startup
-    /// (or [`SelectionColors::Inverse`] if the theme had none / no theme was
-    /// configured).
+    /// Selection highlight colors resolved from the tab's theme at startup.
     selection_colors: SelectionColors,
-    /// The terminal's default background as `(r, g, b)` — the baseline the
-    /// presented-frame coverage metric measures against (glyphs and non-default
-    /// cell backgrounds show up as pixels far from this). Resolved from the
-    /// startup theme (or ghostty-vt's default `0x18` grey).
+    /// The terminal's default background as `(r, g, b)` — the presented-frame
+    /// coverage baseline.
     default_bg: (u8, u8, u8),
-    /// Debug frame-dump (env `GHOSTTY_APP_DUMP_FRAME`), if enabled. When set,
-    /// the render path reads the presented IOSurface back and writes periodic
-    /// PNGs — the decisive "does the presented surface contain glyphs" probe.
+    /// Debug frame-dump (env `GHOSTTY_APP_DUMP_FRAME`), if enabled.
     frame_dump: Option<crate::frame_dump::FrameDump>,
     /// Max per-pixel L1 delta from `default_bg` in the most recently *presented*
-    /// frame (not the engine buffer). `0` before the first present. The windowed
-    /// typing smoke reads this to assert the layer actually received glyph
-    /// pixels — the gap the old engine-text-only assertion missed.
+    /// frame.
     last_present_delta: i32,
-    /// Whether the render path should read the presented frame back each tick to
-    /// record [`Tab::last_present_delta`]. Enabled by a frame dump or by the
-    /// presented-pixel smoke (`GHOSTTY_APP_ASSERT_PRESENT`); off in normal use
-    /// (readback is a per-frame CPU copy we don't want in the steady loop).
+    /// Whether the render path reads the presented frame back each tick.
     capture_present: bool,
 }
 
-impl Tab {
-    /// Lock the shared engine. Held only briefly per call (a snapshot, a
-    /// resize, or a state read) so the parse thread's line-rate feed is barely
-    /// contended (`docs/analysis/termio-hub.md` §3.3).
+impl Surface {
+    /// Lock the shared engine. Held only briefly per call.
     fn engine(&self) -> std::sync::MutexGuard<'_, Engine> {
         self.engine.lock().expect("engine mutex poisoned")
     }
 
-    /// Rebuild the render target + grid for the current view size and scale,
-    /// resizing the engine + pty to match. Called on creation and resize.
+    /// Rebuild the render target + grid for this pane's current view size and
+    /// scale, resizing the engine + pty to match. `focused` drives the
+    /// hollow-cursor treatment on the next render.
     fn reflow(&mut self) {
-        // Keep the host layer's contentsScale in lockstep with the backing
-        // scale. The presented IOSurface is device-pixel-sized while the
-        // layer's bounds are in points; without this the frame renders at the
-        // wrong scale (only the top-left 1/scale of it is visible — the blank
-        // window / garbled-sliver bug on Retina). See
-        // `IOSurfaceLayer::set_contents_scale`.
         self.apply_contents_scale();
-
         let (cols, rows) = self.current_grid_size();
         if cols != self.cols || rows != self.rows {
             self.cols = cols;
@@ -328,13 +309,12 @@ impl Tab {
         }
     }
 
-    /// Apply the tab's current backing scale to the host render layer's
-    /// `contentsScale`. Idempotent; safe to call every reflow.
+    /// Apply this pane's backing scale to its host render layer's contentsScale.
     fn apply_contents_scale(&self) {
         self.view.host_layer().set_contents_scale(self.scale);
     }
 
-    /// The grid size that fits the view's current pixel bounds.
+    /// The grid size that fits this pane view's current pixel bounds.
     fn current_grid_size(&self) -> (usize, usize) {
         let bounds = self.view.bounds();
         let w = (bounds.size.width * self.scale) as usize;
@@ -342,68 +322,49 @@ impl Tab {
         geometry::grid_size(w, h, self.font.cell_width, self.font.cell_height)
     }
 
-    /// Rebuild the font grid at the tab's current font size × backing scale.
+    /// Rebuild the font grid at this pane's current font size × backing scale.
     fn rebuild_font(&mut self, family: Option<&str>) {
         let px = (self.font_size.get() as f64) * self.scale;
         if let Ok(fg) = font::build(family, px) {
             self.font = fg;
-            // A new cell size changes the fitting grid; reflow.
             self.reflow();
         }
     }
 
-    /// Per-tick IO servicing. The termio parse thread already fed pty output
-    /// into the engine off-thread; here we (1) drain engine reply bytes
-    /// (DSR/DA/CPR) back to the pty and (2) act on surface events. Returns
-    /// whether the child shell exited (so the caller closes the tab).
-    fn pump(&mut self) -> bool {
-        // Drain engine replies under the lock, then release before writing to
-        // the pty (the write goes through the mailbox, not the engine lock).
+    /// Per-tick IO servicing for this pane. Returns whether its child shell
+    /// exited (so the caller closes this surface). `title_sink` receives the
+    /// title/password state so the tab can reflect the *focused* pane's title in
+    /// the window title.
+    fn pump(&mut self) -> (bool, Option<bool>) {
         let out = self.engine().take_output();
         if !out.is_empty() {
             self.io.write(&out);
         }
-
-        // Surface events from the io threads (child-exit / password).
         let mut exited = false;
+        let mut password: Option<bool> = None;
         for event in self.io.drain_events() {
             match event {
                 IoEvent::ChildExited { exit_code, .. } => {
-                    // Match the interim behavior: the tab closes when its shell
-                    // exits. Log the code so a non-zero exit is visible.
                     if exit_code != 0 {
                         eprintln!("ghostty-app: shell exited with code {exit_code}");
                     }
                     exited = true;
                 }
                 IoEvent::PasswordInput(active) => {
-                    // Surfacing-only for M2-E: reflect it in the window title
-                    // suffix (a lock icon marker) so the state is visible.
-                    self.set_password_marker(active);
+                    password = Some(active);
                 }
             }
         }
-        exited
+        (exited, password)
     }
 
-    /// Reflect password-input state in the window title (M2-E surfacing). A
-    /// lock marker is appended while a program is reading a secret.
-    fn set_password_marker(&self, active: bool) {
-        let base = self
-            .engine()
-            .title()
-            .unwrap_or_else(|| "ghostty-rs".to_string());
-        let title = if active { format!("{base} 🔒") } else { base };
-        self.window.setTitle(&NSString::from_str(&title));
-    }
-
-    /// Render one frame into the view's layer.
-    fn render(&mut self) {
+    /// Render one frame into this pane's layer. `focused` selects the hollow
+    /// (unfocused) vs. solid cursor via `FrameOptions.focused` — the renderer
+    /// draws a hollow box for an unfocused pane at no extra cost.
+    fn render(&mut self, focused: bool) {
         if self.render.is_none() {
             return;
         }
-        // Snapshot + resolve the selection range under one lock acquisition,
-        // then release before the Metal draw (which doesn't touch the engine).
         let (mut window, range) = {
             let engine = self.engine();
             let window = engine.snapshot_window(0);
@@ -417,14 +378,16 @@ impl Tab {
         }
         let snapshot = FullSnapshot::from_window(window);
         let render = self.render.as_mut().expect("checked above");
-        render.update_frame(&snapshot, &mut self.font.grid, FrameOptions::default());
+        let opts = FrameOptions {
+            focused,
+            ..FrameOptions::default()
+        };
+        render.update_frame(&snapshot, &mut self.font.grid, opts);
         if render.sync_atlas(&self.font.grid).is_err() {
             return;
         }
 
         if self.capture_present {
-            // Debug / smoke path: present *and* read the presented surface back,
-            // so we can both dump it and assert on real presented pixels.
             let (sw, sh) = render.screen_size();
             if let Ok(Some(pixels)) = render.draw_and_present_readback(self.view.host_layer()) {
                 self.last_present_delta = crate::frame_dump::max_bg_delta(&pixels, self.default_bg);
@@ -439,8 +402,7 @@ impl Tab {
         }
     }
 
-    /// Convert a device-pixel viewport position into a `(col, row)` cell
-    /// coordinate, or `None` if it falls outside the grid.
+    /// Convert a device-pixel viewport position into a `(col, row)` cell.
     fn cell_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
         geometry::cell_at(
             x,
@@ -452,6 +414,114 @@ impl Tab {
         )
     }
 }
+
+/// One terminal tab: a window hosting a split tree of [`Surface`]s inside a
+/// [`SplitContainer`]. A single-leaf tree is the one-pane tab (behaviourally
+/// identical to the pre-splits `Tab`).
+struct Tab {
+    /// The split tree (pure model): which surfaces exist, how they're arranged,
+    /// and which one is focused.
+    tree: crate::splits::SplitTree,
+    /// The pane bundles, keyed by the tree's leaf ids.
+    surfaces: HashMap<crate::splits::SurfaceId, Surface>,
+    /// The owning window (one NSWindow per tab; macOS groups them as tabs).
+    window: Retained<NSWindow>,
+    /// The flipped container hosting the pane views + divider strips.
+    container: Retained<crate::splitview::SplitContainer>,
+    /// The live divider strip views (rebuilt on every layout).
+    dividers: Vec<Retained<crate::splitview::SplitDivider>>,
+    /// The window's delegate (keeps the controller's active tab in sync).
+    _window_delegate: Retained<WindowDelegate>,
+    /// Next surface id to mint within this tab.
+    next_surface: u64,
+}
+
+impl Tab {
+    /// Mint a fresh surface id for this tab.
+    fn mint_surface_id(&mut self) -> crate::splits::SurfaceId {
+        let id = crate::splits::SurfaceId(self.next_surface);
+        self.next_surface += 1;
+        id
+    }
+
+    /// The focused surface's bundle.
+    fn focused_surface(&self) -> Option<&Surface> {
+        self.surfaces.get(&self.tree.focused())
+    }
+
+    /// Re-lay-out the panes for the container's current bounds: recompute each
+    /// leaf's pixel rect from the tree, set the pane view frames, rebuild the
+    /// divider strips, and reflow each surface's grid to its new rect. Called on
+    /// creation, split, close, window resize, and divider drag. `scale` is the
+    /// window's backing scale (points→pixels).
+    fn relayout(
+        &mut self,
+        controller_ptr: *const Controller,
+        tab_id: TabId,
+        mtm: MainThreadMarker,
+    ) {
+        let scale = self.window.backingScaleFactor();
+        let bounds = self.container.bounds();
+        // Work in device pixels so grid math matches the single-pane path.
+        let container_px = crate::splits::Rect::new(
+            0.0,
+            0.0,
+            bounds.size.width * scale,
+            bounds.size.height * scale,
+        );
+        let divider_px = (DIVIDER_THICKNESS_PT * scale).round();
+        let layout = self.tree.layout(container_px, divider_px);
+
+        // Position each pane view + reflow its grid.
+        for (id, rect) in &layout.panes {
+            if let Some(surface) = self.surfaces.get_mut(id) {
+                surface.scale = scale;
+                surface.rect = *rect;
+                let frame = crate::splitview::ns_rect_from_tree(*rect, scale);
+                surface.view.setFrame(frame);
+                surface.reflow();
+            }
+        }
+
+        // Rebuild divider strips (cheap; count is small).
+        for d in self.dividers.drain(..) {
+            d.removeFromSuperview();
+        }
+        for div in &layout.dividers {
+            let frame = crate::splitview::ns_rect_from_tree(div.rect, scale);
+            let view = crate::splitview::SplitDivider::new(
+                mtm,
+                controller_ptr,
+                tab_id,
+                div.path.clone(),
+                div.axis,
+                frame,
+            );
+            self.container.addSubview(&view);
+            self.dividers.push(view);
+        }
+        // A changed divider layout invalidates cursor rects.
+        self.window.invalidateCursorRectsForView(&self.container);
+    }
+
+    /// Reflect the *focused* pane's title (+ password marker) in the window
+    /// title.
+    fn update_window_title(&self, password: bool) {
+        let base = self
+            .focused_surface()
+            .and_then(|s| s.engine().title())
+            .unwrap_or_else(|| "ghostty-rs".to_string());
+        let title = if password {
+            format!("{base} 🔒")
+        } else {
+            base
+        };
+        self.window.setTitle(&NSString::from_str(&title));
+    }
+}
+
+/// The divider strip thickness in points.
+const DIVIDER_THICKNESS_PT: f64 = 4.0;
 
 /// Shared, main-thread controller state.
 pub struct ControllerState {
@@ -526,14 +596,16 @@ impl Controller {
         self.spawn_tab(None, None)
     }
 
-    /// Open a new tab in `parent`'s window group, inheriting `parent`'s pwd.
+    /// Open a new tab in `parent`'s window group, inheriting the *focused*
+    /// surface's pwd.
     pub fn new_tab_in(&self, parent: TabId) -> Option<TabId> {
         let pwd = {
             let state = self.0.borrow();
             state
                 .tabs
                 .get(&parent)
-                .and_then(|t| t.engine().pwd())
+                .and_then(|t| t.focused_surface())
+                .and_then(|s| s.engine().pwd())
                 .and_then(|p| tabs::inherit_pwd(Some(&p)))
         };
         self.spawn_tab(pwd, Some(parent))
@@ -572,29 +644,60 @@ impl Controller {
     /// the presented surface at the wrong size/scale — the same
     /// device-pixel-vs-points mismatch that blanks the window at startup.
     pub fn resync_tab_geometry(&self, tab: TabId) {
+        let controller_ptr: *const Controller = self;
         let mut state = self.0.borrow_mut();
         let family = state.font_family.clone();
+        let mtm = state.mtm;
         if let Some(t) = state.tabs.get_mut(&tab) {
             let new_scale = t.window.backingScaleFactor();
-            if (new_scale - t.scale).abs() > f64::EPSILON {
-                t.scale = new_scale;
-                // Rebuilds the font at the new scale, which itself reflows
-                // (and re-applies contentsScale).
-                t.rebuild_font(family.as_deref());
-            } else {
-                t.reflow();
+            // The container is the window's content view, so AppKit has already
+            // sized it; re-lay-out (per-pane frames + grids follow the new
+            // bounds/scale) and rebuild the fonts per pane if the scale changed.
+            let scale_changed = t
+                .focused_surface()
+                .map(|s| (new_scale - s.scale).abs() > f64::EPSILON)
+                .unwrap_or(true);
+            if scale_changed {
+                let family = family.clone();
+                for surface in t.surfaces.values_mut() {
+                    surface.scale = new_scale;
+                    surface.rebuild_font(family.as_deref());
+                }
             }
+            t.relayout(controller_ptr, tab, mtm);
         }
     }
 
-    /// The plain-text screen dump of the active tab's engine (smoke/test only).
-    /// `None` if there is no active tab. Used by the synthetic-input smoke
-    /// (`GHOSTTY_APP_SMOKE_TYPE`) to assert a typed command round-tripped
-    /// through keyDown → encode → PTY → engine.
+    /// The tab's [`SplitContainer`](crate::splitview::SplitContainer) was resized
+    /// by AppKit (`setFrameSize:`). This fires for window resizes *and* for
+    /// content-area changes that never post `windowDidResize:` — the native tab
+    /// bar appearing/disappearing. Re-lay-out the panes to the new bounds.
+    ///
+    /// Re-entrancy: `relayout` (under `resync_tab_geometry` or `spawn_tab`) can
+    /// itself provoke AppKit into a synchronous `setFrameSize:` while the
+    /// controller is already borrowed; those outer callers re-lay-out anyway, so
+    /// a failed `try_borrow_mut` is safely skipped rather than panicking.
+    pub fn container_resized(&self, tab: TabId) {
+        let controller_ptr: *const Controller = self;
+        let Ok(mut state) = self.0.try_borrow_mut() else {
+            return;
+        };
+        let mtm = state.mtm;
+        if let Some(t) = state.tabs.get_mut(&tab) {
+            t.relayout(controller_ptr, tab, mtm);
+        }
+    }
+
+    /// The plain-text screen dump of the active tab's *focused* surface
+    /// (smoke/test only).
     pub fn active_screen_text(&self) -> Option<String> {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
-        state.tabs.get(&tab).map(|t| t.engine().screen_dump())
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .map(|s| s.engine().screen_dump())
     }
 
     /// The active tab's most recently *presented* frame coverage: the max
@@ -607,7 +710,11 @@ impl Controller {
     pub fn active_present_delta(&self) -> Option<i32> {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
-        state.tabs.get(&tab).map(|t| t.last_present_delta)
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .map(|s| s.last_present_delta)
     }
 
     /// The active tab's `NSWindow` (smoke/test only): the target the synthetic
@@ -618,17 +725,131 @@ impl Controller {
         state.tabs.get(&tab).map(|t| t.window.clone())
     }
 
-    /// The active tab's terminal view (smoke/test only): used to force it to
-    /// become first responder before delivering synthetic key events.
+    /// The active tab's *focused* pane view (smoke/test only): used to force it
+    /// to become first responder before delivering synthetic key events.
     pub fn active_view(&self) -> Option<Retained<TerminalView>> {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
-        state.tabs.get(&tab).map(|t| t.view.clone())
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .map(|s| s.view.clone())
     }
 
     /// Mark `tab` active (called when its window becomes key).
     pub fn set_active(&self, tab: TabId) {
         self.0.borrow_mut().registry.activate(tab);
+    }
+
+    // -- splits smoke/test accessors --------------------------------------
+
+    /// The number of panes (surfaces) in the active tab (smoke/test only).
+    pub fn active_surface_count(&self) -> Option<usize> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).map(|t| t.tree.len())
+    }
+
+    /// The focused surface id of the active tab (smoke/test only).
+    pub fn active_focused_surface(&self) -> Option<SurfaceId> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).map(|t| t.tree.focused())
+    }
+
+    /// The active tab id + every surface id in the active tab, in flatten order
+    /// (smoke/test only).
+    pub fn active_surfaces(&self) -> Option<(TabId, Vec<SurfaceId>)> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).map(|t| (tab, t.tree.surfaces()))
+    }
+
+    /// The plain-text screen dump of a specific surface in a tab (smoke/test).
+    pub fn surface_screen_text(&self, tab: TabId, surface: SurfaceId) -> Option<String> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.engine().screen_dump())
+    }
+
+    /// A specific surface's `(cols, rows)` grid (smoke/test) — the divider-resize
+    /// smoke asserts these change when a divider moves.
+    pub fn surface_grid(&self, tab: TabId, surface: SurfaceId) -> Option<(usize, usize)> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| (s.cols, s.rows))
+    }
+
+    /// A specific surface's presented-frame coverage (max background delta) —
+    /// the presented-pixel smoke reads this to confirm each pane rendered ink in
+    /// its own rect (smoke/test; needs `GHOSTTY_APP_ASSERT_PRESENT`).
+    pub fn surface_present_delta(&self, tab: TabId, surface: SurfaceId) -> Option<i32> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.last_present_delta)
+    }
+
+    /// Write raw bytes directly to a specific surface's PTY (smoke/test only):
+    /// the isolation probe writes a distinct marker to each pane and asserts it
+    /// lands only in that pane's engine.
+    pub fn write_to_surface(&self, tab: TabId, surface: SurfaceId, bytes: &[u8]) {
+        let state = self.0.borrow();
+        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
+            s.io.write(bytes);
+        }
+    }
+
+    /// The active tab's divider paths in layout order (smoke/test only) — the
+    /// divider-resize smoke picks one to drag.
+    pub fn active_divider_paths(&self) -> Vec<Vec<bool>> {
+        let state = self.0.borrow();
+        let Some(tab) = state.registry.active() else {
+            return Vec::new();
+        };
+        let Some(t) = state.tabs.get(&tab) else {
+            return Vec::new();
+        };
+        let scale = t.window.backingScaleFactor();
+        let bounds = t.container.bounds();
+        let container_px = crate::splits::Rect::new(
+            0.0,
+            0.0,
+            bounds.size.width * scale,
+            bounds.size.height * scale,
+        );
+        let divider_px = (DIVIDER_THICKNESS_PT * scale).round();
+        t.tree
+            .layout(container_px, divider_px)
+            .dividers
+            .into_iter()
+            .map(|d| d.path)
+            .collect()
+    }
+
+    /// Move the split at `path` in the active tab to `ratio` (smoke/test only):
+    /// a deterministic stand-in for a pointer divider drag that then re-lays-out
+    /// both adjacent panes (engine + PTY resize).
+    pub fn set_active_split_ratio(&self, path: &[bool], ratio: f64) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+        let mut state = self.0.borrow_mut();
+        let Some(tab) = state.registry.active() else {
+            return;
+        };
+        if let Some(t) = state.tabs.get_mut(&tab) {
+            t.tree.set_ratio(path, ratio);
+            t.relayout(controller_ptr, tab, mtm);
+        }
     }
 
     /// Execute a built-in tab-navigation action against the active window's
@@ -710,13 +931,14 @@ impl Controller {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
         let t = state.tabs.get(&tab)?;
+        let s = t.focused_surface()?;
         let surface_px =
-            crate::geometry::pixel_size(t.cols, t.rows, t.font.cell_width, t.font.cell_height);
+            crate::geometry::pixel_size(s.cols, s.rows, s.font.cell_width, s.font.cell_height);
         Some(WindowGeometry::probe(
             &t.window,
-            &t.view,
+            &s.view,
             surface_px,
-            t.default_bg,
+            s.default_bg,
         ))
     }
 
@@ -737,43 +959,43 @@ impl Controller {
         }
     }
 
-    /// Encode a raw key event and write it to `tab`'s PTY. Reads the tab's live
-    /// terminal encode options + the user's option-as-alt config.
-    pub fn encode_key_to_tab(&self, tab: TabId, raw: &RawKeyEvent) {
+    /// Encode a raw key event and write it to `surface`'s PTY (within `tab`).
+    /// Input isolation: only the focused pane's view is first responder, so this
+    /// only ever fires for the pane the user is looking at.
+    pub fn encode_key_to_surface(&self, tab: TabId, surface: SurfaceId, raw: &RawKeyEvent) {
         let mut state = self.0.borrow_mut();
         let cfg = state.input_config;
-        if let Some(t) = state.tabs.get_mut(&tab) {
-            let opts = t.engine().key_encode_options();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            let opts = s.engine().key_encode_options();
             let bytes = crate::input::translate::encode_raw(raw, &cfg, opts);
             if !bytes.is_empty() {
-                t.io.write(&bytes);
+                s.io.write(&bytes);
             }
         }
     }
 
-    /// Send already-composed text (IME commit) to `tab`'s pty.
-    pub fn send_text_to_tab(&self, tab: TabId, text: &str) {
+    /// Send already-composed text (IME commit) to `surface`'s pty.
+    pub fn send_text_to_surface(&self, tab: TabId, surface: SurfaceId, text: &str) {
         let state = self.0.borrow();
-        if let Some(t) = state.tabs.get(&tab) {
-            t.io.write(text.as_bytes());
+        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
+            s.io.write(text.as_bytes());
         }
     }
 
-    /// Encode a mouse event (view-space pixels) against `tab`'s live mouse
-    /// tracking mode/format and write it to the PTY. No-op when the program has
-    /// not enabled mouse reporting. `pressed` updates the held-button state used
-    /// for out-of-viewport motion.
-    ///
-    /// Also drives left-button selection: a press starts (or, if the program
-    /// has enabled mouse reporting and shift isn't held, defers to) a
-    /// selection anchor; drag motion while the button is down extends it;
-    /// release finalizes it and, if `copy-on-select` is configured, copies
-    /// the selected text. This mirrors the reference spike's
-    /// `handle_pointer_selection` (`crates/spike/src/window/mod.rs`).
+    /// Encode a mouse event (view-space pixels, relative to *this pane's* grid)
+    /// against `surface`'s live mouse tracking mode/format and write it to the
+    /// PTY. Mouse coordinates are per-pane because each pane view is flipped and
+    /// its `locationInWindow` is converted to the pane view's own space, so the
+    /// grid origin is the pane's top-left, not the window's.
     #[allow(clippy::too_many_arguments)]
-    pub fn mouse_to_tab(
+    pub fn mouse_to_surface(
         &self,
         tab: TabId,
+        surface: SurfaceId,
         action: ghostty_input::mouse::Action,
         button: Option<ghostty_input::mouse::Button>,
         mods: ghostty_input::key_mods::Mods,
@@ -783,32 +1005,36 @@ impl Controller {
     ) {
         let copy_on_select = self.0.borrow().copy_on_select;
         let mut state = self.0.borrow_mut();
-        let Some(t) = state.tabs.get_mut(&tab) else {
+        let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        else {
             return;
         };
         if let Some(p) = pressed {
-            t.mouse_button_down = p;
+            s.mouse_button_down = p;
         }
 
         if button == Some(ghostty_input::mouse::Button::Left) {
             let reporting_active =
-                t.engine().mouse_event() != ghostty_input::mouse_encode::MouseEvent::None;
+                s.engine().mouse_event() != ghostty_input::mouse_encode::MouseEvent::None;
             let selection_allowed = !reporting_active || mods.shift;
             if selection_allowed {
                 match action {
                     ghostty_input::mouse::Action::Press => {
-                        t.engine().clear_selection();
-                        t.selection_anchor = None;
-                        if let Some(cell) = t.cell_at(x, y) {
-                            t.selection_anchor = Some(cell);
+                        s.engine().clear_selection();
+                        s.selection_anchor = None;
+                        if let Some(cell) = s.cell_at(x, y) {
+                            s.selection_anchor = Some(cell);
                         }
                     }
                     ghostty_input::mouse::Action::Motion => {
-                        if t.mouse_button_down
-                            && let Some(anchor) = t.selection_anchor
-                            && let Some(cell) = t.cell_at(x, y)
+                        if s.mouse_button_down
+                            && let Some(anchor) = s.selection_anchor
+                            && let Some(cell) = s.cell_at(x, y)
                         {
-                            let mut engine = t.engine();
+                            let mut engine = s.engine();
                             if let (Some(start), Some(end)) = (
                                 engine.pin_at(anchor.0, anchor.1),
                                 engine.pin_at(cell.0, cell.1),
@@ -818,36 +1044,62 @@ impl Controller {
                         }
                     }
                     ghostty_input::mouse::Action::Release => {
-                        if copy_on_select && t.selection_anchor.is_some() {
-                            let text = t.engine().selection_string();
+                        if copy_on_select && s.selection_anchor.is_some() {
+                            let text = s.engine().selection_string();
                             if let Some(text) = text {
                                 crate::clipboard::write(&text);
                             }
                         }
-                        t.selection_anchor = None;
+                        s.selection_anchor = None;
                     }
                 }
             }
         }
 
         let (event_mode, format) = {
-            let engine = t.engine();
+            let engine = s.engine();
             (engine.mouse_event(), engine.mouse_format())
         };
         let ctx = crate::input::mouse::MouseContext {
             event_mode,
             format,
-            screen_width: (t.cols * t.font.cell_width as usize) as f64,
-            screen_height: (t.rows * t.font.cell_height as usize) as f64,
-            cell_width: t.font.cell_width as f64,
-            cell_height: t.font.cell_height as f64,
-            any_button_pressed: t.mouse_button_down,
+            screen_width: (s.cols * s.font.cell_width as usize) as f64,
+            screen_height: (s.rows * s.font.cell_height as usize) as f64,
+            cell_width: s.font.cell_width as f64,
+            cell_height: s.font.cell_height as f64,
+            any_button_pressed: s.mouse_button_down,
         };
         let bytes =
-            crate::input::mouse::encode(action, button, mods, x, y, &ctx, &mut t.last_mouse_cell);
+            crate::input::mouse::encode(action, button, mods, x, y, &ctx, &mut s.last_mouse_cell);
         if !bytes.is_empty() {
-            t.io.write(&bytes);
+            s.io.write(&bytes);
         }
+    }
+
+    /// Focus `surface` within `tab` (click-to-focus / directional nav). Updates
+    /// the tree's focused leaf, makes that pane's view first responder (so
+    /// keystrokes/IME route there), and marks the tab active. A no-op if the
+    /// surface isn't in the tab.
+    pub fn focus_surface_in_tab(&self, tab: TabId, surface: SurfaceId) {
+        let view = {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab) else {
+                return;
+            };
+            if !t.tree.focus(surface) {
+                return;
+            }
+            t.focused_surface().map(|s| s.view.clone())
+        };
+        // Make the newly-focused pane the first responder outside the borrow
+        // (AppKit may re-enter). Its window is already key (we don't change
+        // tabs here).
+        if let Some(view) = view
+            && let Some(window) = view.window()
+        {
+            window.makeFirstResponder(Some(&view));
+        }
+        self.0.borrow_mut().registry.activate(tab);
     }
 
     /// Dispatch a resolved [`MenuAction`] against the active tab / app.
@@ -864,8 +1116,13 @@ impl Controller {
                 }
             }
             MenuAction::CloseTab => {
+                // cmd+w closes the *focused pane*; the last pane collapse closes
+                // the tab (today's behaviour, preserved for single-pane tabs).
                 if let Some(active) = self.active_tab() {
-                    self.close_tab(active);
+                    let focused = self.0.borrow().tabs.get(&active).map(|t| t.tree.focused());
+                    if let Some(surface) = focused {
+                        self.close_surface(active, surface);
+                    }
                 }
             }
             MenuAction::Copy => self.copy_selection_from_active(),
@@ -886,28 +1143,28 @@ impl Controller {
         }
     }
 
-    /// Copy the active tab's current selection to the system clipboard
+    /// Copy the *focused* pane's current selection to the system clipboard
     /// (Cmd-C). No-op if there is no selection.
     fn copy_selection_from_active(&self) {
         let Some(tab) = self.active_tab() else { return };
         let state = self.0.borrow();
-        if let Some(t) = state.tabs.get(&tab)
-            && let Some(text) = t.engine().selection_string()
+        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.focused_surface())
+            && let Some(text) = s.engine().selection_string()
         {
             crate::clipboard::write(&text);
         }
     }
 
-    /// Paste the clipboard into the active tab's PTY, bracketed if the program
-    /// enabled bracketed paste.
+    /// Paste the clipboard into the *focused* pane's PTY, bracketed if the
+    /// program enabled bracketed paste.
     fn paste_into_active(&self) {
         let Some(tab) = self.active_tab() else { return };
         let Some(text) = crate::clipboard::read() else {
             return;
         };
         let state = self.0.borrow();
-        if let Some(t) = state.tabs.get(&tab) {
-            let payload = if t.engine().bracketed_paste() {
+        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.focused_surface()) {
+            let payload = if s.engine().bracketed_paste() {
                 let mut p = Vec::with_capacity(text.len() + 12);
                 p.extend_from_slice(b"\x1b[200~");
                 p.extend_from_slice(text.as_bytes());
@@ -916,57 +1173,91 @@ impl Controller {
             } else {
                 text.into_bytes()
             };
-            t.io.write(&payload);
+            s.io.write(&payload);
         }
     }
 
-    /// Apply a font-size step to the active tab and rebuild its grid.
+    /// Apply a font-size step to *every* pane in the active tab and rebuild
+    /// their grids. Font size is a tab-wide setting (all panes share the
+    /// configured size), so a step applies to all of them, then re-lay-out so
+    /// the changed cell metrics re-fit each pane's grid.
     fn font_size_active(&self, step: FontStep) {
         let Some(tab) = self.active_tab() else { return };
+        let controller_ptr: *const Controller = self;
         let mut state = self.0.borrow_mut();
         let family = state.font_family.clone();
+        let mtm = state.mtm;
         if let Some(t) = state.tabs.get_mut(&tab) {
-            let changed = match step {
-                FontStep::Up => t.font_size.increase(),
-                FontStep::Down => t.font_size.decrease(),
-                FontStep::Reset => t.font_size.reset(),
-            };
-            if changed {
-                t.rebuild_font(family.as_deref());
+            let mut any_changed = false;
+            for s in t.surfaces.values_mut() {
+                let changed = match step {
+                    FontStep::Up => s.font_size.increase(),
+                    FontStep::Down => s.font_size.decrease(),
+                    FontStep::Reset => s.font_size.reset(),
+                };
+                if changed {
+                    s.rebuild_font(family.as_deref());
+                    any_changed = true;
+                }
+            }
+            if any_changed {
+                t.relayout(controller_ptr, tab, mtm);
             }
         }
     }
 
-    /// Pump + render every live tab. Called each pace tick. Closes tabs whose
-    /// shell exited.
+    /// Pump + render every pane of every live tab. Called each pace tick. A
+    /// tab is closed when its *last* pane's shell exits; individual pane exits
+    /// collapse the split (handled here via `close_surface`).
     pub fn tick(&self) {
-        let exited: Vec<TabId> = {
+        // Collect (tab, surface) pairs whose shell exited, plus per-tab focused
+        // title/password state, under one borrow. Render every pane.
+        let exited: Vec<(TabId, SurfaceId)> = {
             let mut state = self.0.borrow_mut();
             let mut dead = Vec::new();
-            for (id, tab) in state.tabs.iter_mut() {
-                if tab.pump() {
-                    dead.push(*id);
-                } else {
-                    tab.render();
+            for (tid, tab) in state.tabs.iter_mut() {
+                let focused = tab.tree.focused();
+                let mut password_focused = false;
+                for (sid, surface) in tab.surfaces.iter_mut() {
+                    let (surface_exited, password) = surface.pump();
+                    if surface_exited {
+                        dead.push((*tid, *sid));
+                    } else {
+                        surface.render(*sid == focused);
+                    }
+                    if *sid == focused
+                        && let Some(active) = password
+                    {
+                        password_focused = active;
+                    }
                 }
+                tab.update_window_title(password_focused);
             }
             dead
         };
-        for id in exited {
-            self.close_tab(id);
+        for (tab, surface) in exited {
+            self.close_surface(tab, surface);
         }
-        // Quit when the last tab's shell exits.
+        // Quit when the last tab's last pane exits.
         if self.tab_count() == 0 {
             let mtm = self.0.borrow().mtm;
             NSApplication::sharedApplication(mtm).terminate(None);
         }
     }
 
-    /// Create a tab (window + view + engine + PTY + renderer), register it, and
-    /// show the window. `cwd` is the new shell's directory; `tab_group_parent`,
-    /// if set, adds the new window as a native tab of the parent's window.
-    fn spawn_tab(&self, cwd: Option<PathBuf>, tab_group_parent: Option<TabId>) -> Option<TabId> {
-        let mtm = self.0.borrow().mtm;
+    /// Build one [`Surface`] (view + engine + PTY + renderer) for `tab`, with a
+    /// fresh `surface` id and provisional grid at `scale`. Shared by the initial
+    /// pane in [`spawn_tab`] and every [`new_split`](Self::new_split). Spawns the
+    /// shell in `cwd`. The pane view is created but not yet framed / added to a
+    /// container (the caller lays it out).
+    fn build_surface(
+        &self,
+        mtm: MainThreadMarker,
+        tab: TabId,
+        surface: SurfaceId,
+        scale: f64,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<Surface> {
         let (family, default_size, startup_colors, selection_colors) = {
             let s = self.0.borrow();
             (
@@ -977,22 +1268,13 @@ impl Controller {
             )
         };
 
-        // Backing scale: default to 2.0 (Retina) before the window is on a
-        // screen; corrected on first reflow via the window's actual scale.
-        let scale = 2.0;
         let font_size = FontSize::new(default_size);
         let fg = font::build(family.as_deref(), (font_size.get() as f64) * scale).ok()?;
-
-        // Provisional grid from the initial content size.
         let (cw, ch) = (fg.cell_width, fg.cell_height);
         let init_w = (INITIAL_WIDTH * scale) as usize;
         let init_h = (INITIAL_HEIGHT * scale) as usize;
         let (cols, rows) = geometry::grid_size(init_w, init_h, cw, ch);
 
-        // The theme background is what fills the presented surface (the frame
-        // clears to it); it's the baseline the presented-pixel coverage metric
-        // measures glyphs against. Fall back to the renderer's default grey
-        // (`0x18`) when no theme sets an explicit background.
         let default_bg = startup_colors
             .background
             .get()
@@ -1000,67 +1282,29 @@ impl Controller {
             .unwrap_or((0x18, 0x18, 0x18));
 
         let engine = Arc::new(Mutex::new(Engine::with_colors(cols, rows, startup_colors)));
-        // Spawn the real termio stack: rustix pty + read pipeline + writer loop.
-        // The parse thread feeds `engine` behind its mutex (see `crate::termio`).
-        let io = TabIo::spawn(
-            Arc::clone(&engine),
-            cols as u16,
-            rows as u16,
-            cw,
-            ch,
-            cwd.as_deref(),
-        )
-        .ok()?;
+        let io = TabIo::spawn(Arc::clone(&engine), cols as u16, rows as u16, cw, ch, cwd).ok()?;
         let render = RenderEngine::new(cw, ch).ok();
 
-        // Debug frame dump + presented-pixel capture (both env-gated; off in
-        // normal use). `capture_present` also turns on when the presented-pixel
-        // smoke asks for it, so `last_present_delta` is populated for the
-        // assertion.
         let frame_dump = crate::frame_dump::FrameDump::from_env();
         let capture_present =
             frame_dump.is_some() || std::env::var_os("GHOSTTY_APP_ASSERT_PRESENT").is_some();
 
-        // Register first so the view can carry the id.
-        let id = self.0.borrow_mut().registry.add();
-
         let controller_ptr: *const Controller = self;
-        let view = TerminalView::new(mtm, id, controller_ptr);
-        let window = make_window(mtm, &view);
-
-        // Paint the window background with the terminal's default background.
-        // The presented IOSurface is sized to a whole number of cells, so it is
-        // up to (cell_width-1)×(cell_height-1) device pixels smaller than the
-        // layer; that sub-cell remainder is uncovered layer area. Without this,
-        // the uncovered strip shows the window's default chrome-grey background
-        // — the reported "~25px dark band" whose colour "matches window chrome".
-        // Painting the window background the terminal colour makes any such strip
-        // seamless (a partial-cell of terminal background, indistinguishable from
-        // the grid). See `TerminalView::pin_surface_to_top` for the companion
-        // fix that moves the strip to the bottom edge.
-        set_window_background(&window, default_bg);
-        // Pin the surface flush to the visual top (under the titlebar) so the
-        // sub-cell remainder falls at the *bottom* — where a terminal's partial
-        // last row naturally belongs — instead of as a band under the titlebar.
+        let view = TerminalView::new(mtm, tab, surface, controller_ptr);
+        // Pin the surface flush to the visual top (kills the sub-cell dark band).
         view.pin_surface_to_top();
 
-        // Per-window delegate: sync the controller's active tab to the OS key
-        // window on tab switch. Owned by the Tab (AppKit weak-holds delegates).
-        let window_delegate = WindowDelegate::new(mtm, self.clone(), id);
-        window.setDelegate(Some(ProtocolObject::from_ref(&*window_delegate)));
-
-        let mut tab = Tab {
+        Some(Surface {
             engine,
             io,
             render,
             font: fg,
             font_size,
-            window: window.clone(),
-            view: view.clone(),
-            _window_delegate: window_delegate,
+            view,
             cols,
             rows,
             scale,
+            rect: crate::splits::Rect::new(0.0, 0.0, 0.0, 0.0),
             last_mouse_cell: None,
             mouse_button_down: false,
             selection_anchor: None,
@@ -1069,15 +1313,74 @@ impl Controller {
             frame_dump,
             last_present_delta: 0,
             capture_present,
-        };
+        })
+    }
 
-        // Correct the scale from the real window, then reflow to the actual view
-        // size.
-        tab.scale = window.backingScaleFactor();
-        if (tab.scale - scale).abs() > f64::EPSILON {
-            tab.rebuild_font(family.as_deref());
+    /// Create a tab: a window whose content view is a [`SplitContainer`] hosting
+    /// a single initial [`Surface`]. `cwd` is the new shell's directory;
+    /// `tab_group_parent`, if set, adds the new window as a native tab of the
+    /// parent's window.
+    fn spawn_tab(&self, cwd: Option<PathBuf>, tab_group_parent: Option<TabId>) -> Option<TabId> {
+        let mtm = self.0.borrow().mtm;
+        let scale = 2.0; // provisional; corrected below from the real window.
+
+        // Register the tab, mint the first surface id.
+        let id = self.0.borrow_mut().registry.add();
+        let surface_id = SurfaceId(0);
+
+        let mut surface = self.build_surface(mtm, id, surface_id, scale, cwd.as_deref())?;
+        let default_bg = surface.default_bg;
+
+        // The container hosts the pane view(s); it is the window's content view,
+        // so AppKit keeps it sized to the content area (its `setFrameSize:`
+        // override triggers `container_resized` → relayout — the path that also
+        // covers the tab bar appearing/disappearing).
+        let controller_ptr: *const Controller = self;
+        let container = crate::splitview::SplitContainer::new(
+            mtm,
+            controller_ptr,
+            id,
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+            ),
+        );
+        container.addSubview(&surface.view);
+
+        let window = make_window(mtm, &container);
+        // Paint the window background the terminal colour so any sub-cell
+        // remainder strip is seamless (see the R5 dark-band fix).
+        set_window_background(&window, default_bg);
+
+        let window_delegate = WindowDelegate::new(mtm, self.clone(), id);
+        window.setDelegate(Some(ProtocolObject::from_ref(&*window_delegate)));
+
+        let mut tree = SplitTree::leaf(surface_id);
+        tree.focus(surface_id);
+
+        // Correct the scale from the real window before first layout.
+        let real_scale = window.backingScaleFactor();
+        surface.scale = real_scale;
+        if (real_scale - scale).abs() > f64::EPSILON {
+            let family = self.0.borrow().font_family.clone();
+            surface.rebuild_font(family.as_deref());
         }
-        tab.reflow();
+
+        let view = surface.view.clone();
+        let mut surfaces = HashMap::new();
+        surfaces.insert(surface_id, surface);
+
+        let mut tab = Tab {
+            tree,
+            surfaces,
+            window: window.clone(),
+            container: container.clone(),
+            dividers: Vec::new(),
+            _window_delegate: window_delegate,
+            next_surface: 1,
+        };
+        // Lay out the single pane to the container's (AppKit-sized) bounds.
+        tab.relayout(controller_ptr, id, mtm);
 
         self.0.borrow_mut().tabs.insert(id, tab);
 
@@ -1093,6 +1396,183 @@ impl Controller {
         window.makeFirstResponder(Some(&view));
         Some(id)
     }
+
+    // -- splits -----------------------------------------------------------
+
+    /// Dispatch a resolved [`SplitAction`] against `tab`. Split chords come in
+    /// through the view's `performKeyEquivalent:` (see [`crate::splitkeys`]).
+    pub fn handle_split_action(&self, tab: TabId, action: SplitAction) {
+        match action {
+            SplitAction::NewSplit(dir) => self.new_split(tab, dir),
+            SplitAction::GotoSplit(dir) => self.goto_split(tab, dir),
+            SplitAction::GotoAdjacent(seq) => self.goto_adjacent(tab, seq),
+        }
+    }
+
+    /// Split the focused pane of `tab` in `direction`, spawning a new surface
+    /// (its own shell, inheriting the focused pane's pwd) at a 50/50 ratio, then
+    /// re-lay-out. The new pane becomes focused (first responder).
+    pub fn new_split(&self, tab: TabId, direction: Direction) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+
+        // Resolve the inherited pwd + a fresh surface id under a scoped borrow.
+        let (surface_id, cwd, scale) = {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab) else {
+                return;
+            };
+            let cwd = t
+                .focused_surface()
+                .and_then(|s| s.engine().pwd())
+                .and_then(|p| tabs::inherit_pwd(Some(&p)));
+            let scale = t.window.backingScaleFactor();
+            let sid = t.mint_surface_id();
+            (sid, cwd, scale)
+        };
+
+        // Build the new surface outside the borrow (spawning a shell is heavy).
+        let Some(surface) = self.build_surface(mtm, tab, surface_id, scale, cwd.as_deref()) else {
+            return;
+        };
+        let view = surface.view.clone();
+
+        // Insert into the tree + container + surface map, then re-lay-out.
+        {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab) else {
+                return;
+            };
+            t.container.addSubview(&surface.view);
+            t.surfaces.insert(surface_id, surface);
+            t.tree.split(surface_id, direction);
+            t.relayout(controller_ptr, tab, mtm);
+        }
+
+        // Focus the new pane (first responder) outside the borrow.
+        if let Some(window) = view.window() {
+            window.makeFirstResponder(Some(&view));
+        }
+    }
+
+    /// Move focus to the spatially-adjacent pane of `tab` in `direction`, if one
+    /// exists. No-op otherwise (mirrors upstream's performable check).
+    pub fn goto_split(&self, tab: TabId, direction: Direction) {
+        let target = {
+            let state = self.0.borrow();
+            let Some(t) = state.tabs.get(&tab) else {
+                return;
+            };
+            let bounds = t.container.bounds();
+            let scale = t.window.backingScaleFactor();
+            let container_px = crate::splits::Rect::new(
+                0.0,
+                0.0,
+                bounds.size.width * scale,
+                bounds.size.height * scale,
+            );
+            let divider_px = (DIVIDER_THICKNESS_PT * scale).round();
+            let layout = t.tree.layout(container_px, divider_px);
+            t.tree.neighbor(direction, &layout)
+        };
+        if let Some(target) = target {
+            self.focus_surface_in_tab(tab, target);
+        }
+    }
+
+    /// Move focus to the previous / next pane of `tab` in flatten order (wraps).
+    pub fn goto_adjacent(&self, tab: TabId, seq: Sequential) {
+        let target = {
+            let state = self.0.borrow();
+            state.tabs.get(&tab).and_then(|t| t.tree.adjacent(seq))
+        };
+        if let Some(target) = target {
+            self.focus_surface_in_tab(tab, target);
+        }
+    }
+
+    /// Close a surface (pane) within `tab`: collapse its parent split so the
+    /// sibling absorbs the space, drop the pane's view + IO, re-lay-out, and move
+    /// focus to the sibling. If it was the tab's last pane, close the whole tab
+    /// (today's behaviour). Called on `cmd+w` (focused pane) and on a pane's
+    /// shell exit.
+    pub fn close_surface(&self, tab: TabId, surface: SurfaceId) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+
+        // Mutate the tree + surface map under a scoped borrow; capture whether
+        // the tab should close and the new focus target.
+        enum Outcome {
+            CloseTab,
+            Refocus(Option<Retained<TerminalView>>),
+        }
+        let outcome = {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab) else {
+                return;
+            };
+            match t.tree.close(surface) {
+                None => Outcome::CloseTab,
+                Some(new_focus) => {
+                    // Remove the pane bundle (drops its view + joins io threads).
+                    if let Some(dead) = t.surfaces.remove(&surface) {
+                        dead.view.removeFromSuperview();
+                    } else {
+                        return; // already gone
+                    }
+                    t.relayout(controller_ptr, tab, mtm);
+                    let view = t.surfaces.get(&new_focus).map(|s| s.view.clone());
+                    Outcome::Refocus(view)
+                }
+            }
+        };
+
+        match outcome {
+            Outcome::CloseTab => self.close_tab(tab),
+            Outcome::Refocus(view) => {
+                if let Some(view) = view
+                    && let Some(window) = view.window()
+                {
+                    window.makeFirstResponder(Some(&view));
+                }
+            }
+        }
+    }
+
+    /// A divider drag: `coord` is the pointer's position along the split's axis
+    /// in *container point space*. Convert it to a ratio against the split's own
+    /// rect (from [`SplitTree::split_rect`]), set it, and re-lay-out both
+    /// adjacent panes (each pane's engine + PTY resizes to its new rect).
+    pub fn drag_divider(&self, tab: TabId, path: &[bool], coord: f64) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab) else {
+            return;
+        };
+        let scale = t.window.backingScaleFactor();
+        let bounds = t.container.bounds();
+        let container_px = crate::splits::Rect::new(
+            0.0,
+            0.0,
+            bounds.size.width * scale,
+            bounds.size.height * scale,
+        );
+        let divider_px = (DIVIDER_THICKNESS_PT * scale).round();
+        let Some((split_rect, axis)) = t.tree.split_rect(path, container_px, divider_px) else {
+            return;
+        };
+        // Convert the pointer position into a ratio within the split's own rect.
+        // `coord` is in points; scale to pixels to match `split_rect`.
+        let coord_px = coord * scale;
+        let (origin, span) = match axis {
+            crate::splits::Axis::Horizontal => (split_rect.x, (split_rect.w - divider_px).max(1.0)),
+            crate::splits::Axis::Vertical => (split_rect.y, (split_rect.h - divider_px).max(1.0)),
+        };
+        let ratio = (coord_px - origin) / span;
+        t.tree.set_ratio(path, ratio);
+        t.relayout(controller_ptr, tab, mtm);
+    }
 }
 
 /// Which way a font-size step goes.
@@ -1103,8 +1583,8 @@ enum FontStep {
 }
 
 /// Build an `NSWindow` sized to the initial content, tabbing-enabled, hosting
-/// `view` as its content view.
-fn make_window(mtm: MainThreadMarker, view: &TerminalView) -> Retained<NSWindow> {
+/// `content_view` (the tab's split container) as its content view.
+fn make_window(mtm: MainThreadMarker, content_view: &NSView) -> Retained<NSWindow> {
     let content = NSRect::new(
         NSPoint::new(0.0, 0.0),
         NSSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
@@ -1137,7 +1617,7 @@ fn make_window(mtm: MainThreadMarker, view: &TerminalView) -> Retained<NSWindow>
         // set here, which forces the tab bar always-on even for a single
         // window — the reported "empty dark strip" bug.
         window.setTabbingMode(NSWindowTabbingMode::Automatic);
-        window.setContentView(Some(view));
+        window.setContentView(Some(content_view));
         window.setReleasedWhenClosed(false);
     }
     window
@@ -1258,7 +1738,18 @@ pub struct DelegateIvars {
     /// (plus the pty-encoding regression: tab chords send nothing, plain Tab /
     /// Shift+Tab still encode). See [`AppDelegate::run_tabkeys_smoke`].
     smoke_tabkeys: bool,
+    /// Splits smoke (`GHOSTTY_APP_SMOKE_SPLITS`): split right then down (3 panes),
+    /// assert 3 live shells with isolated input, directional focus walk, divider
+    /// resize, and close-collapse. See [`AppDelegate::run_splits_smoke`].
+    smoke_splits: bool,
+    /// Splits smoke phase state carried from phase 1 to phase 2: the tab under
+    /// test and each pane's `(SurfaceId, unique marker)`.
+    splits_state: RefCell<Option<SplitsSmokeState>>,
 }
+
+/// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
+/// pane's `(SurfaceId, unique marker)`.
+type SplitsSmokeState = (TabId, Vec<(SurfaceId, String)>);
 
 define_class!(
     // SAFETY: NSObject subclass; implements NSApplicationDelegate + a menu action
@@ -1293,8 +1784,11 @@ define_class!(
             // plain auto-exit.
             let has_geometry = self.ivars().smoke_geometry;
             let has_tabkeys = self.ivars().smoke_tabkeys;
+            let has_splits = self.ivars().smoke_splits;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
-            if has_tabkeys {
+            if has_splits {
+                self.schedule_splits_smoke();
+            } else if has_tabkeys {
                 self.schedule_tabkeys_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
@@ -1389,11 +1883,24 @@ define_class!(
         fn tabkeys_smoke(&self, _timer: &AnyObject) {
             self.run_tabkeys_smoke();
         }
+
+        /// Splits smoke phase 1: build 3 panes, assert focus walk, write markers.
+        #[unsafe(method(ghosttySplitsSmoke:))]
+        fn splits_smoke(&self, _timer: &AnyObject) {
+            self.run_splits_smoke();
+        }
+
+        /// Splits smoke phase 2: assert isolation + resize + close-collapse, exit.
+        #[unsafe(method(ghosttySplitsSmokeCheck:))]
+        fn splits_smoke_check(&self, _timer: &AnyObject) {
+            self.finish_splits_smoke();
+        }
     }
 );
 
 impl AppDelegate {
     /// Create the delegate.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mtm: MainThreadMarker,
         controller: Controller,
@@ -1401,6 +1908,7 @@ impl AppDelegate {
         smoke_type: String,
         smoke_geometry: bool,
         smoke_tabkeys: bool,
+        smoke_splits: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -1408,6 +1916,8 @@ impl AppDelegate {
             smoke_type: RefCell::new(smoke_type),
             smoke_geometry,
             smoke_tabkeys,
+            smoke_splits,
+            splits_state: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -1956,6 +2466,245 @@ impl AppDelegate {
         }
     }
 
+    /// Schedule the splits smoke: let the first shell draw its prompt, then run
+    /// phase 1.
+    fn schedule_splits_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttySplitsSmoke:));
+    }
+
+    /// Splits smoke phase 1. Split the single pane right then down (3 panes),
+    /// assert the tree shape + directional focus walk (pure geometry, no shell
+    /// round-trip needed), then write a distinct marker to *each* pane's pty and
+    /// schedule phase 2 to assert isolation + resize + close-collapse.
+    fn run_splits_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = splits_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at splits smoke start".into());
+        };
+
+        // Start: exactly one pane.
+        if controller.active_surface_count() != Some(1) {
+            fail(format!(
+                "expected 1 pane at start, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+
+        // Split right → 2 panes; the new pane is focused.
+        controller.new_split(tab, Direction::Right);
+        if controller.active_surface_count() != Some(2) {
+            fail(format!(
+                "after split-right expected 2 panes, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+        // Split down → 3 panes; new pane focused.
+        controller.new_split(tab, Direction::Down);
+        if controller.active_surface_count() != Some(3) {
+            fail(format!(
+                "after split-down expected 3 panes, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+
+        // Layout is 0 | (1 / 2) in flatten order. Confirm and grab ids.
+        let (tab_id, surfaces) = controller
+            .active_surfaces()
+            .unwrap_or_else(|| fail("no active surfaces after 2 splits".into()));
+        if surfaces.len() != 3 {
+            fail(format!("expected 3 surfaces, saw {}", surfaces.len()));
+        }
+        let (left, top_right, bottom_right) = (surfaces[0], surfaces[1], surfaces[2]);
+
+        // Focus is on the last-created pane (bottom-right).
+        if controller.active_focused_surface() != Some(bottom_right) {
+            fail("newest pane (bottom-right) should be focused after split".into());
+        }
+
+        // --- Directional focus walk (pure geometry). From bottom-right: ---
+        //   left  → left pane; up → top-right; then from left, up/down stay.
+        controller.goto_split(tab_id, Direction::Left);
+        if controller.active_focused_surface() != Some(left) {
+            fail("goto-left from bottom-right should focus the left pane".into());
+        }
+        controller.goto_split(tab_id, Direction::Right);
+        // From the left pane, right goes to one of the right column panes.
+        let after_right = controller.active_focused_surface();
+        if after_right != Some(top_right) && after_right != Some(bottom_right) {
+            fail(format!(
+                "goto-right from left should focus a right-column pane, saw {after_right:?}"
+            ));
+        }
+        // Normalise: focus top-right, then down → bottom-right.
+        controller.goto_split(tab_id, Direction::Up);
+        if controller.active_focused_surface() != Some(top_right) {
+            fail("goto-up should reach the top-right pane".into());
+        }
+        controller.goto_split(tab_id, Direction::Down);
+        if controller.active_focused_surface() != Some(bottom_right) {
+            fail("goto-down from top-right should reach bottom-right".into());
+        }
+
+        // --- Write a distinct marker into each pane's pty. Isolation is asserted
+        // in phase 2 (each marker must appear ONLY in its own pane). ---
+        let markers = [
+            (left, "zz-split-marker-LEFT"),
+            (top_right, "zz-split-marker-TOPRIGHT"),
+            (bottom_right, "zz-split-marker-BOTRIGHT"),
+        ];
+        for (sid, marker) in markers {
+            let cmd = format!("printf '{marker}\\n'\n");
+            controller.write_to_surface(tab_id, sid, cmd.as_bytes());
+        }
+
+        *self.ivars().splits_state.borrow_mut() = Some((
+            tab_id,
+            markers
+                .iter()
+                .map(|(s, m)| (*s, (*m).to_string()))
+                .collect(),
+        ));
+
+        // Give the three shells time to echo + run their printf, then check.
+        self.schedule_selector(1.2, sel!(ghosttySplitsSmokeCheck:));
+    }
+
+    /// Splits smoke phase 2. Assert input isolation (each marker only in its own
+    /// pane), presented-pixel coverage per pane (if enabled), divider resize
+    /// (adjacent panes' grids change), and close-collapse (middle pane close →
+    /// 2 panes, sibling absorbs; close all → tab closes → app quits). Exits 0/1.
+    fn finish_splits_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = splits_fail;
+
+        let (tab, markers) = self
+            .ivars()
+            .splits_state
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| fail("splits smoke phase-2 state missing".into()));
+
+        // --- Input isolation: each pane's engine shows ITS marker (proof the
+        // shell ran) and NONE of the others' (proof the ptys are independent and
+        // keystrokes route only to the focused pane's writer). ---
+        for (sid, marker) in &markers {
+            let screen = controller
+                .surface_screen_text(tab, *sid)
+                .unwrap_or_default();
+            if !screen.contains(marker) {
+                fail(format!(
+                    "pane {sid:?} is missing its own marker '{marker}' — its shell \
+                     never ran / rendered.\n--- screen ---\n{screen}"
+                ));
+            }
+            for (other_sid, other_marker) in &markers {
+                if other_sid == sid {
+                    continue;
+                }
+                if screen.contains(other_marker) {
+                    fail(format!(
+                        "input LEAK: pane {sid:?} contains another pane's marker \
+                         '{other_marker}'. Writes are not isolated per surface."
+                    ));
+                }
+            }
+        }
+
+        // --- Presented-pixel coverage: each pane rendered ink in its own rect.
+        // Only when capture is enabled (GHOSTTY_APP_ASSERT_PRESENT). ---
+        if std::env::var_os("GHOSTTY_APP_ASSERT_PRESENT").is_some() {
+            const COVERAGE_FLOOR: i32 = 40;
+            for (sid, _) in &markers {
+                let delta = controller.surface_present_delta(tab, *sid).unwrap_or(0);
+                if delta <= COVERAGE_FLOOR {
+                    fail(format!(
+                        "pane {sid:?} presented a blank frame (max bg delta {delta} \
+                         <= {COVERAGE_FLOOR}): no ink in its own rect."
+                    ));
+                }
+            }
+        }
+
+        // --- Divider resize: moving a divider changes both adjacent panes'
+        // grids (engine cols/rows) and delivers a WINCH via TabIo::resize. ---
+        let (left, top_right, bottom_right) = (markers[0].0, markers[1].0, markers[2].0);
+        let before_left = controller
+            .surface_grid(tab, left)
+            .unwrap_or_else(|| fail("no grid for left pane".into()));
+        let before_right = controller
+            .surface_grid(tab, top_right)
+            .unwrap_or_else(|| fail("no grid for top-right pane".into()));
+        // The root split (path []) divides left | right. Shrink the left pane to
+        // 25%.
+        controller.set_active_split_ratio(&[], 0.25);
+        let after_left = controller
+            .surface_grid(tab, left)
+            .unwrap_or_else(|| fail("no grid for left pane after resize".into()));
+        let after_right = controller
+            .surface_grid(tab, top_right)
+            .unwrap_or_else(|| fail("no grid for top-right pane after resize".into()));
+        if after_left.0 >= before_left.0 {
+            fail(format!(
+                "divider resize did not shrink the left pane's columns: {before_left:?} -> {after_left:?}"
+            ));
+        }
+        if after_right.0 <= before_right.0 {
+            fail(format!(
+                "divider resize did not grow the right column's columns: {before_right:?} -> {after_right:?}"
+            ));
+        }
+
+        // --- Close-collapse: close the middle pane (top-right). The tree
+        // collapses so the sibling (bottom-right) absorbs the right column →
+        // 2 panes remain. ---
+        controller.close_surface(tab, top_right);
+        if controller.active_surface_count() != Some(2) {
+            fail(format!(
+                "closing the middle pane should leave 2, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+        let (_, remaining) = controller
+            .active_surfaces()
+            .unwrap_or_else(|| fail("no surfaces after middle close".into()));
+        if remaining.contains(&top_right) {
+            fail("closed pane still present after collapse".into());
+        }
+        if !remaining.contains(&left) || !remaining.contains(&bottom_right) {
+            fail("collapse dropped the wrong panes".into());
+        }
+
+        // --- Close the rest: closing every pane closes the tab, and (last tab)
+        // quits the app. Close the two survivors; the second close removes the
+        // last pane → close_tab → 0 tabs → app terminate. ---
+        controller.close_surface(tab, left);
+        if controller.active_surface_count() != Some(1) {
+            fail(format!(
+                "after closing another pane expected 1, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+        // The final pane close collapses to a tab close.
+        controller.close_surface(tab, bottom_right);
+        if controller.tab_count() != 0 {
+            fail(format!(
+                "closing the last pane should close the tab (0 tabs), saw {}",
+                controller.tab_count()
+            ));
+        }
+
+        println!(
+            "OK: splits smoke — split-right + split-down build 3 isolated shells \
+             (each marker only in its own pane), directional focus walks the grid, \
+             a divider drag resizes both adjacent panes' grids, closing the middle \
+             pane collapses to 2 with the sibling absorbing the space, and closing \
+             every pane closes the tab."
+        );
+        std::process::exit(0);
+    }
+
     /// Schedule a one-shot `selector` on `self` `secs` out.
     fn schedule_selector(&self, secs: f64, selector: Sel) {
         let target: &AnyObject = self.as_ref();
@@ -2051,6 +2800,12 @@ fn build_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMenu> {
     main
 }
 
+/// Print a splits smoke failure and exit non-zero.
+fn splits_fail(msg: String) -> ! {
+    eprintln!("FAIL: splits smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -2134,13 +2889,18 @@ fn smoke_marker(script: &str) -> String {
 /// window geometry across the 1-tab→2-tab→1-tab transition, exit);
 /// `smoke_tabkeys` instead runs the tab-navigation keybind smoke (open 3 tabs,
 /// drive the built-in tab chords via real `performKeyEquivalent:` events, assert
-/// the active-tab index after each, exit). Returns after the run loop exits.
+/// the active-tab index after each, exit); `smoke_splits` instead runs the
+/// splits smoke (split right + down into 3 panes, assert isolated shells,
+/// directional focus, divider resize, and close-collapse, exit). Returns after
+/// the run loop exits.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     config: &crate::config::Config,
     smoke_ms: u64,
     smoke_type: String,
     smoke_geometry: bool,
     smoke_tabkeys: bool,
+    smoke_splits: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -2154,6 +2914,7 @@ pub fn run(
         smoke_type,
         smoke_geometry,
         smoke_tabkeys,
+        smoke_splits,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

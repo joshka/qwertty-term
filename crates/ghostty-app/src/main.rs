@@ -29,6 +29,12 @@
 //!   cmd+shift+[/]) through the real `performKeyEquivalent:` path, assert the
 //!   active-tab index after each, and check the pty-encoding regression, then
 //!   exit 0/1.
+//! - `GHOSTTY_APP_SMOKE_SPLITS=1` — run the splits smoke: split the pane right
+//!   then down (3 panes), assert 3 isolated shells (each marker only in its own
+//!   pane), directional focus navigation, divider-driven per-pane resize, and
+//!   close-collapse (middle pane close → 2 panes; close all → tab closes), then
+//!   exit 0/1. Pair with `GHOSTTY_APP_ASSERT_PRESENT=1` to also assert each pane
+//!   presented real ink in its own rect.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -95,7 +101,17 @@ fn run_window() {
     // Tab-navigation keybind smoke: open 3 tabs, drive the built-in tab chords,
     // assert the active-tab index after each, then exit (see app::run).
     let smoke_tabkeys = std::env::var_os("GHOSTTY_APP_SMOKE_TABKEYS").is_some();
-    ghostty_app::app::run(&config, smoke_ms, smoke_type, smoke_geometry, smoke_tabkeys);
+    // Splits smoke: split into 3 panes, assert isolated shells / directional
+    // focus / divider resize / close-collapse, then exit (see app::run).
+    let smoke_splits = std::env::var_os("GHOSTTY_APP_SMOKE_SPLITS").is_some();
+    ghostty_app::app::run(
+        &config,
+        smoke_ms,
+        smoke_type,
+        smoke_geometry,
+        smoke_tabkeys,
+        smoke_splits,
+    );
 }
 
 #[cfg(not(target_os = "macos"))]

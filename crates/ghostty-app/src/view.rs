@@ -31,6 +31,8 @@ use crate::app::Controller;
 use crate::input::keymap::key_from_macos_keycode;
 use crate::input::preedit::Preedit;
 use crate::input::translate::RawKeyEvent;
+use crate::splitkeys;
+use crate::splits::SurfaceId;
 use crate::tabkeys::{self, TabMods};
 use crate::tabs::TabId;
 
@@ -40,6 +42,11 @@ pub struct Ivars {
     preedit: RefCell<Preedit>,
     /// The tab this view renders/inputs for.
     tab: TabId,
+    /// The surface (pane) this view *is* — one `TerminalView` per split pane.
+    /// Keystrokes/mouse route to exactly this surface, so a split tab's input
+    /// isolation is automatic: only the first-responder view (the focused pane)
+    /// receives events.
+    surface: SurfaceId,
     /// Back-reference to the shared controller. Main-thread-only access.
     controller: *const Controller,
     /// The render layer hosted by this view (also assigned as `self.layer`).
@@ -119,6 +126,12 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            // Click focuses this pane first (so a click on an unfocused split
+            // both focuses it and starts any selection/mouse-report there), then
+            // routes the press. Focusing makes this view the first responder, so
+            // subsequent keystrokes go to this pane.
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.with_controller(|c| c.focus_surface_in_tab(tab, surface));
             self.route_mouse(event, MouseKind::Down, Some(MouseBtn::Left));
         }
 
@@ -252,12 +265,14 @@ impl TerminalView {
     pub fn new(
         mtm: objc2::MainThreadMarker,
         tab: TabId,
+        surface: SurfaceId,
         controller: *const Controller,
     ) -> Retained<Self> {
         let layer = ghostty_renderer::metal::IOSurfaceLayer::new();
         let this = Self::alloc(mtm).set_ivars(Ivars {
             preedit: RefCell::new(Preedit::new()),
             tab,
+            surface,
             controller,
             layer,
         });
@@ -274,6 +289,11 @@ impl TerminalView {
     /// The tab this view belongs to.
     pub fn tab(&self) -> TabId {
         self.ivars().tab
+    }
+
+    /// The surface (pane) this view is.
+    pub fn surface(&self) -> SurfaceId {
+        self.ivars().surface
     }
 
     /// The host layer to present into.
@@ -329,6 +349,18 @@ impl TerminalView {
     fn try_handle_tab_key(&self, event: &NSEvent) -> bool {
         let key = key_from_macos_keycode(event.keyCode());
         let mods = tab_mods_from_flags(event.modifierFlags());
+
+        // Split chords take precedence (cmd+d, ctrl+alt+arrow, ctrl+super+[]).
+        // They are disjoint from the tab table (asserted in
+        // `splitkeys::tests::does_not_collide_with_tab_bindings`), so order only
+        // matters for clarity. A resolved split chord acts on *this* view's tab
+        // and never falls through to the encoder.
+        if let Some(action) = splitkeys::resolve(key, mods) {
+            let tab = self.ivars().tab;
+            self.with_controller(|c| c.handle_split_action(tab, action));
+            return true;
+        }
+
         let Some(action) = tabkeys::resolve(key, mods) else {
             return false;
         };
@@ -358,16 +390,21 @@ impl TerminalView {
             return;
         }
 
-        // Normal key: encode via the controller (which reads the tab's live
-        // terminal encode options + user option-as-alt config).
-        self.with_controller(|c| c.encode_key_to_tab(self.ivars().tab, raw));
+        // Normal key: encode via the controller (which reads this surface's live
+        // terminal encode options + user option-as-alt config). Routed to *this*
+        // surface — input isolation is automatic because only the focused pane's
+        // view is first responder.
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| c.encode_key_to_surface(tab, surface, raw));
     }
 
-    /// Send already-composed text to the tab's PTY (IME commit path). Bracketed
-    /// if the program enabled bracketed paste is handled at the controller.
+    /// Send already-composed text to this surface's PTY (IME commit path).
+    /// Bracketed if the program enabled bracketed paste is handled at the
+    /// controller.
     fn send_text(&self, text: &str) {
         let text = text.to_owned();
-        self.with_controller(move |c| c.send_text_to_tab(self.ivars().tab, &text));
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(move |c| c.send_text_to_surface(tab, surface, &text));
     }
 
     /// Convert a mouse `NSEvent` to top-left device-pixel coordinates and route
@@ -388,8 +425,10 @@ impl TerminalView {
             MouseKind::Drag => (ghostty_input::mouse::Action::Motion, None),
         };
         let btn = button.map(MouseBtn::to_input);
-        let tab = self.ivars().tab;
-        self.with_controller(|c| c.mouse_to_tab(tab, action, btn, mods, x, y, pressed));
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| {
+            c.mouse_to_surface(tab, surface, action, btn, mods, x, y, pressed)
+        });
     }
 
     /// Run `f` with the controller, if the back-pointer is set.

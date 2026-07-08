@@ -18,6 +18,8 @@ pub mod geometry;
 pub mod input;
 pub mod menu;
 pub mod selection;
+pub mod splitkeys;
+pub mod splits;
 pub mod tabkeys;
 pub mod tabs;
 pub mod theme;
@@ -36,5 +38,7 @@ pub mod clipboard;
 pub mod font;
 #[cfg(target_os = "macos")]
 pub mod smoke;
+#[cfg(target_os = "macos")]
+pub mod splitview;
 #[cfg(target_os = "macos")]
 pub mod view;
