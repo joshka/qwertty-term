@@ -113,6 +113,13 @@ impl TabIo {
         let config = Config {
             command,
             working_directory,
+            // Inherit the full process environment (PATH, HOME, ...) as the
+            // base; Exec overlays TERM/COLORTERM/GHOSTTY_* on top. Config's
+            // default is an EMPTY env -- omitting this spawns a shell that
+            // can't find `ls`/`git`/anything (field-found: oh-my-zsh init
+            // spewing "command not found" and the shell dying, which closed
+            // the tab and looked like an app crash).
+            env: std::env::vars().collect(),
             ..Config::default()
         };
 
