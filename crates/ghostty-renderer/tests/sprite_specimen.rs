@@ -50,13 +50,6 @@ impl Frame {
         }
     }
 
-    /// Sample the center pixel of cell (col, row).
-    fn cell_center(&self, col: usize, row: usize) -> Px {
-        let x = col * self.cell_w + self.cell_w / 2;
-        let y = row * self.cell_h + self.cell_h / 2;
-        self.px(x.min(self.width - 1), y.min(self.height - 1))
-    }
-
     /// Max coverage-vs-background delta over a cell's pixels: how much any pixel
     /// in the cell differs from the given background color (sum of abs channel
     /// deltas). A cell with a glyph has a high delta; a blank cell ~0.
@@ -105,10 +98,7 @@ fn sprite_specimen_offscreen_readback() {
     let (cw, ch) = (metrics.cell_width, metrics.cell_height);
     let mut grid = make_grid(text_face);
 
-    // --- Terminal: a scripted session. ---
-    //   Row 0: a colored prompt "$ " (green on default) then "hello "
-    //   Row 1: "世界" (wide) then a box-drawing run "──"
-    //   Cursor: left at a known cell.
+    // --- Terminal: the specimen sheet, one row per procedural-glyph family. ---
     let cols = 30u16;
     let rows = 8u16;
     let term = Terminal::new(Options {
@@ -117,9 +107,6 @@ fn sprite_specimen_offscreen_readback() {
         ..Default::default()
     });
     let mut stream = Stream::new(TerminalHandler::new(term));
-    // Green fg for the prompt, reset, then plain "hello", newline, wide + box.
-    // \x1b[32m = green fg; \x1b[0m = reset.
-    // Specimen sheet: one row per procedural-glyph family (ghostty-sprite).
     stream.feed("\u{250C}\u{2500}\u{252C}\u{2500}\u{2510} \u{2554}\u{2550}\u{2566}\u{2550}\u{2557} \u{256D}\u{2500}\u{256E}\r\n".as_bytes());
     stream.feed(
         "\u{2502} \u{2502} \u{2502} \u{2551} \u{2551} \u{2551} \u{2502} \u{2502}\r\n".as_bytes(),
@@ -156,14 +143,6 @@ fn sprite_specimen_offscreen_readback() {
         cell_h: ch as usize,
     };
 
-    // The default background from FrameOptions (0x18 gray).
-    let bg = Px {
-        r: opts.default_bg.r,
-        g: opts.default_bg.g,
-        b: opts.default_bg.b,
-        a: 255,
-    };
-
     // Generic specimen assertions: every specimen row (0..=6) must contain ink
     // (coverage above background) in at least one cell — each sprite family
     // rendered SOMETHING; visual quality is judged from the dumped PNG.
@@ -184,18 +163,6 @@ fn sprite_specimen_offscreen_readback() {
     if let Some(path) = dump_png(&frame) {
         println!("first-pixels frame written to {path}");
     }
-}
-
-/// The snapshot cells for a given active-area row.
-fn snapshot_row(term: &Terminal, row: usize) -> Vec<ghostty_vt::snapshot::SnapshotCell> {
-    let snap = term.snapshot_window(0);
-    snap.window[row].cells.clone()
-}
-
-/// Find the first box-drawing cell (U+2500) on a row.
-fn find_box_col(term: &Terminal, row: usize) -> Option<usize> {
-    let cells = snapshot_row(term, row);
-    cells.iter().position(|c| c.ch == '\u{2500}')
 }
 
 /// Write the BGRA frame to `target/sprite-specimen.png` as an RGBA PNG (hand-rolled
