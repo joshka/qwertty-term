@@ -7,9 +7,9 @@ Copyright (c) Mitchell Hashimoto and Ghostty contributors, licensed under the
 MIT License. Ported code preserves upstream semantics and structure; see
 docs/analysis/ for per-subsystem provenance (pinned upstream commit 2da015cd6).
 
-Vendored assets keep their own licenses: fonts under crates/ghostty-font/res/
+Vendored assets keep their own licenses: fonts under crates/qwertty-term-font/res/
 (SIL OFL 1.1 for JetBrains Mono; MIT for Nerd Fonts patches; OFL for Noto
-Emoji), shell-integration scripts under crates/ghostty-termio/resources/
+Emoji), shell-integration scripts under crates/qwertty-term-termio/resources/
 (from Ghostty, MIT).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

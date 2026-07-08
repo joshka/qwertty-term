@@ -2,7 +2,7 @@
 
 R5 de-risk spike (see `docs/plans/m3-first-pixels.md`). Proves macOS text input
 — dead keys, IME composition, modifier fidelity, `macos-option-as-alt` — flows
-from an AppKit `NSTextInputClient` `NSView` into `ghostty-input`'s encoder, and
+from an AppKit `NSTextInputClient` `NSView` into `qwertty-term-input`'s encoder, and
 settles whether the R5 window host should be raw AppKit or winit 0.30 **before**
 R5 builds on the wrong one.
 
@@ -127,7 +127,7 @@ a live input context — see §4.
 `NSEvent+Extension.swift::ghosttyKeyEvent` (:12) passes the raw `event.keyCode`
 straight through as `key_ev.keycode`. libghostty resolves it in
 `embedded.zig::KeyEvent.core` (:103) by scanning `input.keycodes.entries` for the
-matching `.native` column, else `.unidentified`. Our `ghostty-input` crate does
+matching `.native` column, else `.unidentified`. Our `qwertty-term-input` crate does
 **not** port that `keycodes.zig` native table, so a Rust AppKit host must supply
 the physical `Key` itself. The spike's `keymap.rs` is that map (partial,
 transcribed from the macOS column of `keycodes.zig`).
@@ -148,7 +148,7 @@ and winit issues #3617, #2651, #3342, #1806.
 | **IME / marked text**                       | `Ime::Preedit(text, Option<(usize, usize)>)` gives preedit string + cursor range. **But** `selectedRange`/`replacementRange` from the IME are **ignored** (issue #3617) — breaks IMEs with nested inline composition buffers. macOS Character Viewer has known glitches (#3342). Enabled via `set_ime_allowed(true)`, positioned via `set_ime_cursor_area`.          | Full `NSTextInputClient`: we honor selected/replacement ranges, feed `ghostty_surface_preedit`, place the IME box via `firstRectForCharacterRange`, and serve QuickLook/dictation via `attributedSubstring`. | **AppKit** — winit's dropped ranges are a correctness gap for CJK.               |
 | **`macos-option-as-alt`**                   | **Supported**: `set_option_as_alt(OptionAsAlt)` / `option_as_alt()` on `WindowExtMacOS`, with `None`/`Only{Left,Right}`/`Both` variants — a near 1:1 match to our `OptionAsAlt`.                                                                                                                                                                                     | Full control via `Mods.translation` before `interpretKeyEvents` (§1.4).                                                                                                                                      | **Tie** — winit covers this one natively.                                        |
 | **`performKeyEquivalent` access**           | **Not exposed.** winit owns the view and the responder chain; there's no hook to intercept key-equivalents or run the binding→menu→re-inject dance (§1.3). Cmd-key routing would have to be reconstructed from winit's cooked `KeyEvent`s, losing the "is this bound at the system level?" signal.                                                                   | Native override — the whole §1.3 flow is ours.                                                                                                                                                               | **AppKit** — decisive for correct Cmd/Ctrl + native menu integration.            |
-| **CALayer hosting (IOSurface)**             | Indirect: `Window: HasWindowHandle` → `AppKitWindowHandle { ns_view: NonNull<c_void> }`. From `ns_view` you get `view.layer()` and can assign the IOSurface (our `IOSurfaceLayer`, R2). Works, but you're reaching *through* winit's view, which winit also drives.                                                                                                  | Direct: our `NSView` owns its `CALayer`; `IOSurfaceLayer` (crates/ghostty-renderer) is assigned as `layer`/`contents` with no intermediary.                                                                  | **AppKit** (clean), winit (workable). Not decisive alone.                        |
+| **CALayer hosting (IOSurface)**             | Indirect: `Window: HasWindowHandle` → `AppKitWindowHandle { ns_view: NonNull<c_void> }`. From `ns_view` you get `view.layer()` and can assign the IOSurface (our `IOSurfaceLayer`, R2). Works, but you're reaching *through* winit's view, which winit also drives.                                                                                                  | Direct: our `NSView` owns its `CALayer`; `IOSurfaceLayer` (crates/qwertty-term-renderer) is assigned as `layer`/`contents` with no intermediary.                                                                  | **AppKit** (clean), winit (workable). Not decisive alone.                        |
 | **Native tabbing (`NSWindow.tabbingMode`)** | Partial: `set_tabbing_identifier`/`select_next_tab`/`num_tabs` etc. drive macOS *automatic* window tabbing by identifier. But no `NSWindow` handle (`AppKitWindowHandle` has **no `ns_window`** — you must go `ns_view.window()`), and no control over `tabbingMode`, per-tab `NSWindow` subclassing, or the menu wiring R5 wants ("each tab = its own Engine+PTY"). | Full `NSWindow` + `NSWindowTabbingMode` + custom `NSToolbar`/`NSMenu`; each tab is a real `NSWindow` we own. This is exactly the R5 "cheap native-shell wins" line item.                                     | **AppKit** — winit's identifier-only tabbing can't host per-tab engines cleanly. |
 | **Native menu bar / Cmd-N/T/W**             | Not part of winit. Would need a separate `objc2` `NSMenu` + `AppDelegate` alongside winit's app, fighting winit for `NSApplication` ownership.                                                                                                                                                                                                                       | Native `NSMenu` + `AppDelegate`, same object graph as everything else.                                                                                                                                       | **AppKit**.                                                                      |
 | **Event-loop / threading model**            | winit owns `NSApplication.run` and the run loop; our render thread + PTY channels must fit winit's `ApplicationHandler`.                                                                                                                                                                                                                                             | We own `NSApplication`; R5's "Thread.zig-lite (plain thread+channel)" sits naturally beside it.                                                                                                              | **AppKit** — matches the R5 plan's threading shape.                              |
@@ -158,9 +158,9 @@ and winit issues #3617, #2651, #3342, #1806.
 Run: `cargo test --manifest-path spikes/appkit-input/Cargo.toml` and
 `cargo run --manifest-path spikes/appkit-input/Cargo.toml` (headless matrix).
 
-Encoder note: `ghostty_input::key_encode::encode` dispatches to the **kitty**
+Encoder note: `qwertty_term_input::key_encode::encode` dispatches to the **kitty**
 encoder when any kitty flag is set, and to a **legacy stub** otherwise. The
-legacy stub is a *narrow placeholder* (crates/ghostty-input/src/key_encode.rs:583):
+legacy stub is a *narrow placeholder* (crates/qwertty-term-input/src/key_encode.rs:583):
 it handles special/navigation keys and ctrl-combos but does **not** echo plain
 printable text nor apply alt/ESC-prefix. The full legacy encoder is an unported
 later chunk. The spike therefore exercises the **disambiguate-only kitty** path
@@ -230,7 +230,7 @@ Confidence: **high** for the host choice; medium on effort estimate.
    (#3617) and mishandles dead keys under custom layouts + modifiers (#2651) —
    both are real fidelity gaps versus Ghostty's full `NSTextInputClient`.
 5. The renderer already presents via an **IOSurface `CALayer`** we own
-   (crates/ghostty-renderer `IOSurfaceLayer`); an AppKit `NSView` hosts it with
+   (crates/qwertty-term-renderer `IOSurfaceLayer`); an AppKit `NSView` hosts it with
    no intermediary. winit would have us reach through its view for the same
    layer.
 
@@ -246,7 +246,7 @@ to the objc2 stack (renderer, fonts). Adopting winit would mean re-deriving the
 Proven here (encoder + handler plumbing):
 
 - keycode → `Key` mapping (extend `keymap.rs` to the full `keycodes.zig` table,
-  or port that table into `ghostty-input`). **[partial map proven]**
+  or port that table into `qwertty-term-input`). **[partial map proven]**
 - NSEvent mods → `Mods` incl. option-as-alt filtering (`translation`). **[proven]**
 - `KeyEvent` construction + `key_encode::encode` dispatch (kitty + legacy). **[proven]**
 - Preedit state machine (`setMarkedText`/`unmarkText`/`insertText`). **[proven]**
@@ -260,7 +260,7 @@ R5 must still build (NOT proven here — need a live window/app):
   `NX_DEVICER*` bits (§1.5, §4.4).
 - `firstRectForCharacterRange` IME box placement + `attributedSubstring` for
   QuickLook/dictation, fed from real terminal geometry.
-- **A dependency to resolve first:** the **legacy key encoder in `ghostty-input`
+- **A dependency to resolve first:** the **legacy key encoder in `qwertty-term-input`
   is still a stub** (§3). A production terminal must handle the legacy (non-kitty)
   path fully — that ported chunk is a prerequisite for R5 input parity, or R5
   ships only correct under kitty-protocol apps.

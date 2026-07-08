@@ -8,8 +8,8 @@ presentation layer (`IOSurfaceLayer.zig`, 183), and the `SwapChain` +
 `FrameState` machinery inside the comptime-generic renderer
 (`src/renderer/generic.zig`, ~lines 230-430), plus the `present` /
 `loopEnter` / `displayCallback` / `beginFrame` hooks in `Metal.zig`. Rust ports
-live at `crates/ghostty-renderer/src/metal/{frame,render_pass,pipeline,layer}.rs`
-and `crates/ghostty-renderer/src/swap_chain.rs`, with frame-lifecycle entry
+live at `crates/qwertty-term-renderer/src/metal/{frame,render_pass,pipeline,layer}.rs`
+and `crates/qwertty-term-renderer/src/swap_chain.rs`, with frame-lifecycle entry
 points (`begin_frame`, `new_pipeline`, `target_pixel_format`) added to
 `metal/mod.rs`.
 
@@ -18,7 +18,7 @@ This is chunk R2: it replaces R1's uninhabited placeholder enums
 types, and adds the presentation layer + swap chain. It builds strictly on
 R1's resources (`Target`, `Buffer(T)`, `Texture`, `Sampler`) and the frozen
 wire structs; it does **not** touch `src/shaders/` (chunk R3 owns the MSL
-sources + production pipeline table), `ghostty-vt` tests, or `ghostty-font`.
+sources + production pipeline table), `qwertty-term-vt` tests, or `qwertty-term-font`.
 
 ## `Frame.zig` -> `frame.rs` (command buffer + completion cycle)
 
@@ -221,7 +221,7 @@ window).
 
 ## Coordination with R3 (frozen wire structs only)
 
-R2 and R3 share `crates/ghostty-renderer`, split strictly by file: R3 owns
+R2 and R3 share `crates/qwertty-term-renderer`, split strictly by file: R3 owns
 `src/shaders/` (MSL sources + the production pipeline-description table +
 color-math tests), R2 owns `metal/{frame,render_pass,pipeline,layer}.rs` +
 `swap_chain.rs` + `gpu.rs`/`mod.rs` additions. The contract between them is the

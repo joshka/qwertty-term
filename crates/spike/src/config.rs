@@ -7,7 +7,7 @@
 //! actually-used settings (theme, copy-on-select) plus the font knobs the
 //! window already half-supports via env vars.
 //!
-//! Load order: `~/.config/ghostty-rs/config.toml`, created with a commented
+//! Load order: `~/.config/qwertty-term/config.toml`, created with a commented
 //! example on first run if missing. Parsing is lenient — unknown keys are
 //! ignored (`serde` default) and a malformed file falls back to defaults
 //! rather than failing the window startup.
@@ -35,7 +35,7 @@ pub(crate) struct Config {
     pub(crate) font_family: Option<String>,
 }
 
-const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
+const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 #
 # This file is created automatically on first run. Uncomment and edit any of
 # the lines below; unknown keys are ignored.
@@ -43,7 +43,7 @@ const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
 # Theme name, resolved against (in order):
 #   1. an absolute path, used as-is
 #   2. ~/.config/ghostty/themes/<name>
-#   3. the shared ghostty themes directory (see the GHOSTTY_RS_THEMES_DIR
+#   3. the shared ghostty themes directory (see the QWERTTY_TERM_THEMES_DIR
 #      override in the README's config section)
 # theme = "GruvboxDarkHard"
 
@@ -59,7 +59,7 @@ const EXAMPLE_CONFIG: &str = r#"# ghostty-rs config
 # font-family = "JetBrainsMono Nerd Font Mono"
 "#;
 
-/// Load the config from `~/.config/ghostty-rs/config.toml`, creating the
+/// Load the config from `~/.config/qwertty-term/config.toml`, creating the
 /// file (with a commented example, all settings left at their defaults) if
 /// it does not exist yet. Returns [`Config::default`] if `$HOME` is unset,
 /// the file can't be read, or it fails to parse.
@@ -99,14 +99,14 @@ fn create_default_config(path: &PathBuf) {
 }
 
 fn config_path() -> Option<PathBuf> {
-    if let Some(dir) = env::var_os("GHOSTTY_RS_CONFIG_DIR") {
+    if let Some(dir) = env::var_os("QWERTTY_TERM_CONFIG_DIR") {
         return Some(PathBuf::from(dir).join("config.toml"));
     }
     let home = env::var_os("HOME")?;
     Some(
         PathBuf::from(home)
             .join(".config")
-            .join("ghostty-rs")
+            .join("qwertty-term")
             .join("config.toml"),
     )
 }

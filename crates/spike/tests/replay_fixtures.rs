@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use ghostty_spike::Engine;
+use qwertty_term_spike::Engine;
 
 #[test]
 fn replay_fixtures_match_expected_screen() {

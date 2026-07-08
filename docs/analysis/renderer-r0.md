@@ -6,9 +6,9 @@ HEAD at time of port is `38e49a232`, two unrelated `repro:` commits ahead —
 the six files below are byte-identical to the baseline). Scope: `src/renderer/
 {size,State,cursor,row,Options,backend}.zig` (458+161+154+63+24+23 = 883
 lines, 12 inline tests) plus the design of a new `RenderSnapshot` trait that
-lets any future `ghostty-renderer` backend consume `ghostty-vt` state without
+lets any future `qwertty-term-renderer` backend consume `qwertty-term-vt` state without
 depending on its internal page/pin representation. Rust ports live at
-`crates/ghostty-renderer/src/{size,cursor,row,options,backend,snapshot}.rs`.
+`crates/qwertty-term-renderer/src/{size,cursor,row,options,backend,snapshot}.rs`.
 
 This is chunk R0: the foundation every other renderer chunk (cell building,
 GPU backends, betamax) imports. It intentionally ports only geometry + cursor
@@ -139,7 +139,7 @@ concern specific to upstream's dedicated-renderer-thread architecture
 renderer, and app/UI"). This crate (R0) doesn't yet have a threading model —
 that's a later chunk's job once we pick an app-shell architecture. What *is*
 timeless and belongs in R0 is the **contract**: what data crosses the
-lock/copy boundary from engine to renderer. That's exactly `ghostty-vt`'s
+lock/copy boundary from engine to renderer. That's exactly `qwertty-term-vt`'s
 existing `Snapshot`/`SnapshotWindow` (an owned, `Vec`-backed, no-lifetime copy
 of visible cells + cursor + palette) plus the fields `State` adds on top
 (`preedit`, `mouse.point`/`mods`, `inspector` — inspector is out of scope,
@@ -150,7 +150,7 @@ future threaded implementation can produce it from a locked `Terminal` +
 synchronously.
 
 `Preedit::range` **is** ported verbatim as free functions/methods on a
-`Preedit` type in `crates/ghostty-renderer/src/snapshot.rs` (2 tests), since
+`Preedit` type in `crates/qwertty-term-renderer/src/snapshot.rs` (2 tests), since
 it's pure geometry a renderer needs regardless of threading model.
 
 ## `cursor.zig` -> `cursor.rs`
@@ -167,7 +167,7 @@ maps the terminal's 4-variant `CursorStyle` (`Bar`/`Block`/`BlockHollow`/
 `Underline` — already a 1:1 superset in this codebase's `screen::cursor::
 CursorStyle`, so the mapping is the identity) — note upstream's terminal
 `CursorStyle` also already includes `block_hollow` (reported as plain block
-over the wire), matching `ghostty-vt`'s existing type exactly.
+over the wire), matching `qwertty-term-vt`'s existing type exactly.
 
 **`StyleOptions { preedit, focused, blink_visible }`** — three renderer-only
 booleans not derivable from terminal state alone.
@@ -199,12 +199,12 @@ in all 4 combos), `always_block_with_preedit` (preedit true -> `Block` in all
 4 combos while cursor is on-screen; then scroll into history -> `None` in all
 4 combos even with preedit true, proving priority #1 over #2).
 
-**What R0's port needs that isn't in `ghostty-vt` yet** (documented as
+**What R0's port needs that isn't in `qwertty-term-vt` yet** (documented as
 deferrals, not blockers — `style()` is portable today as a pure function over
 a small input struct; only the *source* of two of its fields is missing):
 
 - `cursor.password_input` — no `PasswordInput` terminal mode/flag wired in
-  `ghostty-vt` yet (checked: no `password` hit in `modes.rs`; `Flags.
+  `qwertty-term-vt` yet (checked: no `password` hit in `modes.rs`; `Flags.
   password_input` exists at the *Terminal* struct level in `terminal/mod.rs:
   146` but nothing sets it from OSC/mode processing yet — plumbing is a
   future chunk, likely alongside OSC 133/prompt or a dedicated input chunk).
@@ -214,7 +214,7 @@ a small input struct; only the *source* of two of its fields is missing):
 - `cursor.blinking` — **is** available: `modes::Mode::CursorBlinking` exists
   and is queryable (`modes.rs:135`). Wired in the full-copy impl.
 - `cursor.viewport()` (`Option<...>`, i.e. "is the cursor currently within
-  the visible viewport") — `ghostty-vt`'s `Screen`/`Terminal` snapshot APIs
+  the visible viewport") — `qwertty-term-vt`'s `Screen`/`Terminal` snapshot APIs
   don't currently expose "cursor is scrolled out of view" as a distinct
   concept; `SnapshotCursor` always reports a `col`/`row` relative to the
   *active area*, and `snapshot_window` always returns a `rows`-tall window
@@ -267,7 +267,7 @@ such in code comments and in the summary table below.
 page.Cell, styles: []const Style, palette: *const Palette, default_
 background: Rgb` — i.e. raw pointers into a live page. R0's `row.rs` instead
 takes the already-*resolved* per-cell view: a row's `&[SnapshotCell]` (via
-`ghostty-vt::snapshot::{SnapshotCell, SnapshotRow}`) plus `default_background:
+`qwertty-term-vt::snapshot::{SnapshotCell, SnapshotRow}`) plus `default_background:
 Option<Rgb>` (matching `Snapshot::default_bg`'s `Option`), since
 `SnapshotCell::style` already carries a resolved `CellStyle` (fg/bg as
 `SnapshotColor`, not a style-table lookup) — there is no separate `styles`
@@ -313,7 +313,7 @@ it, cross-referenced with `docs/rewrite-prompt.md`'s threading note) is:
    `preedit`/`mouse`/`inspector`, then **releases the lock**. This is
    `Terminal.render_state`-style access in spirit, though the concrete Zig
    renderer inlines the walk rather than calling a single "snapshot" method
-   — there is no equivalent of `ghostty-vt`'s owned `Snapshot` struct
+   — there is no equivalent of `qwertty-term-vt`'s owned `Snapshot` struct
    upstream; each renderer backend (Metal/OpenGL) does its own walk-and-copy
    directly into GPU-shaped buffers (cell arrays, glyph atlas keys) while
    holding the lock, which is *more* backend-specific coupling than this
@@ -326,20 +326,20 @@ it, cross-referenced with `docs/rewrite-prompt.md`'s threading note) is:
    the O(frame-time) GPU work. This is the whole point of the split: without
    it, a slow GPU frame would stall the input-reading thread.
 
-**Why `ghostty-vt`'s existing `Snapshot`/`SnapshotWindow` already model tier
+**Why `qwertty-term-vt`'s existing `Snapshot`/`SnapshotWindow` already model tier
 1's *output* faithfully, and why R0 formalizes it as a trait instead of
 inlining the walk per-backend:** `Screen::snapshot_window` / `Terminal::
-snapshot_window` (see `crates/ghostty-vt/src/snapshot.rs`) already do
+snapshot_window` (see `crates/qwertty-term-vt/src/snapshot.rs`) already do
 exactly the tier-1 job — walk only the visible window (cost proportional to
 `rows`, not total scrollback), copy cells with fully-resolved styles, copy
 cursor position/style/visibility, copy the palette + dynamic fg/bg — and
 return a plain, `Vec`-backed, lifetime-free struct. That *is* tier 2's input.
 What upstream does ad-hoc per-GPU-backend (walk once, build backend-specific
 buffers directly), this rewrite splits into two composable seams: (a)
-`ghostty-vt` produces a generic, backend-agnostic owned snapshot (already
+`qwertty-term-vt` produces a generic, backend-agnostic owned snapshot (already
 built, R0 adds the trait around it), (b) each renderer backend consumes that
 snapshot to build its own cell/run/GPU buffers (a later chunk, not R0).
-This keeps `ghostty-vt` renderer-agnostic (it has zero renderer-specific
+This keeps `qwertty-term-vt` renderer-agnostic (it has zero renderer-specific
 types) while still giving every future backend the same cheap,
 lock-minimal, allocation-shaped-once frame data.
 
@@ -355,10 +355,10 @@ specify that contract.
 
 ```rust
 /// Everything a renderer needs to draw one frame, decoupled from
-/// `ghostty-vt`'s internal page/pin representation.
+/// `qwertty-term-vt`'s internal page/pin representation.
 ///
 /// Two planned implementations:
-/// - `FullSnapshot` (implemented now): wraps `ghostty_vt::snapshot::
+/// - `FullSnapshot` (implemented now): wraps `qwertty_term_vt::snapshot::
 ///   SnapshotWindow`, built fresh (a full visible-window copy) every frame.
 ///   Simple, correct, and already cheap (O(visible rows), not O(scrollback))
 ///   thanks to `Screen::snapshot_window`'s backward-walk-from-bottom
@@ -366,7 +366,7 @@ specify that contract.
 ///   one row changed.
 /// - `DirtySnapshot` (contract only, lands with a future chunk once
 ///   `PageList`'s existing per-row dirty bit — see `Row::dirty()` /
-///   `Row::set_dirty()` at `crates/ghostty-vt/src/page/page_impl.rs:187-195`,
+///   `Row::set_dirty()` at `crates/qwertty-term-vt/src/page/page_impl.rs:187-195`,
 ///   bit 40 of the packed row header, already ported from `row.zig`'s Zig
 ///   bit layout but not yet surfaced through `snapshot`/`snapshot_window` —
 ///   is threaded through to report exactly which visible rows changed since
@@ -398,7 +398,7 @@ pub trait RenderSnapshot {
     fn cursor(&self) -> Option<SnapshotCursor>;
 
     /// Current 256-color palette + dynamic default fg/bg, resolved through
-    /// exactly like `ghostty_vt::snapshot::Snapshot::palette/default_fg/
+    /// exactly like `qwertty_term_vt::snapshot::Snapshot::palette/default_fg/
     /// default_bg`.
     fn palette(&self) -> &Palette;
     fn default_fg(&self) -> Option<Rgb>;
@@ -406,14 +406,14 @@ pub trait RenderSnapshot {
 
     /// IME composition text to render over/near the cursor, if active.
     /// Placeholder: mirrors `State.Preedit` (codepoints + width/range
-    /// helpers, ported in `snapshot.rs`) but no `ghostty-vt` producer wires
+    /// helpers, ported in `snapshot.rs`) but no `qwertty-term-vt` producer wires
     /// it yet (no OSC/input-layer preedit state lands until an input
     /// chunk) — `FullSnapshot` always returns `None`.
     fn preedit(&self) -> Option<&Preedit>;
 
     /// Kitty graphics placements visible this frame. Placeholder: the
-    /// `kitty::Placement`/`ImageStorage` model exists in `ghostty-vt`
-    /// (`crates/ghostty-vt/src/kitty/storage.rs`) but isn't threaded
+    /// `kitty::Placement`/`ImageStorage` model exists in `qwertty-term-vt`
+    /// (`crates/qwertty-term-vt/src/kitty/storage.rs`) but isn't threaded
     /// through `Snapshot`/`SnapshotWindow` yet — `FullSnapshot` always
     /// returns an empty slice.
     fn kitty_placements(&self) -> &[KittyPlacement];
@@ -431,7 +431,7 @@ pub enum DirtyStatus {
 }
 ```
 
-`FullSnapshot` (implemented now, `snapshot.rs`): wraps a `ghostty_vt::
+`FullSnapshot` (implemented now, `snapshot.rs`): wraps a `qwertty_term_vt::
 snapshot::SnapshotWindow` (built via `Terminal::snapshot_window`), always
 reports `DirtyStatus::Full`, and answers every accessor straight from the
 wrapped fields — `row()` indexes `window.window[row].cells`, `cursor()` is
@@ -444,7 +444,7 @@ don't yet exist to make redraw cost matter), not acceptable long-term for a
 60-120fps target with mostly-static screens (a shell prompt, a pager, etc.)
 where most rows don't change between frames.
 
-### What the future `DirtySnapshot` impl needs from `ghostty-vt` (precise list)
+### What the future `DirtySnapshot` impl needs from `qwertty-term-vt` (precise list)
 
 None of this blocks R0 — it's the exact scope for the chunk that wires
 dirty-row tracking through to the renderer boundary:
@@ -475,7 +475,7 @@ dirty-row tracking through to the renderer boundary:
    `clear`, `preedit`, `glyph_glossary`) and `Screen.dirty` (`selection`,
    `hyperlink_hover`) already exist and are set by mutation paths (confirmed:
    `stream.rs:1760,1773,1785` set `dirty.palette` on OSC 4/104/etc) but
-   aren't currently read by anything outside `ghostty-vt` — no public
+   aren't currently read by anything outside `qwertty-term-vt` — no public
    accessor exists to ask "has the palette changed since I last checked".
    `DirtySnapshot` needs read (and renderer-side "I've consumed this, clear
    it") access to at least `dirty.palette`, `dirty.clear`, `dirty.preedit`,
@@ -492,11 +492,11 @@ dirty-row tracking through to the renderer boundary:
    former (always include cursor in `DirtyStatus::Partial`'s payload or as a
    separate always-present accessor, which the trait sketch above already
    does — `cursor()` is unconditional, not gated by dirty status) so this
-   isn't actually a new requirement on `ghostty-vt`, just a design note for
+   isn't actually a new requirement on `qwertty-term-vt`, just a design note for
    whoever implements `DirtySnapshot`.
-5. **Preedit state producer.** Not `ghostty-vt`'s job per se (preedit is
+5. **Preedit state producer.** Not `qwertty-term-vt`'s job per se (preedit is
    IME/input-layer state, arguably belongs on an app-shell / input chunk
-   above both `ghostty-vt` and `ghostty-renderer`), but whatever chunk adds
+   above both `qwertty-term-vt` and `qwertty-term-renderer`), but whatever chunk adds
    it needs to decide where it lives so `RenderSnapshot::preedit()` has a
    real source; flagging here so R0's placeholder isn't forgotten.
 6. **Kitty placement geometry resolved against current grid.** `kitty::
@@ -539,7 +539,7 @@ coherence over a live `Terminal` across writes/resizes.
 
 ## Deferrals (out of scope for R0, tracked above)
 
-- `cursor.password_input` source (no mode/OSC wiring in `ghostty-vt`).
+- `cursor.password_input` source (no mode/OSC wiring in `qwertty-term-vt`).
 - `Row::dirty()` not surfaced through `snapshot`/`snapshot_window`; no clear-on-consume API.
 - `Terminal.flags.dirty` / `Screen.dirty` have no public read accessor outside the crate.
 - Preedit producer (IME/input-layer, likely a different future chunk entirely).

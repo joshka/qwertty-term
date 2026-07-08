@@ -1,8 +1,8 @@
 //! frame-capture: VT bytes in, PNG frames out.
 //!
-//! A small, headless program proving the ghostty-rs embeddability story: feed
-//! terminal escape-sequence bytes into a `ghostty_vt::Terminal`, render the
-//! resulting screen through the `ghostty_font` + `ghostty_renderer` offscreen
+//! A small, headless program proving the qwertty-term embeddability story: feed
+//! terminal escape-sequence bytes into a `qwertty_term_vt::Terminal`, render the
+//! resulting screen through the `qwertty_term_font` + `qwertty_term_renderer` offscreen
 //! stack, and write the pixels out as PNG frames. No window, no pty, no
 //! wall-clock — the same input always produces byte-identical PNGs (with the
 //! default embedded font).
@@ -28,13 +28,13 @@ mod macos {
     use std::io::Read;
     use std::path::{Path, PathBuf};
 
-    use ghostty_font::coretext::Face;
-    use ghostty_font::{CodepointResolver, Collection, Grid, Metrics};
-    use ghostty_renderer::engine::{Engine, FrameOptions};
-    use ghostty_renderer::metal::Metal;
-    use ghostty_renderer::snapshot::FullSnapshot;
-    use ghostty_vt::stream::{Stream, TerminalHandler};
-    use ghostty_vt::terminal::{Options, Terminal};
+    use qwertty_term_font::coretext::Face;
+    use qwertty_term_font::{CodepointResolver, Collection, Grid, Metrics};
+    use qwertty_term_renderer::engine::{Engine, FrameOptions};
+    use qwertty_term_renderer::metal::Metal;
+    use qwertty_term_renderer::snapshot::FullSnapshot;
+    use qwertty_term_vt::stream::{Stream, TerminalHandler};
+    use qwertty_term_vt::terminal::{Options, Terminal};
 
     const USAGE: &str = "\
 frame-capture: VT bytes in, PNG frames out (headless, deterministic)

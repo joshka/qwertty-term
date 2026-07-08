@@ -9,7 +9,7 @@ lazy reflow on resize.
 
 `PageList.zig` is ~14.8k lines with 205 inline `test` blocks. This document is the
 maintainer-grade map of its data structures and algorithms; the Rust port lives in
-`crates/ghostty-vt/src/pagelist/` with 119 ported tests (see "Test porting status"
+`crates/qwertty-term-vt/src/pagelist/` with 119 ported tests (see "Test porting status"
 at the end for the exact accounting against upstream's 205).
 
 ## Top-level structure

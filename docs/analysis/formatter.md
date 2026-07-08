@@ -3,7 +3,7 @@
 Surveyed and ported against ghostty commit `2da015cd6` (verify with
 `git -C ~/local/ghostty rev-parse HEAD`). Upstream `formatter.zig` is ~6.3k
 lines / **100** inline `test` blocks. The Rust port lives in
-`crates/ghostty-vt/src/formatter.rs` (+ `formatter/tests.rs`).
+`crates/qwertty-term-vt/src/formatter.rs` (+ `formatter/tests.rs`).
 
 This is the Rust mirror of the Zig **C-API formatter** (`src/terminal/c/formatter.zig`,
 `ghostty_formatter_*`) that `crates/vt-diff`'s `ReferenceTerminal::raw_text`
@@ -158,7 +158,7 @@ performance hit"; it is a render/selection-tracking convenience, not part of the
 serialized bytes. **Deferred** — see deferrals below. All `pin_map`-only tests
 are ported minus their pin-map assertions (the text assertions are kept).
 
-## Rust port shape (`crates/ghostty-vt/src/formatter.rs`)
+## Rust port shape (`crates/qwertty-term-vt/src/formatter.rs`)
 
 The Rust port drives entirely off **read-only Screen/Terminal/PageList APIs**
 (the same row-iterator pattern as `Screen::dump_string`), matching the task
@@ -182,7 +182,7 @@ tabstops/pwd state is already public.
 ## Test port status (exact)
 
 Upstream: **100** inline tests. Rust port: **49** tests in
-`crates/ghostty-vt/src/formatter/tests.rs`, all passing. Categories:
+`crates/qwertty-term-vt/src/formatter/tests.rs`, all passing. Categories:
 
 | category                                                  | upstream | Rust | notes                                                                 |
 | --------------------------------------------------------- | -------- | ---- | --------------------------------------------------------------------- |

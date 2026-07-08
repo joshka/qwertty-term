@@ -240,7 +240,7 @@ the Rust port's stream layer starts with the scalar decoder path only.
   FFFD, FFFD`).
 - `parse_table.zig`: **1** test (table comptime-builds).
 
-## Port notes (Rust: `crates/ghostty-vt/src/parser/`, `src/utf8_decoder.rs`)
+## Port notes (Rust: `crates/qwertty-term-vt/src/parser/`, `src/utf8_decoder.rs`)
 
 - The table is built by a `const fn` mirroring `genTable` (same write order, same
   overwrite-last-wins semantics), stored as a `static [[Transition; 14]; 256]`.
@@ -257,4 +257,4 @@ the Rust port's stream layer starts with the scalar decoder path only.
 - `Parser::state`/`set_state`/`clear` are public because `stream.zig` pokes them
   (`handleCodepoint` ESC fast path; `consumeUntilGround`).
 - `vte` is a dev-dependency **only** (differential oracle); divergences are documented in
-  `crates/ghostty-vt/tests/parser_vte_differential.rs` rather than forced to parity.
+  `crates/qwertty-term-vt/tests/parser_vte_differential.rs` rather than forced to parity.

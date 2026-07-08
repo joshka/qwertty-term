@@ -13,8 +13,8 @@
 //! `interpretKeyEvents` dead-key composition, real IME candidate windows, and
 //! `performKeyEquivalent` menu routing.
 
-use ghostty_input::key_encode::KittyFlags;
-use ghostty_input::key_mods::OptionAsAlt;
+use qwertty_term_input::key_encode::KittyFlags;
+use qwertty_term_input::key_mods::OptionAsAlt;
 use spike_appkit_input::translate::{self, Config, RawKeyEvent};
 
 const KC_A: u16 = 0x00;

@@ -1,4 +1,4 @@
-//! The Rust `ghostty-vt` oracle, exercised standalone (no reference library).
+//! The Rust `qwertty-term-vt` oracle, exercised standalone (no reference library).
 //!
 //! Runs always (`cargo test -p vt-diff`); verifies the in-tree
 //! [`RustTerminal`] oracle reproduces the replay fixtures. The reference

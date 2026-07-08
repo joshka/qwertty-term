@@ -7,14 +7,14 @@ inline tests) and the load-bearing subset of `src/renderer/generic.zig`
 (`updateFrame` ~1123-1430, `drawFrame` ~1442-1724, `rebuildCells`/`rebuildRow`/
 `addGlyph`/`addCursor`/`addUnderline`/`addOverline`/`addStrikethrough`
 ~2319-3374, `syncAtlasTexture` ~3370). Rust ports live at
-`crates/ghostty-renderer/src/cells.rs` (Contents + classifiers) and
-`crates/ghostty-renderer/src/engine.rs` (the render engine), with the
-acceptance test at `crates/ghostty-renderer/tests/first_pixels.rs`.
+`crates/qwertty-term-renderer/src/cells.rs` (Contents + classifiers) and
+`crates/qwertty-term-renderer/src/engine.rs` (the render engine), with the
+acceptance test at `crates/qwertty-term-renderer/tests/first_pixels.rs`.
 
 This is chunk R4: the cell engine that turns a live-terminal
 [`RenderSnapshot`] (R0) into GPU buffers and draws real glyphs through the R1
 Metal resources, R2 frame/pass/swap-chain machinery, and R3 shader pipelines,
-using the `ghostty-font` `Grid` (shaping + glyph→atlas) and `ghostty-sprite`
+using the `qwertty-term-font` `Grid` (shaping + glyph→atlas) and `qwertty-term-sprite`
 (cursors, decorations, box drawing). It builds strictly on R0-R3 + the font
 crates; it adds new modules (`cells`, `engine`) and does not restructure the
 R1-R3 modules.
@@ -172,7 +172,7 @@ follow-on that reinstates the per-run iterator.
 ### Decorations (`add_decoration`, port of `addUnderline`/`add*`)
 
 Underline (single/double/dotted/dashed/curly), overline, and strikethrough are
-rendered as sprite glyphs from `ghostty-sprite` through the `Grid` (the
+rendered as sprite glyphs from `qwertty-term-sprite` through the `Grid` (the
 `Sprite::Underline`… pseudo-codepoints), added to the fg lists exactly as
 upstream does — underlines before the glyph (layered under text), strikethrough
 after. Their color is the underline color (falling back to fg) / fg, at the
@@ -231,7 +231,7 @@ color-atlas instance is ever emitted, so `sync_atlas` only syncs grayscale.
 
 ## THE ACCEPTANCE TEST (`tests/first_pixels.rs`) — offscreen, no window
 
-Drives a real `ghostty_vt::Terminal` through a `Stream`:
+Drives a real `qwertty_term_vt::Terminal` through a `Stream`:
 
 - Row 0: `\x1b[32m$ \x1b[0mhello` — a green prompt then plain "hello".
 - Row 1: `世界──` — two wide CJK chars then two box-drawing chars (U+2500).
@@ -273,11 +273,11 @@ glyph + `min_contrast` uniform + block-cursor color override feed the shader).
 
 ## Snapshot-API additions
 
-**None.** The R0 `RenderSnapshot` trait + `FullSnapshot` and `ghostty-vt`'s
+**None.** The R0 `RenderSnapshot` trait + `FullSnapshot` and `qwertty-term-vt`'s
 `SnapshotWindow`/`SnapshotCell`/`SnapshotCursor` already carried everything the
 engine needs (resolved per-cell `CellStyle`, wide/spacer widths, cursor
 position/style/visibility, palette, dynamic fg/bg). No additive accessors were
-required on `ghostty-vt`'s `snapshot.rs`.
+required on `qwertty-term-vt`'s `snapshot.rs`.
 
 ## Swap-chain additions
 

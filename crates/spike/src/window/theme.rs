@@ -1,5 +1,5 @@
 use eframe::egui::Color32;
-use ghostty_spike::{CellStyle, Rgb, Snapshot, SnapshotColor, SnapshotWindow};
+use qwertty_term_spike::{CellStyle, Rgb, Snapshot, SnapshotColor, SnapshotWindow};
 
 /// The dynamic color state a snapshot variant carries (256-color palette +
 /// optional OSC 10/11 default fg/bg overrides). Both the full [`Snapshot`]
@@ -85,7 +85,7 @@ fn to_egui_color(source: &impl ColorSource, color: SnapshotColor) -> Option<Colo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghostty_spike::Engine;
+    use qwertty_term_spike::Engine;
 
     fn snapshot_of(bytes: &[u8]) -> Snapshot {
         let mut engine = Engine::new(10, 2);
@@ -99,9 +99,9 @@ mod tests {
         assert_eq!(
             to_egui_color(&snapshot, SnapshotColor::Palette(1)),
             Some(Color32::from_rgb(
-                ghostty_vt::color::DEFAULT[1].r,
-                ghostty_vt::color::DEFAULT[1].g,
-                ghostty_vt::color::DEFAULT[1].b,
+                qwertty_term_vt::color::DEFAULT[1].r,
+                qwertty_term_vt::color::DEFAULT[1].g,
+                qwertty_term_vt::color::DEFAULT[1].b,
             ))
         );
     }

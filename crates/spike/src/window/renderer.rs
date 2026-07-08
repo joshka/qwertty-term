@@ -1,5 +1,5 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
-use ghostty_spike::{
+use qwertty_term_spike::{
     CellStyle, CellWidth, CursorStyle, Engine, Snapshot, SnapshotCell, SnapshotColor, SnapshotRow,
     SnapshotUnderline, SnapshotWindow,
 };
@@ -40,7 +40,7 @@ impl CellMetrics {
 ///
 /// Takes a [`SnapshotWindow`] (only the visible rows, not the whole
 /// scrollback) rather than a full [`Snapshot`] — see
-/// [`ghostty_vt::snapshot::Screen::snapshot_window`] — since this runs once
+/// [`qwertty_term_vt::snapshot::Screen::snapshot_window`] — since this runs once
 /// per rendered frame and a full snapshot's cost grows with total history
 /// length, not with what's actually painted.
 pub(super) fn paint_terminal(
@@ -512,7 +512,7 @@ pub(super) fn is_nonblank(cell: &SnapshotCell) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghostty_spike::{Engine, SnapshotColor};
+    use qwertty_term_spike::{Engine, SnapshotColor};
 
     fn snapshot_of(cols: usize, rows: usize, bytes: &[u8]) -> Snapshot {
         let mut engine = Engine::new(cols, rows);

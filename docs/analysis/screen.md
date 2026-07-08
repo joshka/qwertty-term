@@ -7,7 +7,7 @@ with 188 inline `test` blocks. It sits directly on top of
 layer a `Terminal` drives: it owns the **cursor**, the **charset state**, the
 **kitty keyboard flag stack**, the **selection**, **semantic-prompt** state,
 **dirty** flags, and the **resize** entry point. The Rust port lives in
-`crates/ghostty-vt/src/screen/`.
+`crates/qwertty-term-vt/src/screen/`.
 
 ## Screen's responsibilities vs. Terminal's
 
@@ -211,7 +211,7 @@ clone, point<->pin resolution, iterators. Screen only adds the *cursor cache*,
 *style/hyperlink interning against the cursor page*, *charset/kitty/semantic
 state*, the *blank-cell (bg) fill* on clears, and the *dirty render hints*.
 
-## Port notes (Rust, `crates/ghostty-vt/src/screen/`)
+## Port notes (Rust, `crates/qwertty-term-vt/src/screen/`)
 
 - **Module layout**: `screen/mod.rs` (the `Screen` struct + init/deinit/reset/
   clone + cursor cache + all `cursor*` motion + scroll/clear/erase/resize +

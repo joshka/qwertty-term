@@ -1411,10 +1411,10 @@ dependencies = [
 name = "frame-capture"
 version = "0.0.0"
 dependencies = [
- "ghostty-font",
- "ghostty-renderer",
- "ghostty-vt",
  "png 0.18.1",
+ "qwertty-term-font",
+ "qwertty-term-renderer",
+ "qwertty-term-vt",
 ]
 
 [[package]]
@@ -1503,118 +1503,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
-]
-
-[[package]]
-name = "ghostty-app"
-version = "0.0.0"
-dependencies = [
- "base64",
- "ghostty-font",
- "ghostty-input",
- "ghostty-renderer",
- "ghostty-termio",
- "ghostty-vt",
- "image",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "ghostty-ffi"
-version = "0.0.0"
-dependencies = [
- "cbindgen",
- "ghostty-input",
- "ghostty-vt",
-]
-
-[[package]]
-name = "ghostty-font"
-version = "0.1.0"
-dependencies = [
- "ghostty-sprite",
- "objc2 0.6.4",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-text",
- "rustybuzz",
- "ttf-parser",
- "unicode-properties",
-]
-
-[[package]]
-name = "ghostty-input"
-version = "0.0.0"
-
-[[package]]
-name = "ghostty-renderer"
-version = "0.0.0"
-dependencies = [
- "block2 0.6.2",
- "dispatch2",
- "ghostty-font",
- "ghostty-sprite",
- "ghostty-vt",
- "objc2 0.6.4",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-foundation 0.3.2",
- "objc2-io-surface",
- "objc2-metal 0.3.2",
- "objc2-quartz-core 0.3.2",
-]
-
-[[package]]
-name = "ghostty-spike"
-version = "0.1.0"
-dependencies = [
- "base64",
- "crossterm",
- "eframe",
- "ghostty-input",
- "ghostty-vt",
- "portable-pty",
- "serde",
- "toml",
- "ttf-parser",
- "unicode-width",
-]
-
-[[package]]
-name = "ghostty-sprite"
-version = "0.1.0"
-dependencies = [
- "png 0.17.16",
- "tiny-skia",
-]
-
-[[package]]
-name = "ghostty-termio"
-version = "0.0.0"
-dependencies = [
- "ghostty-vt",
- "libc",
- "polling",
- "rustix 1.1.4",
-]
-
-[[package]]
-name = "ghostty-vt"
-version = "0.0.0"
-dependencies = [
- "base64",
- "criterion",
- "flate2",
- "png 0.17.16",
- "unicode-segmentation",
- "unicode-width",
- "vte",
 ]
 
 [[package]]
@@ -3004,6 +2892,118 @@ dependencies = [
 ]
 
 [[package]]
+name = "qwertty-term-app"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "qwertty-term-font",
+ "qwertty-term-input",
+ "qwertty-term-renderer",
+ "qwertty-term-termio",
+ "qwertty-term-vt",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "qwertty-term-ffi"
+version = "0.0.0"
+dependencies = [
+ "cbindgen",
+ "qwertty-term-input",
+ "qwertty-term-vt",
+]
+
+[[package]]
+name = "qwertty-term-font"
+version = "0.1.0"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-text",
+ "qwertty-term-sprite",
+ "rustybuzz",
+ "ttf-parser",
+ "unicode-properties",
+]
+
+[[package]]
+name = "qwertty-term-input"
+version = "0.0.0"
+
+[[package]]
+name = "qwertty-term-renderer"
+version = "0.0.0"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "qwertty-term-font",
+ "qwertty-term-sprite",
+ "qwertty-term-vt",
+]
+
+[[package]]
+name = "qwertty-term-spike"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "crossterm",
+ "eframe",
+ "portable-pty",
+ "qwertty-term-input",
+ "qwertty-term-vt",
+ "serde",
+ "toml",
+ "ttf-parser",
+ "unicode-width",
+]
+
+[[package]]
+name = "qwertty-term-sprite"
+version = "0.1.0"
+dependencies = [
+ "png 0.17.16",
+ "tiny-skia",
+]
+
+[[package]]
+name = "qwertty-term-termio"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "polling",
+ "qwertty-term-vt",
+ "rustix 1.1.4",
+]
+
+[[package]]
+name = "qwertty-term-vt"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "criterion",
+ "flate2",
+ "png 0.17.16",
+ "unicode-segmentation",
+ "unicode-width",
+ "vte",
+]
+
+[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3956,7 +3956,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vt-diff"
 version = "0.0.0"
 dependencies = [
- "ghostty-vt",
+ "qwertty-term-vt",
 ]
 
 [[package]]

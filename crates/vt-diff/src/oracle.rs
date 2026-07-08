@@ -24,7 +24,7 @@ pub struct ScreenDump {
 /// test: feed bytes in, dump observable state out.
 ///
 /// Implemented by `ReferenceTerminal` (libghostty-vt behind FFI, `reference`
-/// feature) and, in Phase 1, by the pure-Rust `ghostty-vt` terminal.
+/// feature) and, in Phase 1, by the pure-Rust `qwertty-term-vt` terminal.
 pub trait Oracle {
     /// Feed raw VT bytes to the terminal. Must never fail on malformed
     /// input; garbage bytes only affect state.

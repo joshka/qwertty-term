@@ -3,7 +3,7 @@
 Analysis of Ghostty's opentype table layer (`src/font/opentype/`), the derived
 cell-metrics algorithm (`src/font/Metrics.zig`), and the texture atlas
 bin-packer (`src/font/Atlas.zig`), plus the crate/library decisions for the
-`ghostty-font` port.
+`qwertty-term-font` port.
 
 - **Upstream reference:** commit `2da015cd6` (the designated port baseline).
 - **Scope:**
@@ -296,7 +296,7 @@ the region lies within `[0, size-1)` (the border) and bump `modified`.
 
 A `Wasm` sub-namespace (409-579) exposes a hand-rolled C ABI for the WASM
 build target (`atlas_new/free/reserve/set/grow/clear/debug_canvas`) — not
-relevant to this port (no wasm target in ghostty-rs yet).
+relevant to this port (no wasm target in qwertty-term yet).
 
 ### Test inventory: `Atlas.zig` — 12 tests (+1 wasm-only, not counted)
 
@@ -377,7 +377,7 @@ Two important nuances confirmed by reading `ttf-parser`'s source directly
    `face.tables().os2` **raw** and re-implement ghostty's exact fallback
    chain (item 4 in the derivation section above) rather than delegate to
    ttf-parser's merged accessor. This is a one-function, well-contained
-   piece of hand logic, not a parser — it belongs in `ghostty-font`'s
+   piece of hand logic, not a parser — it belongs in `qwertty-term-font`'s
    `Metrics` module, not the opentype layer.
 2. **No CoreText-style glyph-measurement fallback is available cross-
    platform.** Steps 7-9 of the derivation (cap/ex-height glyph-measurement
@@ -414,7 +414,7 @@ decoding as a bonus, in one call. `Face::glyph_bounding_box()` is a thin
 wrapper over the same path with a `DummyOutline` builder. This means the
 glyph-protocol chunk likely does **not** need to port `glyf.zig` at all —
 it can drive `ttf-parser`'s outline callback directly into whatever
-rasterizer (e.g. `tiny-skia`, already a dependency of `ghostty-sprite`)
+rasterizer (e.g. `tiny-skia`, already a dependency of `qwertty-term-sprite`)
 that chunk chooses. Recommend that chunk re-verify this against ghostty's
 actual rasterized bitmaps for a numeric fidelity check (anti-aliasing/
 hinting behavior can differ even with identical outline coordinates), but

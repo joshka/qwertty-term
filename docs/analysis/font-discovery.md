@@ -1,7 +1,7 @@
 # Font discovery, the `Score` ranking, and the full fallback resolver (analysis)
 
 Analysis of Ghostty's macOS CoreText **discovery** layer and the
-`CodepointResolver`'s **full fallback chain**, for the ghostty-rs port (chunk
+`CodepointResolver`'s **full fallback chain**, for the qwertty-term port (chunk
 **M3 F5-full**). This completes the deferred half of F5: F5-reduced landed
 load-by-name + a single-style `Collection` + a two-step resolver (sprite +
 primary), documented in `docs/analysis/font-coretext.md` and

@@ -1,4 +1,4 @@
-//! Pure translation core: `NSEvent`-derived data -> [`ghostty_input`] key
+//! Pure translation core: `NSEvent`-derived data -> [`qwertty_term_input`] key
 //! event -> encoded PTY bytes.
 //!
 //! This module is deliberately AppKit-free so it can be unit-tested without a
@@ -8,9 +8,9 @@
 //! `apprt/embedded.zig` turns it into an `input.KeyEvent` and hands it to the
 //! shared encoder. We are the Rust equivalent of that second half.
 
-use ghostty_input::key::{Action, Key, KeyEvent};
-use ghostty_input::key_encode::{self, KittyFlags, Options as EncodeOptions};
-use ghostty_input::key_mods::{Mods, OptionAsAlt};
+use qwertty_term_input::key::{Action, Key, KeyEvent};
+use qwertty_term_input::key_encode::{self, KittyFlags, Options as EncodeOptions};
+use qwertty_term_input::key_mods::{Mods, OptionAsAlt};
 
 use crate::keymap::key_from_macos_keycode;
 
@@ -64,7 +64,7 @@ pub struct Config {
     /// `alt` bit set) instead of composing an accented character.
     pub option_as_alt: OptionAsAlt,
     /// Kitty keyboard protocol flags currently active for the screen. When all
-    /// zero, `ghostty_input::key_encode::encode` dispatches to the *legacy*
+    /// zero, `qwertty_term_input::key_encode::encode` dispatches to the *legacy*
     /// path — which in this port is a narrow stub that does NOT echo plain
     /// printable text nor apply alt/ESC-prefix (see that crate's `key_encode`
     /// module docs and `docs/analysis/appkit-input.md` § "Encoder maturity").
@@ -98,7 +98,7 @@ impl Default for Config {
 /// `GHOSTTY_MODS_ALT` and only later filters via
 /// `ghostty_surface_key_translation_mods`.
 pub fn mods_from_raw(raw: &RawKeyEvent) -> Mods {
-    use ghostty_input::key_mods::Side;
+    use qwertty_term_input::key_mods::Side;
     Mods {
         shift: raw.shift,
         ctrl: raw.ctrl,
@@ -115,8 +115,8 @@ pub fn mods_from_raw(raw: &RawKeyEvent) -> Mods {
     }
 }
 
-fn side(is_right: bool) -> ghostty_input::key_mods::ModSide {
-    use ghostty_input::key_mods::ModSide;
+fn side(is_right: bool) -> qwertty_term_input::key_mods::ModSide {
+    use qwertty_term_input::key_mods::ModSide;
     if is_right {
         ModSide::Right
     } else {

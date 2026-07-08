@@ -1,14 +1,14 @@
-// macOS Swift driver for the ghostty-rs FFI spike.
+// macOS Swift driver for the qwertty-term FFI spike.
 //
 // This is the Swift side of the Rust -> C-ABI -> Swift round-trip. It links the
-// `libghostty_ffi.a` staticlib and drives the C ABI declared in
-// `crates/ghostty-ffi/include/ghostty_rs.h` (imported as the `CGhosttyRs`
+// `libqwertty_term_ffi.a` staticlib and drives the C ABI declared in
+// `crates/qwertty-term-ffi/include/qwertty_term.h` (imported as the `CQwerttyTerm`
 // clang module; see module.modulemap + build.sh). It deliberately mirrors how
 // upstream's `macos/Sources/Ghostty/*.swift` would call the app/surface API, so
 // the ergonomics we hit here are the ones the real adaptation will hit.
 //
 // Flow:
-//   1. ghostty_rs_init
+//   1. qwertty_term_init
 //   2. app_new with a runtime config carrying a write-clipboard callback
 //   3. surface_new (80x24)
 //   4. write "hi\r\n" PTY bytes  (a shell's `printf 'hi\n'`)
@@ -20,7 +20,7 @@
 // It prints PASS/FAIL lines and exits non-zero on any failure so build.sh can
 // gate on it.
 
-import CGhosttyRs
+import CQwerttyTerm
 import Foundation
 
 // --- Callback plumbing -------------------------------------------------------
@@ -32,11 +32,11 @@ import Foundation
 // a plain global is sound.
 
 var clipboardFired = false
-var clipboardKind: GhosttyRsClipboard = GHOSTTY_RS_CLIPBOARD_STANDARD
+var clipboardKind: QwerttyTermClipboard = QWERTTY_TERM_CLIPBOARD_STANDARD
 var clipboardData = ""
 
 let writeClipboard: @convention(c) (
-    UnsafeMutableRawPointer?, GhosttyRsClipboard, UnsafePointer<CChar>?
+    UnsafeMutableRawPointer?, QwerttyTermClipboard, UnsafePointer<CChar>?
 ) -> Void = { _userdata, kind, data in
     clipboardFired = true
     clipboardKind = kind
@@ -58,54 +58,54 @@ func check(_ cond: Bool, _ label: String) {
 }
 
 // 1. init
-check(ghostty_rs_init() == GHOSTTY_RS_RESULT_SUCCESS, "ghostty_rs_init")
+check(qwertty_term_init() == QWERTTY_TERM_RESULT_SUCCESS, "qwertty_term_init")
 
 // 2. app_new
-var runtime = GhosttyRsRuntimeConfig(
+var runtime = QwerttyTermRuntimeConfig(
     userdata: nil,
     wakeup_cb: nil,
     write_clipboard_cb: writeClipboard
 )
-let app = ghostty_rs_app_new(&runtime)
-check(app != nil, "ghostty_rs_app_new returns non-null")
+let app = qwertty_term_app_new(&runtime)
+check(app != nil, "qwertty_term_app_new returns non-null")
 
 // 3. surface_new
-var surfaceConfig = GhosttyRsSurfaceConfig(cols: 80, rows: 24, max_scrollback: 1000)
-let surface = ghostty_rs_surface_new(app, &surfaceConfig)
-check(surface != nil, "ghostty_rs_surface_new returns non-null")
+var surfaceConfig = QwerttyTermSurfaceConfig(cols: 80, rows: 24, max_scrollback: 1000)
+let surface = qwertty_term_surface_new(app, &surfaceConfig)
+check(surface != nil, "qwertty_term_surface_new returns non-null")
 
 // 4. write PTY bytes: "hi\r\n"
 let ptyBytes = Array("hi\r\n".utf8)
 let writeRc = ptyBytes.withUnsafeBufferPointer {
-    ghostty_rs_surface_write_pty_bytes(surface, $0.baseAddress, $0.count)
+    qwertty_term_surface_write_pty_bytes(surface, $0.baseAddress, $0.count)
 }
-check(writeRc == GHOSTTY_RS_RESULT_SUCCESS, "surface_write_pty_bytes")
+check(writeRc == QWERTTY_TERM_RESULT_SUCCESS, "surface_write_pty_bytes")
 
 // 5. send a key event: typed "x"
 let keyText = "x"
 keyText.withCString { textPtr in
-    let event = GhosttyRsInputKey(
-        action: GHOSTTY_RS_INPUT_ACTION_PRESS,
-        mods: GhosttyRsInputMods(bits: 0),
+    let event = QwerttyTermInputKey(
+        action: QWERTTY_TERM_INPUT_ACTION_PRESS,
+        mods: QwerttyTermInputMods(bits: 0),
         text: textPtr,
         unshifted_codepoint: UInt32(UnicodeScalar("x").value),
         composing: false
     )
-    let keyRc = ghostty_rs_surface_key(surface, event)
-    check(keyRc == GHOSTTY_RS_RESULT_SUCCESS, "surface_key")
+    let keyRc = qwertty_term_surface_key(surface, event)
+    check(keyRc == QWERTTY_TERM_RESULT_SUCCESS, "surface_key")
 }
 
 // 6. read screen text back (two-call buffer convention)
 func readScreenText() -> String? {
     var needed: Int = 0
-    let sizeRc = ghostty_rs_surface_read_text(surface, nil, 0, &needed)
-    guard sizeRc == GHOSTTY_RS_RESULT_SUCCESS else { return nil }
+    let sizeRc = qwertty_term_surface_read_text(surface, nil, 0, &needed)
+    guard sizeRc == QWERTTY_TERM_RESULT_SUCCESS else { return nil }
     var buf = [CChar](repeating: 0, count: needed + 1)
     var written: Int = 0
     let rc = buf.withUnsafeMutableBufferPointer {
-        ghostty_rs_surface_read_text(surface, $0.baseAddress, $0.count, &written)
+        qwertty_term_surface_read_text(surface, $0.baseAddress, $0.count, &written)
     }
-    guard rc == GHOSTTY_RS_RESULT_SUCCESS else { return nil }
+    guard rc == QWERTTY_TERM_RESULT_SUCCESS else { return nil }
     return String(cString: buf)
 }
 
@@ -124,17 +124,17 @@ if let screen = screen {
 // 7. OSC 52 write -> clipboard callback fires. base64("hi") == "aGk=".
 let osc = Array("\u{1b}]52;c;aGk=\u{07}".utf8)
 let oscRc = osc.withUnsafeBufferPointer {
-    ghostty_rs_surface_write_pty_bytes(surface, $0.baseAddress, $0.count)
+    qwertty_term_surface_write_pty_bytes(surface, $0.baseAddress, $0.count)
 }
-check(oscRc == GHOSTTY_RS_RESULT_SUCCESS, "OSC 52 write accepted")
+check(oscRc == QWERTTY_TERM_RESULT_SUCCESS, "OSC 52 write accepted")
 check(clipboardFired, "clipboard callback fired")
-check(clipboardKind == GHOSTTY_RS_CLIPBOARD_STANDARD, "clipboard kind is STANDARD")
+check(clipboardKind == QWERTTY_TERM_CLIPBOARD_STANDARD, "clipboard kind is STANDARD")
 check(clipboardData == "aGk=", "clipboard data is raw base64 'aGk='")
 print("      clipboard data = \(clipboardData.debugDescription)")
 
 // 8. teardown (order matters: surface before app)
-ghostty_rs_surface_free(surface)
-ghostty_rs_app_free(app)
+qwertty_term_surface_free(surface)
+qwertty_term_app_free(app)
 check(true, "teardown (surface_free + app_free)")
 
 // Result

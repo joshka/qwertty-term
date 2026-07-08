@@ -1,5 +1,5 @@
 //! Profiling driver: replays synthesized vtebench-equivalent payloads through
-//! the pure-Rust `ghostty-vt` engine in a tight loop so a sampler (samply /
+//! the pure-Rust `qwertty-term-vt` engine in a tight loop so a sampler (samply /
 //! cargo flamegraph) attributes time to the parser / print / decode paths.
 //!
 //! Usage:
@@ -11,8 +11,8 @@
 
 use std::time::Instant;
 
-use ghostty_vt::stream::{Stream, TerminalHandler};
-use ghostty_vt::terminal::{Options, Terminal};
+use qwertty_term_vt::stream::{Stream, TerminalHandler};
+use qwertty_term_vt::terminal::{Options, Terminal};
 
 const COLS: u16 = 120;
 const ROWS: u16 = 40;

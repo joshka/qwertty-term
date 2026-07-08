@@ -1,4 +1,4 @@
-//! Minimal macOS native (Carbon `kVK_*`) keycode -> [`ghostty_input::key::Key`]
+//! Minimal macOS native (Carbon `kVK_*`) keycode -> [`qwertty_term_input::key::Key`]
 //! map.
 //!
 //! Upstream does NOT do this mapping in Swift: `NSEvent+Extension.swift`
@@ -7,16 +7,16 @@
 //! `apprt/embedded.zig` (`KeyEvent.core`) by scanning `input.keycodes.entries`
 //! for the entry whose `.native` column matches, else `.unidentified`.
 //!
-//! Our `ghostty-input` crate is freestanding and (deliberately) does not port
+//! Our `qwertty-term-input` crate is freestanding and (deliberately) does not port
 //! that `keycodes.zig` native-keycode table, so a real AppKit host has to supply
 //! the physical `Key` itself. This module is that map, transcribed from the
 //! macOS (`native_idx = 4`) column of upstream `src/input/keycodes.zig`
 //! `raw_entries` (Ghostty commit `38e49a23`). It is deliberately partial: only
 //! the keys exercised by the spike verification matrix plus the common ASCII /
 //! navigation set. R5's real host must complete it (or port `keycodes.zig`
-//! wholesale into `ghostty-input`).
+//! wholesale into `qwertty-term-input`).
 
-use ghostty_input::key::Key;
+use qwertty_term_input::key::Key;
 
 /// Map a macOS native virtual keycode (`NSEvent.keyCode`, i.e. Carbon
 /// `kVK_*`) to a layout-independent [`Key`]. Returns [`Key::Unidentified`]

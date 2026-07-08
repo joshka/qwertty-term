@@ -1,4 +1,4 @@
-# vtebench baseline: ghostty-rs vs Ghostty
+# vtebench baseline: qwertty-term vs Ghostty
 
 First recorded baselines for the canonical terminal benchmark lane —
 [vtebench](https://github.com/alacritty/vtebench), the tool upstream Ghostty uses for terminal
@@ -7,7 +7,7 @@ comparisons. This is the scoreboard for upcoming perf work (dirty tracking, SIMD
 ## Re-running
 
 ```sh
-scripts/bench-vtebench.sh                    # ghostty-rs (builds ghostty-app --release)
+scripts/bench-vtebench.sh                    # qwertty-term (builds qwertty-term-app --release)
 scripts/bench-vtebench.sh --terminal ghostty # real Ghostty.app for the A/B column
 ```
 
@@ -22,13 +22,13 @@ below into `work/vtebench-upstream` (git-ignored scratch, not vendored) if missi
 | machine     | Apple M2 Max, 96 GB RAM, macOS 15.7.7                             |
 | date        | 2026-07-08                                                        |
 | vtebench    | `ead80032e57dee2e75f0b51f2ea67528647d9944` (v0.3.1, 2025-01-09)   |
-| ghostty-rs  | `bc762bf87115` (main) + this bench-lane change, `--release` build |
+| qwertty-term  | `bc762bf87115` (main) + this bench-lane change, `--release` build |
 | Ghostty     | 1.3.1 stable (`/Applications/Ghostty.app`, ReleaseFast)           |
 | grid        | 80x24 in both terminals (verified via `stty size` inside each)    |
 | suite knobs | vtebench defaults: 1 MiB min sample, 10 s per suite, 1 warmup     |
 
-Both terminals ran as real GUI windows driven non-interactively: ghostty-rs via the
-`GHOSTTY_RS_COMMAND` override in `crates/ghostty-app/src/termio.rs`, Ghostty via its `--command`
+Both terminals ran as real GUI windows driven non-interactively: qwertty-term via the
+`QWERTTY_TERM_COMMAND` override in `crates/qwertty-term-app/src/termio.rs`, Ghostty via its `--command`
 config with `--quit-after-last-window-closed`. This is the full GUI lane, not an engine-only
 fallback.
 
@@ -36,9 +36,9 @@ fallback.
 
 Milliseconds per ~1 MiB sample, lower is better. Median of per-sample times from one full run of
 each terminal (medians because Ghostty's distribution has a long tail — see analysis). Ratio is
-ghostty-rs time / Ghostty time: below 1.0 means ghostty-rs is faster.
+qwertty-term time / Ghostty time: below 1.0 means qwertty-term is faster.
 
-| suite                         | ghostty-rs med (p90) | Ghostty med (p90) | ratio |
+| suite                         | qwertty-term med (p90) | Ghostty med (p90) | ratio |
 | ----------------------------- | -------------------- | ----------------- | ----- |
 | dense_cells                   | 15 (15)              | 11 (25)           | 1.36  |
 | medium_cells                  | 10 (10)              | 16 (47)           | 0.62  |
@@ -56,7 +56,7 @@ ghostty-rs time / Ghostty time: below 1.0 means ghostty-rs is faster.
 Read these numbers with vtebench's own disclaimer in hand: it measures **PTY read throughput
 only** — no frame rate, no latency, no rendering-quality signal.
 
-- **The headline flatters us architecturally.** ghostty-rs applies pty output on the io-reader
+- **The headline flatters us architecturally.** qwertty-term applies pty output on the io-reader
   thread straight into the engine while the renderer redraws whole frames at its own cadence;
   there is little backpressure between parsing and presentation, so we can drain the pty at parse
   speed even when frames lag. Ghostty deliberately couples reads to its render loop. A pty-drain
@@ -64,14 +64,14 @@ only** — no frame rate, no latency, no rendering-quality signal.
   vt-diff throughput harness remains the parser-truth lane.
 - **`dense_cells` is our one median loss (1.36x)** and the most render-shaped suite (every cell
   rewritten with heavy SGR per cell). Ghostty's median is faster but bimodal (p90 25 ms vs its
-  11 ms median); ghostty-rs is slower but flat (stddev 0.7 ms). Cell-write cost, not scroll
+  11 ms median); qwertty-term is slower but flat (stddev 0.7 ms). Cell-write cost, not scroll
   handling, is our current per-byte bottleneck.
 - **Scrolling did not turn out to be our weakest suite at this grid** (0.68–0.92x across all six
   scrolling variants) — at 80x24 the full-redraw renderer's per-frame cost is small enough that
   pty drain dominates. That will not hold at large grids, and the in-flight dirty-tracking chunk
   should move exactly these suites; re-run this lane when it lands (and consider a large-window
   variant).
-- **Stability**: ghostty-rs run-to-run spread was tight (per-suite stddev 0.2–1.2 ms). Ghostty
+- **Stability**: qwertty-term run-to-run spread was tight (per-suite stddev 0.2–1.2 ms). Ghostty
   showed a noisy first few minutes in one of two runs (dense/medium/scrolling means up to
   58–64 ms before settling); medians from its cleaner run are reported. The user's own Ghostty
   instance was running (idle) during all runs — shared-machine noise applies to both columns.

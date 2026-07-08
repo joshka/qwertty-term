@@ -3,7 +3,7 @@
 Surveyed and ported against ghostty commit `2da015cd6`
 (`2da015cd6ac06cedc89e09756e895d2c1715205d`; verify with
 `git -C ~/local/ghostty rev-parse 2da015cd6`). The Rust port lives in
-`crates/ghostty-termio/src/exec.rs`. This covers M2 chunk D (Exec) from
+`crates/qwertty-term-termio/src/exec.rs`. This covers M2 chunk D (Exec) from
 `docs/plans/m2-termio.md`; it builds on chunks A+B (`pty`, `message`,
 `mailbox`, `backend`) and plugs into the runtime decision
 `docs/adr/002-termio-runtime.md` (ACCEPTED — OS threads + `polling`; the
@@ -13,7 +13,7 @@ Zig references (all line numbers against `2da015cd6`):
 
 | file                    | LoC   | inline tests | Rust module                          |
 | ----------------------- | ----- | ------------ | ------------------------------------ |
-| `src/termio/Exec.zig`   | 2,143 | 11           | `ghostty-termio/src/exec.rs`         |
+| `src/termio/Exec.zig`   | 2,143 | 11           | `qwertty-term-termio/src/exec.rs`         |
 | `src/termio/Thread.zig` | 531   | 0            | writer-loop glue folded into `exec`  |
 
 Only the parts of `Thread.zig` that Exec's tests need are ported here (the
@@ -192,11 +192,11 @@ Environment variables set (in `Subprocess.init` order):
 
 | var                     | value / source                                    | line    |
 | ----------------------- | ------------------------------------------------- | ------- |
-| `GHOSTTY_RESOURCES_DIR` | `cfg.resources_dir` (if set)                      | 633     |
+| `QWERTTY_TERM_RESOURCES_DIR` | `cfg.resources_dir` (if set)                      | 633     |
 | `TERM`                  | `cfg.term` if resources_dir else `xterm-256color` | 643/660 |
 | `COLORTERM`             | `truecolor`                                       | 644     |
 | `TERMINFO`              | `{dirname(resources_dir)}/terminfo` (if res dir)  | 652     |
-| `GHOSTTY_BIN_DIR`       | dir of the ghostty exe                            | 684     |
+| `QWERTTY_TERM_BIN_DIR`       | dir of the ghostty exe                            | 684     |
 | `PATH`                  | append exe dir (last priority), or set to it      | 696     |
 | `XDG_DATA_DIRS`         | append `{resources_dir}/..` (macOS)               | 714     |
 | `MANPATH`               | append `{resources_dir}/../man` (macOS)           | 731     |
@@ -204,14 +204,14 @@ Environment variables set (in `Subprocess.init` order):
 | `TERM_PROGRAM_VERSION`  | build version string                              | 747     |
 | `VTE_VERSION`           | **removed** (don't look like VTE)                 | 752     |
 | `PWD`                   | `cfg.working_directory` (if set & accessible)     | 860     |
-| shell-integration vars  | `GHOSTTY_SHELL_FEATURES` etc. (chunk G)           | 764     |
+| shell-integration vars  | `QWERTTY_TERM_SHELL_FEATURES` etc. (chunk G)           | 764     |
 | `cfg.env_override`      | applied last, overrides all                       | 813     |
 
 Rust port note: the port takes the caller's env map as the base (upstream's
 `cfg.env`), sets `TERM`/`COLORTERM`/`TERM_PROGRAM`/`TERM_PROGRAM_VERSION`,
-`GHOSTTY_RESOURCES_DIR`/`TERMINFO`/`GHOSTTY_BIN_DIR` when the inputs are
+`QWERTTY_TERM_RESOURCES_DIR`/`TERMINFO`/`QWERTTY_TERM_BIN_DIR` when the inputs are
 present, removes `VTE_VERSION`, sets `PWD`, and applies overrides last. Shell
-integration (`GHOSTTY_SHELL_FEATURES`, script injection) is chunk G and is
+integration (`QWERTTY_TERM_SHELL_FEATURES`, script injection) is chunk G and is
 **not** wired here; `resources_dir` is optional throughout.
 
 ### `execCommand` — argv construction (`Exec.zig:1708`)

@@ -3,7 +3,7 @@
 Surveyed and ported against ghostty commit `2da015cd6` (verify with
 `git -C ~/local/ghostty rev-parse HEAD`; the six files below are byte-identical
 between that commit and current upstream HEAD `38e49a232`). The Rust port lives
-in `crates/ghostty-termio`. This covers M2 chunks A (PTY primitive) and B
+in `crates/qwertty-term-termio`. This covers M2 chunks A (PTY primitive) and B
 (termio plumbing) from `docs/plans/m2-termio.md`; the runtime decision it plugs
 into is `docs/adr/002-termio-runtime.md` (ACCEPTED — threads + `polling`; its
 mailbox API contract is binding).
@@ -12,11 +12,11 @@ Zig references:
 
 | file                    | LoC | tests | Rust module                       |
 | ----------------------- | --- | ----- | --------------------------------- |
-| `src/pty.zig`           | 506 | 1     | `ghostty-termio/src/pty.rs`       |
+| `src/pty.zig`           | 506 | 1     | `qwertty-term-termio/src/pty.rs`       |
 | `src/pty.c`             | 40  | —     | (folded into rustix calls)        |
-| `src/termio/message.zig`| 108 | 2     | `ghostty-termio/src/message.rs`   |
-| `src/termio/mailbox.zig`| 106 | 0     | `ghostty-termio/src/mailbox.rs`   |
-| `src/termio/backend.zig`| 129 | 0     | `ghostty-termio/src/backend.rs`   |
+| `src/termio/message.zig`| 108 | 2     | `qwertty-term-termio/src/message.rs`   |
+| `src/termio/mailbox.zig`| 106 | 0     | `qwertty-term-termio/src/mailbox.rs`   |
+| `src/termio/backend.zig`| 129 | 0     | `qwertty-term-termio/src/backend.rs`   |
 | `src/termio/Options.zig`| 41  | 0     | deferred to chunk E (see below)   |
 
 ## `pty.zig` — the PTY primitive
@@ -145,7 +145,7 @@ post to the IO thread. All 16 variants:
 | `resize`                    | `renderer.Size` (screen+cell+padding) | local `Size` mirror (see below)                |
 | `size_report`               | `size_report.Style` enum              | local `SizeReport` enum                        |
 | `clear_screen`              | `{ history: bool }`                   | same                                           |
-| `scroll_viewport`           | `Terminal.ScrollViewport`             | `ghostty_vt::terminal::ScrollViewport`         |
+| `scroll_viewport`           | `Terminal.ScrollViewport`             | `qwertty_term_vt::terminal::ScrollViewport`         |
 | `selection_scroll`          | bool (start/stop tick timer)          | same                                           |
 | `jump_to_prompt`            | isize                                 | same                                           |
 | `start_synchronized_output` | void (arms the 1 s reset timer)       | same                                           |
@@ -274,5 +274,5 @@ it.
 - `getProcessInfo(comptime)` → two methods returning `Option`.
 - `Options.zig` deferred to chunk E; `Termio`/`ThreadData` are placeholders.
 - `Size`/`GridSize`/`ScreenSize` are local mirrors of `renderer.Size` types;
-  chunk E reconciles them with `crates/ghostty-renderer/src/size.rs` (which
+  chunk E reconciles them with `crates/qwertty-term-renderer/src/size.rs` (which
   already ports the same Zig structs) once the crates are allowed to couple.

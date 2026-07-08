@@ -9,7 +9,7 @@ ties together every landed VT module — [`modes`](terminal-state.md),
 [`charsets`](terminal-state.md), [`Tabstops`](terminal-state.md),
 [`sgr`](terminal-state.md), [`csi`](terminal-state.md),
 [`color`](terminal-state.md), and the [`osc`](osc.md) semantic-prompt parser.
-The Rust port lives in `crates/ghostty-vt/src/terminal/`.
+The Rust port lives in `crates/qwertty-term-vt/src/terminal/`.
 
 `Terminal` owns *protocol + policy*; `Screen` owns *state + primitive editing*
 (see `screen.md`, "Screen's responsibilities vs. Terminal's"). Terminal never
@@ -176,7 +176,7 @@ local Terminal-owned equivalents or marked seams:
 - **`kitty.zig` graphics** — `kittyGraphics`, size/loading-limit setters, and the
   `screen.kitty_images.dirty = true` scroll hooks are the **kitty-gfx seam**.
   Marked `TODO(chunk:kitty-gfx)`; a sibling workspace owns
-  `crates/ghostty-vt/src/kitty/`. Terminal exposes a seam method/trait shaped so
+  `crates/qwertty-term-vt/src/kitty/`. Terminal exposes a seam method/trait shaped so
   the kitty chunk maps 1:1, and the dirty hooks become no-ops for now.
 - **`apc/glyph.zig`** — `glyph_glossary` + `glyphProtocol` — `TODO(chunk:apc)`.
 - **`stream.zig` / `stream_terminal.zig`** — `vtStream`/`vtHandler` and the whole
@@ -224,7 +224,7 @@ operations they exercise are all implemented and Miri-clean.
 Pass 1 landed the tier-1 op net + non-clustering print. **Pass 2** completes the
 policy-layer operation ladder: the deferred Screen surface, the erase/scroll/edit
 tier, SGR, alt-screen/reset, DECALN, and the mode-2027 grapheme-clustering print
-path. All `cargo test -p ghostty-vt` green (824 lib), fmt+clippy clean, and
+path. All `cargo test -p qwertty-term-vt` green (824 lib), fmt+clippy clean, and
 Miri-clean over `terminal::` (76/76) and `screen::` (92/93; one skip:
 `screen::tests::scrolling_when_viewport_is_pruned` exceeds a 3-minute per-test
 Miri budget — a pass-1-era large-scrollback test untouched by this pass, green

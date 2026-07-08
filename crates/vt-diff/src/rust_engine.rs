@@ -1,17 +1,17 @@
-//! The pure-Rust `ghostty-vt` terminal as an [`Oracle`].
+//! The pure-Rust `qwertty-term-vt` terminal as an [`Oracle`].
 //!
 //! This is the Phase-1 in-tree oracle: it drives the ported stream dispatch
-//! layer ([`ghostty_vt::stream::Stream`] over a
-//! [`ghostty_vt::stream::TerminalHandler`]) and reports observable state
+//! layer ([`qwertty_term_vt::stream::Stream`] over a
+//! [`qwertty_term_vt::stream::TerminalHandler`]) and reports observable state
 //! (screen text + cursor) the same way [`crate::ReferenceTerminal`] does for
 //! the Zig library, so the two can be diffed byte-for-byte.
 
-use ghostty_vt::stream::{Stream, TerminalHandler};
-use ghostty_vt::terminal::{Options, Terminal};
+use qwertty_term_vt::stream::{Stream, TerminalHandler};
+use qwertty_term_vt::terminal::{Options, Terminal};
 
 use crate::oracle::{CursorPos, Oracle, normalize_screen_text};
 
-/// The Rust `ghostty-vt` terminal, used as the in-tree oracle in differential
+/// The Rust `qwertty-term-vt` terminal, used as the in-tree oracle in differential
 /// tests (the counterpart to [`crate::ReferenceTerminal`]).
 pub struct RustTerminal {
     stream: Stream<TerminalHandler>,
@@ -58,12 +58,12 @@ impl RustTerminal {
     }
 
     /// Plain-text dump produced by the **ported formatter**
-    /// ([`ghostty_vt::formatter`]) with `trim = true`, whole active screen —
+    /// ([`qwertty_term_vt::formatter`]) with `trim = true`, whole active screen —
     /// the Rust mirror of [`ReferenceTerminal::raw_text`](crate::ReferenceTerminal::raw_text)
     /// (`ghostty_formatter_terminal_*`, PLAIN). Used by the formatter
     /// differential test.
     pub fn formatter_raw_text(&self) -> String {
-        use ghostty_vt::formatter::{Options, TerminalExtra};
+        use qwertty_term_vt::formatter::{Options, TerminalExtra};
         self.terminal()
             .format(&Options::plain(), &TerminalExtra::none())
     }

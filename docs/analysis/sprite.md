@@ -1,7 +1,7 @@
 # Sprite glyph subsystem
 
 Analysis of Ghostty's procedural sprite-font subsystem (`src/font/sprite/`) and
-its port to the standalone `ghostty-sprite` crate.
+its port to the standalone `qwertty-term-sprite` crate.
 
 - **Upstream reference:** commit `2da015cd6` (the designated port baseline).
   Local working checkout HEAD at time of port: `38e49a232`; the sprite sources
@@ -201,7 +201,7 @@ straight box-drawing glyphs are pixel-identical because they use the integer
 
 ## Public API shape (extraction policy)
 
-Per the extraction policy, the API carries **no** `ghostty-vt` types:
+Per the extraction policy, the API carries **no** `qwertty-term-vt` types:
 
 - Input: `Metrics` — a plain struct of cell width/height, line thicknesses,
   and decoration positions in pixels (`Metrics::simple(w, h)` derives sensible
@@ -220,7 +220,7 @@ Upstream has no inline unit tests (its verification is golden-PNG fixtures in
 diff in `Face.zig`). Those fixtures are now wired in directly — see the
 "Golden-PNG parity vs upstream (MB3)" section below. Alongside them the port
 carries a structural net that needs no reference image (see
-`crates/ghostty-sprite/tests/sprites.rs`):
+`crates/qwertty-term-sprite/tests/sprites.rs`):
 
 - **smoke** — representative codepoints of every range, and all special sprites,
   render to in-bounds bitmaps at 7 odd/even cell sizes;
@@ -235,7 +235,7 @@ carries a structural net that needs no reference image (see
 ## Golden-PNG parity vs upstream (MB3)
 
 The structural net above is now backed by a direct pixel comparison against
-upstream's own golden fixtures. See `crates/ghostty-sprite/tests/golden_parity.rs`.
+upstream's own golden fixtures. See `crates/qwertty-term-sprite/tests/golden_parity.rs`.
 
 ### Methodology
 
@@ -253,7 +253,7 @@ per 0x100-aligned Unicode block — and diffs them against reference PNGs in
 | (9, 15, 2, 1)  | 9×17     | 1                       | `9x17+1`       |
 
 Those 36 reference PNGs (9 ranges × 4 sizes) are copied verbatim into
-`crates/ghostty-sprite/tests/testdata/` and are the golden files.
+`crates/qwertty-term-sprite/tests/testdata/` and are the golden files.
 
 The harness reconstructs each atlas from this crate's output and compares
 pixel-for-pixel:

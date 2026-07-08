@@ -6,8 +6,8 @@ six small-to-medium `src/terminal/` modules ported together as one chunk:
 five standalone state/parsing modules plus the completion of the `color.zig`
 port (whose `Rgb`/`Palette`/`Name`/`DEFAULT` subset had already landed
 alongside the page memory model chunk). Rust ports live at
-`crates/ghostty-vt/src/{sgr,csi,modes,charsets,tabstops}.rs` and
-`crates/ghostty-vt/src/color/{mod,x11_color}.rs`.
+`crates/qwertty-term-vt/src/{sgr,csi,modes,charsets,tabstops}.rs` and
+`crates/qwertty-term-vt/src/color/{mod,x11_color}.rs`.
 
 ## sgr.zig -> `sgr.rs`
 
@@ -57,7 +57,7 @@ which is why `Attribute` and `Parser` both carry a lifetime); `Parser<'a>`
 - `5`/`6` both map to `Blink` (blink and rapid-blink are not distinguished).
 
 **Divergences**: no C ABI union (`Attribute.Value`/`.C`/`.cval`,
-`lib.TaggedUnion`) — this chunk is Rust-only, FFI is `ghostty-ffi`'s job
+`lib.TaggedUnion`) — this chunk is Rust-only, FFI is `qwertty-term-ffi`'s job
 later; `Name`/`Rgb` are reused from `crate::color` rather than duplicated.
 `sgr::Underline` is kept as its own type distinct from
 `crate::page::style::Underline` even though they currently share variants —
@@ -295,9 +295,9 @@ partial port (`default_palette_named`, `default_palette_cube_and_ramp`,
 | `x11_color.zig` | 2         | `color/x11_color.rs` | 2          | Full 1:1                                                                                                                       |
 | **Total**       | **76**    |                      | **83**     |                                                                                                                                |
 
-All 293 tests in `ghostty-vt`'s lib target pass (`cargo test -p ghostty-vt
+All 293 tests in `qwertty-term-vt`'s lib target pass (`cargo test -p qwertty-term-vt
 --lib`), along with the 14 differential-parser tests and 4 unicode
-cross-check tests. `cargo fmt --check` and `cargo clippy -p ghostty-vt
+cross-check tests. `cargo fmt --check` and `cargo clippy -p qwertty-term-vt
 --all-targets` are clean.
 
 ## Deferred / out of scope for this chunk
@@ -312,6 +312,6 @@ cross-check tests. `cargo fmt --check` and `cargo clippy -p ghostty-vt
   against beyond type shape; if `csi.zig` gains dispatch logic upstream
   later, re-diff before assuming this port is still complete.
 - **C ABI for every module** (`Attribute.C`, `RGB.C`, `PaletteC`, etc.) is
-  deferred to `ghostty-ffi`, per the crate's embeddability rules (Rust API
+  deferred to `qwertty-term-ffi`, per the crate's embeddability rules (Rust API
   primary, FFI is a wrapper, never the only door to a capability) — noted
   per-module above, not repeated here.

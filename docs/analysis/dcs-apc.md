@@ -198,7 +198,7 @@ and the `;`-terminated path.
 
 | Identifier       | Protocol enum | Parser type                                                                                      | Max bytes (default) | Notes                                                                                                                                                                                                |
 | ---------------- | ------------- | ------------------------------------------------------------------------------------------------ | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `G` (first byte) | `.kitty`      | `kitty_gfx.CommandParser` (`kitty/graphics_command.zig`, part of a 6.3k-line `kitty/` subsystem) | 65 MiB              | Chunked image transfer; **out of scope, sibling chunk owns `crates/ghostty-vt/src/kitty/`**                                                                                                          |
+| `G` (first byte) | `.kitty`      | `kitty_gfx.CommandParser` (`kitty/graphics_command.zig`, part of a 6.3k-line `kitty/` subsystem) | 65 MiB              | Chunked image transfer; **out of scope, sibling chunk owns `crates/qwertty-term-vt/src/kitty/`**                                                                                                          |
 | `25a1;`          | `.glyph`      | `glyph.CommandParser` (`apc/glyph/request.zig`)                                                  | 1 MiB               | Custom-glyph registration protocol (Private-Use-Area glyf/COLR outlines); depends on `font/Glyph.zig` + `font/opentype/glyf.zig` — **out of scope, font subsystem not yet ported** (see Seam design) |
 
 `Protocol.defaultMaxBytes` (`apc.zig:199-209`) hard-codes these two values; `max_bytes` on
@@ -263,7 +263,7 @@ Three sub-consumers are deliberately **not ported** in this chunk because they b
 other subsystems/chunks or unported phases:
 
 1. **Kitty graphics** (`kitty_gfx.CommandParser`/`Command`) — owned by the sibling
-   `crates/ghostty-vt/src/kitty/` chunk running concurrently.
+   `crates/qwertty-term-vt/src/kitty/` chunk running concurrently.
 2. **Glyph protocol** (`apc/glyph/*`) — depends on the font subsystem
    (`font/Glyph.zig`, `font/opentype/glyf.zig`), which is Phase 3, not yet ported at all.
 3. **Tmux control mode** (`terminal.tmux.*`) — a 4.35k-line tmux *client*, independent of
@@ -274,13 +274,13 @@ The Rust port models this as a **narrow seam trait per sub-protocol**, so the id
 logic (which bytes select which protocol, buffer limits, error→ignore policy) is ported
 faithfully now, while the actual command semantics slot in later:
 
-- `apc::GraphicsProtocol` trait (in `crates/ghostty-vt/src/apc/mod.rs`, `TODO(chunk:
+- `apc::GraphicsProtocol` trait (in `crates/qwertty-term-vt/src/apc/mod.rs`, `TODO(chunk:
   kitty-gfx)`): `fn feed(&mut self, byte: u8) -> Result<(), ()>` and
   `fn complete(self: Box<Self>) -> Result<KittyRaw, ()>` where `KittyRaw` is presently
   just the raw accumulated byte payload (`Vec<u8>`) behind a placeholder type — the kitty
   chunk replaces `KittyRaw` with its real `Command` type and provides the trait impl.
   `Handler` is generic/boxed over "does something exist for `G`" — concretely, since
-  `ghostty-vt` cannot depend on a not-yet-written sibling module without a build-order
+  `qwertty-term-vt` cannot depend on a not-yet-written sibling module without a build-order
   dependency, the seam is done as **the handler yielding the raw payload bytes on `G`
   identification**, i.e. `Handler`'s `.kitty` state is *just* a byte buffer
   (`Vec<u8>` + `max_bytes` check, mirroring the XTGETTCAP buffer exactly), and `Command`

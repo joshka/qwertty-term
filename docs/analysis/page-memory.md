@@ -314,7 +314,7 @@ Collected here because the port isolates all `unsafe` behind these:
    another `&mut` view. Structure handles (offsets) are copied out before use, so no
    Rust reference into `memory` outlives a mutation.
 
-## Port notes (Rust, `crates/ghostty-vt/src/page/`)
+## Port notes (Rust, `crates/qwertty-term-vt/src/page/`)
 
 - Module layout (as built): `size.rs` (Offset/OffsetSlice/getOffset/OffsetBuf),
   `hash.rs` (SplitMix64 mix + `MapKey`), `bitmap.rs` (`BitmapAllocator<CHUNK>`),

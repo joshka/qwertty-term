@@ -8,9 +8,9 @@ placing them on the screen at pin-tracked positions with z-layers and unicode pl
 
 The subsystem is ~6.3k LOC across eight Zig files. This document maps the **model** —
 command grammar, image storage, placement tracking — and the **exec** and **unicode
-placeholder** layers, all now ported in `crates/ghostty-vt/src/kitty/`. Only the actual GPU
+placeholder** layers, all now ported in `crates/qwertty-term-vt/src/kitty/`. Only the actual GPU
 texture upload/draw of a resolved `RenderPlacement` remains outside this crate's scope (that's
-an embedder/renderer concern, not a `ghostty-vt` one).
+an embedder/renderer concern, not a `qwertty-term-vt` one).
 
 ## File inventory (Zig)
 
@@ -285,7 +285,7 @@ checks `storage.enabled()`, dispatches on `cmd.control`:
 The quiet filter (`:78-88`) decides whether to actually emit the `Response`. Exec is where the
 cursor advances and where `trackPin` happens against the live screen.
 
-**Rust port** (`crates/ghostty-vt/src/kitty/exec.rs`, all 10 inline tests ported 1:1):
+**Rust port** (`crates/qwertty-term-vt/src/kitty/exec.rs`, all 10 inline tests ported 1:1):
 `kitty::exec::execute(&mut Terminal, &Command) -> Option<Response>` mirrors the dispatch
 exactly. The in-progress `loading` state (which the Rust `ImageStorage` model deliberately
 omits) lives on `Screen.kitty_loading: Option<LoadingImage>`, alongside the new
@@ -304,7 +304,7 @@ a real decoder + medium reader), and animation actions (`f`/`a`/`c`, which retur
 
 ## Unicode placeholders (`U=1` virtual placements, `graphics_unicode.zig` + `graphics_render.zig`)
 
-Ported to `crates/ghostty-vt/src/kitty/unicode.rs`. This is the mechanism kitty uses to make
+Ported to `crates/qwertty-term-vt/src/kitty/unicode.rs`. This is the mechanism kitty uses to make
 graphics scroll, reflow, and copy/paste like ordinary text: instead of a screen-anchored pin
 (the `Location::Pin` case in `storage.rs`), a `U=1` display command creates a
 `Location::Virtual` placement, and the *client* (e.g. a shell prompt or `icat`-style tool)
@@ -399,7 +399,7 @@ data, publishable as-is. The blockers for a standalone crate are:
    and now `unicode::Placement`/`RenderPlacement` (the placeholder-resolution read path also
    walks and returns pins). A standalone crate would need to abstract "a tracked screen
    position" behind a trait or generic parameter. For now the port keeps `Pin` (this is a
-   `ghostty-vt` module, not yet a split crate), matching the prompt's "design the seam, split
+   `qwertty-term-vt` module, not yet a split crate), matching the prompt's "design the seam, split
    later" guidance.
 2. **`TerminalGeometry`** was introduced precisely to *avoid* leaking `Terminal`; it is a POD
    the model owns, so it is not a leak.
@@ -412,7 +412,7 @@ can go in a lower crate with zero ghostty types.
 
 ## Pin-API gaps
 
-The existing `PageList` Pin API (`crates/ghostty-vt/src/pagelist/pin.rs`) provides everything
+The existing `PageList` Pin API (`crates/qwertty-term-vt/src/pagelist/pin.rs`) provides everything
 the storage model needs: `pin(Point) -> Option<Pin>`, `track_pin(Pin) -> *mut Pin`,
 `untrack_pin(*mut Pin)`, `count_tracked_pins()`, and `Pin::is_between` / `Pin::down_overflow`
 (both `pub(crate)`, accessible from the in-crate kitty module). No additions were required.

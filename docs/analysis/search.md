@@ -7,7 +7,7 @@ search entry points that drive it. The async `Thread.zig` wrapper (Phase 2) and 
 `ScreenSearch` result-cache (`screen.zig`, depends on the not-yet-ported `Screen`) are
 **deferred** and documented below for the future chunks.
 
-The Rust port lands under `crates/ghostty-vt/src/search/`:
+The Rust port lands under `crates/qwertty-term-vt/src/search/`:
 
 | Zig file (lines)            | Rust file                  | Ported here?              |
 | --------------------------- | -------------------------- | ------------------------- |
@@ -35,7 +35,7 @@ Consequences:
   (`sliding_window.zig:112-115, 588-594, 463-512`). No separate reverse matcher.
 - **No dependency needed in Rust.** Per the rewrite-prompt decision table, literal-substring
   search means **zero regex crate**. `indexOfIgnoreCase` ports to a small hand-rolled
-  ASCII-case-insensitive `memmem` (a windowed `eq_ignore_ascii_case` scan). `ghostty-vt`
+  ASCII-case-insensitive `memmem` (a windowed `eq_ignore_ascii_case` scan). `qwertty-term-vt`
   gains **no new dependency** and **no feature flag** — the preferred outcome the prompt
   called out. (If upstream ever adds regex, that is a future additive feature gate; today it
   would be dead code.)
@@ -177,7 +177,7 @@ immutable — the caller pairs it with `ActiveSearch` for the mutable tail (`:15
 ## Match representation → highlight conversion
 
 Every searcher returns `highlight.Flattened` (already landed at
-`crates/ghostty-vt/src/highlight.rs` by the highlight chunk). `Flattened` is the
+`crates/qwertty-term-vt/src/highlight.rs` by the highlight chunk). `Flattened` is the
 mutation-robust currency of the whole search + renderer pipeline (see `highlight.md:126-136`):
 each `Chunk = { node, serial, start_row, end_row }` plus window-level `top_x`/`bot_x`. Tests
 collapse it via `Flattened.untracked()` → `Untracked { start, end }` pins and assert
@@ -227,7 +227,7 @@ that a future thread can call under a lock, exactly as Zig's thread does.
 
 ## Rust port notes
 
-- **Module** `crates/ghostty-vt/src/search/` (`mod.rs` + `sliding_window.rs`, `active.rs`,
+- **Module** `crates/qwertty-term-vt/src/search/` (`mod.rs` + `sliding_window.rs`, `active.rs`,
   `viewport.rs`, `pagelist.rs`), registered `pub mod search;` in `lib.rs`. In-crate because
   it needs `pub(crate)` PageList internals (`Node`, `node_page`, `Node.{next,prev,serial}`,
   `Pin.node`) and the crate-private `highlight::Chunk.node`.

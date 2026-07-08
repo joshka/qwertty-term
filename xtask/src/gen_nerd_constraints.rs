@@ -1,7 +1,7 @@
 //! `cargo xtask gen-nerd-constraints [<path-to-nerd_font_attributes.zig>]`
 //! — mechanically translates upstream's checked-in, codegen'd
 //! `src/font/nerd_font_attributes.zig` into
-//! `crates/ghostty-font/src/nerd_font_constraints.rs`.
+//! `crates/qwertty-term-font/src/nerd_font_constraints.rs`.
 //!
 //! Upstream `nerd_font_attributes.zig` is itself generated (by
 //! `nerd_font_codegen.py`, from the Nerd Fonts font-patcher script) and checked
@@ -22,7 +22,7 @@ use std::fs;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const DEFAULT_SRC: &str = "/tmp/ghostty-2da015/src/font/nerd_font_attributes.zig";
-const OUT: &str = "crates/ghostty-font/src/nerd_font_constraints.rs";
+const OUT: &str = "crates/qwertty-term-font/src/nerd_font_constraints.rs";
 
 /// One parsed switch arm: the codepoint labels it covers and the constraint
 /// fields it sets (defaults omitted upstream, so we only carry the set ones).

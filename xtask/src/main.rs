@@ -36,8 +36,8 @@ fn bundle(release: bool) -> Result<()> {
     build_app_binary(release)?;
 
     let profile = if release { "release" } else { "debug" };
-    let binary = Path::new("target").join(profile).join("ghostty-rs");
-    let app = Path::new("target").join("ghostty-rs.app");
+    let binary = Path::new("target").join(profile).join("qwertty-term");
+    let app = Path::new("target").join("qwertty-term.app");
     let contents = app.join("Contents");
     let macos = contents.join("MacOS");
     let resources = contents.join("Resources");
@@ -48,8 +48,8 @@ fn bundle(release: bool) -> Result<()> {
     fs::create_dir_all(&macos)?;
     fs::create_dir_all(&resources)?;
 
-    fs::copy(&binary, macos.join("ghostty-rs-bin"))?;
-    write_executable(macos.join("ghostty-rs"), launcher_script())?;
+    fs::copy(&binary, macos.join("qwertty-term-bin"))?;
+    write_executable(macos.join("qwertty-term"), launcher_script())?;
     write_app_icon(&resources)?;
     fs::write(contents.join("Info.plist"), info_plist())?;
     fs::write(contents.join("PkgInfo"), "APPL????")?;
@@ -60,7 +60,7 @@ fn bundle(release: bool) -> Result<()> {
 
 fn build_app_binary(release: bool) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.args(["build", "--package", "ghostty-rs"]);
+    command.args(["build", "--package", "qwertty-term"]);
     if release {
         command.arg("--release");
     }
@@ -82,7 +82,7 @@ fn write_executable(path: PathBuf, contents: &str) -> Result<()> {
 }
 
 fn write_app_icon(resources: &Path) -> Result<()> {
-    let iconset = Path::new("target").join("ghostty-rs.iconset");
+    let iconset = Path::new("target").join("qwertty-term.iconset");
     if iconset.exists() {
         fs::remove_dir_all(&iconset)?;
     }
@@ -92,7 +92,7 @@ fn write_app_icon(resources: &Path) -> Result<()> {
         write_icon_png(&iconset.join(spec.file_name()), spec.pixels())?;
     }
 
-    let icon_path = resources.join("ghostty-rs.icns");
+    let icon_path = resources.join("qwertty-term.icns");
     let status = Command::new("iconutil")
         .args(["-c", "icns", "-o"])
         .arg(&icon_path)
@@ -312,7 +312,7 @@ fn launcher_script() -> &'static str {
     r#"#!/bin/sh
 set -eu
 dir="$(CDPATH= cd "$(dirname "$0")" && pwd)"
-exec "$dir/ghostty-rs-bin" --window "$@"
+exec "$dir/qwertty-term-bin" --window "$@"
 "#
 }
 
@@ -325,17 +325,17 @@ fn info_plist() -> &'static str {
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>ghostty-rs</string>
+  <string>qwertty-term</string>
   <key>CFBundleExecutable</key>
-  <string>ghostty-rs</string>
+  <string>qwertty-term</string>
   <key>CFBundleIdentifier</key>
-  <string>net.joshka.ghostty-rs</string>
+  <string>net.joshka.qwertty-term</string>
   <key>CFBundleIconFile</key>
-  <string>ghostty-rs</string>
+  <string>qwertty-term</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>ghostty-rs</string>
+  <string>qwertty-term</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

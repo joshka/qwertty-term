@@ -34,9 +34,9 @@ Dependency spine: A → B/C → D → E → M/N; input track H → I/J/K/L indep
 | C   | **threads-vs-tokio spike + ADR** (Thread.zig semantics) | 531     | M   | **DONE; ADR-002 ACCEPTED 2026-07-08 (threads+polling)**                                                                   |
 | D   | Exec: fork/exec, 2-stage read pipeline, termios poll    | 2,143   | XL  | **DONE 2026-07-08 (two-stage pipeline verbatim, 106 MiB/s; waitpid watcher; teardown-under-flood proven)**                |
 | E   | Termio integration hub                                  | 800     | L   | **DONE 2026-07-08 (Termio hub + Thread loop; app on real stack @135.8 MiB/s live-engine; portable-pty retired from app)** |
-| F   | stream_handler glue (VT actions → mailboxes)            | 1,577   | L   | much already ported in ghostty-vt stream; delta only                                                                      |
+| F   | stream_handler glue (VT actions → mailboxes)            | 1,577   | L   | much already ported in qwertty-term-vt stream; delta only                                                                      |
 | G   | shell integration (bash/zsh/fish RC injection)          | 1,032   | M   | scripts copy verbatim; soon-after                                                                                         |
-| H   | input models (key/mods/keycodes/…)                      | 3,745   | M/L | **partial DONE 2026-07-07** (ghostty-input crate: key/mods/mouse/function-keys models; keycodes/KeymapDarwin remain)      |
+| H   | input models (key/mods/keycodes/…)                      | 3,745   | M/L | **partial DONE 2026-07-07** (qwertty-term-input crate: key/mods/mouse/function-keys models; keycodes/KeymapDarwin remain)      |
 | I   | kitty keyboard encode                                   | ~400    | S   | **DONE 2026-07-07** (window emits kitty sequences when apps enable them)                                                  |
 | K   | mouse reporting encode (5 formats)                      | 781     | M   | **DONE 2026-07-07** (wired into window)                                                                                   |
 | L   | bracketed paste                                         | 228     | M   | **DONE 2026-07-07** (control-byte stripping now active)                                                                   |
@@ -57,7 +57,7 @@ Font chunks (30.3k total; 27.7k macOS-relevant):
 
 | #   | Chunk                                             | Zig LoC     | Cx   | Notes                                                                                                  |
 | --- | ------------------------------------------------- | ----------- | ---- | ------------------------------------------------------------------------------------------------------ |
-| F3  | **sprite rasterizer → ghostty-sprite crate**      | 6,239       | M/L  | — IN FLIGHT; fully independent                                                                         |
+| F3  | **sprite rasterizer → qwertty-term-sprite crate**      | 6,239       | M/L  | — IN FLIGHT; fully independent                                                                         |
 | F1  | opentype tables                                   | 2,457       | M    | **DONE 2026-07-07 (ttf-parser adopted; skyline atlas ported — etagere rejected: no counter protocol)** |
 | F4  | Metrics + Atlas + backend + embedded fonts        | 3,981       | S/M  | **DONE 2026-07-07 (with F1: Metrics verified, Atlas, embedded fonts)**                                 |
 | F5  | CoreText face + discovery                         | 3,197       | XL   | **DONE 2026-07-08 (CoreText face+rasterize; F1 metrics VERIFIED exact)**                               |
@@ -75,7 +75,7 @@ Renderer chunks (13.9k total; Metal-first):
 | R2  | frame/present/pacing (IOSurface-on-CALayer, NOT CAMetalLayer; CVDisplayLink later, timer first) | ~1,050  | L   | **DONE 2026-07-08 (Frame/RenderPass/Pipeline/IOSurfaceLayer/SwapChain; clear+triangle readback proven)**            |
 | R3  | shaders: cell_text/cell_bg/bg_color MSL + wire structs bit-exact                                | ~1,300  | L   | **DONE 2026-07-08 (MSL verbatim, compiles on Metal; layouts pinned to wire offsets; color-math goldens)**           |
 | R4  | cell engine (rebuildCells family; full-redraw mode day one)                                     | ~2,600  | XL  | **DONE 2026-07-08 (first pixels: offscreen readback acceptance, all 5 assertions)**                                 |
-| R5  | render thread + mailbox (replace egui shell)                                                    | ~840    | L   | **DONE 2026-07-08 (ghostty-app: native window, tabs w/ pwd inheritance, menu, IME; smoke green)**                   |
+| R5  | render thread + mailbox (replace egui shell)                                                    | ~840    | L   | **DONE 2026-07-08 (qwertty-term-app: native window, tabs w/ pwd inheritance, menu, IME; smoke green)**                   |
 | R6  | kitty image + bg-image rendering                                                                | ~1,400  | L   | completeness                                                                                                        |
 | R7  | links (regex crate) + overlay + min-contrast polish                                             | ~740    | M   | completeness                                                                                                        |
 | R8  | shadertoy custom shaders (naga/shaderc)                                                         | ~1,100  | M   | completeness                                                                                                        |
@@ -87,7 +87,7 @@ existing row-dirty flags.
 
 ## M4 — Input/config completeness
 
-- [x] Minimal TOML config — DONE 2026-07-07: ~/.config/ghostty-rs/config.toml (theme via
+- [x] Minimal TOML config — DONE 2026-07-07: ~/.config/qwertty-term/config.toml (theme via
       ghostty theme files, copy-on-select, font-size, font-family preference)
 - [ ] Legacy key encoder (chunk J above, if not landed in M2)
 - [ ] Binding.zig keybind system + actions (4,882 XL) — only when wanted; near-default user
@@ -101,9 +101,9 @@ existing row-dirty flags.
       Binding.zig, `text:` action only; structured for the full port to absorb)
 - [x] Tab-nav keybinds — DONE 2026-07-09 (ctrl+tab, cmd+1-9 physical, cmd+shift+brackets)
 
-## M5 — The .app (ghostty-ffi + macOS shell)
+## M5 — The .app (qwertty-term-ffi + macOS shell)
 
-- [ ] Thin ghostty-ffi spike (app/surface/key/draw round-trip) — can start after M2;
+- [ ] Thin qwertty-term-ffi spike (app/surface/key/draw round-trip) — can start after M2;
       de-risks the least-explored seam
 - [ ] C ABI mirroring include/ghostty.h (~1.2k header; c/ bindings 14.8k Zig as reference)
 - [ ] Adapt macos/Sources Swift (37k; single-window subset first: SurfaceView, window,
@@ -120,7 +120,7 @@ existing row-dirty flags.
 Goal: betamax (~/local/betamax) drops `libghostty-vt-sys` (the pinned-Zig build) and, on
 macOS, renders THROUGH this stack for ghostty-identical output. Work splits across repos:
 
-- [ ] MB1 (betamax repo): swap `libghostty-vt-sys` -> `ghostty-vt` path/git dep. The VT
+- [ ] MB1 (betamax repo): swap `libghostty-vt-sys` -> `qwertty-term-vt` path/git dep. The VT
       surface it consumes exists (Terminal/Stream/snapshot/formatter). Prompt for the
       betamax thread: `work/betamax-thread-prompt.md`
 - [x] MB2 — DONE 2026-07-10: headless frame-capture example (`examples/frame-capture`: bytes in, PNG
@@ -130,9 +130,9 @@ macOS, renders THROUGH this stack for ghostty-identical output. Work splits acro
 - [x] MB3 — DONE 2026-07-08: pixel-identical on all integer-path glyphs (braille/octants
       0.00%); AA fringes on curves within per-family budgets, permanently gated (36 upstream
       golden atlases vendored)
-- [ ] MB4 (betamax): render via ghostty-renderer offscreen on macOS (Metal readback);
+- [ ] MB4 (betamax): render via qwertty-term-renderer offscreen on macOS (Metal readback);
       Linux CI stays on betamax's cosmic-text path until the software-raster ADR (M6)
-- [ ] MB5 (here): publishing prep for ghostty-vt/-sprite/-font/-renderer (versioning,
+- [ ] MB5 (here): publishing prep for qwertty-term-vt/-sprite/-font/-renderer (versioning,
       README, docs.rs) when Josh wants crates.io
 
 ## M6 — Long tail & deferred

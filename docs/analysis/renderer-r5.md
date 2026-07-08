@@ -4,9 +4,9 @@ Chunk R5 of `docs/plans/m3-first-pixels.md`: replace the egui host with a native
 macOS `NSApplication`/`NSWindow` that renders the terminal through the Metal
 stack (R1–R4), with **native window tabs** (each tab its own engine + PTY), a
 menu bar, and the `NSTextInputClient` input path proven by the R5 de-risk spike
-(`docs/analysis/appkit-input.md`). It lands a new crate, `crates/ghostty-app`
-(binary `ghostty-app`), plus additive-only presentation wiring in
-`crates/ghostty-renderer`. The egui spike (`crates/spike`) is untouched
+(`docs/analysis/appkit-input.md`). It lands a new crate, `crates/qwertty-term-app`
+(binary `qwertty-term-app`), plus additive-only presentation wiring in
+`crates/qwertty-term-renderer`. The egui spike (`crates/spike`) is untouched
 reference material.
 
 The host choice is **raw AppKit via `objc2`, not winit** — the PROPOSED verdict
@@ -36,7 +36,7 @@ fights for `NSApplication` ownership.
   > thread that never touches the engine. This is simpler and race-free.
 
 - **`Tab`** (`app.rs`) — one terminal: a vt `Engine` (`engine.rs`, a thin
-  `ghostty-vt` `Stream`+`Terminal` wrapper mirroring the spike's engine adapter),
+  `qwertty-term-vt` `Stream`+`Terminal` wrapper mirroring the spike's engine adapter),
   a `PtySession`, a render `Engine` (R4), a `FontGrid` (`font.rs`), a `FontSize`
   (`font_size.rs`), the owning `NSWindow` + `TerminalView`, current grid dims,
   backing scale, and mouse-report dedup state.
@@ -116,12 +116,12 @@ unit-tested.
    preedit state machine, mouse encode, menu action round-trips + grouping, tab
    registry + pwd inheritance.
 2. **`--offscreen-smoke`** (`smoke.rs`): spawns a real PTY + shell, drives a
-   scripted `printf` marker through it, feeds the output into a real `ghostty-vt`
+   scripted `printf` marker through it, feeds the output into a real `qwertty-term-vt`
    engine, renders through the R4 cell engine into an IOSurface, reads the pixels
    back, and asserts real glyph coverage over the default background (and that
    the readback size matches the geometry math). Exits 0 on success, 0 on a
    graceful no-Metal skip, non-zero on failure. **Runs green on this machine.**
-3. **Windowed auto-exit**: `GHOSTTY_APP_SMOKE_MS=<ms>` launches the real
+3. **Windowed auto-exit**: `QWERTTY_TERM_APP_SMOKE_MS=<ms>` launches the real
    `NSApplication`, opens a window+tab (spawning a PTY+shell, building the Metal
    renderer, running the pace loop, constructing the menu), and cleanly
    terminates after `<ms>`. **Runs green (exit 0) repeatedly**, proving
@@ -129,7 +129,7 @@ unit-tested.
 
 ### Windowed synthetic-input smoke (needs a GUI session)
 
-`GHOSTTY_APP_SMOKE_TYPE="echo <marker>\n"` launches the real window and, after
+`QWERTTY_TERM_APP_SMOKE_TYPE="echo <marker>\n"` launches the real window and, after
 the shell draws its prompt, delivers **synthetic `NSEvent` keystrokes through
 the AppKit responder chain** (`app.sendEvent`) — exercising the full
 frontmost/key → `keyDown:` → `NSTextInputClient`/encode → PTY → engine → screen
@@ -144,19 +144,19 @@ alongside the cooperative `activate()` in `applicationDidFinishLaunching`.
 Wired as an `#[ignore]`d cargo test (needs a windowserver session):
 
 ```sh
-cargo test -p ghostty-app --test typing_smoke -- --ignored --nocapture
+cargo test -p qwertty-term-app --test typing_smoke -- --ignored --nocapture
 ```
 
 Or run the binary directly:
 
 ```sh
-GHOSTTY_APP_SMOKE_TYPE='echo zz-marker\n' cargo run -p ghostty-app -- --window
+QWERTTY_TERM_APP_SMOKE_TYPE='echo zz-marker\n' cargo run -p qwertty-term-app -- --window
 ```
 
 ### Manual test steps (needs a human at a GUI session)
 
 ```sh
-cargo run -p ghostty-app --bin ghostty-app          # or: --window
+cargo run -p qwertty-term-app --bin qwertty-term-app          # or: --window
 ```
 
 Then try:
@@ -164,7 +164,7 @@ Then try:
 - **Typing / a shell**: run `ls`, `vim`, `htop` — text renders via Metal, theme
   colors show, the cursor draws.
 - **Theme**: with `theme = "Aardvark Ink"` (or any installed ghostty theme) in
-  `~/.config/ghostty-rs/config.toml`, the window opens with that theme's
+  `~/.config/qwertty-term/config.toml`, the window opens with that theme's
   background/foreground/palette instead of the built-in default.
 - **Selection + copy**: click-drag over text to select it (highlighted via
   inverse video, or the theme's `selection-background`/`selection-foreground`
@@ -187,11 +187,11 @@ Then try:
 
 ## Deferrals (documented, not blocking)
 
-- **Selection rendering has no dedicated renderer surface.** `ghostty-vt`'s
+- **Selection rendering has no dedicated renderer surface.** `qwertty-term-vt`'s
   `Screen::select`/`selection_string` (the engine-side selection model) is
   wired end to end — left-button drag creates a selection, Cmd-C and
   `copy-on-select` copy `selection_string` to the clipboard, a plain click
-  clears it — but neither `RenderSnapshot` nor `ghostty-renderer`'s cell
+  clears it — but neither `RenderSnapshot` nor `qwertty-term-renderer`'s cell
   engine carry any selection state (no selection colors in `FrameOptions`, no
   selection branch in `Contents::rebuild_row`). Rather than extend those two
   additive-only crates for a single consumer, `crate::selection::tint_selection`
@@ -207,7 +207,7 @@ Then try:
   `theme_file.rs` parser — the spike's module is `pub(crate)` in a different
   crate, so it can't be reused via a path dep without modifying read-only spike
   material; flagged for a later dedup). `config.theme` resolves via
-  `~/.config/ghostty/themes/` then `$GHOSTTY_RS_THEMES_DIR`/a hardcoded shared
+  `~/.config/ghostty/themes/` then `$QWERTTY_TERM_THEMES_DIR`/a hardcoded shared
   themes dir, seeding the engine's startup palette + default fg/bg/cursor
   (`Engine::with_colors`) and the selection tint's colors. OSC 4/10/11 dynamic
   colors and the renderer's built-in default theme remain the fallback when no

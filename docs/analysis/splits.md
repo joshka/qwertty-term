@@ -1,6 +1,6 @@
 # Splits slice 1: a surface tree per tab
 
-Terminal splits (panes within a tab) for `ghostty-app`. Upstream Ghostty
+Terminal splits (panes within a tab) for `qwertty-term-app`. Upstream Ghostty
 implements splits **entirely in the macOS Swift layer**; this chunk ports that
 model natively to Rust/AppKit (objc2), design-guided rather than transliterated.
 
@@ -28,7 +28,7 @@ where `Node = leaf(view) | split(Split)` and
 left/top child occupies. Every mutation (`inserting`, `removing`, `replacing`,
 `resizing`) returns a new tree.
 
-Our port: `crates/ghostty-app/src/splits.rs` — `SplitTree { root: Node,
+Our port: `crates/qwertty-term-app/src/splits.rs` — `SplitTree { root: Node,
 focused: SurfaceId }`, `Node = Leaf(SurfaceId) | Split { axis, ratio, first,
 second }`. Two adaptations:
 
@@ -114,7 +114,7 @@ redistribution.
 
 ## Layout mechanism: hand-rolled container (not `NSSplitView`)
 
-`crates/ghostty-app/src/splitview.rs`. A tab's window content view is a plain
+`crates/qwertty-term-app/src/splitview.rs`. A tab's window content view is a plain
 flipped `SplitContainer` (`NSView`) holding one `TerminalView` per pane at an
 explicit frame plus a thin `SplitDivider` view per split (4 pt, draggable,
 resize cursor). Frames come from the pure `SplitTree::layout`; the controller
@@ -193,12 +193,12 @@ unmodified keys never resolve here — they reach the PTY encoder untouched
   directional-neighbour/adjacent-wrap/split_rect as pure functions.
 - `splitkeys.rs` unit tests (7): chord table, disjointness from tab table,
   encoder fall-through.
-- `GHOSTTY_APP_SMOKE_SPLITS=1` (+ `GHOSTTY_APP_ASSERT_PRESENT=1`), wrapped by
+- `QWERTTY_TERM_APP_SMOKE_SPLITS=1` (+ `QWERTTY_TERM_APP_ASSERT_PRESENT=1`), wrapped by
   `tests/splits_smoke.rs` (`--ignored`, needs a windowserver): split right then
   down → 3 panes; three **isolated** live shells proven by writing a distinct
   marker to each pane's pty and asserting each marker appears **only** in its
   own pane's engine (isolation + liveness in one probe; pty fds aren't exposed
-  by `ghostty-termio`, and distinct-marker-per-shell is the stronger check);
+  by `qwertty-term-termio`, and distinct-marker-per-shell is the stronger check);
   directional focus walk (left/up/down); per-pane presented-pixel ink (frame
   readback per pane, 3 distinct regions via per-surface `last_present_delta`);
   divider move shrinks the left pane's columns and grows the right column's

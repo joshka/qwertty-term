@@ -2,7 +2,7 @@
 
 Differential-testing harness for the Ghostty Rust rewrite. Feeds identical
 byte streams to the Zig-built `libghostty-vt` reference terminal and (from
-Phase 1) the pure-Rust `ghostty-vt` port, then diffs observable state via the
+Phase 1) the pure-Rust `qwertty-term-vt` port, then diffs observable state via the
 `Oracle` trait (screen text + cursor position today; styles and modes later).
 
 ## Layout

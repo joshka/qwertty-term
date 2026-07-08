@@ -33,7 +33,7 @@ upstream build option for discoverability), **off by default in all
 profiles** — including debug/test. Opt in with:
 
 ```bash
-cargo test -p ghostty-vt --features slow_runtime_safety
+cargo test -p qwertty-term-vt --features slow_runtime_safety
 ```
 
 `Page::verify_integrity` remains compiled and callable unconditionally, so
@@ -43,7 +43,7 @@ feature-gated `assert_integrity`.
 
 ## Consequences
 
-- Default `cargo test -p ghostty-vt` no longer exercises the per-mutation
+- Default `cargo test -p qwertty-term-vt` no longer exercises the per-mutation
   integrity scan; a paranoid CI job (or local run) must pass
   `--features slow_runtime_safety` to get upstream-Debug-equivalent coverage.
 - This is a deliberate deviation from upstream's Debug default, trading

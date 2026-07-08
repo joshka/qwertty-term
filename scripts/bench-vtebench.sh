@@ -7,7 +7,7 @@
 # fast the terminal drains them. It must run INSIDE the terminal under test.
 #
 # Usage:
-#   scripts/bench-vtebench.sh                      # bench ghostty-rs (default)
+#   scripts/bench-vtebench.sh                      # bench qwertty-term (default)
 #   scripts/bench-vtebench.sh --terminal ghostty   # bench real Ghostty.app
 #   scripts/bench-vtebench.sh --max-secs 5         # shorter per-suite cap
 #
@@ -22,18 +22,18 @@
 # via `--silent --dat` instead.
 #
 # How each terminal is driven non-interactively:
-#   ghostty-rs  GHOSTTY_RS_COMMAND env override (crates/ghostty-app/src/
+#   qwertty-term  QWERTTY_TERM_COMMAND env override (crates/qwertty-term-app/src/
 #               termio.rs) runs `/bin/sh -c <runner>` instead of $SHELL; the
-#               app quits when the child exits. GHOSTTY_APP_SMOKE_MS is set as
+#               app quits when the child exits. QWERTTY_TERM_APP_SMOKE_MS is set as
 #               a hard-timeout backstop.
 #   ghostty     /Applications/Ghostty.app binary launched directly with
 #               `--command=<runner> --quit-after-last-window-closed=true`,
-#               window sized to match ghostty-rs's default 80x24 grid.
+#               window sized to match qwertty-term's default 80x24 grid.
 #
 # The vtebench checkout is pinned (VTEBENCH_COMMIT below) and lives at
 # work/vtebench-upstream — a git-ignored scratch dir, auto-cloned if missing.
 # An empty `[workspace]` table is appended to its Cargo.toml so cargo does not
-# try to adopt it into the ghostty-rs workspace.
+# try to adopt it into the qwertty-term workspace.
 
 set -euo pipefail
 
@@ -41,7 +41,7 @@ VTEBENCH_REPO="https://github.com/alacritty/vtebench"
 VTEBENCH_COMMIT="ead80032e57dee2e75f0b51f2ea67528647d9944"
 GHOSTTY_APP_BUNDLE="/Applications/Ghostty.app/Contents/MacOS/ghostty"
 
-TERMINAL="ghostty-rs"
+TERMINAL="qwertty-term"
 MAX_SECS=10
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -65,9 +65,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$TERMINAL" in
-ghostty-rs | ghostty) ;;
+qwertty-term | ghostty) ;;
 *)
-    echo "--terminal must be 'ghostty-rs' or 'ghostty', got '$TERMINAL'" >&2
+    echo "--terminal must be 'qwertty-term' or 'ghostty', got '$TERMINAL'" >&2
     exit 2
     ;;
 esac
@@ -96,7 +96,7 @@ git -C "$VTEBENCH_DIR" checkout --quiet "$VTEBENCH_COMMIT" 2>/dev/null || {
     git -C "$VTEBENCH_DIR" fetch --quiet origin "$VTEBENCH_COMMIT"
     git -C "$VTEBENCH_DIR" checkout --quiet "$VTEBENCH_COMMIT"
 }
-# Keep the scratch checkout out of the ghostty-rs cargo workspace.
+# Keep the scratch checkout out of the qwertty-term cargo workspace.
 grep -q '^\[workspace\]' "$VTEBENCH_DIR/Cargo.toml" ||
     printf '\n[workspace]\n' >>"$VTEBENCH_DIR/Cargo.toml"
 
@@ -150,21 +150,21 @@ run_with_timeout() {
 
 echo "==> running vtebench inside $TERMINAL (budget ${BUDGET_SECS}s)"
 case "$TERMINAL" in
-ghostty-rs)
-    echo "==> building ghostty-app (release)"
-    cargo build --release --quiet -p ghostty-app \
+qwertty-term)
+    echo "==> building qwertty-term-app (release)"
+    cargo build --release --quiet -p qwertty-term-app \
         --manifest-path "$REPO_ROOT/Cargo.toml"
-    GHOSTTY_RS_COMMAND="/bin/sh $RUNNER" \
-        GHOSTTY_APP_SMOKE_MS=$((BUDGET_SECS * 1000)) \
+    QWERTTY_TERM_COMMAND="/bin/sh $RUNNER" \
+        QWERTTY_TERM_APP_SMOKE_MS=$((BUDGET_SECS * 1000)) \
         run_with_timeout $((BUDGET_SECS + 30)) \
-        "$REPO_ROOT/target/release/ghostty-app" || true
+        "$REPO_ROOT/target/release/qwertty-term-app" || true
     ;;
 ghostty)
     [[ -x "$GHOSTTY_APP_BUNDLE" ]] || {
         echo "real Ghostty not found at $GHOSTTY_APP_BUNDLE" >&2
         exit 1
     }
-    # Match ghostty-rs's default 80x24 grid; quit when the command exits.
+    # Match qwertty-term's default 80x24 grid; quit when the command exits.
     run_with_timeout "$BUDGET_SECS" "$GHOSTTY_APP_BUNDLE" \
         --command="/bin/sh $RUNNER" \
         --window-width=80 --window-height=24 \

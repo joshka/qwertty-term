@@ -13,7 +13,7 @@ use crossterm::{
     },
     terminal::{self as term, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ghostty_spike::{CellStyle, CursorStyle, Engine, SnapshotColor, SnapshotUnderline};
+use qwertty_term_spike::{CellStyle, CursorStyle, Engine, SnapshotColor, SnapshotUnderline};
 
 mod config;
 mod pty;

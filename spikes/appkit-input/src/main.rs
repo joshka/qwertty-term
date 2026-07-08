@@ -10,8 +10,8 @@
 //! The heavier assertions live in the crate's `#[test]`s; this binary is a
 //! human-readable smoke run of the same matrix.
 
-use ghostty_input::key_encode::KittyFlags;
-use ghostty_input::key_mods::OptionAsAlt;
+use qwertty_term_input::key_encode::KittyFlags;
+use qwertty_term_input::key_mods::OptionAsAlt;
 use spike_appkit_input::translate::{self, Config, RawKeyEvent};
 
 /// macOS native keycodes used by the matrix (see `keymap.rs`).

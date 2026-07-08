@@ -1,4 +1,4 @@
-# Stream throughput: ghostty-vt vs upstream Zig (2026-07-07)
+# Stream throughput: qwertty-term-vt vs upstream Zig (2026-07-07)
 
 Apples-to-apples comparison of full stream→terminal-state throughput
 (`Stream<TerminalHandler>::feed` vs upstream's `ghostty-bench terminal-stream`,
@@ -15,14 +15,14 @@ every chunk through the full VT stream handler into real terminal state).
 - Upstream: ghostty @ 38e49a232 (the spec checkout), `ghostty-bench` built
   with zig 0.15.2 and `-Doptimize=ReleaseFast` — this matters, see pitfall
   below. Run as `ghostty-bench +terminal-stream --data=<file>`.
-- ghostty-rs: `cargo build --release`, `slow_runtime_safety` off (the
-  default), ghostty-vt @ e1f6f21b. Harness source lived in a scratch crate;
+- qwertty-term: `cargo build --release`, `slow_runtime_safety` off (the
+  default), qwertty-term-vt @ e1f6f21b. Harness source lived in a scratch crate;
   it is ~30 lines mirroring upstream's `TerminalStream.step`.
 - Best of 3 interleaved runs, macOS arm64 (M-series).
 
 ## Results
 
-| Workload            | upstream Zig (ReleaseFast) | ghostty-rs (release) | ratio      |
+| Workload            | upstream Zig (ReleaseFast) | qwertty-term (release) | ratio      |
 | ------------------- | -------------------------- | -------------------- | ---------- |
 | ASCII `a`           | ~0.07 s (~900 MB/s)        | ~0.165 s (~406 MB/s) | Zig ~2.3×  |
 | CJK `中`            | ~0.07 s (~950 MB/s)        | ~0.515 s (~130 MB/s) | Zig ~7×    |

@@ -16,7 +16,7 @@ draft). Zig source: `src/terminal/osc.zig` (842 lines: `Command` union,
 ## How this plugs into the VT parser seam
 
 `docs/analysis/vt-parser.md` ("OSC boundary" section) documents the seam this
-chunk fills: the ported `parser::Parser` (in `crates/ghostty-vt/src/parser/`)
+chunk fills: the ported `parser::Parser` (in `crates/qwertty-term-vt/src/parser/`)
 does **not** embed an OSC parser — it emits raw byte events `Action::OscStart`
 (on entry to `osc_string`), `Action::OscPut(u8)` (per accumulated byte), and
 `Action::OscEnd(u8)` (on exit, carrying the terminating byte: `0x07` for BEL,
@@ -280,7 +280,7 @@ terminal-state/Screen area owns full `color.zig`, including the X11 named-
 color table `x11_color.zig`, LAB color math, and the config-facing
 `parsePaletteEntry`). Per this chunk's charter, the **minimal** supporting
 pieces needed to make the OSC 4/5/10-19/104/110-119/21 tests pass have been
-ported into `crates/ghostty-vt/src/osc/rgb.rs`: an `Rgb::parse` covering the
+ported into `crates/qwertty-term-vt/src/osc/rgb.rs`: an `Rgb::parse` covering the
 `#rgb`/`#rrggbb`/`#rrrgggbbb`/`#rrrrggggbbbb`, bare `rgb`/`rrggbb`, and
 `rgb:h/hh/hhh/hhhh` / `rgbi:<float>/<float>/<float>` forms (`color.zig:642-
 699` in the Zig original), plus `Special`/`Dynamic` enums with `Dynamic::next`.
@@ -591,7 +591,7 @@ Two pieces of state live in *other* chunks' Zig files but are small enough,
 and load-bearing enough for test fidelity, to port minimally here rather
 than stub out:
 
-1. **`crates/ghostty-vt/src/osc/rgb.rs`**: `Rgb::parse` (hex forms +
+1. **`crates/qwertty-term-vt/src/osc/rgb.rs`**: `Rgb::parse` (hex forms +
    `rgb:`/`rgbi:`), ported from `src/terminal/color.zig:642-699`. **X11
    named colors are explicitly not ported** (see the `color.zig` section
    above) — that's `x11_color.zig`'s ~700-entry generated table, squarely
@@ -599,7 +599,7 @@ than stub out:
    here. `Special`/`Dynamic` enums (`color.zig:416-464`) are ported in full
    (they're tiny and OSC-parser-owned in spirit — every variant is a
    protocol constant the OSC layer dispatches on).
-2. **`crates/ghostty-vt/src/osc/string_encoding.rs`**: `printf_q_decode`
+2. **`crates/qwertty-term-vt/src/osc/string_encoding.rs`**: `printf_q_decode`
    and `url_percent_decode`, ported from `src/os/string_encoding.zig:6-191`
    (the `os/` prefix marks it as a general OS-layer helper, not
    terminal-specific, but it has exactly one caller in the whole codebase —
@@ -668,12 +668,12 @@ than stub out:
 8. **No FFI/`cval()` mirrors ported.** Every Zig payload struct with a
    `pub const C = void;`/`cval()` pair (kitty color OSC, kitty text sizing
    OSC, kitty dnd OSC, context_signal Command) drops that pair — there is
-   no `ghostty-ffi` crate yet (Phase 6). Noted per-type in doc comments so
+   no `qwertty-term-ffi` crate yet (Phase 6). Noted per-type in doc comments so
    the eventual FFI chunk knows what mirror to add.
 
 ## Zig vs Rust test counts (per file, final — port complete)
 
-Ported into `crates/ghostty-vt/src/osc/`. Every parser file maps 1:1 to a
+Ported into `crates/qwertty-term-vt/src/osc/`. Every parser file maps 1:1 to a
 Rust module of the same name under `osc/parsers/`; test counts match
 exactly (no consolidation), plus a small number of Rust-only tests added
 for behavior the Rust port introduces (e.g. the allocator-permission gate
@@ -710,8 +710,8 @@ time.)
 | `osc/mod.rs` (new: `Parser` itself, the seam integration)                                                 | —                                                                                              | `osc/mod.rs`                                  | 3          | seam composition + terminator + overflow                                                        |
 | **Grand total**                                                                                           | **269** (excl. `osc.zig`'s/`osc/parsers.zig`'s `refAllDecls` meta-tests, which assert nothing) |                                               | **281**    | 269 ported 1:1 + 12 new Rust-only (allocator gate, support-module unit tests, seam integration) |
 
-All 281 `ghostty-vt` OSC tests pass, alongside the pre-existing 496-and-growing
-suite (`cargo test -p ghostty-vt`: 497 lib tests total after this chunk, 14
+All 281 `qwertty-term-vt` OSC tests pass, alongside the pre-existing 496-and-growing
+suite (`cargo test -p qwertty-term-vt`: 497 lib tests total after this chunk, 14
 differential, 4 unicode crosscheck, 1 doctest — all green). The 4 pre-existing
 `parser::tests::osc_*` tests (the raw-seam tests in
-`crates/ghostty-vt/src/parser/mod.rs`) are unchanged.
+`crates/qwertty-term-vt/src/parser/mod.rs`) are unchanged.

@@ -1,5 +1,5 @@
 //! Formatter differential test: the ported Rust formatter
-//! ([`ghostty_vt::formatter`]) vs the Zig `ghostty_formatter_terminal_*`
+//! ([`qwertty_term_vt::formatter`]) vs the Zig `ghostty_formatter_terminal_*`
 //! reference, comparing **plain-text formatter output** (a richer comparison
 //! than the screen-text differ — it exercises trim, blank-row/blank-cell
 //! accounting, and wide-char handling in the serializer itself).

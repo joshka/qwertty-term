@@ -224,7 +224,7 @@ Second LUT instance with `Elem = bool`: true for private-use gc or codepoints in
 symbol-heavy blocks (arrows, dingbats, emoticons, misc symbols, enclosed alphanumerics,
 misc symbols & pictographs, transport & map) — formula in `uucode_config.zig:computeIsSymbol`.
 Sole runtime consumer is `renderer/cell.zig` (font/glyph decisions). **Not needed for
-`ghostty-vt`; defer to the renderer/font phase.**
+`qwertty-term-vt`; defer to the renderer/font phase.**
 
 ## Inline tests (the conformance anchors)
 
@@ -250,11 +250,11 @@ Sole runtime consumer is `renderer/cell.zig` (font/glyph decisions). **Not neede
 - The property LUT is codegen'd by `cargo xtask gen-unicode` from UCD 17.0.0 via `ucd-parse`
   (+ small hand parsers for `@missing` EAW directives, InCB values, and
   emoji-variation-sequences, which ucd-parse does not model), reproducing the uucode
-  derivations documented above. Generated file: `crates/ghostty-vt/src/unicode/tables.rs`
+  derivations documented above. Generated file: `crates/qwertty-term-vt/src/unicode/tables.rs`
   (stage1 = 4352, stage2 = 31488 = 123 blocks, stage3 = 29 unique property sets; ghostty's
   Zig table is 8192/31744/30, the delta being exactly the >U+10FFFF fallback rows).
 - Verified: per-codepoint parity with ghostty's actual generated `props.zig` (from the
   ghostty build cache at the surveyed commit) over all of `0..=0x10FFFF` — 0 mismatches —
   and exhaustive cross-checks against `unicode-width`/`unicode-segmentation` (both UCD
   17.0.0) with an allowlist documenting every intentional divergence
-  (`crates/ghostty-vt/tests/unicode_crosscheck.rs`).
+  (`crates/qwertty-term-vt/tests/unicode_crosscheck.rs`).

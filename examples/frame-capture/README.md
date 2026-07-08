@@ -1,6 +1,6 @@
 # frame-capture
 
-VT bytes in, PNG frames out — a small, headless example proving the ghostty-rs
+VT bytes in, PNG frames out — a small, headless example proving the qwertty-term
 embeddability story.
 
 A terminal recorder like [betamax](https://github.com/joshka/betamax) (a Rust
@@ -8,11 +8,11 @@ VHS-style recorder that wants ghostty-identical pixels) needs exactly three
 things from a terminal stack, none of them a window:
 
 1. a terminal state machine it can feed raw bytes
-   (`ghostty_vt::{Terminal, Stream}`),
+   (`qwertty_term_vt::{Terminal, Stream}`),
 2. a deterministic font substrate
-   (`ghostty_font`: embedded JetBrains Mono, metrics, glyph atlas),
+   (`qwertty_term_font`: embedded JetBrains Mono, metrics, glyph atlas),
 3. an offscreen renderer with pixel readback
-   (`ghostty_renderer`: `Engine` + Metal offscreen target).
+   (`qwertty_term_renderer`: `Engine` + Metal offscreen target).
 
 This example wires those three public APIs together in ~100 lines of actual
 logic (`src/main.rs`, `render_frame` is the whole story): feed bytes, snapshot,

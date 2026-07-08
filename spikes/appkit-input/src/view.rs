@@ -5,7 +5,7 @@
 //! can conform to `NSTextInputClient`, receive `keyDown:`, drive the same
 //! keyDown -> `interpretKeyEvents` -> `insertText`/`setMarkedText` dance
 //! upstream uses (`SurfaceView_AppKit.swift`), and feed
-//! `ghostty_input::key_encode::encode`.
+//! `qwertty_term_input::key_encode::encode`.
 //!
 //! What it deliberately does NOT do (out of spike scope): host a CALayer,
 //! participate in the responder chain of a real window, or wire

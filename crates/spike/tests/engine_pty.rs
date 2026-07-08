@@ -1,13 +1,13 @@
 //! Headless end-to-end test: spawn a real PTY running scripted shell commands,
-//! feed its output through the `ghostty-vt`-backed [`Engine`], and assert on the
+//! feed its output through the `qwertty-term-vt`-backed [`Engine`], and assert on the
 //! final rendered screen text + styled snapshot. This exercises the same path
 //! the interactive frontends use (pty bytes -> engine.write -> snapshot) without
 //! a GUI.
 
 use std::time::{Duration, Instant};
 
-use ghostty_spike::{Engine, SnapshotColor};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use qwertty_term_spike::{Engine, SnapshotColor};
 
 /// Spawn `/bin/sh -c <script>` on a PTY of the given size, pump its output into
 /// an [`Engine`] until the child exits (or a timeout), and return the engine.

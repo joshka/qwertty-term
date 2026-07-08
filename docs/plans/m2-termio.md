@@ -37,7 +37,7 @@ Sizing detail lives in the termio/input discovery report (2026-07-07); key excer
 | C   | runtime spike + ADR                        | Opus                               | 531     | see decision 2; timeboxed; docs/adr/                                                   |
 | D   | Exec                                       | Opus, priority ladder              | 2,143   | after C; the XL; 11 upstream tests                                                     |
 | E   | Termio hub + spike swap to real PTY        | Opus                               | 800     | retires portable-pty                                                                   |
-| F   | stream_handler delta                       | Sonnet                             | 1,577   | most exists in ghostty-vt stream; port the mailbox-effect delta only (enumerate first) |
+| F   | stream_handler delta                       | Sonnet                             | 1,577   | most exists in qwertty-term-vt stream; port the mailbox-effect delta only (enumerate first) |
 | G   | shell integration                          | Sonnet                             | 1,032   | after D; 20 upstream tests                                                             |
 | J   | legacy key encode                          | Opus                               | ~2,100  | fills the seam input-encode left; 92-test file                                         |
 | M   | Surface.zig single-surface                 | Opus, multi-pass like Terminal.zig | 6,036   | decision 6; join point                                                                 |

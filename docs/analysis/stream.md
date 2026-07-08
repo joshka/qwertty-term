@@ -2,7 +2,7 @@
 
 Surveyed and ported against ghostty commit `2da015cd6` (verify with
 `git -C ~/local/ghostty rev-parse HEAD`). The Rust port lives in
-`crates/ghostty-vt/src/stream.rs` (+ `stream/tests.rs`) and the differential
+`crates/qwertty-term-vt/src/stream.rs` (+ `stream/tests.rs`) and the differential
 oracle in `crates/vt-diff/src/rust_engine.rs`.
 
 `stream.zig` (3.7k) composes the [`UTF8Decoder`](vt-parser.md) and
@@ -215,7 +215,7 @@ the differential suite where it matters.
   insert/delete chars. All identical.
 
 No deliberate divergences. The three fixtures also pass identically against the
-Rust engine alone (`cargo test -p ghostty-vt --lib stream`) and the reference
+Rust engine alone (`cargo test -p qwertty-term-vt --lib stream`) and the reference
 (`cargo test -p vt-diff --features reference tests::smoke`).
 
 ## Seams closed this chunk (M1)
@@ -266,11 +266,11 @@ concrete `TerminalHandler` over `Terminal` with a drainable reply queue, and the
 `vt-diff` crate gained the in-tree `RustTerminal` oracle and a Rust-vs-reference
 differential suite.
 
-Gates: `cargo check --workspace` green; `cargo test -p ghostty-vt` 874 lib
+Gates: `cargo check --workspace` green; `cargo test -p qwertty-term-vt` 874 lib
 (33 new stream) + prior differential/unicode/doctests all pass; `cargo test -p
 vt-diff` (3) and `--features reference` (differential 9 + rust_engine 3 +
 smoke 3 + oracle 4) all pass; `cargo fmt` clean; `cargo clippy` clean on
-`ghostty-vt` + `vt-diff` (pre-existing spike clippy warnings untouched — spike
+`qwertty-term-vt` + `vt-diff` (pre-existing spike clippy warnings untouched — spike
 source not edited per charter).
 
 All three replay fixtures pass **identically** against both the Rust engine and

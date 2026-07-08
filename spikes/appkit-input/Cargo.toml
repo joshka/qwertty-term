@@ -1,7 +1,7 @@
-# R5 de-risk spike: AppKit NSTextInputClient -> ghostty-input encoder.
+# R5 de-risk spike: AppKit NSTextInputClient -> qwertty-term-input encoder.
 #
 # This is its OWN workspace root (note the empty `[workspace]` table below), so
-# it is NOT a member of the top-level ghostty-rs workspace. That keeps
+# it is NOT a member of the top-level qwertty-term workspace. That keeps
 # `cargo check --workspace` at the repo root green and untouched: the root
 # `members = ["crates/*", "xtask"]` glob never scans `spikes/`, and declaring a
 # workspace here stops any accidental upward member discovery. Build/test this
@@ -9,7 +9,7 @@
 #
 #     cargo test --manifest-path spikes/appkit-input/Cargo.toml
 #
-# The dependency on `ghostty-input` is by relative path into the sibling
+# The dependency on `qwertty-term-input` is by relative path into the sibling
 # `crates/` tree; it does not pull the whole workspace in.
 [workspace]
 
@@ -27,10 +27,10 @@ name = "spike-appkit-input"
 path = "src/main.rs"
 
 [dependencies]
-ghostty-input = { path = "../../crates/ghostty-input" }
+qwertty-term-input = { path = "../../crates/qwertty-term-input" }
 
 # objc2 family pinned to the same versions the workspace already standardizes on
-# (objc2 0.6 / objc2-* 0.3.2, per crates/ghostty-renderer and crates/ghostty-font),
+# (objc2 0.6 / objc2-* 0.3.2, per crates/qwertty-term-renderer and crates/qwertty-term-font),
 # so the spike exercises the exact toolchain R5 would inherit.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

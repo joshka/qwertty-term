@@ -1,24 +1,24 @@
-//! Adapter that runs the spike frontends on the `ghostty-vt` engine.
+//! Adapter that runs the spike frontends on the `qwertty-term-vt` engine.
 //!
-//! This wraps `ghostty_vt`'s [`Stream`] + [`Terminal`] behind the narrow
+//! This wraps `qwertty_term_vt`'s [`Stream`] + [`Terminal`] behind the narrow
 //! interface the crossterm and egui frontends need: feed pty bytes in, drain
 //! reply bytes out, snapshot the visible + scrollback grid for rendering, read
 //! cursor / title / input-affecting modes, and resize.
 //!
-//! The rendering surface is `ghostty_vt`'s owned [`Snapshot`] type (see
-//! [`ghostty_vt::snapshot`]) — the frontends consume it directly rather than
+//! The rendering surface is `qwertty_term_vt`'s owned [`Snapshot`] type (see
+//! [`qwertty_term_vt::snapshot`]) — the frontends consume it directly rather than
 //! re-mapping into the spike's legacy cell/style types, which are no longer used
 //! on the live path.
 
-use ghostty_input::key_encode::KittyFlags;
-use ghostty_input::mouse_encode::{MouseEvent, MouseFormat};
-use ghostty_vt::modes::Mode;
-use ghostty_vt::snapshot::Snapshot;
-use ghostty_vt::stream::{Stream, TerminalHandler};
-use ghostty_vt::terminal::{Colors, Options, Terminal};
+use qwertty_term_input::key_encode::KittyFlags;
+use qwertty_term_input::mouse_encode::{MouseEvent, MouseFormat};
+use qwertty_term_vt::modes::Mode;
+use qwertty_term_vt::snapshot::Snapshot;
+use qwertty_term_vt::stream::{Stream, TerminalHandler};
+use qwertty_term_vt::terminal::{Colors, Options, Terminal};
 
-pub use ghostty_vt::screen::cursor::CursorStyle;
-pub use ghostty_vt::snapshot::{
+pub use qwertty_term_vt::screen::cursor::CursorStyle;
+pub use qwertty_term_vt::snapshot::{
     CellStyle, CellWidth, SnapshotCell, SnapshotColor, SnapshotCursor, SnapshotRow,
     SnapshotUnderline, SnapshotWindow,
 };
@@ -35,7 +35,7 @@ pub enum MouseTracking {
     Any,
 }
 
-/// The spike-side terminal engine, backed by `ghostty-vt`.
+/// The spike-side terminal engine, backed by `qwertty-term-vt`.
 pub struct Engine {
     stream: Stream<TerminalHandler>,
 }
@@ -83,7 +83,7 @@ impl Engine {
     }
 
     /// Drain the most recent OSC 52 clipboard write request, if any.
-    /// Returns `(kind, raw_base64_data)` — `ghostty-vt` hands this up raw
+    /// Returns `(kind, raw_base64_data)` — `qwertty-term-vt` hands this up raw
     /// (still base64-encoded, per upstream's apprt-decodes-it policy); the
     /// frontend is responsible for base64-decoding and performing the actual
     /// clipboard I/O. An empty `raw_base64_data` means "clear the clipboard".
@@ -174,22 +174,22 @@ impl Engine {
     }
 
     /// The kitty keyboard protocol flags currently active on the active
-    /// screen, in `ghostty-input`'s freestanding [`KittyFlags`] shape. A
+    /// screen, in `qwertty-term-input`'s freestanding [`KittyFlags`] shape. A
     /// narrow accessor over `Screen::kitty_keyboard` (itself engine/screen
     /// state) so the window can route key events through
-    /// `ghostty_input::key_encode` without the encoding crate depending on
-    /// `ghostty-vt`.
+    /// `qwertty_term_input::key_encode` without the encoding crate depending on
+    /// `qwertty-term-vt`.
     pub fn kitty_flags(&self) -> KittyFlags {
         let flags = self.terminal().screen().kitty_keyboard.current();
         KittyFlags::from_bits(flags.int())
     }
 
     /// Key-encoding options derived from current terminal mode state, for use
-    /// with `ghostty_input::key_encode::encode`. `macos_option_as_alt` is left
+    /// with `qwertty_term_input::key_encode::encode`. `macos_option_as_alt` is left
     /// at its default (`OptionAsAlt::False`): that setting isn't terminal
     /// state, it's a user config knob the spike doesn't expose yet.
-    pub fn key_encode_options(&self) -> ghostty_input::key_encode::Options {
-        ghostty_input::key_encode::Options {
+    pub fn key_encode_options(&self) -> qwertty_term_input::key_encode::Options {
+        qwertty_term_input::key_encode::Options {
             cursor_key_application: self.mode(Mode::CursorKeys),
             keypad_key_application: self.mode(Mode::KeypadKeys),
             backarrow_key_mode: self.mode(Mode::BackarrowKeyMode),
@@ -201,7 +201,7 @@ impl Engine {
         }
     }
 
-    /// The terminal's requested mouse reporting mode, in `ghostty-input`'s
+    /// The terminal's requested mouse reporting mode, in `qwertty-term-input`'s
     /// freestanding [`MouseEvent`] shape (`None` if mouse reporting is off).
     pub fn mouse_event(&self) -> MouseEvent {
         if self.mode(Mode::MouseEventAny) {
@@ -217,7 +217,7 @@ impl Engine {
         }
     }
 
-    /// The terminal's requested mouse report format, in `ghostty-input`'s
+    /// The terminal's requested mouse report format, in `qwertty-term-input`'s
     /// freestanding [`MouseFormat`] shape. Precedence matches upstream
     /// Ghostty: SGR-pixels, then SGR, then urxvt, then UTF-8, else X10.
     pub fn mouse_format(&self) -> MouseFormat {
@@ -337,15 +337,15 @@ mod tests {
         let snap = engine.snapshot();
         assert_eq!(
             snap.palette[1],
-            ghostty_vt::color::Rgb::new(0x11, 0x22, 0x33)
+            qwertty_term_vt::color::Rgb::new(0x11, 0x22, 0x33)
         );
         assert_eq!(
             snap.default_fg,
-            Some(ghostty_vt::color::Rgb::new(0xaa, 0xbb, 0xcc))
+            Some(qwertty_term_vt::color::Rgb::new(0xaa, 0xbb, 0xcc))
         );
         assert_eq!(
             snap.default_bg,
-            Some(ghostty_vt::color::Rgb::new(0x00, 0x11, 0x22))
+            Some(qwertty_term_vt::color::Rgb::new(0x00, 0x11, 0x22))
         );
     }
 }

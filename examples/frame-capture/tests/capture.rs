@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ghostty_font::Metrics;
-use ghostty_font::coretext::Face;
+use qwertty_term_font::Metrics;
+use qwertty_term_font::coretext::Face;
 
 /// The scripted session: a colored prompt, SGR colors, a box-drawing frame,
 /// and an emoji.

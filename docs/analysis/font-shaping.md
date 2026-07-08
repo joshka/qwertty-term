@@ -17,7 +17,7 @@ font substrate: `Collection`, `CodepointResolver`, `Shaper` (rustybuzz), and a
   not the packed u16 bitfield). These are LOCKED; this analysis documents how
   the reduced cut maps onto upstream, not whether to re-litigate them.
 - **Scope of the port (this chunk):** single regular style, single primary
-  font, sprite dispatch to `ghostty-sprite`, rustybuzz shaping of one run,
+  font, sprite dispatch to `qwertty-term-sprite`, rustybuzz shaping of one run,
   cluster→cell mapping, glyph→atlas upload with a codepoint→glyph render cache.
   Everything the plan calls a "completeness pass" (font fallback search, style
   grouping beyond a single slot, ligature/emoji run splitting) is deferred and
@@ -140,7 +140,7 @@ The reduced cut is single-font + sprite dispatch, so it collapses to steps
   regular anyway).
 - **Step 2 (codepoint override):** **deferred.** No `CodepointMap` in the
   reduced config surface.
-- **Step 3 (sprite dispatch):** **implemented.** `ghostty_sprite::has_codepoint(cp)`
+- **Step 3 (sprite dispatch):** **implemented.** `qwertty_term_sprite::has_codepoint(cp)`
   is the analog of `sprite.hasCodepoint`. A hit returns `FontIndex::Sprite`.
   (The reduced sprite check is codepoint-only; upstream also gates on
   presentation for a few emoji-vs-text cases, deferred.)
@@ -341,7 +341,7 @@ the atlas ownership:
   offset_y }` mirrors upstream's `Glyph`.
 - On a render miss: for a face glyph, `face.rasterize(glyph_id)` (F5) →
   `atlas.reserve(w, h)` → `atlas.set` (or a zero-region for blank glyphs); for
-  a sprite codepoint, `ghostty_sprite::render(cp, &sprite_metrics)` → same
+  a sprite codepoint, `qwertty_term_sprite::render(cp, &sprite_metrics)` → same
   reserve/set. On `AtlasFull`, `atlas.grow(size*2)` and retry — the exact
   upstream escalation.
 - Returns atlas coordinates + placement offsets. This is the "returning atlas
@@ -418,7 +418,7 @@ reduced substrate:
 4. Shape+rasterize a CJK ideograph (U+6C34 水): a single glyph whose advance is
    ~2 cells, occupying 2 cells with one glyph.
 5. Rasterize a box-drawing char (U+2500 ─): resolves to `FontIndex::Sprite`,
-   comes from `ghostty-sprite` (not a face), lands in the atlas.
+   comes from `qwertty-term-sprite` (not a face), lands in the atlas.
 6. Assert every rasterized cell has a distinct, in-bounds atlas region.
 
 ## Deferrals

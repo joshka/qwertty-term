@@ -4,9 +4,9 @@ members = ["crates/*", "examples/*", "xtask"]
 default-members = ["crates/*"]
 # cargo-fuzz target is its own workspace (needs nightly); keep it out so
 # `cargo check --workspace` stays green on stable.
-exclude = ["crates/ghostty-vt/fuzz"]
+exclude = ["crates/qwertty-term-vt/fuzz"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/joshka/ghostty-rs"
+repository = "https://github.com/joshka/qwertty-term"

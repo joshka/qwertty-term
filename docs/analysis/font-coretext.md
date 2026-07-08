@@ -1,6 +1,6 @@
 # CoreText face loading & rasterization (analysis)
 
-Analysis of Ghostty's macOS CoreText font backend, for the ghostty-rs port
+Analysis of Ghostty's macOS CoreText font backend, for the qwertty-term port
 (chunk **M3 F5-reduced**). All line references are against
 `src/font/face/coretext.zig` and `src/font/face.zig` at commit **`2da015cd6`**
 (read via `git show 2da015cd6:…` from the reference checkout).

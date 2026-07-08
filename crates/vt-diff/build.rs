@@ -57,5 +57,5 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", lib.display());
     println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=ghostty-vt");
+    println!("cargo:rustc-link-lib=static=qwertty-term-vt");
 }

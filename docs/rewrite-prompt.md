@@ -107,7 +107,7 @@ These are what make Ghostty Ghostty. Port the *design*, in idiomatic Rust:
 6. **libghostty layering**: the core is a library (`include/ghostty.h`, ~1,210 lines, 100+
    functions, opaque `app_t`/`surface_t`/`config_t` handles, runtime-callback struct for
    wakeup/action/clipboard) and the macOS app is a *consumer* of it. Preserve this split: the
-   Rust workspace must produce a `ghostty-vt`-equivalent crate and a C ABI layer so a
+   Rust workspace must produce a `qwertty-term-vt`-equivalent crate and a C ABI layer so a
    Swift/AppKit shell (or any other frontend) can embed it.
 7. **Kitty protocols**: graphics (`src/terminal/kitty/graphics_*.zig` ~6.3k — chunked transfer,
    placements at three z-layers, virtual placements) and keyboard
@@ -149,19 +149,19 @@ Cargo workspace in `~/local/ghostty-rs` with crates cut at ghostty's own seams:
 
 ```text
 crates/
-  ghostty-vt         # terminal core: parser, stream, Terminal, Screen, PageList, page,
+  qwertty-term-vt         # terminal core: parser, stream, Terminal, Screen, PageList, page,
                      # sgr/csi/osc/dcs/apc, kitty graphics state, search, selection,
                      # formatter, unicode tables. No I/O, no platform deps. Fuzzable.
   ghostty-config     # config parse/validate/format, themes, conditionals, keybind parsing
-  ghostty-input      # key/mouse encoding (kitty keyboard, legacy, mouse protocols),
+  qwertty-term-input      # key/mouse encoding (kitty keyboard, legacy, mouse protocols),
                      # binding trigger matching, actions
-  ghostty-termio     # PTY (openpty/fork on macOS), exec backend, read thread,
+  qwertty-term-termio     # PTY (openpty/fork on macOS), exec backend, read thread,
                      # shell integration injection, flow control
-  ghostty-font       # discovery (CoreText now, fontconfig later), face loading, shaping,
+  qwertty-term-font       # discovery (CoreText now, fontconfig later), face loading, shaping,
                      # atlas, sprite rasterization, nerd-font constraints, resolver
-  ghostty-renderer   # generic renderer + backend trait; Metal backend first
+  qwertty-term-renderer   # generic renderer + backend trait; Metal backend first
   ghostty-core       # App/Surface orchestration, mailboxes, threading, actions
-  ghostty-ffi        # C ABI mirroring include/ghostty.h (cbindgen), for the Swift shell
+  qwertty-term-ffi        # C ABI mirroring include/ghostty.h (cbindgen), for the Swift shell
   ghostty            # binary: CLI actions (+list-fonts, +show-config, …) and app entry
 xtask/               # build tooling: unicode table codegen, nerd-font codegen, shader
                      # compilation, .app bundling, xcframework
@@ -193,7 +193,7 @@ betamax as the reference consumer:
    `feed bytes → inspect/step state → render frame` on its own thread and schedule, without
    spawning ghostty's thread topology. The threaded mailbox architecture is how the *app*
    composes the crates, not a requirement baked into them.
-6. **Rust API is primary; the C ABI (`ghostty-ffi`) is a wrapper over it** — never the only
+6. **Rust API is primary; the C ABI (`qwertty-term-ffi`) is a wrapper over it** — never the only
    door to a capability, and no capability (especially rendering) is app-private.
 
 An embedding example lives in-tree from Phase 4 onward (`examples/frame-capture`: bytes in,
@@ -202,10 +202,10 @@ being discovered by the next betamax.
 
 Rules:
 
-- `ghostty-vt` must stay dependency-light and compile on stable Rust; it is the crown jewel
+- `qwertty-term-vt` must stay dependency-light and compile on stable Rust; it is the crown jewel
   and should be independently publishable/fuzzable, like `libghostty-vt`.
 - Unsafe is allowed and expected in the page memory model, FFI, and GPU code — isolate it,
-  document invariants, run Miri on `ghostty-vt`'s unsafe layer where feasible.
+  document invariants, run Miri on `qwertty-term-vt`'s unsafe layer where feasible.
 - Cross-thread messages are enums mirroring ghostty's Message unions; no ad-hoc shared state
   beyond the documented render-state mutex.
 
@@ -226,7 +226,7 @@ Rules:
 | Image decode (kitty graphics)                     | `image`/`png` crates instead of wuffs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | No user-visible semantics                                                                                                                                               |
 | Headless/embedded rendering                       | **Offscreen GPU target + readback first** (render to an offscreen Metal texture with the exact app pipeline, read pixels back) — pixel-identity with the app is free. Then evaluate (ADR) a **software raster backend** implementing the same GPU-backend trait for GPU-less environments (Linux CI, servers): candidates are a scalar/`std::simd` rasterizer of the same cell model, or `naga`-interpreted shaders; it must pass the same golden-image suite as the GPU path or document every divergence                                                                                                                                                                                                                                                                                                                                                          | Betamax-class consumers need frames on machines without a display and ideally without a GPU; two backends behind one trait keeps them honest against each other         |
 | PTY                                               | Direct `openpty`/`forkpty` via `nix`/`rustix` (port `pty.c` + `Exec.zig`), not `portable-pty`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Need ghostty-level control (termios polling, flow control, process watching)                                                                                            |
-| Concurrency substrate (termio, app orchestration) | **Undecided — settle by measurement in Phase 2 (ADR required).** Candidates: (a) dedicated threads + `mio`/`polling`/kqueue-via-`rustix` (libxev equivalent, mirrors ghostty), (b) tokio (`AsyncFd` for the PTY, `tokio::process`, timers, `select!` replacing hand-rolled wakeup pipes). Build the Phase-2 termio spike so the substrate is swappable behind the mailbox API, then benchmark both: PTY read→screen-update latency (p50/p99), throughput under `cat` flood, wakeup jitter, CPU idle cost, and code complexity (signal handling, kill-pipe, termios polling). Adopt tokio if it wins or ties on the hot path — it likely simplifies process/signal/timer plumbing — but do not let executor scheduling onto the byte-parsing hot path without numbers. Renderer stays a dedicated thread regardless; `ghostty-vt` stays sync/runtime-free regardless | This is exactly the layer where threads-vs-async problems (latency jitter, priority inversion, buffer ownership across `await`) show up — decide with data, not fashion |
+| Concurrency substrate (termio, app orchestration) | **Undecided — settle by measurement in Phase 2 (ADR required).** Candidates: (a) dedicated threads + `mio`/`polling`/kqueue-via-`rustix` (libxev equivalent, mirrors ghostty), (b) tokio (`AsyncFd` for the PTY, `tokio::process`, timers, `select!` replacing hand-rolled wakeup pipes). Build the Phase-2 termio spike so the substrate is swappable behind the mailbox API, then benchmark both: PTY read→screen-update latency (p50/p99), throughput under `cat` flood, wakeup jitter, CPU idle cost, and code complexity (signal handling, kill-pipe, termios polling). Adopt tokio if it wins or ties on the hot path — it likely simplifies process/signal/timer plumbing — but do not let executor scheduling onto the byte-parsing hot path without numbers. Renderer stays a dedicated thread regardless; `qwertty-term-vt` stays sync/runtime-free regardless | This is exactly the layer where threads-vs-async problems (latency jitter, priority inversion, buffer ownership across `await`) show up — decide with data, not fashion |
 | Config format                                     | **TOML** (`toml`/`serde` crates) — a deliberate, owner-approved deviation from ghostty's custom key=value format. Keep hyphenated option names and semantics identical; ship a `+import-ghostty-config` converter (ghostty format → TOML, including keybind strings) and use converted ghostty example configs as fixtures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Owner prefers a standard format; converter preserves the migration path                                                                                                 |
 | Shell integration scripts                         | **Copy verbatim** from `src/shell-integration/`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | They're shell scripts; divergence is pure loss                                                                                                                          |
 | Terminfo                                          | Ship ghostty's terminfo (`xterm-ghostty`) unchanged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Ecosystem compat                                                                                                                                                        |
@@ -249,7 +249,7 @@ Extraction candidates (flag status in `docs/port-status.md`):
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | **Sprite glyph rasterizer** — box drawing, block elements, braille, powerline, branch/git symbols, geometric shapes, legacy computing (U+1FB00 block), etc.: "given cell metrics + line thickness, what does this codepoint look like" | `src/font/sprite/` (~3.8k)           | Any terminal, TUI screenshot/recording tools (betamax), font tooling; nothing in the ecosystem renders these *correctly and seam-free* as a library | High — extract                                        |
 | Nerd-font constraint rules (codepoint-range → sizing/alignment/padding)                                                                                                                                                                | codegen'd `nerd_font_attributes.zig` | Companion to the sprite crate; any renderer drawing nerd fonts at grid metrics                                                                      | High — extract (same crate or sibling)                |
-| **ghostty-vt** — the whole terminal core                                                                                                                                                                                               | `src/terminal/`                      | Already planned as the crown-jewel crate; this is the flagship extraction                                                                           | Committed                                             |
+| **qwertty-term-vt** — the whole terminal core                                                                                                                                                                                               | `src/terminal/`                      | Already planned as the crown-jewel crate; this is the flagship extraction                                                                           | Committed                                             |
 | Kitty graphics protocol model (chunked transfer, placement tracking, z-layers) — decoupled from any renderer                                                                                                                           | `src/terminal/kitty/` (~6.3k)        | Any emulator or emulator-adjacent tool implementing the protocol                                                                                    | Medium — design for it, split when a consumer appears |
 | Terminal-tuned Unicode tables (width + grapheme FSM, mode-2027-aware)                                                                                                                                                                  | `src/unicode/` + codegen             | Overlaps `unicode-width`/`unicode-segmentation`; only worth it if terminal-specific semantics diverge enough                                        | Low — flag, don't commit                              |
 | Glyph atlas / bin packing                                                                                                                                                                                                              | `src/font/Atlas.zig`                 | `etagere`/`guillotiere` already exist                                                                                                               | No — use or wrap ecosystem                            |
@@ -267,33 +267,33 @@ to* a terminal. It owns: session lifecycle, command encoding (host→terminal), 
 decoding (terminal→host), query correlation, and — critically — a **canonical
 machine-readable sequence database** (every sequence family, with citations and byte
 fixtures, generating its docs) plus a **conformance runner** producing a "caniuse for
-terminals" support matrix. ghostty-rs is the emulator side of the same wire: it decodes what
+terminals" support matrix. qwertty-term is the emulator side of the same wire: it decodes what
 qwertty encodes and encodes what qwertty decodes.
 
 Division of labor — do not duplicate:
 
-- **qwertty owns the sequence database, citations, and conformance tooling.** ghostty-rs
+- **qwertty owns the sequence database, citations, and conformance tooling.** qwertty-term
   must NOT build a rival sequence registry or protocol-documentation corpus. The
   authoritative statement of what is currently consumable is
   `work/qwertty/protocol-status.md` (maintained by the qwertty thread, commit-stamped) —
   read it before relying on anything qwertty-shaped. As of its 2026-07-06 stamp: the
   database exists only on qwertty's prototype branch
   (`joshka/qwertty-reference-prototype:registry/`); its **host→terminal command fixtures
-  are usable as a `ghostty-vt` parser corpus today** (unescape `\e`/`\xNN`, trailing LF is
+  are usable as a `qwertty-term-vt` parser corpus today** (unescape `\e`/`\xNN`, trailing LF is
   noise, skip the named known-bad groups in the status doc's trust map), its terminal→host
   report fixtures are **quarantined — never use as encoder ground truth**, and its sequence
   IDs are **not yet citable** — `docs/analysis/` docs cite primary specs directly until
   qwertty's Phase 2 stabilizes an ID scheme (mapping can be added mechanically later).
-- **ghostty-rs owns emulator-side semantics** (state machine, memory model, rendering) —
+- **qwertty-term owns emulator-side semantics** (state machine, memory model, rendering) —
   nothing session- or app-side-shaped belongs here.
-- **Mutual oracle testing**: qwertty's report/event decoders verify ghostty-rs's encoders
+- **Mutual oracle testing**: qwertty's report/event decoders verify qwertty-term's encoders
   (kitty keyboard, mouse reports, DSR/DA replies) and vice versa; each project's fixtures
   are test vectors for the other. (Today qwertty can verify only CPR/DSR replies and
   general CSI well-formedness — kitty keyboard/mouse decode is deferred on their side, so
   don't plan Phase 5 encoder tests around it; check `protocol-status.md` for current
   coverage. Pin any qwertty git dependency by rev — their input event model is explicitly
   high-churn.)
-- **Headless ghostty-rs is a conformance asset for qwertty**: an embeddable, deterministic,
+- **Headless qwertty-term is a conformance asset for qwertty**: an embeddable, deterministic,
   CI-runnable emulator is exactly what qwertty's conformance runner and its quarantined
   terminal→host fixture regeneration need. This strengthens the embeddability requirements —
   qwertty joins betamax as a named reference consumer.
@@ -301,7 +301,7 @@ Division of labor — do not duplicate:
 Coordination follows the pattern proven with rabbitui: `work/qwertty/` in this repo is a
 shared drop-box (NOT a jj workspace) where the qwertty thread maintains a commit-stamped
 protocol/status doc and dispositions this project's requests; this project's asks/offers
-live in `work/qwertty/ghostty-rs-collab.md`. The prompt to hand the qwertty thread is
+live in `work/qwertty/qwertty-term-collab.md`. The prompt to hand the qwertty thread is
 `work/qwertty-thread-prompt.md`.
 
 ## Conformance & testing strategy (non-negotiable, built alongside each phase)
@@ -311,12 +311,12 @@ live in `work/qwertty/ghostty-rs-collab.md`. The prompt to hand the qwertty thre
    coverage in a checklist doc (`docs/port-status.md`): file → ported? tests ported? count.
 2. **Differential/oracle testing.** Build a harness that feeds identical byte streams to
    (a) ghostty's `libghostty-vt` (build it: `zig build` in `~/local/ghostty`; C API in
-   `include/`) and (b) `ghostty-vt`, then diffs final screen state (text, styles, cursor,
+   `include/`) and (b) `qwertty-term-vt`, then diffs final screen state (text, styles, cursor,
    modes). Corpus: the existing replay fixtures in `tests/fixtures/replay/`, vttest/esctest
    sequences, captured real-app sessions (nvim, tmux, htop, fzf startup), and qwertty's
    audited host→terminal fixture corpus (see the qwertty seam section for the trust map and
    unescaping convention).
-3. **Fuzzing**: `cargo-fuzz` on the parser + stream from day one of Phase 1. `ghostty-vt` must
+3. **Fuzzing**: `cargo-fuzz` on the parser + stream from day one of Phase 1. `qwertty-term-vt` must
    never panic on arbitrary bytes.
 4. **Snapshot/replay fixtures** (already in repo) grow with every feature; keep them
    deterministic.
@@ -336,7 +336,7 @@ deviation taken, and a bookmarked jj change.
   "existing prototype" below). Build libghostty-vt from the Zig tree and stand up the
   differential harness + fuzz targets + criterion skeleton. Set up xtask codegen for unicode
   tables (verify output against ghostty's `props_table.zig` semantics).
-- **Phase 1 — VT core (`ghostty-vt`).** Parser → stream → Terminal → Screen → PageList/page,
+- **Phase 1 — VT core (`qwertty-term-vt`).** Parser → stream → Terminal → Screen → PageList/page,
   in dependency order but with the page memory model FIRST (everything sits on it). Full
   sgr/csi/osc/dcs/apc coverage, charsets, tabstops, modes, primary/alternate screens, scroll
   regions, wide chars + grapheme clustering, hyperlinks, styles dedup, dirty tracking, resize
@@ -372,7 +372,7 @@ deviation taken, and a bookmarked jj change.
   `+import-ghostty-config` converter. App/Surface mailboxes and action dispatch
   (`ghostty-core`). Exit: a ghostty user's config, run through the converter, produces
   identical effective settings (`+show-config` diff vs ghostty).
-- **Phase 6 — macOS app shell.** `ghostty-ffi` C ABI (cbindgen, mirror `include/ghostty.h`
+- **Phase 6 — macOS app shell.** `qwertty-term-ffi` C ABI (cbindgen, mirror `include/ghostty.h`
   closely enough that ghostty's Swift sources can be adapted rather than rewritten), then the
   Swift app: window/tab/split management, quick terminal, secure input, clipboard
   confirmation, menu sync with keybinds. Strongly prefer adapting `macos/Sources/` from the
@@ -389,9 +389,9 @@ deviation taken, and a bookmarked jj change.
 host, `Vec<Vec<Cell>>` grid, 1000-row scrollback, partial VT coverage). Verdict: **the spike is
 scaffolding, not a foundation.** Keep and carry forward: the replay-fixture harness and
 fixtures, the xtask bundling approach, `docs/` process files, and the crossterm debug host
-(as a `ghostty-vt` consumer for Phase 2). The grid/screen/parser will be superseded by the
+(as a `qwertty-term-vt` consumer for Phase 2). The grid/screen/parser will be superseded by the
 Phase-1 port — don't incrementally mutate the spike's screen model into PageList; build
-`ghostty-vt` clean against the Zig reference and port the spike's passing fixtures over as
+`qwertty-term-vt` clean against the Zig reference and port the spike's passing fixtures over as
 acceptance tests. Salvage individual functions (OSC parsing, CSI param handling) only where
 they match ghostty semantics.
 
@@ -487,7 +487,7 @@ Rules:
    hot path changed. Between gates, `cargo check` early and often — a workspace that doesn't
    compile is debt accruing interest.
 7. **Small, revertible changes** at subsystem boundaries; jj change descriptions reference
-   the Zig files ported (e.g. `port: terminal/sgr.zig → ghostty-vt::sgr (49 tests)`).
+   the Zig files ported (e.g. `port: terminal/sgr.zig → qwertty-term-vt::sgr (49 tests)`).
 8. **Don't trust this document's numbers over the source.** LOC counts and field counts here
    are survey estimates; enumerate from the Zig source when exactness matters (config fields,
    action list, mode list, OSC command set).

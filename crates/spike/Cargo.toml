@@ -1,19 +1,19 @@
 [package]
-name = "ghostty-spike"
+name = "qwertty-term-spike"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [lib]
-name = "ghostty_spike"
+name = "qwertty_term_spike"
 
 [[bin]]
-name = "ghostty-spike"
+name = "qwertty-term-spike"
 path = "src/main.rs"
 
 [dependencies]
-ghostty-vt = { path = "../ghostty-vt" }
-ghostty-input = { path = "../ghostty-input" }
+qwertty-term-vt = { path = "../qwertty-term-vt" }
+qwertty-term-input = { path = "../qwertty-term-input" }
 base64 = "0.22.1"
 crossterm = "0.29.0"
 eframe = "0.34.2"

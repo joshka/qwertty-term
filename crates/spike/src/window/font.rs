@@ -8,8 +8,8 @@ use eframe::egui::{Context, FontData, FontDefinitions, FontFamily, FontId};
 use ttf_parser::Face;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
-const TERMINAL_FAMILY: &str = "ghostty-rs-terminal";
-const TERMINAL_FONT_PREFIX: &str = "ghostty-rs-terminal-font";
+const TERMINAL_FAMILY: &str = "qwertty-term-terminal";
+const TERMINAL_FONT_PREFIX: &str = "qwertty-term-terminal-font";
 
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalFont {
@@ -160,7 +160,7 @@ const DEVICON_GLYPHS: [char; 6] = [
 ];
 
 fn configured_font_size(saved_size: Option<f32>) -> f32 {
-    env::var("GHOSTTY_RS_FONT_SIZE")
+    env::var("QWERTTY_TERM_FONT_SIZE")
         .ok()
         .and_then(|size| size.parse::<f32>().ok())
         .filter(|size| (6.0..=48.0).contains(size))
@@ -169,7 +169,7 @@ fn configured_font_size(saved_size: Option<f32>) -> f32 {
 }
 
 fn configured_font_path() -> Option<PathBuf> {
-    env::var_os("GHOSTTY_RS_FONT_PATH")
+    env::var_os("QWERTTY_TERM_FONT_PATH")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
 }

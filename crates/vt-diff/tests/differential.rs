@@ -1,4 +1,4 @@
-//! Differential test: pure-Rust `ghostty-vt` vs the Zig `libghostty-vt`
+//! Differential test: pure-Rust `qwertty-term-vt` vs the Zig `libghostty-vt`
 //! reference, comparing screen text + cursor position.
 //!
 //! Only runs with the `reference` feature (links the Zig-built static lib):

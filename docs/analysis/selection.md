@@ -5,7 +5,7 @@ Surveyed against ghostty commit `2da015cd6` (verify with
 (1604) with **18** inline `test` blocks. It models a single highlight region on a
 [`Screen`](screen.md) as a pair of pins (start/end), plus the `select*` query
 family that lives on `Screen` itself. The Rust port lives in
-`crates/ghostty-vt/src/screen/selection.rs`, and the `Screen`-side integration
+`crates/qwertty-term-vt/src/screen/selection.rs`, and the `Screen`-side integration
 replaces the `SelectionPlaceholder` scaffold in `screen/mod.rs`.
 
 `SelectionGesture.zig` (input-phase drag/click state) is **out of scope** — it is

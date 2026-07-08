@@ -4,8 +4,8 @@ Surveyed and ported against ghostty commit `2da015cd6`
 (`2da015cd6ac06cedc89e09756e895d2c1715205d`; the local checkout is at
 `38e49a232`, and `docs/analysis/termio-foundations.md` records that the termio
 foundation files are byte-identical between the two). The Rust port lives in
-`crates/ghostty-termio/src/hub.rs` (the `Termio` hub + promoted `Thread` loop)
-and rewires `crates/ghostty-app` onto it. This is M2 chunk E from
+`crates/qwertty-term-termio/src/hub.rs` (the `Termio` hub + promoted `Thread` loop)
+and rewires `crates/qwertty-term-app` onto it. This is M2 chunk E from
 `docs/plans/m2-termio.md`; it builds on chunk D
 (`docs/analysis/termio-exec.md`), the mailbox contract
 (`docs/adr/002-termio-runtime.md`, binding), and the runtime spike
@@ -15,10 +15,10 @@ Zig references (all line numbers against `2da015cd6`):
 
 | file                             | LoC | Rust module                            |
 | -------------------------------- | --- | -------------------------------------- |
-| `src/termio/Termio.zig`          | 761 | `ghostty-termio/src/hub.rs` (`Termio`) |
-| `src/termio/Thread.zig`          | 531 | `ghostty-termio/src/hub.rs` (`Thread`) |
+| `src/termio/Termio.zig`          | 761 | `qwertty-term-termio/src/hub.rs` (`Termio`) |
+| `src/termio/Thread.zig`          | 531 | `qwertty-term-termio/src/hub.rs` (`Thread`) |
 | `src/termio/Options.zig`         | 41  | folded into `Termio::spawn` args       |
-| `src/Surface.zig` (io lifecycle) | ref | `ghostty-app/src/app.rs` `Tab` (ref)   |
+| `src/Surface.zig` (io lifecycle) | ref | `qwertty-term-app/src/app.rs` `Tab` (ref)   |
 
 ## 1. What `Termio.zig` is (the hub's role)
 
@@ -54,7 +54,7 @@ crate (out of M2-E scope).
 `Thread.zig` is the writer event loop. Its shape (`Thread.threadMain_:230` +
 `drainMailbox:288`) is exactly the `Driver`/`Handler` seam the spike ratified
 (`crates/spike-runtime/src/{driver,threads}.rs`), so chunk E **promotes that
-seam into `ghostty-termio`** rather than re-deriving it:
+seam into `qwertty-term-termio`** rather than re-deriving it:
 
 - **Mailbox wakeup + drain**: `polling::Poller::wait(timeout)` parks the loop;
   `Poller::notify()` (≙ `xev.Async.notify`) wakes it; `Receiver::drain` pulls
@@ -73,10 +73,10 @@ seam into `ghostty-termio`** rather than re-deriving it:
 
 The promotion keeps the spike's `Waker`/`DriverHandle` names but retargets
 `Handler` at the real `Termio` (the spike's `Handler` was a counting stub). The
-`polling` dependency moves from `spike-runtime` into `ghostty-termio`.
+`polling` dependency moves from `spike-runtime` into `qwertty-term-termio`.
 
 The spike's `Message` (a toy enum) is dropped; the loop drains the real
-`ghostty_termio::message::Message`. The chunk-D `WriterLoop` (a condvar-parked
+`qwertty_term_termio::message::Message`. The chunk-D `WriterLoop` (a condvar-parked
 minimal drainer written for Exec's tests) is subsumed by the promoted `Thread`
 loop, which adds the real `polling` wakeup and the terminal-touching handlers.
 `WriterLoop` is retained for the chunk-D integration tests (they drive `drain` +
@@ -227,7 +227,7 @@ clear and asserts a render is released within ~1s.
 
 ## 5. Test plan (chunk E)
 
-- **Hub lifecycle** (`ghostty-termio/tests/hub.rs`, headless, no window): spawn
+- **Hub lifecycle** (`qwertty-term-termio/tests/hub.rs`, headless, no window): spawn
   `Termio` on `/bin/sh`, drive `echo` round-trip through gather→parse→engine,
   resize, clean exit + exit-code capture. Drives `Termio` directly.
 - **Sync-output timeout**: feed `\x1b[?2026h` with no clear; assert the mode is
@@ -250,4 +250,4 @@ clear and asserts a render is released within ~1s.
   chunk D did).
 - The error-screen "pty exhausted" banner rendering (Surface-level, chunk M).
 - The spike (`crates/spike`) keeps `portable-pty` — it is scaffolding, per plan
-  decision (only `ghostty-app` swaps).
+  decision (only `qwertty-term-app` swaps).

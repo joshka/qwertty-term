@@ -6,7 +6,7 @@ Surveyed against ghostty commit `2da015cd6` (2026-07-06). Reference build:
 zig is 0.16.0). Artifacts install to `zig-out/lib/` (`libghostty-vt.a` ~12 MB,
 `libghostty-vt.{0.1.0,0,}.dylib`) and headers to `zig-out/include/ghostty/`.
 There is also a `test-lib-vt` build step for the library's own tests and a
-`ghostty-vt.xcframework` output.
+`qwertty-term-vt.xcframework` output.
 
 Headers live in-source at `include/ghostty/vt/*.h` (umbrella:
 `include/ghostty/vt.h`); the Zig implementation of the C bindings is
@@ -168,7 +168,7 @@ helpers (`wasm.h`).
   into `OUT_DIR` and links against that.
 - The static archive needs no extra system libraries beyond what Rust links
   by default on macOS (verified: tests link and run with just
-  `-lghostty-vt`).
+  `-lqwertty-term-vt`).
 - Replay-fixture check: all three spike fixtures
   (`alternate_screen_roundtrip`, `prompt_and_color`,
   `wide_text_and_resize`) match `expected.txt` under the normalization

@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghostty-input"
+name = "qwertty-term-input"
 version = "0.0.0"
 
 [[package]]
@@ -74,7 +74,7 @@ dependencies = [
 name = "spike-appkit-input"
 version = "0.1.0"
 dependencies = [
- "ghostty-input",
+ "qwertty-term-input",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

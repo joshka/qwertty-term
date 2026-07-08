@@ -1,5 +1,5 @@
-//! Maps egui input events to `ghostty-input` events, and routes key presses
-//! through `ghostty_input::key_encode` (kitty protocol when active, a narrow
+//! Maps egui input events to `qwertty-term-input` events, and routes key presses
+//! through `qwertty_term_input::key_encode` (kitty protocol when active, a narrow
 //! legacy placeholder otherwise — see that crate's module docs for the seam
 //! design).
 //!
@@ -13,9 +13,9 @@
 //! doesn't have.
 
 use eframe::egui::{Key as EguiKey, Modifiers as EguiModifiers, PointerButton};
-use ghostty_input::key::{Action, Key as InputKey, KeyEvent};
-use ghostty_input::key_encode::{self, Options as KeyEncodeOptions};
-use ghostty_input::key_mods::Mods;
+use qwertty_term_input::key::{Action, Key as InputKey, KeyEvent};
+use qwertty_term_input::key_encode::{self, Options as KeyEncodeOptions};
+use qwertty_term_input::key_mods::Mods;
 
 pub(super) fn mouse_button_code(button: PointerButton) -> Option<u8> {
     match button {
@@ -26,7 +26,7 @@ pub(super) fn mouse_button_code(button: PointerButton) -> Option<u8> {
     }
 }
 
-/// Encode a key press/repeat into PTY bytes via `ghostty_input::key_encode`.
+/// Encode a key press/repeat into PTY bytes via `qwertty_term_input::key_encode`.
 /// Returns `None` if the event produces no output (e.g. a bare modifier key,
 /// or a key/mods combination the encoder doesn't map to anything).
 pub(super) fn encode_key(

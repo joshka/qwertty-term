@@ -14,7 +14,7 @@ then continue from the next incomplete milestone. This file only covers repo mec
   - `work/qwertty/` — shared drop-box with the qwertty project. NOT a jj workspace; never
     `jj workspace add` over it, never track its files.
 - Advance `main` with `jj bookmark move main --to <rev>` after landing work on trunk.
-- Cargo workspace: `crates/*` + `xtask`. `crates/ghostty-vt` is the terminal core (Phase 1);
+- Cargo workspace: `crates/*` + `xtask`. `crates/qwertty-term-vt` is the terminal core (Phase 1);
   `crates/spike` is the pre-rewrite prototype kept as scaffolding and Phase-2 debug frontend.
 
 ## Local Project Rules

@@ -3,15 +3,15 @@
 Surveyed and ported against ghostty commit `2da015cd6`
 (`2da015cd6ac06cedc89e09756e895d2c1715205d`; verify with
 `git -C ~/local/ghostty rev-parse 2da015cd6`). The Rust port lives in
-`crates/ghostty-termio/src/shell_integration.rs`; the vendored scripts live in
-`crates/ghostty-termio/resources/shell-integration/`. This covers M2 chunk G
+`crates/qwertty-term-termio/src/shell_integration.rs`; the vendored scripts live in
+`crates/qwertty-term-termio/resources/shell-integration/`. This covers M2 chunk G
 from `docs/plans/m2-termio.md` (after chunk D/Exec).
 
 Zig references:
 
 | file                               | LoC   | inline tests | Rust module                               |
 | ---------------------------------- | ----- | ------------ | ----------------------------------------- |
-| `src/termio/shell_integration.zig` | 1,032 | 20\*         | `ghostty-termio/src/shell_integration.rs` |
+| `src/termio/shell_integration.zig` | 1,032 | 20\*         | `qwertty-term-termio/src/shell_integration.rs` |
 
 \* 21 `test` blocks exist in the file; `test "force shell"` loops over all 5
 `Shell` variants in one block rather than being 5 separate tests, so upstream's
@@ -24,17 +24,17 @@ the injection logic above is ported):
 
 | upstream path                                                             | bytes        | vendored at                                                                     |
 | ------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
-| `src/shell-integration/bash/ghostty.bash`                                 | see manifest | `resources/shell-integration/bash/ghostty.bash`                                 |
+| `src/shell-integration/bash/qwertty-term.bash`                                 | see manifest | `resources/shell-integration/bash/qwertty-term.bash`                                 |
 | `src/shell-integration/bash/bash-preexec.sh`                              | see manifest | `resources/shell-integration/bash/bash-preexec.sh`                              |
 | `src/shell-integration/zsh/.zshenv`                                       | see manifest | `resources/shell-integration/zsh/.zshenv`                                       |
-| `src/shell-integration/zsh/ghostty-integration`                           | see manifest | `resources/shell-integration/zsh/ghostty-integration`                           |
-| `src/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish` | see manifest | `resources/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish` |
-| `src/shell-integration/elvish/lib/ghostty-integration.elv`                | see manifest | `resources/shell-integration/elvish/lib/ghostty-integration.elv`                |
-| `src/shell-integration/nushell/vendor/autoload/ghostty.nu`                | see manifest | `resources/shell-integration/nushell/vendor/autoload/ghostty.nu`                |
+| `src/shell-integration/zsh/qwertty-term-integration`                           | see manifest | `resources/shell-integration/zsh/qwertty-term-integration`                           |
+| `src/shell-integration/fish/vendor_conf.d/qwertty-term-shell-integration.fish` | see manifest | `resources/shell-integration/fish/vendor_conf.d/qwertty-term-shell-integration.fish` |
+| `src/shell-integration/elvish/lib/qwertty-term-integration.elv`                | see manifest | `resources/shell-integration/elvish/lib/qwertty-term-integration.elv`                |
+| `src/shell-integration/nushell/vendor/autoload/qwertty-term.nu`                | see manifest | `resources/shell-integration/nushell/vendor/autoload/qwertty-term.nu`                |
 | `src/shell-integration/README.md`                                         | see manifest | `resources/shell-integration/README.md`                                         |
 
 Exact byte counts + sha256 live in the checked-in manifest
-(`crates/ghostty-termio/resources/shell-integration-manifest.txt`); a test
+(`crates/qwertty-term-termio/resources/shell-integration-manifest.txt`); a test
 (`tests/shell_integration_scripts.rs`) hashes the vendored tree against it so
 any accidental hand-edit or upstream drift is a loud, immediate test failure.
 
@@ -63,20 +63,20 @@ and a fake `sh` command line.
 
 All paths share two upstream env vars set unconditionally before dispatch:
 
-- `GHOSTTY_SHELL_FEATURES` — from `setupFeatures`, a sorted comma list of
+- `QWERTTY_TERM_SHELL_FEATURES` — from `setupFeatures`, a sorted comma list of
   enabled features (`cursor[:blink|:steady]`, `path`, `ssh-env`,
   `ssh-terminfo`, `sudo`, `title`), built at a fixed-size stack buffer since
   the field set is comptime-known. Both automatic and manual (user-sourced)
   integrations read this var, so it's set even when shell detection fails.
 - The command construction below (or `None`, degrading to launching the
-  unmodified default shell command with only `GHOSTTY_SHELL_FEATURES` set).
+  unmodified default shell command with only `QWERTTY_TERM_SHELL_FEATURES` set).
 
 ### zsh — `ZDOTDIR` indirection (`setupZsh`, line 895)
 
 The simplest and most robust mechanism, because zsh has first-class support
 for redirecting its dotfile directory:
 
-1. If the caller already has `ZDOTDIR` set, stash it in `GHOSTTY_ZSH_ZDOTDIR`
+1. If the caller already has `ZDOTDIR` set, stash it in `QWERTTY_TERM_ZSH_ZDOTDIR`
    (so it can be restored later — see below). This is the **user-zdotdir
    preservation** the task called out.
 2. Point `ZDOTDIR` at `<resource_dir>/shell-integration/zsh` — verified to
@@ -88,11 +88,11 @@ for redirecting its dotfile directory:
 
 The restoration side lives entirely in the vendored `.zshenv` (sourced
 automatically by zsh because `ZDOTDIR` points there): it immediately restores
-the real `ZDOTDIR` (from `GHOSTTY_ZSH_ZDOTDIR` if present, else unsets it
+the real `ZDOTDIR` (from `QWERTTY_TERM_ZSH_ZDOTDIR` if present, else unsets it
 entirely — zsh treats unset `ZDOTDIR` as `$HOME`), *then* sources the user's
 real `.zshenv` from that restored location, and *only after* that (in an
 `always` block, so it runs even if the user's `.zshenv` errors) autoloads and
-invokes `ghostty-integration` from the ghostty resource dir by absolute path
+invokes `qwertty-term-integration` from the ghostty resource dir by absolute path
 (computed from `${(%):-%x}:A:h`, i.e. "the directory containing the currently
 executing file", NOT `ZDOTDIR` — which by that point has already been
 restored to the user's value). This ordering — restore, then user config,
@@ -100,7 +100,7 @@ then integration — is exactly what lets integration run standalone alongside
 whatever the user's own zsh config does, without the user's config ever
 observing the redirected `ZDOTDIR`.
 
-`ghostty-integration` itself is invoked unconditionally for every zsh startup
+`qwertty-term-integration` itself is invoked unconditionally for every zsh startup
 under this ZDOTDIR redirect, but internally checks `[[ -o interactive ]]` and
 an idempotency guard (`_ghostty_state` already set) before doing anything, and
 defers its real setup to a `precmd_functions` hook (`_ghostty_deferred_init`)
@@ -120,33 +120,33 @@ The subtle one, ported exactly per the task's warning:
    POSIX (`-c ...`, `--posix` already present) — because integration only
    makes sense for an interactive login/rc-loading shell. `--norc`/
    `--noprofile` are intercepted (not passed through to the rewritten argv
-   directly) and instead folded into a `GHOSTTY_BASH_INJECT` env var
+   directly) and instead folded into a `QWERTTY_TERM_BASH_INJECT` env var
    (`"1[ --norc][ --noprofile]"` — the leading `"1"` lets the script tell
    "manually sourced" apart from "auto-injected") so the vendored
-   `ghostty.bash` can replay them precisely during its manual startup-file
+   `qwertty-term.bash` can replay them precisely during its manual startup-file
    walk. `--rcfile FILE`/`--init-file FILE` are captured into
-   `GHOSTTY_BASH_RCFILE` (consuming the following arg) rather than passed
+   `QWERTTY_TERM_BASH_RCFILE` (consuming the following arg) rather than passed
    through, for the same reason. A bare `-` or `--` stops all further option
    parsing and passes everything remaining straight through as positional
    args (script file + its args).
-3. Preserve any existing `ENV` into `GHOSTTY_BASH_ENV` (about to be
+3. Preserve any existing `ENV` into `QWERTTY_TERM_BASH_ENV` (about to be
    overwritten), then verify
-   `<resource_dir>/shell-integration/bash/ghostty.bash` actually opens (else:
-   fail integration, `GHOSTTY_BASH_ENV`/etc. rolled back / never set) and
+   `<resource_dir>/shell-integration/bash/qwertty-term.bash` actually opens (else:
+   fail integration, `QWERTTY_TERM_BASH_ENV`/etc. rolled back / never set) and
    point `ENV` at it. POSIX-mode bash sources `$ENV` unconditionally on
    startup even for non-login shells — that's the whole trick.
 4. `HISTFILE`: in POSIX mode bash defaults `HISTFILE` to `~/.sh_history`
    instead of `~/.bash_history`. If the caller hadn't set `HISTFILE`
    explicitly, set it to `~/.bash_history` and mark
-   `GHOSTTY_BASH_UNEXPORT_HISTFILE=1` so the vendored script un-exports it
+   `QWERTTY_TERM_BASH_UNEXPORT_HISTFILE=1` so the vendored script un-exports it
    again after startup (matching what bash would have done on its own in
    non-POSIX mode).
 
-The vendored `ghostty.bash` (loaded via `$ENV` while still in POSIX mode)
-detects `GHOSTTY_BASH_INJECT`, unsets the trickery vars, `set +o posix`,
+The vendored `qwertty-term.bash` (loaded via `$ENV` while still in POSIX mode)
+detects `QWERTTY_TERM_BASH_INJECT`, unsets the trickery vars, `set +o posix`,
 manually replays exactly the startup-file sequence bash itself would have run
 (`/etc/profile` + first of `~/.bash_profile`/`~/.bash_login`/`~/.profile` for
-a login shell; the distro-specific system bashrc + `$GHOSTTY_BASH_RCFILE`
+a login shell; the distro-specific system bashrc + `$QWERTTY_TERM_BASH_RCFILE`
 (default `~/.bashrc`) otherwise, respecting the captured `--norc`/
 `--noprofile`), then installs the real integration (`PROMPT_COMMAND`/
 `PS0`-based OSC 133/7 hooks, described below).
@@ -157,9 +157,9 @@ Both ride the same helper, since both shells auto-load vendor config/modules
 from directories listed in `XDG_DATA_DIRS`:
 
 1. Verify `<resource_dir>/shell-integration` exists.
-2. Stash that path in `GHOSTTY_SHELL_INTEGRATION_XDG_DIR` so the shell's own
-   vendored config (fish: `vendor_conf.d/ghostty-shell-integration.fish`;
-   elvish: `lib/ghostty-integration.elv`) can strip it back out of
+2. Stash that path in `QWERTTY_TERM_SHELL_INTEGRATION_XDG_DIR` so the shell's own
+   vendored config (fish: `vendor_conf.d/qwertty-term-shell-integration.fish`;
+   elvish: `lib/qwertty-term-integration.elv`) can strip it back out of
    `XDG_DATA_DIRS` after loading, so subsequently `exec`'d shells / nested
    shells don't keep re-discovering it via a stale `XDG_DATA_DIRS` prefix.
 3. Prepend it to `XDG_DATA_DIRS`, defaulting the base value to the
@@ -170,7 +170,7 @@ from directories listed in `XDG_DATA_DIRS`:
 
 ### nushell — `XDG_DATA_DIRS` + `--execute` (`setupNushell`, line 755)
 
-Nushell also uses `XDG_DATA_DIRS` (for `nushell/vendor/autoload/ghostty.nu`,
+Nushell also uses `XDG_DATA_DIRS` (for `nushell/vendor/autoload/qwertty-term.nu`,
 loaded automatically) but additionally needs an explicit `use` to bring the
 exported commands into scope, so `setupNushell`:
 
@@ -183,17 +183,17 @@ exported commands into scope, so `setupNushell`:
    non-interactive or an alternate mode). `-`/`--` stops parsing and passes
    the rest through, same as bash.
 
-## `GHOSTTY_SHELL_INTEGRATION_*` env vars actually used at this commit
+## `QWERTTY_TERM_SHELL_INTEGRATION_*` env vars actually used at this commit
 
-The task description mentioned `GHOSTTY_SHELL_INTEGRATION_NO_*` toggle
+The task description mentioned `QWERTTY_TERM_SHELL_INTEGRATION_NO_*` toggle
 variables; **no such variables exist in `shell_integration.zig` or any
 vendored script at `2da015cd6`** (grepped the full pinned tree). The actual
-`GHOSTTY_SHELL_INTEGRATION_*` variable is singular:
-`GHOSTTY_SHELL_INTEGRATION_XDG_DIR` (fish/elvish/nushell only, described
+`QWERTTY_TERM_SHELL_INTEGRATION_*` variable is singular:
+`QWERTTY_TERM_SHELL_INTEGRATION_XDG_DIR` (fish/elvish/nushell only, described
 above — a "which of my dirs did ghostty prepend" pointer, not a feature
-toggle). Feature toggling is entirely through `GHOSTTY_SHELL_FEATURES`
+toggle). Feature toggling is entirely through `QWERTTY_TERM_SHELL_FEATURES`
 (comma list) plus the config-level `shell-integration = none` escape hatch
-(skips `setup()` entirely, only `GHOSTTY_SHELL_FEATURES` gets set). This
+(skips `setup()` entirely, only `QWERTTY_TERM_SHELL_FEATURES` gets set). This
 doc corrects the assumption for whoever wrote the task coordination notes;
 the Rust port does not invent `_NO_*` vars that don't exist upstream.
 
@@ -243,12 +243,12 @@ prompt because `PS0` — bash's nearest analogue to a preexec hook — runs
 *before* the command, so a cwd change mid-pipeline is invisible until
 precmd). This OSC 7 payload format
 (`kitty-shell-cwd://host/path`) is what `docs/analysis` / the app's
-`pwd_path_from_osc7` parser (already wired, per `crates/ghostty-app/src/engine.rs`)
+`pwd_path_from_osc7` parser (already wired, per `crates/qwertty-term-app/src/engine.rs`)
 expects.
 
 **Bar-cursor-at-prompt (DECSCUSR, the maintainer's question).** Confirmed:
 gated entirely behind the `cursor` feature flag
-(`GHOSTTY_SHELL_FEATURES == *cursor*`), which defaults to **enabled**
+(`QWERTTY_TERM_SHELL_FEATURES == *cursor*`), which defaults to **enabled**
 (`ShellIntegrationFeatures.cursor: bool = true` in `Config.zig:8631`, and
 `cursor-style` config doc explicitly says *"shell integration will
 automatically set the cursor to a bar at a prompt, regardless of
@@ -261,7 +261,7 @@ UX, not an accident):
   keymap (vi command mode) or `5`/`6` (**bar**) for every other keymap
   (emacs mode, vi insert mode — i.e. "normal typing at the prompt"), with the
   even/odd choice (`5` vs `6`, `1` vs `2`) picking blinking vs steady from
-  `GHOSTTY_SHELL_FEATURES == *cursor:steady*` (itself derived from the
+  `QWERTTY_TERM_SHELL_FEATURES == *cursor:steady*` (itself derived from the
   config's `cursor-style-blink`, defaulting to blinking). `_ghostty_preexec`
   additionally emits `CSI 0 SP q` (reset to the terminal's configured
   default shape) right before the external command runs, so a program that
@@ -291,7 +291,7 @@ says).
   `--preserve-env=TERMINFO` (so a re-exec under `sudo` doesn't lose Ghostty's
   terminfo entry) *unless* the invocation looks like `sudoedit`
   (`-e`/`--edit`), which doesn't need terminfo preserved. Gated on
-  `GHOSTTY_SHELL_FEATURES == *sudo*` AND a non-empty `$TERMINFO`. Defaults to
+  `QWERTTY_TERM_SHELL_FEATURES == *sudo*` AND a non-empty `$TERMINFO`. Defaults to
   **disabled** (`sudo: bool = false`).
 - `title`: sets the OSC 2 window title from the abbreviated pwd (`precmd`,
   zsh only — bash sets title via a plain `PS1` append too) and from the
@@ -309,7 +309,7 @@ says).
 
 Upstream (`os/resourcesdir.zig:40`, not itself part of this chunk's 1,032 LoC
 but the dependency shell_integration.setup's `resource_dir` parameter needs):
-in release builds, `GHOSTTY_RESOURCES_DIR` env var wins outright if set and
+in release builds, `QWERTTY_TERM_RESOURCES_DIR` env var wins outright if set and
 non-empty; otherwise (and always in debug builds, deliberately, so a debug
 Ghostty launched from an old installed Ghostty doesn't inherit stale
 resources) it climbs from the running binary's `selfExePath` looking for a
@@ -318,7 +318,7 @@ sentinel (`terminfo/78/xterm-ghostty` on macOS) to locate the app bundle's
 
 The Rust port's shape (`resources_dir()` in `shell_integration.rs`):
 
-1. `GHOSTTY_RESOURCES_DIR` env var, if set and non-empty — wins unconditionally
+1. `QWERTTY_TERM_RESOURCES_DIR` env var, if set and non-empty — wins unconditionally
    (we don't have upstream's release/debug distinction machinery, and always
    honoring an explicit override is the least surprising choice for an
    embedder/dev-time tool).
@@ -335,9 +335,9 @@ The Rust port's shape (`resources_dir()` in `shell_integration.rs`):
 
 ## App wiring (chunk G's one permitted app touch)
 
-`crates/ghostty-app/src/termio.rs`'s `TabIo::spawn` constructs
-`ghostty_termio::exec::Config` directly. Chunk G adds a
-`ghostty_termio::shell_integration::setup(...)` call between building the
+`crates/qwertty-term-app/src/termio.rs`'s `TabIo::spawn` constructs
+`qwertty_term_termio::exec::Config` directly. Chunk G adds a
+`qwertty_term_termio::shell_integration::setup(...)` call between building the
 base env (`std::env::vars().collect()`, from the M2-E env-inherit fix) and
 handing `Config` to `Termio::build_exec`, mutating the config's `env` /
 `command` in place exactly the way `Exec.Subprocess.init`'s `shell:` block

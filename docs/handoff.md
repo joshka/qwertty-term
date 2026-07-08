@@ -18,10 +18,10 @@ described commits even if the workspace looks idle.
   `~/local/ghostty-main/macos/build/ReleaseLocal/Ghostty.app`).
 
 Queued next (user-approved): selection gestures (double-click word / triple line) +
-OSC-synced tab titles (one ghostty-app chunk, launch after splits-2 integrates);
+OSC-synced tab titles (one qwertty-term-app chunk, launch after splits-2 integrates);
 CVDisplayLink pacing; dense_cells re-bench after simd-perf lands. Also pending: user
 pastes `work/betamax-thread-prompt.md` (MB1) and the jj thread
-(`~/local/jj/work/ghostty-rs-jj-failures-thread.md`).
+(`~/local/jj/work/qwertty-term-jj-failures-thread.md`).
 
 ## State as of 2026-07-10 (third batch: perf + search + embeddability)
 
@@ -30,13 +30,13 @@ mirrored; equality-proven vs full redraw across 6 scenarios; 2x faster single-ro
 scrolled-back cursor now hidden), **Cmd+F search UI** (overlay + incremental PageListSearch,
 3.2ms/10k lines synchronous, upstream highlight colors, per-pane; one additive vt
 constructor), **vtebench lane** (`scripts/bench-vtebench.sh`, pinned v0.3.1;
-`docs/benchmarks/vtebench-baseline.md`: **ghostty-rs faster in 9/10 suites vs Ghostty
+`docs/benchmarks/vtebench-baseline.md`: **qwertty-term faster in 9/10 suites vs Ghostty
 1.3.1**, dense_cells the one loss at 1.36x; pty-drain caveat documented), **MB2
 frame-capture example** (public-APIs-only bytes→PNG, deterministic; 6-item API-polish list
 for MB5 in its report; MB1 unblocked — paste `work/betamax-thread-prompt.md` into a
 betamax session). Restart-audit also recovered 3 orphaned commits (font-shaping analysis
 doc, workspace-lifecycle + SendMessage-scoping playbook rules) — landed. jj-failure-modes
-thread prompt written to `~/local/jj/work/ghostty-rs-jj-failures-thread.md`.
+thread prompt written to `~/local/jj/work/qwertty-term-jj-failures-thread.md`.
 
 ## Earlier 2026-07-10 (second sweep)
 
@@ -67,7 +67,7 @@ bugs fixed** (first --release run): cursor_absolute pin-walk panic (alt-1049+res
 corpus case) and grapheme debug_assert side-effect (Zig assert ALWAYS evaluates — see
 memory + orchestration release lane, now part of the standard gate). Config import
 corrected: real ghostty loads TWO files; Josh actually runs FiraCode NFM @16pt (now in
-ghostty-rs config). Invisible-FiraCode-text fixed (byteless named faces: unshaped
+qwertty-term config). Invisible-FiraCode-text fixed (byteless named faces: unshaped
 fallback; ligatures for named faces still pending). In flight: family-styles (FiraCode
 real Bold). Queued: emoji-discovery (we pick Noto, ghostty picks Apple), named-face
 ligatures, nerd-font constraint sizing.
@@ -90,7 +90,7 @@ Evidence: bold ink coverage 1.335× regular; offscreen test `bold_italic_pixels.
 Visual-parity sweep landed on `main` (all field-reported): **glyph baseline fix** (text was
 `cell_baseline` px too low — cursor was never wrong), **top-band root cause** (sub-cell
 surface remainder exposed at the visual top by flipped-layer gravity; surface now pinned
-under the titlebar + window bg painted terminal-colored; `GHOSTTY_APP_SMOKE_GEOMETRY`
+under the titlebar + window bg painted terminal-colored; `QWERTTY_TERM_APP_SMOKE_GEOMETRY`
 asserts the 1→2→1-tab transition), and **default-font parity** (vendored upstream's exact
 JetBrainsMono variable + italic-variable + SymbolsNerdFontMono, hash-manifested like the
 shell scripts; nerd-symbols is an explicit fallback slot ahead of discovery; metrics
@@ -99,7 +99,7 @@ natural size. Emoji, tabs-only-at-2+, bar cursor: confirmed good by maintainer.
 
 ## Earlier state (2026-07-08 evening)
 
-**The app runs the REAL stack end-to-end**: `cargo run -p ghostty-app` = native AppKit
+**The app runs the REAL stack end-to-end**: `cargo run -p qwertty-term-app` = native AppKit
 window (tabs/menu/theme/selection/IME), Metal rendering (contentsScale fixed — presented-
 pixel assertions now in the smoke), and the genuine termio architecture (rustix PTY,
 two-stage Exec pipeline, ADR-002 thread loop, 135.8 MiB/s into the live engine).
@@ -111,11 +111,11 @@ smokes that assert what the user actually experiences.
 
 ## Earlier 2026-07-08 state
 
-**M1 CERTIFIED** (see port-status Milestones). **M3 essentially complete**: `ghostty-app`
+**M1 CERTIFIED** (see port-status Milestones). **M3 essentially complete**: `qwertty-term-app`
 runs — native AppKit window, Metal via the full ported stack, native tabs with OSC7 pwd
 inheritance, menu, kitty+legacy key encoding, IME. All three de-risk spike decisions
 RATIFIED (ADR-002 threads+polling; FFI Swift-adaptation GO; raw AppKit). In flight:
-app theme+selection chunk; termio A+B (ghostty-termio). Next: M2 spine (Exec D, hub E),
+app theme+selection chunk; termio A+B (qwertty-term-termio). Next: M2 spine (Exec D, hub E),
 M3 completeness (emoji/color atlas, kitty image render R6, links R7, CVDisplayLink,
 F5-full discovery), then M5 via the proven FFI path.
 
@@ -123,8 +123,8 @@ F5-full discovery), then M5 via the proven FFI path.
 
 **Phase 1 core loop CLOSED and demo live**: parser → stream → Terminal → Screen → PageList all
 ported; differential parity proven (zero divergences vs libghostty-vt across fixtures + 8
-hand-written streams); both spike frontends now run on the ghostty-vt engine
-(`cargo run -p ghostty-spike -- --window`). Trunk: 880 lib tests + differential + E2E PTY
+hand-written streams); both spike frontends now run on the qwertty-term-vt engine
+(`cargo run -p qwertty-term-spike -- --window`). Trunk: 880 lib tests + differential + E2E PTY
 tests, all green. Ledger + milestones in `docs/port-status.md`; 14 analysis docs in
 `docs/analysis/`.
 
@@ -139,7 +139,7 @@ formatter differential vs ghostty_formatter_* is clean; trunk ~993 lib tests.
 ## Prior state notes
 
 - **Phase 0 essentially complete.** jj `work/` layout live (integrate in `work/default`,
-  one workspace per chunk). Cargo workspace: `crates/ghostty-vt` (core, real code now),
+  one workspace per chunk). Cargo workspace: `crates/qwertty-term-vt` (core, real code now),
   `crates/vt-diff` (differential harness vs Zig-built libghostty-vt, feature `reference`),
   `crates/spike` (old prototype, kept as Phase-2 debug frontend), `xtask`
   (`gen-unicode` codegen). Remaining Phase 0 items (fuzz targets, criterion skeleton)
@@ -151,7 +151,7 @@ formatter differential vs ghostty_formatter_* is clean; trunk ~993 lib tests.
   generated table); regenerate tables with `cargo xtask gen-unicode`.
 - **Analysis docs so far**: `docs/analysis/libghostty-vt-c-api.md`, `docs/analysis/unicode.md`.
 - **qwertty coordination**: `work/qwertty/protocol-status.md` (theirs) and
-  `ghostty-rs-collab.md` (ours); their conformance-target sketch is expected during their
+  `qwertty-term-collab.md` (ours); their conformance-target sketch is expected during their
   Phase 2 — shape the Phase 4 headless API against it.
 
 ## Plans and playbook (written 2026-07-07, Fable-era)

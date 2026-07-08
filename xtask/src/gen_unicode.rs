@@ -1,4 +1,4 @@
-//! `cargo xtask gen-unicode` — generates `crates/ghostty-vt/src/unicode/tables.rs`.
+//! `cargo xtask gen-unicode` — generates `crates/qwertty-term-vt/src/unicode/tables.rs`.
 //!
 //! Port of ghostty's unicode table codegen (`src/unicode/props_uucode.zig` +
 //! `src/build/uucode_config.zig` + the uucode property derivations). See
@@ -47,7 +47,7 @@ pub fn run() -> Result<()> {
     );
 
     let out = render_tables(&stage1, &stage2, &stage3);
-    let out_path = Path::new("crates/ghostty-vt/src/unicode/tables.rs");
+    let out_path = Path::new("crates/qwertty-term-vt/src/unicode/tables.rs");
     fs::write(out_path, out)?;
     eprintln!("gen-unicode: wrote {}", out_path.display());
 
@@ -79,7 +79,7 @@ fn write_grapheme_control_fixture(ucd_dir: &Path) -> Result<()> {
     for (first, last) in ranges {
         let _ = writeln!(out, "{first:04X}..{last:04X}");
     }
-    let out_path = Path::new("crates/ghostty-vt/tests/data/grapheme_control.txt");
+    let out_path = Path::new("crates/qwertty-term-vt/tests/data/grapheme_control.txt");
     fs::write(out_path, out)?;
     eprintln!("gen-unicode: wrote {}", out_path.display());
     Ok(())
@@ -147,7 +147,7 @@ enum Incb {
 }
 
 /// The 17-value grapheme class stored in the table. Discriminants must match
-/// `ghostty_vt::unicode::GraphemeBreakClass` (which mirrors uucode's
+/// `qwertty_term_vt::unicode::GraphemeBreakClass` (which mirrors uucode's
 /// `GraphemeBreakNoControl`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -193,7 +193,7 @@ impl Gbnc {
     ];
 }
 
-/// Mirror of `ghostty_vt::unicode::Properties` (ghostty `src/unicode/props.zig`).
+/// Mirror of `qwertty_term_vt::unicode::Properties` (ghostty `src/unicode/props.zig`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Props {
     width: u8,

@@ -5,8 +5,8 @@ Surveyed against ghostty commit `2da015cd6` (verify with
 `highlight.zig` module (~213 lines, 0 inline tests) plus the `highlightSemanticContent`
 method of `PageList.zig` (`:4340-4470`) and its 17 inline tests (`:8313-9374`), which the
 [PageList port](pagelist.md) deliberately deferred because it depends on `highlight.zig`.
-The Rust port lands `highlight.zig` at `crates/ghostty-vt/src/highlight.rs` and
-`highlightSemanticContent` additively in `crates/ghostty-vt/src/pagelist/ops.rs`.
+The Rust port lands `highlight.zig` at `crates/qwertty-term-vt/src/highlight.rs` and
+`highlightSemanticContent` additively in `crates/qwertty-term-vt/src/pagelist/ops.rs`.
 
 ## What `highlight.zig` models
 
@@ -142,7 +142,7 @@ following prompt on the same row); multiline; stops at next prompt; runs to end 
 
 ## Rust port notes
 
-- **Module** `crates/ghostty-vt/src/highlight.rs`, registered `pub mod highlight;` in `lib.rs`.
+- **Module** `crates/qwertty-term-vt/src/highlight.rs`, registered `pub mod highlight;` in `lib.rs`.
   Ports `Untracked`, `Tracked`, `Flattened` (+ `Flattened::Chunk`). Infallible-alloc idiom
   (matching the PageList port): `Tracked::init`/`Untracked::track` do not return `Result` since
   `track_pin` is infallible in the Rust model; the Zig `errdefer` untrack-on-failure logic is

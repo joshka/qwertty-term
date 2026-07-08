@@ -5,9 +5,11 @@ use eframe::egui::{
     self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Vec2,
     ViewportCommand,
 };
-use ghostty_input::mouse_encode::{self, Event as MouseEncodeEvent, Options as MouseEncodeOptions};
-use ghostty_input::paste;
-use ghostty_spike::{Engine, MouseTracking, Snapshot, SnapshotWindow};
+use qwertty_term_input::mouse_encode::{
+    self, Event as MouseEncodeEvent, Options as MouseEncodeOptions,
+};
+use qwertty_term_input::paste;
+use qwertty_term_spike::{Engine, MouseTracking, Snapshot, SnapshotWindow};
 
 use crate::pty::{PtyResult, PtySession};
 
@@ -31,14 +33,14 @@ pub(crate) fn run_window() -> PtyResult<()> {
     let config = config::load();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ghostty-rs")
+            .with_title("qwertty-term")
             .with_inner_size([preferences.window_size.x, preferences.window_size.y])
-            .with_app_id("net.joshka.ghostty-rs"),
+            .with_app_id("net.joshka.qwertty-term"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "ghostty-rs",
+        "qwertty-term",
         options,
         Box::new(|cc| {
             // config's `font-size` takes precedence over the saved
@@ -78,7 +80,7 @@ struct WindowTerminal {
     /// Last cell reported for a motion event, for `mouse_encode`'s
     /// motion-dedup logic (skip identical consecutive same-cell motion
     /// reports, except in SGR-pixels format). See
-    /// `ghostty_input::mouse_encode::encode`'s `last_cell` parameter.
+    /// `qwertty_term_input::mouse_encode::encode`'s `last_cell` parameter.
     last_mouse_cell: Option<(i64, i64)>,
     close_requested: bool,
     exit_status: Option<String>,
@@ -121,7 +123,7 @@ impl WindowTerminal {
             engine,
             pty: PtySession::spawn(cols as u16, rows as u16)?,
             scrollback_offset: 0,
-            shown_title: "ghostty-rs".to_string(),
+            shown_title: "qwertty-term".to_string(),
             selection: None,
             pressed_mouse_button: None,
             last_mouse_cell: None,
@@ -149,7 +151,7 @@ impl WindowTerminal {
 
     /// Drain any OSC 52 clipboard write requests the engine queued and copy
     /// them to the system clipboard via egui. Per upstream's
-    /// `clipboardContents` policy, `ghostty-vt` hands the request up raw
+    /// `clipboardContents` policy, `qwertty-term-vt` hands the request up raw
     /// (still base64-encoded) — decoding is this frontend's job. An invalid
     /// base64 payload is silently dropped (matches upstream logging-and-
     /// ignoring an OSC 52 decode failure rather than treating it as fatal).
@@ -379,7 +381,7 @@ impl WindowTerminal {
         }
     }
 
-    /// Encode and send a mouse event through `ghostty_input::mouse_encode`.
+    /// Encode and send a mouse event through `qwertty_term_input::mouse_encode`.
     /// `pos` is in window (egui) coordinates; `rect` is the terminal's
     /// on-screen rectangle, so `pos - rect.min` gives the surface-space
     /// position `mouse_encode` expects (origin at the terminal's top-left).
@@ -393,7 +395,7 @@ impl WindowTerminal {
             format: self.engine.mouse_format(),
             size: self.mouse_encode_size(metrics),
             any_button_pressed: self.pressed_mouse_button.is_some()
-                || event.action == ghostty_input::mouse::Action::Press,
+                || event.action == qwertty_term_input::mouse::Action::Press,
         };
         let bytes = mouse_encode::encode(event, &opts, &mut self.last_mouse_cell);
         if bytes.is_empty() {
@@ -424,12 +426,12 @@ impl WindowTerminal {
 
         let event = MouseEncodeEvent {
             action: if pressed {
-                ghostty_input::mouse::Action::Press
+                qwertty_term_input::mouse::Action::Press
             } else {
-                ghostty_input::mouse::Action::Release
+                qwertty_term_input::mouse::Action::Release
             },
             button: Some(mouse_button),
-            mods: ghostty_input::key_mods::Mods::default(),
+            mods: qwertty_term_input::key_mods::Mods::default(),
             pos: surface_pos(rect, pos),
         };
         self.write_mouse_event(metrics, event)
@@ -445,9 +447,9 @@ impl WindowTerminal {
         self.selection = None;
         let button = self.pressed_mouse_button.and_then(mouse_button_from_code);
         let event = MouseEncodeEvent {
-            action: ghostty_input::mouse::Action::Motion,
+            action: qwertty_term_input::mouse::Action::Motion,
             button,
-            mods: ghostty_input::key_mods::Mods::default(),
+            mods: qwertty_term_input::key_mods::Mods::default(),
             pos: surface_pos(rect, pos),
         };
         self.write_mouse_event(metrics, event)
@@ -464,16 +466,16 @@ impl WindowTerminal {
             return Ok(());
         };
         let button = if delta.y > 0.0 {
-            ghostty_input::mouse::Button::Four
+            qwertty_term_input::mouse::Button::Four
         } else {
-            ghostty_input::mouse::Button::Five
+            qwertty_term_input::mouse::Button::Five
         };
         self.scrollback_offset = 0;
         self.selection = None;
         let event = MouseEncodeEvent {
-            action: ghostty_input::mouse::Action::Press,
+            action: qwertty_term_input::mouse::Action::Press,
             button: Some(button),
-            mods: ghostty_input::key_mods::Mods::default(),
+            mods: qwertty_term_input::key_mods::Mods::default(),
             pos: surface_pos(rect, pos),
         };
         self.write_mouse_event(metrics, event)
@@ -484,7 +486,7 @@ impl WindowTerminal {
             .engine
             .title()
             .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "ghostty-rs".to_string());
+            .unwrap_or_else(|| "qwertty-term".to_string());
         if title != self.shown_title {
             self.shown_title = title;
             ctx.send_viewport_cmd(ViewportCommand::Title(self.shown_title.clone()));
@@ -693,23 +695,23 @@ fn exit_status_message(status: &portable_pty::ExitStatus) -> String {
     }
 }
 
-/// Map an egui pointer button to `ghostty_input::mouse::Button`.
-fn map_pointer_button(button: PointerButton) -> Option<ghostty_input::mouse::Button> {
+/// Map an egui pointer button to `qwertty_term_input::mouse::Button`.
+fn map_pointer_button(button: PointerButton) -> Option<qwertty_term_input::mouse::Button> {
     match button {
-        PointerButton::Primary => Some(ghostty_input::mouse::Button::Left),
-        PointerButton::Middle => Some(ghostty_input::mouse::Button::Middle),
-        PointerButton::Secondary => Some(ghostty_input::mouse::Button::Right),
+        PointerButton::Primary => Some(qwertty_term_input::mouse::Button::Left),
+        PointerButton::Middle => Some(qwertty_term_input::mouse::Button::Middle),
+        PointerButton::Secondary => Some(qwertty_term_input::mouse::Button::Right),
         _ => None,
     }
 }
 
 /// Inverse of [`mouse_button_code`]: recover the `mouse::Button` held during
 /// a drag from the legacy button code cached in `pressed_mouse_button`.
-fn mouse_button_from_code(code: u8) -> Option<ghostty_input::mouse::Button> {
+fn mouse_button_from_code(code: u8) -> Option<qwertty_term_input::mouse::Button> {
     match code {
-        0 => Some(ghostty_input::mouse::Button::Left),
-        1 => Some(ghostty_input::mouse::Button::Middle),
-        2 => Some(ghostty_input::mouse::Button::Right),
+        0 => Some(qwertty_term_input::mouse::Button::Left),
+        1 => Some(qwertty_term_input::mouse::Button::Middle),
+        2 => Some(qwertty_term_input::mouse::Button::Right),
         _ => None,
     }
 }

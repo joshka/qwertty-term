@@ -114,7 +114,7 @@ fn preferences_path() -> Option<PathBuf> {
     Some(
         PathBuf::from(home)
             .join("Library/Application Support")
-            .join("ghostty-rs")
+            .join("qwertty-term")
             .join("preferences"),
     )
 }

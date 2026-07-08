@@ -5,7 +5,7 @@ Surveyed against ghostty commit `2da015cd6` (verify with
 `src/renderer/shaders/shaders.metal` (853 lines — the first-pixels subset
 only) and `src/renderer/metal/shaders.zig` (454 lines — the pipeline
 description table and wire structs, wire structs already ported and frozen
-in R1). Rust ports live at `crates/ghostty-renderer/src/shaders/{mod.rs,
+in R1). Rust ports live at `crates/qwertty-term-renderer/src/shaders/{mod.rs,
 ghostty.metal,color_math.rs,smoke.rs}`. Working-copy commit at time of
 writing: `9a9b82b05604`.
 

@@ -1,4 +1,4 @@
-# M5 FFI spike: ghostty-rs C ABI + Swift round-trip
+# M5 FFI spike: qwertty-term C ABI + Swift round-trip
 
 Status: **spike complete, go/no-go ACCEPTED (Josh, 2026-07-08) (pending maintainer review)**.
 Scope: de-risk the Rust -> C-ABI -> Swift/AppKit seam with a thin end-to-end
@@ -6,23 +6,23 @@ round-trip before committing to the full M5. Plan: `docs/plans/m5-ffi-spike.md`.
 
 ## What was built
 
-- `crates/ghostty-ffi` -- a `staticlib` + `cdylib` + `rlib` crate exposing a C
+- `crates/qwertty-term-ffi` -- a `staticlib` + `cdylib` + `rlib` crate exposing a C
   ABI that mirrors the shapes of upstream `include/ghostty.h` (opaque handles,
   sized `*_s` structs, `*_e` enums, a runtime-callback struct). Spike surface:
-  - `ghostty_rs_init`
-  - `ghostty_rs_app_new` / `_tick` / `_free`
-  - `ghostty_rs_surface_new` / `_free` (wraps `Stream<TerminalHandler>` + a
+  - `qwertty_term_init`
+  - `qwertty_term_app_new` / `_tick` / `_free`
+  - `qwertty_term_surface_new` / `_free` (wraps `Stream<TerminalHandler>` + a
     cols/rows/scrollback config struct)
-  - `ghostty_rs_surface_write_pty_bytes` (raw shell output in)
-  - `ghostty_rs_surface_key` (mirrored key-event struct -> `ghostty-input`
+  - `qwertty_term_surface_write_pty_bytes` (raw shell output in)
+  - `qwertty_term_surface_key` (mirrored key-event struct -> `qwertty-term-input`
     encode -> engine, side effects drained internally)
-  - `ghostty_rs_surface_read_text` (screen text dump out; pre-M3 stand-in for
+  - `qwertty_term_surface_read_text` (screen text dump out; pre-M3 stand-in for
     `surface_draw`; caller-buffer + length convention)
-  - `ghostty_rs_surface_take_pty_reply` (engine reply bytes out; DSR/DA/CPR)
+  - `qwertty_term_surface_take_pty_reply` (engine reply bytes out; DSR/DA/CPR)
   - clipboard callback registration (on the runtime config) + firing on OSC 52
   - wakeup callback stub (declared in the runtime config; not fired in-spike)
   - `catch_unwind` at every extern boundary -> error code / null handle
-- `crates/ghostty-ffi/include/ghostty_rs.h` -- cbindgen-generated, checked in,
+- `crates/qwertty-term-ffi/include/qwertty_term.h` -- cbindgen-generated, checked in,
   with a drift-check test (`tests/header_drift.rs`).
 - `macos-spike/` -- a `swiftc`-compiled single-file Swift driver (`main.swift`)
   with a clang `module.modulemap` and `build.sh`. **Not** an Xcode project.
@@ -35,14 +35,14 @@ Swift **was** available (`swiftc` 6.2.4, arm64-apple-macosx15.0), so this is a
 real Swift verification, not a C fallback:
 
 ```text
-==> Building ghostty-ffi staticlib (debug)
+==> Building qwertty-term-ffi staticlib (debug)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
 ==> Compiling Swift driver
 ==> Running Swift driver
 -----------------------------------------------------------------------
-PASS: ghostty_rs_init
-PASS: ghostty_rs_app_new returns non-null
-PASS: ghostty_rs_surface_new returns non-null
+PASS: qwertty_term_init
+PASS: qwertty_term_app_new returns non-null
+PASS: qwertty_term_surface_new returns non-null
 PASS: surface_write_pty_bytes
 PASS: surface_key
 PASS: surface_read_text succeeds
@@ -66,7 +66,7 @@ Mirrors upstream's apprt model. In short: **nothing in this ABI is
 thread-safe.**
 
 - An **app and all its surfaces form a single-thread apartment.** Every
-  `ghostty_rs_app_*` and `ghostty_rs_surface_*` call must happen on the one
+  `qwertty_term_app_*` and `qwertty_term_surface_*` call must happen on the one
   thread that owns them (upstream: the AppKit main thread). There is no internal
   locking; handles are `*mut` to plain Rust structs with no `Sync`/`Send`
   guarantee. Calling two functions on the same handle concurrently is a data
@@ -75,7 +75,7 @@ thread-safe.**
   It is the "please schedule a tick on your event loop" signal, which a real PTY
   reader thread (off the main thread) needs to raise. The embedder's `wakeup_cb`
   implementation must therefore be thread-safe and must *not* call back into any
-  `ghostty_rs_*` function directly -- it should only hop to the owning thread
+  `qwertty_term_*` function directly -- it should only hop to the owning thread
   (e.g. `DispatchQueue.main.async`) and drive the ABI from there. The spike
   never fires `wakeup_cb` off-thread (the engine is synchronous), but the
   contract is fixed now so the future PTY thread has a legal path.
@@ -101,9 +101,9 @@ main-thread-only and only the wakeup path is cross-thread.
    silently-empty header loud.
 2. **Double-prefixed enum variants.** Setting both `prefix_with_name = true`
    *and* `rename_variants = "QualifiedScreamingSnakeCase"` produced
-   `GHOSTTY_RS_RESULT_GHOSTTY_RS_RESULT_SUCCESS`. `QualifiedScreamingSnakeCase`
+   `QWERTTY_TERM_RESULT_QWERTTY_TERM_RESULT_SUCCESS`. `QualifiedScreamingSnakeCase`
    already prefixes with the enum name; drop `prefix_with_name`. Net config in
-   `cbindgen.toml` gives clean `GHOSTTY_RS_RESULT_SUCCESS`, matching upstream's
+   `cbindgen.toml` gives clean `QWERTTY_TERM_RESULT_SUCCESS`, matching upstream's
    `GHOSTTY_*` style.
 3. **cbindgen as a dev-dependency, not a build-dependency.** The drift-check
    test links the cbindgen *library* API to regenerate in-memory and diff. Test
@@ -112,14 +112,14 @@ main-thread-only and only the wakeup path is cross-thread.
    that would make `cargo build` depend on a heavy proc-macro tree and a
    writable source tree.)
 4. **The legacy key encoder does not emit printable text.**
-   `ghostty-input`'s `key_encode::legacy_stub` only maps special keys
+   `qwertty-term-input`'s `key_encode::legacy_stub` only maps special keys
    (Enter/Tab/arrows) and ctrl-combos; it ignores `event.utf8`. Routing a typed
    "x" through it yields empty output. This is correct per upstream's design:
    printable text arrives via a *separate* path (`ghostty_surface_text` vs
    `ghostty_surface_key`; the spike window uses egui `Event::Text` vs
    `Event::Key`). The FFI therefore splits: a plain-text key writes its `text`
    bytes straight to the PTY; special/control keys go through the encoder. The
-   real M5 should expose a distinct `ghostty_rs_surface_text` entry point to
+   real M5 should expose a distinct `qwertty_term_surface_text` entry point to
    mirror upstream exactly (and to keep IME/preedit coherent), rather than
    overloading `surface_key`.
 5. **Swift ergonomics were smooth, with two notes.** (a) A `@convention(c)`
@@ -129,7 +129,7 @@ main-thread-only and only the wakeup path is cross-thread.
    `[CChar]` cover the buffer + string conventions cleanly; the two-call
    size-then-fill `read_text` convention maps to Swift naturally. No bridging
    header, no Objective-C shim needed -- a bare clang `module.modulemap` was
-   enough for `import CGhosttyRs`.
+   enough for `import CQwerttyTerm`.
 6. **Linking a Rust staticlib from swiftc needed only `-framework
    CoreFoundation`.** No explicit `-lc++`/`-lresolv`/`-lSystem` -- the Swift
    driver pulls the base system libs in. A `cdylib` (`.dylib`) is the eventual
@@ -146,16 +146,16 @@ main-thread-only and only the wakeup path is cross-thread.
 ## Header drift-check design
 
 - **Source of truth:** the Rust `#[repr(C)]` types + `extern "C"` fns in
-  `crates/ghostty-ffi/src/lib.rs`. cbindgen (config: `cbindgen.toml`) generates
+  `crates/qwertty-term-ffi/src/lib.rs`. cbindgen (config: `cbindgen.toml`) generates
   the header from them.
-- **Checked in:** `crates/ghostty-ffi/include/ghostty_rs.h`. This is what the
+- **Checked in:** `crates/qwertty-term-ffi/include/qwertty_term.h`. This is what the
   Swift `module.modulemap` points at, so it is the interface contract the Swift
   side compiles against.
 - **The check:** `tests/header_drift.rs` regenerates the header *in memory* via
   the cbindgen **library** API (same `cbindgen.toml`, so the only variable is
   the Rust source), normalizes line-endings/trailing-whitespace, and asserts it
   equals the checked-in file. On mismatch it writes
-  `include/ghostty_rs.generated.h` next to the committed one (for a quick
+  `include/qwertty_term.generated.h` next to the committed one (for a quick
   `diff`) and fails with the regenerate command. Runs under `cargo test
   --workspace`, so CI catches drift with no external binary on PATH.
 - **Why library API, not shelling out to the `cbindgen` CLI:** no PATH
@@ -164,7 +164,7 @@ main-thread-only and only the wakeup path is cross-thread.
   different cbindgen version.
 - **Regenerate command** (also in the test's failure message and the header
   banner):
-  `cbindgen --config crates/ghostty-ffi/cbindgen.toml --output crates/ghostty-ffi/include/ghostty_rs.h`
+  `cbindgen --config crates/qwertty-term-ffi/cbindgen.toml --output crates/qwertty-term-ffi/include/qwertty_term.h`
 
 ## Go/no-go recommendation (ACCEPTED — ratified by Josh, 2026-07-08)
 
@@ -199,35 +199,35 @@ Ordered by the round-trip they unblock. Paths are under
 `~/local/ghostty/macos/Sources/`.
 
 1. **`Ghostty/Ghostty.App.swift`** -- the app wrapper. Needs:
-   `ghostty_rs_init`, `ghostty_rs_app_new/_tick/_free`, and the
-   `GhosttyRsRuntimeConfig` struct with `userdata` + `wakeup_cb`. Adaptation:
-   replace `ghostty_app_*` calls with `ghostty_rs_app_*`; drop the config-object
+   `qwertty_term_init`, `qwertty_term_app_new/_tick/_free`, and the
+   `QwerttyTermRuntimeConfig` struct with `userdata` + `wakeup_cb`. Adaptation:
+   replace `qwertty_term_app_*` calls with `qwertty_term_app_*`; drop the config-object
    plumbing (`ghostty_config_t`) the spike doesn't have yet and pass the
    grid/scrollback via the surface config instead. This is where the wakeup ->
    `DispatchQueue.main.async` -> `app_tick` loop lives.
 2. **`Ghostty/Surface View/SurfaceView_AppKit.swift`** (the AppKit NSView;
    shared base in `Surface View/SurfaceView.swift`) --
-   the surface lifecycle + input entry. Needs: `ghostty_rs_surface_new/_free`,
-   `ghostty_rs_surface_key`, `GhosttyRsInputKey`/`GhosttyRsInputMods`/
-   `GhosttyRsInputAction`. Adaptation: map NSEvent key/mods to the mirrored key
+   the surface lifecycle + input entry. Needs: `qwertty_term_surface_new/_free`,
+   `qwertty_term_surface_key`, `QwerttyTermInputKey`/`QwerttyTermInputMods`/
+   `QwerttyTermInputAction`. Adaptation: map NSEvent key/mods to the mirrored key
    struct (upstream already has this mapping -- keep it, retarget the struct);
    split printable text to a future `surface_text` (friction #4).
 3. **`Ghostty/Ghostty.Input.swift`** (+ `Ghostty/NSEvent+Extension.swift`) --
    the NSEvent -> Ghostty key/mods translation tables. Needs: the
-   `GhosttyRsInput*` enum/struct *values* to line up with the Rust
-   `ghostty-input` `Key`/`Mods`/`Action`. Adaptation: this file
+   `QwerttyTermInput*` enum/struct *values* to line up with the Rust
+   `qwertty-term-input` `Key`/`Mods`/`Action`. Adaptation: this file
    is mostly pure mapping and adapts almost verbatim once the enum names match;
-   it is the reason we mirrored `ghostty_input_key_s`'s shape.
+   it is the reason we mirrored `qwertty_term_input_key_s`'s shape.
 4. **`Ghostty/Ghostty.Action.swift`** (+ the clipboard bits of
    `SurfaceView`) -- the runtime action/clipboard callback handlers. Needs: the
-   `GhosttyRsWriteClipboardCb` signature + `GhosttyRsClipboard` enum (and,
+   `QwerttyTermWriteClipboardCb` signature + `QwerttyTermClipboard` enum (and,
    later, the action tagged union). Adaptation: wire the `@convention(c)`
    trampoline through `userdata` to the Swift surface object; the spike proves
    the clipboard leg end-to-end.
 5. **`Ghostty/Surface View/SurfaceView_AppKit.swift`'s Metal-layer draw path**
    (the same NSView from item 2, its `draw`/`CAMetalLayer` half) -- the draw
    host. Needs: a real
-   `ghostty_rs_surface_draw` (post-M3) + a size/content-scale API. Adaptation:
+   `qwertty_term_surface_draw` (post-M3) + a size/content-scale API. Adaptation:
    the *largest* effort and the least de-risked here; for M5 it can start
    against the `read_text` stand-in to bring the view up, then swap to the pixel
    path when the renderer lands.

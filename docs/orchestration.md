@@ -63,7 +63,7 @@ jj log -r "$CH" --no-graph -T 'if(conflict, "CONFLICT", "clean")'
 jj bookmark move main --to "$CH" && jj new main
 # GATE (all must pass BEFORE the bookmark stays):
 cargo check --workspace --all-targets && cargo test --workspace && cargo fmt --check
-cargo test -p ghostty-vt --release --all-targets  # RELEASE LANE (added 2026-07-09: the
+cargo test -p qwertty-term-vt --release --all-targets  # RELEASE LANE (added 2026-07-09: the
     # maintainer daily-drives --release; two field bugs — a cursor_absolute panic and a
     # grapheme debug_assert side-effect — were invisible to the all-debug gate)
 cargo test -p vt-diff --features reference    # when engine code changed
@@ -85,7 +85,7 @@ markdownlint-cli2 "**/*.md" "!target"          # when docs changed
 # their own workspace (work/josh) — never share work/default with integration.
 ```
 
-Conflict notes: `crates/ghostty-vt/src/lib.rs` module lists conflict often — resolve as the
+Conflict notes: `crates/qwertty-term-vt/src/lib.rs` module lists conflict often — resolve as the
 UNION of `pub mod` lines, sorted (a python one-liner extracting `^pub mod \w+;` and
 deduping is reliable). Ledger/table edits: aligned-table padding defeats naive string
 matching — edit by REGEX row-key match (`re.match(r'^\| H +\|', line)` — padded columns defeat exact

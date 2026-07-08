@@ -12,15 +12,15 @@
 //!
 //! Search order for a bare theme name (not an absolute path):
 //!   1. `~/.config/ghostty/themes/<name>`
-//!   2. `$GHOSTTY_RS_THEMES_DIR/<name>` if set, else
+//!   2. `$QWERTTY_TERM_THEMES_DIR/<name>` if set, else
 //!      `/Users/joshka/local/ghostty/zig-out/share/ghostty/themes/<name>`
 //!      (the env var exists so this resolves on machines without that
 //!      checkout at that exact path).
 
 use std::{env, fs, path::Path, path::PathBuf};
 
-use ghostty_vt::color::{DEFAULT, Rgb, parse_palette_entry};
-use ghostty_vt::terminal::Colors;
+use qwertty_term_vt::color::{DEFAULT, Rgb, parse_palette_entry};
+use qwertty_term_vt::terminal::Colors;
 
 /// The color fields parsed out of a ghostty theme file. `cursor_text` is
 /// parsed but currently unused by the spike renderer (it doesn't render a
@@ -89,17 +89,17 @@ impl ThemeColors {
         theme
     }
 
-    /// Build the `ghostty-vt` startup [`Colors`] this theme implies: the
+    /// Build the `qwertty-term-vt` startup [`Colors`] this theme implies: the
     /// full 256-entry palette (defaults, with any theme overrides applied)
-    /// plus OSC-10/11-equivalent default fg/bg. `ghostty-vt`'s `Colors` /
+    /// plus OSC-10/11-equivalent default fg/bg. `qwertty-term-vt`'s `Colors` /
     /// `DynamicRgb` / `DynamicPalette` types are already public and
-    /// constructible from outside the crate, so no `ghostty-vt` changes are
+    /// constructible from outside the crate, so no `qwertty-term-vt` changes are
     /// needed to seed initial state this way — later OSC 4/10/11 sequences
     /// from the running program still override at runtime through the same
     /// dynamic-color path (see `Terminal::colors`).
     pub(crate) fn to_colors(&self) -> Colors {
         let mut colors = Colors {
-            palette: ghostty_vt::color::DynamicPalette::new(self.palette),
+            palette: qwertty_term_vt::color::DynamicPalette::new(self.palette),
             ..Colors::default()
         };
         if let Some(fg) = self.foreground {
@@ -119,9 +119,9 @@ impl ThemeColors {
 ///
 /// Absolute paths are used as-is. Otherwise, the name is looked up first in
 /// `~/.config/ghostty/themes/`, then in the shared ghostty themes directory
-/// (overridable via `GHOSTTY_RS_THEMES_DIR` for machines without the
+/// (overridable via `QWERTTY_TERM_THEMES_DIR` for machines without the
 /// hardcoded checkout path). Returns `None` (falling back to
-/// `ghostty-vt`'s built-in default colors) if the theme can't be found or
+/// `qwertty-term-vt`'s built-in default colors) if the theme can't be found or
 /// read; a warning is printed to stderr in that case.
 pub(crate) fn load_theme(name: &str) -> Option<ThemeColors> {
     let path = resolve_theme_path(name)?;
@@ -134,7 +134,7 @@ pub(crate) fn load_theme(name: &str) -> Option<ThemeColors> {
     }
 }
 
-/// Fallback shared themes directory when `GHOSTTY_RS_THEMES_DIR` is unset —
+/// Fallback shared themes directory when `QWERTTY_TERM_THEMES_DIR` is unset —
 /// the maintainer's local ghostty checkout. Other machines should set the
 /// env var.
 const DEFAULT_SHARED_THEMES_DIR: &str = "/Users/joshka/local/ghostty/zig-out/share/ghostty/themes";
@@ -171,7 +171,7 @@ fn theme_search_dirs() -> Vec<PathBuf> {
     if let Some(home) = env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".config/ghostty/themes"));
     }
-    let shared = env::var("GHOSTTY_RS_THEMES_DIR")
+    let shared = env::var("QWERTTY_TERM_THEMES_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SHARED_THEMES_DIR));
     dirs.push(shared);
@@ -203,7 +203,7 @@ selection-foreground = #000000
         assert_eq!(theme.palette[0], Rgb::new(0x11, 0x11, 0x11));
         assert_eq!(theme.palette[1], Rgb::new(0x22, 0x22, 0x22));
         assert_eq!(theme.palette[15], Rgb::new(0xff, 0xff, 0xff));
-        // Untouched indexes keep the ghostty-vt default palette.
+        // Untouched indexes keep the qwertty-term-vt default palette.
         assert_eq!(theme.palette[2], DEFAULT[2]);
     }
 
@@ -244,7 +244,7 @@ foreground = #ffffff
     }
 
     #[test]
-    fn default_theme_matches_ghostty_vt_defaults() {
+    fn default_theme_matches_qwertty_term_vt_defaults() {
         let theme = ThemeColors::default();
         assert_eq!(theme.palette, DEFAULT);
         assert_eq!(theme.background, None);
@@ -271,7 +271,7 @@ foreground = #ffffff
 
     #[test]
     fn resolves_absolute_path_as_is() {
-        let dir = std::env::temp_dir().join("ghostty-rs-theme-test-absolute");
+        let dir = std::env::temp_dir().join("qwertty-term-theme-test-absolute");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("MyTheme");
         fs::write(&path, "background = #010203\n").unwrap();

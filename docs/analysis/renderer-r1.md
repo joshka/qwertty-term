@@ -7,8 +7,8 @@ Surveyed against ghostty commit `2da015cd6` (verify with
 (`src/renderer/Metal.zig` 458 lines + `src/renderer/metal/{Target,Texture,
 Sampler,buffer}.zig` = 108+202+64+185 lines), and the GPU wire structs
 (`src/renderer/metal/shaders.zig`, the subset defining `Uniforms`/`CellText`/
-`CellBg`/`Image`/`BgImage`). Rust ports live at `crates/ghostty-renderer/src/
-{gpu,wire}.rs` + `crates/ghostty-renderer/src/metal/{mod,target,texture,
+`CellBg`/`Image`/`BgImage`). Rust ports live at `crates/qwertty-term-renderer/src/
+{gpu,wire}.rs` + `crates/qwertty-term-renderer/src/metal/{mod,target,texture,
 sampler,buffer}.rs`.
 
 This is chunk R1: resource creation only. The frame lifecycle

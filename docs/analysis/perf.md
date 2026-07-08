@@ -1,6 +1,6 @@
 # M1 performance pass (`vt-perf` chunk)
 
-Commit-stamped record of the M1 throughput pass on the `ghostty-vt` stream +
+Commit-stamped record of the M1 throughput pass on the `qwertty-term-vt` stream +
 print path. Gate (rewrite-prompt Phase-1 exit): **>= 0.5x of ReleaseFast
 libghostty-vt** on every stream of the committed benchmark
 (`cargo test -p vt-diff --features reference --release -- --ignored --nocapture
@@ -178,7 +178,7 @@ Gate status: **PASS — every stream >= 0.5x.** All four moved from 0.15-0.31x t
 
 ### Parity + quality gates
 
-- `cargo test -p ghostty-vt` — 993 lib + doctests green (incl. 8 new
+- `cargo test -p qwertty-term-vt` — 993 lib + doctests green (incl. 8 new
   `stream::tests::fastpath_*` whole-vs-per-byte-vs-chunked equivalence tests).
 - `cargo test -p vt-diff --features reference` — full differential + formatter
   differential green, **zero divergences**.

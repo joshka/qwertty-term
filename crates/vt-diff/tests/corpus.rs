@@ -1,5 +1,5 @@
 //! Corpus sweep: every case under `crates/vt-diff/corpus/` is fed to both
-//! the Zig `libghostty-vt` reference and the Rust `ghostty-vt` port, and the
+//! the Zig `libghostty-vt` reference and the Rust `qwertty-term-vt` port, and the
 //! screen dump (text + cursor) *and* formatter output must agree.
 //!
 //! Layout (mirrors `crates/spike/tests/fixtures/replay`): one directory per
@@ -231,7 +231,7 @@ fn assert_case_agrees(rel: &str) {
 /// `firmware_version: u16 = 0` (pinned by its own inline test
 /// `"secondary default"`, line 208, asserting exactly `"\x1b[>1;0;0c"`). The
 /// Rust port's `device_attributes` handler
-/// (`crates/ghostty-vt/src/stream.rs`, `DeviceAttributesReq::Secondary` arm)
+/// (`crates/qwertty-term-vt/src/stream.rs`, `DeviceAttributesReq::Secondary` arm)
 /// hardcodes `\x1b[>1;10;0c` with the comment "VT220-ish, version 10" — no
 /// upstream basis for `10` was found; it appears to be an invented value.
 ///
@@ -256,7 +256,7 @@ fn regression_da2_firmware_version_mismatch() {
 /// mismatch. Upstream's DECRQSS *response* logic
 /// (`ghostty/src/termio/stream_handler.zig:475-540`, the `.decrqss` arm)
 /// lives entirely in the **app-level termio handler**, not in
-/// `terminal/Terminal.zig` (the core the Rust `ghostty-vt` crate — and the
+/// `terminal/Terminal.zig` (the core the Rust `qwertty-term-vt` crate — and the
 /// `libghostty-vt` C API this harness links — actually ports). Confirmed by
 /// `grep`: `Terminal.zig` defines no `dcsHook`/`decrqss` handling at all;
 /// only `terminal/dcs.zig` parses the *request* into a `.decrqss` enum
@@ -264,16 +264,16 @@ fn regression_da2_firmware_version_mismatch() {
 /// hook only `stream_handler.zig` (app layer) implements. So the reference
 /// terminal here (built from the core alone) correctly has no way to answer
 /// DECRQSS, matching its scope; the Rust port's `decrqss` method in
-/// `crates/ghostty-vt/src/stream.rs` ported the app-layer response logic
+/// `crates/qwertty-term-vt/src/stream.rs` ported the app-layer response logic
 /// into the vt-core crate, which is out of scope for a `Terminal`/core port
 /// and produces output no core-only C-API consumer (like this harness, or
 /// any other libghostty-vt embedder) should expect.
 ///
 /// Resolution is a scoping decision, not just a bug fix: either (a) move
-/// `decrqss` response formatting out of `ghostty-vt`'s core `Stream`/
+/// `decrqss` response formatting out of `qwertty-term-vt`'s core `Stream`/
 /// `TerminalHandler` into whatever layer will eventually mirror
 /// `termio/stream_handler.zig` (leaving the core silent, matching the
-/// reference exactly), or (b) if `ghostty-vt` intentionally broadens scope
+/// reference exactly), or (b) if `qwertty-term-vt` intentionally broadens scope
 /// to include this, document that divergence from libghostty-vt explicitly
 /// rather than silently disagreeing. Remove this test + the case's `SKIP`
 /// file once resolved either way. `real_apps/nvim_edit` (nvim probes DECRQSS
