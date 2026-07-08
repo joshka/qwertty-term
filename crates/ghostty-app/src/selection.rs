@@ -176,6 +176,9 @@ mod tests {
             palette: ghostty_vt::color::DEFAULT,
             default_fg: None,
             default_bg: None,
+            row_dirty: vec![true; rows],
+            global_dirty: ghostty_vt::snapshot::SnapshotDirty::default(),
+            screen_key: ghostty_vt::terminal::ScreenKey::Primary,
         }
     }
 

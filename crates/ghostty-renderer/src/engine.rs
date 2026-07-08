@@ -18,6 +18,7 @@ use ghostty_font::grid::Grid;
 use ghostty_font::{AtlasKind, FontIndex, ShapedCell, Style};
 use ghostty_sprite::Sprite;
 use ghostty_vt::color::{Palette, Rgb};
+use ghostty_vt::page::size::CellCountInt;
 use ghostty_vt::snapshot::{CellStyle, SnapshotCell, SnapshotColor, SnapshotUnderline};
 
 use crate::cells::{self, Contents, Key};
@@ -120,6 +121,12 @@ pub struct Engine {
     /// keeps steady-state cost near the per-cell path even though the reduced
     /// cut rebuilds every visible row every frame.
     run_cache: RunCache,
+    /// The [`FrameKey`] of the last frame we built cell contents for, or `None`
+    /// before the first frame. Persisting this across frames is what lets the
+    /// engine detect the cross-frame full-rebuild triggers (screen switch,
+    /// viewport move, resize) the way upstream's `RenderState` compares against
+    /// its own `self.screen`/`self.viewport_pin`/`self.rows`/`self.cols`.
+    prev_frame_key: Option<crate::snapshot::FrameKey>,
 }
 
 impl Engine {
@@ -167,6 +174,7 @@ impl Engine {
             screen_width: 0,
             screen_height: 0,
             run_cache: RunCache::new(),
+            prev_frame_key: None,
         })
     }
 
@@ -184,9 +192,17 @@ impl Engine {
     /// shaping and rasterizing glyphs through `grid`. Port of `updateFrame` +
     /// `rebuildCells` + `rebuildRow` (buffer-building half).
     ///
-    /// The reduced cut always does a full rebuild (`DirtyStatus::Full`; the
-    /// full-copy snapshot never reports partial), matching plan decision 4
-    /// (day-one full redraw).
+    /// **Dirty tracking** (port of `rebuildCells`'s `rebuild`/`row_dirty`
+    /// logic): the engine persists the previous frame's [`crate::snapshot::
+    /// FrameKey`] so it can detect the cross-frame full-rebuild triggers
+    /// (screen switch, viewport move, resize) the way upstream's `RenderState`
+    /// compares `self.screen`/`self.viewport_pin`/`self.rows`/`self.cols`. When
+    /// a full rebuild is forced (first frame, resize, screen switch, viewport
+    /// move, or a global dirty signal — palette/selection/clear/etc), it clears
+    /// and rebuilds every row (upstream `self.cells.reset()` + rebuild-all).
+    /// Otherwise it clears and rebuilds *only* the per-row dirty rows the
+    /// snapshot reports, leaving clean rows' GPU cells untouched (upstream
+    /// `if (!dirty.*) continue; self.cells.clear(y);`).
     pub fn update_frame<S: RenderSnapshot>(
         &mut self,
         snapshot: &S,
@@ -195,16 +211,30 @@ impl Engine {
     ) {
         let cols = snapshot.cols();
         let rows = snapshot.rows();
+        let signals = snapshot.dirty_signals();
 
         // Resize the contents (and thus target/uniforms geometry) if the grid
-        // changed. Full-copy snapshot => always a full rebuild anyway.
+        // changed. A size change forces a full rebuild (upstream `grid_size_diff`).
         let size_changed = self.contents.cols() != cols || self.contents.rows() != rows;
         if size_changed {
             self.contents.resize(cols, rows);
             self.screen_width = cols * self.cell_width as usize;
             self.screen_height = rows * self.cell_height as usize;
         }
-        self.contents.reset();
+
+        // Decide full-vs-partial. Mirrors upstream `RenderState.update`'s
+        // `redraw` (global flags OR screen-key OR viewport-pin OR dims changed)
+        // combined with `rebuildCells`'s `grid_size_diff`.
+        let full_rebuild = size_changed
+            || signals.global_forces_full
+            || self.prev_frame_key != Some(signals.frame_key);
+        self.prev_frame_key = Some(signals.frame_key);
+
+        if full_rebuild {
+            // Full rebuild clears the entire cell buffer (upstream
+            // `self.cells.reset()`); every row is then rebuilt below.
+            self.contents.reset();
+        }
 
         // Resolve default fg/bg (dynamic OSC override wins, else config default).
         let default_fg = snapshot.default_fg().unwrap_or(opts.default_fg);
@@ -244,8 +274,20 @@ impl Engine {
             _ => None,
         };
 
-        // Rebuild each row.
+        // Rebuild each row. On a full rebuild every row is rebuilt (the buffer
+        // was just reset). On a partial rebuild only the dirty rows are cleared
+        // and rebuilt; clean rows keep their existing GPU cells (upstream
+        // `if (!dirty.*) continue; self.cells.clear(y);`).
         for y in 0..rows {
+            if !full_rebuild {
+                let is_dirty = signals.row_dirty.get(y).copied().unwrap_or(true);
+                if !is_dirty {
+                    continue;
+                }
+                // Clear this row's cells before rebuilding (upstream
+                // `self.cells.clear(y)`); a full rebuild already reset all rows.
+                self.contents.clear(y as CellCountInt);
+            }
             let row = snapshot.row(y);
             let cursor_x = cursor_row_col.and_then(|(cr, cc)| (cr == y).then_some(cc));
             self.rebuild_row(y, row, grid, palette, default_fg, default_bg, cursor_x);

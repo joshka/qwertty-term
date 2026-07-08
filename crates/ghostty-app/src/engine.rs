@@ -127,9 +127,21 @@ impl Engine {
 
     /// A cheap, windowed snapshot containing only the rows needed to render the
     /// viewport `scrollback_offset` rows up from the bottom (0 = live active
-    /// area). Use this on the per-frame render path.
+    /// area). Read-only: reports every row dirty and leaves the terminal's
+    /// dirty state untouched. Use [`Engine::snapshot_window_tracking`] on the
+    /// per-frame render path so incremental redraw can skip clean rows.
     pub fn snapshot_window(&self, scrollback_offset: usize) -> SnapshotWindow {
         self.terminal().snapshot_window(scrollback_offset)
+    }
+
+    /// The per-frame render capture: like [`Engine::snapshot_window`] but reads
+    /// and *clears* the terminal's per-row / global dirty state so the renderer
+    /// rebuilds only the rows (or the whole frame, on a global change) that
+    /// actually changed since the last frame. This is the incremental-redraw
+    /// path; call it once per frame drawn.
+    pub fn snapshot_window_tracking(&mut self, scrollback_offset: usize) -> SnapshotWindow {
+        self.terminal_mut()
+            .snapshot_window_tracking(scrollback_offset)
     }
 
     /// A plain-text dump of the visible screen (used by smoke modes).

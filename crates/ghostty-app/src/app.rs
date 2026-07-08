@@ -492,11 +492,13 @@ impl Surface {
             return;
         }
         let (mut window, range) = {
-            let engine = self.engine();
-            let window = engine.snapshot_window(self.scrollback_offset);
+            let mut engine = self.engine();
+            // Resolve the selection range first (immutable borrow), then take
+            // the per-frame tracking capture (which mutably clears dirty state).
             let range = engine
                 .selection()
                 .and_then(|(start, end, rect)| engine.screen_range(start, end, rect));
+            let window = engine.snapshot_window_tracking(self.scrollback_offset);
             (window, range)
         };
         if let Some(range) = range {

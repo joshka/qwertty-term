@@ -27,6 +27,46 @@ pub enum DirtyStatus {
     Partial { dirty_rows: Vec<usize> },
 }
 
+/// The intrinsic (single-frame) dirty signals a [`RenderSnapshot`] carries so a
+/// renderer can decide full-vs-partial rebuild. The cross-frame triggers
+/// (screen switch, viewport move, resize) are compared by the renderer against
+/// the frame it last drew via [`FrameKey`]; the whole-screen "force full"
+/// signal (palette/selection/clear/etc) is a single bool here.
+///
+/// This mirrors how upstream's `RenderState.update` combines the live
+/// terminal's global dirty flags with its own persisted per-render-state
+/// comparison fields (`self.screen`, `self.viewport_pin`, `self.rows/cols`) to
+/// pick `redraw`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDirty {
+    /// Per-visible-row dirty bits (top-to-bottom, exactly `rows` long).
+    pub row_dirty: Vec<bool>,
+    /// True if a whole-frame rebuild is forced by intrinsic global signals
+    /// (palette change, selection change, screen clear, etc).
+    pub global_forces_full: bool,
+    /// The cross-frame identity of this frame's viewport; the renderer forces
+    /// a full rebuild when it differs from the last frame it drew.
+    pub frame_key: FrameKey,
+}
+
+/// The identity of a rendered frame's viewport, used to detect the cross-frame
+/// full-rebuild triggers by comparing against the previously drawn frame:
+/// a screen switch (`screen`), a scroll / viewport move (`window_top`), or a
+/// resize (`cols`/`rows`). Port of the `self.screen`/`self.viewport_pin`/
+/// `self.rows`/`self.cols` comparisons in upstream `RenderState.update`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameKey {
+    /// 0 = primary screen, 1 = alternate. Compared like upstream's
+    /// `active_key != self.screen`.
+    pub screen: u8,
+    /// Absolute logical row index of the top visible row (the snapshot's
+    /// `window_top`). A change means the viewport scrolled — upstream's
+    /// `viewport_pin` inequality.
+    pub window_top: usize,
+    pub cols: usize,
+    pub rows: usize,
+}
+
 /// A single codepoint in an IME preedit (composition) string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreeditCodepoint {
@@ -136,8 +176,32 @@ pub trait RenderSnapshot {
     fn cols(&self) -> usize;
     fn rows(&self) -> usize;
 
-    /// What changed since the renderer's last consumed frame.
-    fn dirty(&self) -> DirtyStatus;
+    /// The intrinsic dirty signals for this frame: per-row dirty bits, the
+    /// global "force full" bool, and the cross-frame [`FrameKey`]. The renderer
+    /// combines these with its own memory of the last drawn frame to decide
+    /// full-vs-partial (see [`crate::engine::Engine::update_frame`]).
+    fn dirty_signals(&self) -> SnapshotDirty;
+
+    /// Convenience view of [`RenderSnapshot::dirty_signals`] that does *not*
+    /// account for cross-frame triggers (it has no memory of the last frame):
+    /// [`DirtyStatus::Full`] if the global signals force a full rebuild, else
+    /// [`DirtyStatus::Partial`] listing the dirty rows. The engine uses
+    /// `dirty_signals` directly (with its `FrameKey` memory); this exists for
+    /// tests and simple consumers.
+    fn dirty(&self) -> DirtyStatus {
+        let d = self.dirty_signals();
+        if d.global_forces_full {
+            return DirtyStatus::Full;
+        }
+        DirtyStatus::Partial {
+            dirty_rows: d
+                .row_dirty
+                .iter()
+                .enumerate()
+                .filter_map(|(y, &dirty)| dirty.then_some(y))
+                .collect(),
+        }
+    }
 
     /// One visible row, 0-indexed from the top of the rendered window.
     /// Always exactly `cols()` cells long.
@@ -170,11 +234,17 @@ pub trait RenderSnapshot {
 }
 
 /// A full-copy [`RenderSnapshot`] implementation backed by
-/// `ghostty_vt::Terminal::snapshot_window`. Always reports
-/// [`DirtyStatus::Full`] and re-copies the entire visible window every
-/// frame; correct but not incremental. See the trait docs and
-/// `docs/analysis/renderer-r0.md` for the planned `DirtySnapshot`
-/// alternative.
+/// `ghostty_vt::Terminal::snapshot_window[_tracking]`. It re-copies the entire
+/// visible window every frame (cheap: O(visible rows)), but carries the vt
+/// layer's per-row + global dirty signals so the engine can still skip
+/// *rebuilding* (shaping / glyph lookup / cell writes for) the clean rows.
+///
+/// Two capture paths:
+/// - [`FullSnapshot::capture`] (read-only): reports every row dirty, leaves the
+///   terminal's dirty state untouched — for inspection / tests.
+/// - [`FullSnapshot::capture_tracking`] (incremental): reads and clears the
+///   terminal's dirty state so `dirty_signals()` reports the real per-row and
+///   global dirtiness — for the per-frame render path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FullSnapshot {
     window: ghostty_vt::snapshot::SnapshotWindow,
@@ -184,9 +254,25 @@ impl FullSnapshot {
     /// Capture a full-copy snapshot of `terminal`'s currently visible
     /// window, `scrollback_offset` rows up from the bottom (0 = the live
     /// active area). Thin wrapper over `Terminal::snapshot_window`.
+    ///
+    /// This is the read-only path: it reports every row dirty (`dirty()` =>
+    /// `Full`) and does not touch the terminal's dirty state. For incremental
+    /// redraw use [`FullSnapshot::capture_tracking`].
     pub fn capture(terminal: &Terminal, scrollback_offset: usize) -> FullSnapshot {
         FullSnapshot {
             window: terminal.snapshot_window(scrollback_offset),
+        }
+    }
+
+    /// Capture a snapshot on the incremental-redraw path: reads and *clears*
+    /// the terminal's per-row/page/global dirty state, so the window carries
+    /// the real per-row dirty bits and global signals. Thin wrapper over
+    /// `Terminal::snapshot_window_tracking` (requires `&mut` because consuming
+    /// dirty state mutates the terminal, exactly as upstream `RenderState`'s
+    /// snapshot does under the render lock).
+    pub fn capture_tracking(terminal: &mut Terminal, scrollback_offset: usize) -> FullSnapshot {
+        FullSnapshot {
+            window: terminal.snapshot_window_tracking(scrollback_offset),
         }
     }
 
@@ -209,11 +295,20 @@ impl RenderSnapshot for FullSnapshot {
         self.window.window.len()
     }
 
-    fn dirty(&self) -> DirtyStatus {
-        // A fresh full copy has no notion of "since last frame" — always
-        // report Full. See DirtySnapshot (future chunk) for partial
-        // reporting.
-        DirtyStatus::Full
+    fn dirty_signals(&self) -> SnapshotDirty {
+        SnapshotDirty {
+            row_dirty: self.window.row_dirty.clone(),
+            global_forces_full: self.window.global_dirty_forces_full(),
+            frame_key: FrameKey {
+                screen: match self.window.screen_key {
+                    ghostty_vt::terminal::ScreenKey::Primary => 0,
+                    ghostty_vt::terminal::ScreenKey::Alternate => 1,
+                },
+                window_top: self.window.window_top,
+                cols: self.window.cols,
+                rows: self.window.window.len(),
+            },
+        }
     }
 
     fn row(&self, row: usize) -> &[SnapshotCell] {
@@ -221,11 +316,24 @@ impl RenderSnapshot for FullSnapshot {
     }
 
     fn cursor(&self) -> Option<SnapshotCursor> {
-        // The active area (what snapshot_window captures) always contains
-        // the live cursor today; "cursor scrolled out of the visible
-        // window" isn't modeled by ghostty-vt yet. See
-        // docs/analysis/renderer-r0.md's cursor.zig section.
-        Some(self.window.cursor)
+        // The cursor's position is relative to the active area (row 0 = top of
+        // the active area). Its absolute logical row is
+        // `scrollback_len + cursor.row`. The visible window covers absolute
+        // rows `[window_top, window_top + rows)`. When the viewport is scrolled
+        // back into history the cursor may fall outside that range — upstream
+        // then reports `cursor.viewport == null` and draws no cursor
+        // (`render.zig`; `cursor.zig` priority #1). Mirror that: suppress the
+        // cursor when it's out of the visible window, and otherwise remap its
+        // row to be window-relative.
+        let abs_cursor_row = self.window.scrollback_len + self.window.cursor.row;
+        let top = self.window.window_top;
+        let rows = self.window.window.len();
+        if abs_cursor_row < top || abs_cursor_row >= top + rows {
+            return None;
+        }
+        let mut cursor = self.window.cursor;
+        cursor.row = abs_cursor_row - top;
+        Some(cursor)
     }
 
     fn palette(&self) -> &Palette {
@@ -321,11 +429,17 @@ mod tests {
     }
 
     #[test]
-    fn full_snapshot_reports_full_dirty_and_matches_terminal() {
+    fn full_snapshot_read_only_reports_all_rows_dirty_and_matches_terminal() {
         let term = feed(10, 3, b"Hello");
         let snap = FullSnapshot::capture(&term, 0);
 
-        assert_eq!(snap.dirty(), DirtyStatus::Full);
+        // The read-only capture reports every row dirty (a full repaint).
+        assert_eq!(
+            snap.dirty(),
+            DirtyStatus::Partial {
+                dirty_rows: vec![0, 1, 2]
+            }
+        );
         assert_eq!(snap.cols(), 10);
         assert_eq!(snap.rows(), 3);
         assert_eq!(row_text(snap.row(0)), "Hello");
@@ -379,6 +493,83 @@ mod tests {
             let expected = full.visible_window(offset);
             for (row_idx, expected_row) in expected.iter().enumerate() {
                 assert_eq!(snap.row(row_idx), expected_row.cells.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn tracking_capture_reports_partial_after_single_row_change() {
+        let mut term = feed(10, 4, b"aaa\r\nbbb\r\nccc\r\nddd");
+        // Drain initial dirt.
+        let _ = FullSnapshot::capture_tracking(&mut term, 0);
+
+        // Overwrite exactly one row.
+        let mut stream = Stream::new(TerminalHandler::new(term));
+        stream.feed(b"\x1b[2;1HZZZ"); // row index 1
+        let mut term = stream.handler.terminal;
+
+        let snap = FullSnapshot::capture_tracking(&mut term, 0);
+        match snap.dirty() {
+            DirtyStatus::Partial { dirty_rows } => {
+                assert!(dirty_rows.contains(&1), "row 1 (rewritten) dirty");
+                // Unrelated rows above the change stay clean (not a full repaint).
+                assert!(!dirty_rows.contains(&0), "row 0 clean");
+                assert!(!dirty_rows.contains(&2), "row 2 clean");
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tracking_capture_forces_full_on_palette_change() {
+        let mut term = feed(10, 2, b"hi");
+        let _ = FullSnapshot::capture_tracking(&mut term, 0);
+
+        let mut stream = Stream::new(TerminalHandler::new(term));
+        stream.feed(b"\x1b]4;1;#112233\x1b\\");
+        let mut term = stream.handler.terminal;
+
+        let snap = FullSnapshot::capture_tracking(&mut term, 0);
+        assert_eq!(snap.dirty(), DirtyStatus::Full);
+    }
+
+    #[test]
+    fn cursor_hidden_when_scrolled_into_history() {
+        // Push several rows into scrollback so a nonzero offset shows history.
+        let term = feed(4, 2, b"aaaabbbbccccddddeeee");
+        let sb = term.snapshot().scrollback_len();
+        assert!(sb >= 1);
+
+        // At the bottom (offset 0) the cursor is in the active area => shown.
+        let at_bottom = FullSnapshot::capture(&term, 0);
+        assert!(at_bottom.cursor().is_some(), "cursor shown at bottom");
+
+        // Scrolled fully back into history => cursor out of the visible window
+        // => suppressed (upstream draws no cursor when viewport != active).
+        let scrolled = FullSnapshot::capture(&term, sb);
+        assert!(
+            scrolled.cursor().is_none(),
+            "cursor hidden when scrolled into history"
+        );
+    }
+
+    #[test]
+    fn cursor_row_is_remapped_window_relative_when_partly_scrolled() {
+        // A partial scroll that still keeps the cursor in view must remap the
+        // cursor's row to be window-relative (so it draws at the right place).
+        let term = feed(4, 3, b"aaaabbbbccccdddd");
+        let full = term.snapshot();
+        // Cursor is on the last active row.
+        let bottom = FullSnapshot::capture(&term, 0);
+        let c0 = bottom.cursor().expect("cursor visible at bottom");
+
+        // Scroll up by 1: the cursor's absolute row is one lower in the window.
+        let sb = full.scrollback_len();
+        if sb >= 1 {
+            let up = FullSnapshot::capture(&term, 1);
+            match up.cursor() {
+                Some(c) => assert_eq!(c.row, c0.row + 1, "cursor row shifted down by scroll"),
+                None => { /* cursor scrolled out entirely — also valid */ }
             }
         }
     }

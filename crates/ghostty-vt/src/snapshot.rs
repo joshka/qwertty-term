@@ -24,7 +24,7 @@ use crate::pagelist::Direction;
 use crate::point::{Point, Tag};
 use crate::screen::Screen;
 use crate::screen::cursor::CursorStyle;
-use crate::terminal::Terminal;
+use crate::terminal::{ScreenKey, Terminal};
 
 /// A source-tracked color for a snapshot cell. Mirrors the engine's
 /// [`crate::page::style::Color`] but is a plain owned value with no lifetime.
@@ -143,6 +143,57 @@ pub struct SnapshotCursor {
     pub visible: bool,
 }
 
+/// The global (whole-screen) dirty signals a renderer needs to decide whether
+/// a frame must be *fully* rebuilt rather than just repainting the per-row
+/// dirty rows. Mirrors the union of upstream's full-rebuild triggers that are
+/// *intrinsic to the current terminal state* — the `Terminal.Dirty` and
+/// `Screen.Dirty` packed-struct bits that `src/terminal/render.zig`'s `update`
+/// reads (`t.flags.dirty` and `t.screens.active.dirty`) before forcing
+/// `redraw`. The cross-frame triggers (screen-key switch, viewport-pin move,
+/// dimension change) are *not* here: those are comparisons against the
+/// previous frame, so they're carried as raw values ([`SnapshotWindow`]'s
+/// `screen_key`, `window_top`, `cols`/`rows`) for the renderer — which persists
+/// across frames, the way upstream's `RenderState` does — to compare itself.
+///
+/// [`SnapshotWindow::global_dirty_forces_full`] collapses these to the single
+/// bool the renderer actually branches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SnapshotDirty {
+    /// Palette changed (OSC 4/104). Port of `Terminal.Dirty.palette`.
+    pub palette: bool,
+    /// Reverse-colors (DECSCNM) toggled. Port of `Terminal.Dirty.reverse_colors`.
+    pub reverse_colors: bool,
+    /// Screen clear of some kind (erase display, screen change, RIS). Port of
+    /// `Terminal.Dirty.clear`.
+    pub clear: bool,
+    /// Pre-edit modified. Port of `Terminal.Dirty.preedit`.
+    pub preedit: bool,
+    /// Glyph-protocol registrations changed. Port of
+    /// `Terminal.Dirty.glyph_glossary`.
+    pub glyph_glossary: bool,
+    /// Selection set or unset. Port of `Screen.Dirty.selection`.
+    pub selection: bool,
+    /// A hovered OSC8 hyperlink dirtied the full screen. Port of
+    /// `Screen.Dirty.hyperlink_hover`.
+    pub hyperlink_hover: bool,
+}
+
+impl SnapshotDirty {
+    /// True if any global dirty bit is set, meaning the whole visible frame
+    /// must be rebuilt (the renderer can't localize the change to rows).
+    /// Mirrors upstream's `if (v > 0) break :redraw true` over the two packed
+    /// dirty integers.
+    pub fn forces_full(self) -> bool {
+        self.palette
+            || self.reverse_colors
+            || self.clear
+            || self.preedit
+            || self.glyph_glossary
+            || self.selection
+            || self.hyperlink_hover
+    }
+}
+
 /// A cheap, windowed counterpart to [`Snapshot`]: only the rows needed to
 /// render a `rows`-tall viewport are materialized, instead of the whole
 /// scrollback history.
@@ -173,6 +224,41 @@ pub struct SnapshotWindow {
     pub palette: Palette,
     pub default_fg: Option<Rgb>,
     pub default_bg: Option<Rgb>,
+    /// Per-window-row dirty bits (same length and order as `window`): `true` if
+    /// that visible row's underlying page/row dirty bit was set when this
+    /// window was captured. A renderer doing incremental redraw repaints only
+    /// the rows flagged here (unless a global signal forces a full rebuild —
+    /// see [`SnapshotWindow::global_dirty`]).
+    ///
+    /// Only populated by the *tracking* capture path
+    /// ([`Terminal::snapshot_window_tracking`] /
+    /// [`Screen::snapshot_window_tracking`]), which also *clears* the consumed
+    /// dirty bits — mirroring upstream `render.zig`'s `update`. The plain
+    /// [`Terminal::snapshot_window`] leaves this all-`true` (every row dirty)
+    /// and does not touch the engine's dirty state, so read-only callers and
+    /// the differential corpus are unaffected.
+    pub row_dirty: Vec<bool>,
+    /// The whole-screen dirty signals that force a full rebuild regardless of
+    /// per-row dirtiness (palette/selection/clear/etc). Only meaningful on the
+    /// tracking capture path; the plain path reports all-`false` here (its
+    /// all-`true` `row_dirty` already forces a full repaint).
+    pub global_dirty: SnapshotDirty,
+    /// Which screen (primary/alternate) this window was captured from. A
+    /// renderer compares this against the previous frame's value to detect a
+    /// screen switch (alt-screen enter/exit, DEC 1049), which upstream treats
+    /// as a full rebuild (`t.screens.active_key != self.screen`).
+    pub screen_key: ScreenKey,
+}
+
+impl SnapshotWindow {
+    /// True if a whole-frame rebuild is required by the intrinsic global dirty
+    /// signals (palette, selection, clear, etc). Does *not* cover the
+    /// cross-frame triggers (screen switch, viewport move, resize); the
+    /// renderer detects those by comparing `screen_key` / `window_top` /
+    /// `cols` / `rows` against the frame it last drew.
+    pub fn global_dirty_forces_full(&self) -> bool {
+        self.global_dirty.forces_full()
+    }
 }
 
 /// A complete, owned, read-only view of the visible + scrollback grid.
@@ -357,6 +443,7 @@ impl Screen {
             window.insert(0, SnapshotRow::blank(cols));
         }
 
+        let row_dirty = vec![true; window.len()];
         SnapshotWindow {
             cols,
             window_top: total_rows.saturating_sub(offset + rows),
@@ -366,6 +453,101 @@ impl Screen {
             palette: DEFAULT_PALETTE,
             default_fg: None,
             default_bg: None,
+            // Read-only path: every row is "dirty" (full repaint), no global
+            // signals, screen-key filled in by `Terminal::snapshot_window`.
+            row_dirty,
+            global_dirty: SnapshotDirty::default(),
+            screen_key: ScreenKey::Primary,
+        }
+    }
+
+    /// Like [`Screen::snapshot_window`], but reads and *clears* the per-row
+    /// (and page) dirty bits for the captured window, returning them in
+    /// `row_dirty`. This is the renderer's incremental-redraw capture path: a
+    /// row is repainted only if its bit is set. Mirrors upstream
+    /// `render.zig`'s `update`, which reads each viewport row's `dirty` flag,
+    /// then clears the row and page dirty state as it consumes it.
+    ///
+    /// The global (whole-screen) dirty signals live on the [`Terminal`] /
+    /// [`Screen`] as packed flags; this `Screen`-level method only handles the
+    /// per-row/page bits, so `global_dirty`/`screen_key` are left at their
+    /// defaults for [`Terminal::snapshot_window_tracking`] to fill.
+    pub fn snapshot_window_tracking(&mut self, scrollback_offset: usize) -> SnapshotWindow {
+        let cols = self.cols() as usize;
+        let rows = self.rows() as usize;
+        let total_rows = self.pages.total_rows();
+        let scrollback_len = total_rows.saturating_sub(rows);
+        let offset = scrollback_offset.min(scrollback_len);
+
+        // Same window bounds as `snapshot_window`, but here we also read the
+        // row dirty bit for each row and clear it (plus the owning page's
+        // dirty flag) as we go.
+        let bottom_right = self
+            .pages
+            .get_bottom_right(Tag::Screen)
+            .and_then(|p| unsafe { p.up(offset) });
+
+        let mut window = Vec::new();
+        let mut row_dirty = Vec::new();
+        if let Some(bl_pin) = bottom_right {
+            let window_len = rows.min(total_rows.saturating_sub(offset));
+            if window_len > 0 {
+                // SAFETY: `bl_pin` addresses a live page; `up` only walks
+                // `prev` pointers within the same live page list.
+                if let Some(tl_pin) = unsafe { bl_pin.up(window_len - 1) } {
+                    // SAFETY: both pins address live pages; the iterator is
+                    // used only for the duration of this call.
+                    let mut it = unsafe { tl_pin.row_iterator(Direction::RightDown, Some(bl_pin)) };
+                    // SAFETY: the iterator yields valid pins into live pages.
+                    unsafe {
+                        while let Some(pin) = it.next() {
+                            let (row_ptr, _) = pin.row_and_cell();
+                            let page = self.pages.node_data(pin.node);
+                            let dirty = (*pin.node).data.dirty || (*row_ptr).dirty();
+                            row_dirty.push(dirty);
+                            // Consume (clear) the row dirty bit as upstream does.
+                            (*row_ptr).set_dirty(false);
+
+                            let base = page.get_cells(row_ptr) as *const crate::page::Cell;
+                            let mut cells = Vec::with_capacity(cols);
+                            for x in 0..cols {
+                                let cell = *base.add(x);
+                                cells.push(snapshot_cell(page, base.add(x), &cell));
+                            }
+                            window.push(SnapshotRow { cells });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clear every page's dirty flag we may have observed. Upstream clears
+        // the page dirty of the last dirty page inline and finalizes any
+        // trailing one; we simply clear all pages' dirty bits after consuming
+        // them (cheap: page count is tiny), matching `render.zig`'s effect of
+        // leaving no page dirty behind.
+        self.pages.clear_page_dirty();
+
+        // Pad at the top if the window is shorter than `rows` (parity with
+        // `snapshot_window`); padded rows are treated as dirty (they're
+        // freshly synthesized, so must be painted).
+        while window.len() < rows {
+            window.insert(0, SnapshotRow::blank(cols));
+            row_dirty.insert(0, true);
+        }
+
+        SnapshotWindow {
+            cols,
+            window_top: total_rows.saturating_sub(offset + rows),
+            window,
+            scrollback_len,
+            cursor: self.snapshot_cursor(),
+            palette: DEFAULT_PALETTE,
+            default_fg: None,
+            default_bg: None,
+            row_dirty,
+            global_dirty: SnapshotDirty::default(),
+            screen_key: ScreenKey::Primary,
         }
     }
 
@@ -517,6 +699,60 @@ impl Terminal {
         snap.palette = self.colors.palette.current;
         snap.default_fg = self.colors.foreground.get();
         snap.default_bg = self.colors.background.get();
+        snap.screen_key = self.screens.active_key();
+        snap
+    }
+
+    /// Build an owned [`SnapshotWindow`] for the incremental-redraw render
+    /// path: like [`Terminal::snapshot_window`], but it reads and **clears**
+    /// the consumed dirty state (per-row/page bits plus the global
+    /// `Terminal.Dirty`/`Screen.Dirty` flags), reporting which rows were dirty
+    /// in `row_dirty` and the global signals in `global_dirty`. This mirrors
+    /// upstream `render.zig`'s `update`, which is the single place that
+    /// consumes and resets the terminal's renderer dirty state.
+    ///
+    /// A renderer calls this once per frame it draws (not once per snapshot
+    /// inspection) and repaints only the dirty rows, falling back to a full
+    /// rebuild when `global_dirty` forces it or when the cross-frame signals
+    /// (`screen_key`, `window_top`, `cols`/`rows`) show a screen switch,
+    /// viewport move, or resize. Read-only inspection must use the plain
+    /// [`Terminal::snapshot_window`], which never mutates dirty state.
+    pub fn snapshot_window_tracking(&mut self, scrollback_offset: usize) -> SnapshotWindow {
+        // Snapshot the global dirty flags *before* the screen-level capture
+        // clears anything (it only touches row/page bits, but read first to be
+        // unambiguous).
+        let global_dirty = SnapshotDirty {
+            palette: self.flags.dirty.palette,
+            reverse_colors: self.flags.dirty.reverse_colors,
+            clear: self.flags.dirty.clear,
+            preedit: self.flags.dirty.preedit,
+            glyph_glossary: self.flags.dirty.glyph_glossary,
+            selection: self.screen().dirty.selection,
+            hyperlink_hover: self.screen().dirty.hyperlink_hover,
+        };
+        let screen_key = self.screens.active_key();
+
+        let cursor_visible = self.modes.get(crate::modes::Mode::CursorVisible);
+        let palette = self.colors.palette.current;
+        let default_fg = self.colors.foreground.get();
+        let default_bg = self.colors.background.get();
+
+        let mut snap = self
+            .screen_mut()
+            .snapshot_window_tracking(scrollback_offset);
+        snap.cursor.visible = cursor_visible;
+        snap.palette = palette;
+        snap.default_fg = default_fg;
+        snap.default_bg = default_bg;
+        snap.global_dirty = global_dirty;
+        snap.screen_key = screen_key;
+
+        // Consume (clear) the global dirty flags, exactly as upstream's
+        // `render.zig` `update` does at its tail (`t.flags.dirty = .{};
+        // s.dirty = .{};`).
+        self.flags.dirty = crate::terminal::Dirty::default();
+        self.screen_mut().dirty = crate::screen::Dirty::default();
+
         snap
     }
 }
@@ -770,5 +1006,134 @@ mod tests {
         let clamped = term.snapshot_window(full.scrollback_len() + 100);
         let unclamped = term.snapshot_window(full.scrollback_len());
         assert_eq!(clamped.window, unclamped.window);
+    }
+
+    // ---- tracking capture path ----------------------------------------
+
+    fn stream_of(term: Terminal) -> Stream<TerminalHandler> {
+        Stream::new(TerminalHandler::new(term))
+    }
+
+    #[test]
+    fn tracking_window_content_matches_plain_window() {
+        // The tracking path must produce byte-identical cell content to the
+        // plain path (it only additionally reports+clears dirty state).
+        let term = feed(10, 3, b"Hello\r\nWorld");
+        let plain = term.snapshot_window(0);
+        let mut term = term;
+        let tracking = term.snapshot_window_tracking(0);
+        assert_eq!(tracking.window, plain.window);
+        assert_eq!(tracking.cursor, plain.cursor);
+        assert_eq!(tracking.screen_key, plain.screen_key);
+        assert_eq!(tracking.row_dirty.len(), tracking.window.len());
+    }
+
+    #[test]
+    fn tracking_reports_only_the_touched_row_after_a_clean_capture() {
+        // Fresh writes make rows dirty. A first tracking capture consumes+
+        // clears them; a follow-up with no writes reports all-clean; a write
+        // touching exactly one row reports exactly that row dirty.
+        let mut term = feed(10, 4, b"aaa\r\nbbb\r\nccc\r\nddd");
+
+        // First capture: some rows dirty (freshly written).
+        let first = term.snapshot_window_tracking(0);
+        assert!(first.row_dirty.iter().any(|&d| d), "first capture has dirt");
+
+        // Second capture with no intervening writes: nothing dirty.
+        let clean = term.snapshot_window_tracking(0);
+        assert!(
+            clean.row_dirty.iter().all(|&d| !d),
+            "clean capture has no dirty rows, got {:?}",
+            clean.row_dirty
+        );
+
+        // Move cursor to row 2 (0-based) and overwrite it only.
+        let mut stream = stream_of(term);
+        stream.feed(b"\x1b[3;1HXYZ"); // CUP row 3 (1-based) => row index 2
+        let mut term = stream.handler.terminal;
+
+        let partial = term.snapshot_window_tracking(0);
+        // The rewritten row is dirty; the untouched rows above it stay clean.
+        // (The cursor's landing/prior row may also be flagged, matching the
+        // engine's dirty semantics — we only require that unrelated rows are
+        // NOT needlessly repainted.)
+        assert!(partial.row_dirty[2], "rewritten row 2 dirty");
+        assert!(!partial.row_dirty[0], "row 0 stays clean");
+        assert!(!partial.row_dirty[1], "row 1 stays clean");
+        // And the touched row has the new content.
+        assert_eq!(row_text(&partial.window[2]), "XYZ");
+    }
+
+    #[test]
+    fn tracking_consumes_global_palette_dirty() {
+        // OSC 4 sets Terminal.Dirty.palette; the tracking capture reports it
+        // and then clears it so the next capture is clean.
+        let mut term = feed(10, 2, b"hi");
+        // Drain the initial write dirt.
+        let _ = term.snapshot_window_tracking(0);
+
+        let mut stream = stream_of(term);
+        stream.feed(b"\x1b]4;1;#112233\x1b\\");
+        let mut term = stream.handler.terminal;
+
+        let snap = term.snapshot_window_tracking(0);
+        assert!(snap.global_dirty.palette, "palette dirty reported");
+        assert!(snap.global_dirty_forces_full());
+
+        // Consumed: next capture clean.
+        let next = term.snapshot_window_tracking(0);
+        assert!(!next.global_dirty.palette);
+        assert!(!next.global_dirty_forces_full());
+    }
+
+    #[test]
+    fn tracking_reports_selection_dirty() {
+        let mut term = feed(10, 3, b"hello world");
+        let _ = term.snapshot_window_tracking(0);
+
+        // Set a selection (Screen.Dirty.selection).
+        use crate::point::Point;
+        use crate::screen::selection::Selection;
+        let s = term.screen_mut();
+        let start = s.pages.pin(Point::active(0, 0)).unwrap();
+        let end = s.pages.pin(Point::active(4, 0)).unwrap();
+        s.select(Some(Selection::init(start, end, false)));
+
+        let snap = term.snapshot_window_tracking(0);
+        assert!(snap.global_dirty.selection, "selection dirty reported");
+        assert!(snap.global_dirty_forces_full());
+
+        let next = term.snapshot_window_tracking(0);
+        assert!(!next.global_dirty.selection);
+    }
+
+    #[test]
+    fn tracking_screen_key_tracks_alt_screen() {
+        let mut term = feed(10, 2, b"primary");
+        assert_eq!(
+            term.snapshot_window_tracking(0).screen_key,
+            crate::terminal::ScreenKey::Primary
+        );
+
+        let mut stream = stream_of(term);
+        stream.feed(b"\x1b[?1049h"); // enter alt screen
+        let mut term = stream.handler.terminal;
+        assert_eq!(
+            term.snapshot_window_tracking(0).screen_key,
+            crate::terminal::ScreenKey::Alternate
+        );
+    }
+
+    #[test]
+    fn plain_window_leaves_dirty_untouched() {
+        // The read-only path must not clear dirty state (differential corpus
+        // and inspection callers depend on this).
+        let mut term = feed(10, 2, b"data");
+        // Plain capture reports all rows dirty and leaves the bits set...
+        let plain = term.snapshot_window(0);
+        assert!(plain.row_dirty.iter().all(|&d| d));
+        // ...so a subsequent tracking capture still sees them dirty.
+        let tracking = term.snapshot_window_tracking(0);
+        assert!(tracking.row_dirty.iter().any(|&d| d));
     }
 }

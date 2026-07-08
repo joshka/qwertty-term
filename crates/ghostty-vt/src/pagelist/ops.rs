@@ -593,6 +593,21 @@ impl PageList {
         }
     }
 
+    /// Clear every page's page-level dirty flag, leaving per-row dirty bits
+    /// untouched. Used by the renderer snapshot's incremental capture path
+    /// after it has consumed the page dirty state (upstream `render.zig`'s
+    /// `update` clears each observed page's dirty flag as it goes; this is the
+    /// same net effect over the tiny page count).
+    pub(crate) fn clear_page_dirty(&mut self) {
+        let mut node = self.pages.first;
+        while !node.is_null() {
+            unsafe {
+                (*node).data.dirty = false;
+                node = (*node).next;
+            }
+        }
+    }
+
     // ---- semantic-content highlighting ----
 
     /// Build an untracked highlight for the semantic content (`.prompt`/`.input`/`.output`)
