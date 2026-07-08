@@ -18,7 +18,11 @@
 //! Out of R2 scope, landing later: `shaders.zig`'s production pipeline table
 //! (R3, lives with the shaders), the cell engine that drives rebuild/draw
 //! (R4), and the view-attachment/`contentsScale` wiring in upstream
-//! `Metal.init` (R5, needs a window).
+//! `Metal.init` (R5, needs a window). The `contentsScale` half of that R5 item
+//! is now wired: [`IOSurfaceLayer::set_contents_scale`] lets the window host
+//! match the layer's scale to the display's backing scale so the device-pixel
+//! surface isn't shown at the wrong magnification (the Retina "blank window"
+//! fix).
 
 mod buffer;
 mod frame;

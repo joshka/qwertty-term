@@ -14,6 +14,16 @@
 //! The `GHOSTTY_APP_SMOKE_MS` environment variable, if set to a positive integer
 //! in window mode, schedules a clean auto-exit after that many milliseconds —
 //! used to smoke-test app startup/teardown without a human closing the window.
+//!
+//! Debug env vars (window mode):
+//! - `GHOSTTY_APP_DUMP_FRAME=<prefix>` — after every Nth present, read the
+//!   presented IOSurface back and write it to `<prefix>-NNNN.png`. The decisive
+//!   probe for "blank window" bugs: if the PNGs contain glyphs but the window
+//!   doesn't, it's a presentation-geometry bug (contentsScale); if the PNGs are
+//!   blank too, it's the pump/draw path.
+//! - `GHOSTTY_APP_DUMP_EVERY=<n>` — dump cadence (default 30 presents).
+//! - `GHOSTTY_APP_ASSERT_PRESENT=1` — with `GHOSTTY_APP_SMOKE_TYPE`, also assert
+//!   the *presented* frame has glyph coverage (not just the engine buffer).
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));

@@ -13,6 +13,7 @@
 pub mod config;
 pub mod engine;
 pub mod font_size;
+pub mod frame_dump;
 pub mod geometry;
 pub mod input;
 pub mod menu;

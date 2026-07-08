@@ -42,8 +42,39 @@ impl Engine {
     /// Returns `Ok(false)` (nothing presented) when the target has zero area
     /// (no `update_frame` has sized it yet), matching `draw_frame`'s early-out.
     pub fn draw_and_present(&mut self, layer: &IOSurfaceLayer) -> Result<bool, MetalError> {
+        self.draw_and_present_inner(layer, false).map(|r| r.0)
+    }
+
+    /// Like [`Engine::draw_and_present`], but also reads the freshly presented
+    /// surface's pixels back and returns them (BGRA, `screen_width × screen_height`,
+    /// row padding stripped — same layout as [`Engine::draw_frame`]).
+    ///
+    /// This is the presented-pixel verification seam the windowed typing smoke
+    /// uses to assert that what was *attached to the layer* actually contains
+    /// glyph coverage — not just that the engine's text buffer does. It reads
+    /// from the same IOSurface that was handed to the layer, after the sync
+    /// frame completed, so the bytes are exactly what CoreAnimation will show.
+    /// `None` (nothing presented) when the target has zero area.
+    ///
+    /// Slightly more expensive than [`Engine::draw_and_present`] (a full-frame
+    /// CPU readback), so it's for smoke/debug paths, not the steady render loop.
+    pub fn draw_and_present_readback(
+        &mut self,
+        layer: &IOSurfaceLayer,
+    ) -> Result<Option<Vec<u8>>, MetalError> {
+        let (presented, pixels) = self.draw_and_present_inner(layer, true)?;
+        Ok(if presented { Some(pixels) } else { None })
+    }
+
+    /// Shared body of the present paths. When `readback` is set, the presented
+    /// surface's pixels are returned in the second tuple slot (empty otherwise).
+    fn draw_and_present_inner(
+        &mut self,
+        layer: &IOSurfaceLayer,
+        readback: bool,
+    ) -> Result<(bool, Vec<u8>), MetalError> {
         if self.screen_width() == 0 || self.screen_height() == 0 {
-            return Ok(false);
+            return Ok((false, Vec::new()));
         }
 
         let uniforms = self.uniforms_snapshot();
@@ -115,7 +146,17 @@ impl Engine {
         // SAFETY: called on the main thread (documented precondition).
         unsafe { layer.set_surface_sync(slot.target.surface()) };
 
+        // Optional presented-pixel readback (smoke/debug). The frame completed
+        // synchronously above, so the IOSurface is coherent; read the exact
+        // bytes just attached to the layer before releasing the slot (which may
+        // reuse the target on the next frame).
+        let pixels = if readback {
+            slot.target.read_pixels()
+        } else {
+            Vec::new()
+        };
+
         guard.release();
-        Ok(true)
+        Ok((true, pixels))
     }
 }

@@ -129,6 +129,28 @@ impl IOSurfaceLayer {
         self
     }
 
+    /// Set the layer's `contentsScale` to the window's backing-scale factor.
+    ///
+    /// This is the R5 "view-attachment / `contentsScale` wiring" the R2 module
+    /// header (`metal/mod.rs`) deferred as "needs a window". A layer-backed
+    /// `NSView`'s layer has `bounds` in *points*, but the presented IOSurface
+    /// is sized in *device pixels* (`cols*cell_width × rows*cell_height`, where
+    /// the cell size is already baked at `font_size × backing_scale`). With the
+    /// default `contentsScale == 1.0`, CoreAnimation maps one surface pixel to
+    /// one point, so on a 2× Retina display a device-pixel surface renders at
+    /// 2× — only its top-left quarter is visible and the rest is clipped off
+    /// the top/right (the "blank window + garbled sliver above the titlebar"
+    /// bug). Setting `contentsScale == backing_scale` makes CoreAnimation map
+    /// the surface's pixels back to points 1:1 in device terms, so the frame
+    /// fills the view.
+    ///
+    /// Must be called on the main thread (CoreAnimation requirement). Idempotent
+    /// and cheap; the host calls it whenever the backing scale is (re)resolved
+    /// (creation, resize, display change).
+    pub fn set_contents_scale(&self, scale: f64) {
+        self.setContentsScale(scale as CGFloat);
+    }
+
     /// Install (or clear) the display callback invoked from `display`. Must be
     /// called on the main thread. Port of `setDisplayCallback` (the closure
     /// subsumes upstream's separate `display_cb` + `display_ctx`).

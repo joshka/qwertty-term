@@ -29,6 +29,12 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 base64 = "0.22.1"
 
+[dev-dependencies]
+# Read-back decoder for the frame-dump PNG unit test (verifies our tiny
+# dependency-free PNG encoder produces valid, correctly-swizzled output).
+# Already in the workspace lock (eframe/spike pull it in), so no new fetch.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # The AppKit host proper. objc2 family pinned to the workspace-standard versions
 # (objc2 0.6 / objc2-* 0.3.2), matching ghostty-renderer and ghostty-font so the
 # whole app shares one toolchain.

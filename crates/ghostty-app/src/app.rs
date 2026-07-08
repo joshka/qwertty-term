@@ -101,12 +101,39 @@ struct Tab {
     /// (or [`SelectionColors::Inverse`] if the theme had none / no theme was
     /// configured).
     selection_colors: SelectionColors,
+    /// The terminal's default background as `(r, g, b)` — the baseline the
+    /// presented-frame coverage metric measures against (glyphs and non-default
+    /// cell backgrounds show up as pixels far from this). Resolved from the
+    /// startup theme (or ghostty-vt's default `0x18` grey).
+    default_bg: (u8, u8, u8),
+    /// Debug frame-dump (env `GHOSTTY_APP_DUMP_FRAME`), if enabled. When set,
+    /// the render path reads the presented IOSurface back and writes periodic
+    /// PNGs — the decisive "does the presented surface contain glyphs" probe.
+    frame_dump: Option<crate::frame_dump::FrameDump>,
+    /// Max per-pixel L1 delta from `default_bg` in the most recently *presented*
+    /// frame (not the engine buffer). `0` before the first present. The windowed
+    /// typing smoke reads this to assert the layer actually received glyph
+    /// pixels — the gap the old engine-text-only assertion missed.
+    last_present_delta: i32,
+    /// Whether the render path should read the presented frame back each tick to
+    /// record [`Tab::last_present_delta`]. Enabled by a frame dump or by the
+    /// presented-pixel smoke (`GHOSTTY_APP_ASSERT_PRESENT`); off in normal use
+    /// (readback is a per-frame CPU copy we don't want in the steady loop).
+    capture_present: bool,
 }
 
 impl Tab {
     /// Rebuild the render target + grid for the current view size and scale,
     /// resizing the engine + PTY to match. Called on creation and resize.
     fn reflow(&mut self) {
+        // Keep the host layer's contentsScale in lockstep with the backing
+        // scale. The presented IOSurface is device-pixel-sized while the
+        // layer's bounds are in points; without this the frame renders at the
+        // wrong scale (only the top-left 1/scale of it is visible — the blank
+        // window / garbled-sliver bug on Retina). See
+        // `IOSurfaceLayer::set_contents_scale`.
+        self.apply_contents_scale();
+
         let (cols, rows) = self.current_grid_size();
         if cols != self.cols || rows != self.rows {
             self.cols = cols;
@@ -114,6 +141,12 @@ impl Tab {
             self.engine.resize(cols, rows);
             let _ = self.pty.resize(cols as u16, rows as u16);
         }
+    }
+
+    /// Apply the tab's current backing scale to the host render layer's
+    /// `contentsScale`. Idempotent; safe to call every reflow.
+    fn apply_contents_scale(&self) {
+        self.view.host_layer().set_contents_scale(self.scale);
     }
 
     /// The grid size that fits the view's current pixel bounds.
@@ -162,7 +195,22 @@ impl Tab {
         if render.sync_atlas(&self.font.grid).is_err() {
             return;
         }
-        let _ = render.draw_and_present(self.view.host_layer());
+
+        if self.capture_present {
+            // Debug / smoke path: present *and* read the presented surface back,
+            // so we can both dump it and assert on real presented pixels.
+            let (sw, sh) = render.screen_size();
+            if let Ok(Some(pixels)) = render.draw_and_present_readback(self.view.host_layer()) {
+                self.last_present_delta = crate::frame_dump::max_bg_delta(&pixels, self.default_bg);
+                if let Some(dump) = self.frame_dump.as_mut()
+                    && dump.should_dump()
+                {
+                    dump.write(&pixels, sw, sh);
+                }
+            }
+        } else {
+            let _ = render.draw_and_present(self.view.host_layer());
+        }
     }
 
     /// The engine's current selection, resolved to absolute screen
@@ -288,6 +336,31 @@ impl Controller {
         self.0.borrow().registry.active()
     }
 
+    /// Re-resolve `tab`'s backing scale from its window and reflow it. Called on
+    /// window resize and on a backing-property change (e.g. the window moved to
+    /// a display with a different scale). Keeps three things in lockstep after
+    /// the initial `spawn_tab`: the font grid (rebuilt if the scale changed),
+    /// the engine/PTY grid (reflowed to the new view size), and the render
+    /// layer's `contentsScale` (re-applied in `reflow`). Without this, resizing
+    /// the window or dragging it between a Retina and non-Retina display leaves
+    /// the presented surface at the wrong size/scale — the same
+    /// device-pixel-vs-points mismatch that blanks the window at startup.
+    pub fn resync_tab_geometry(&self, tab: TabId) {
+        let mut state = self.0.borrow_mut();
+        let family = state.font_family.clone();
+        if let Some(t) = state.tabs.get_mut(&tab) {
+            let new_scale = t.window.backingScaleFactor();
+            if (new_scale - t.scale).abs() > f64::EPSILON {
+                t.scale = new_scale;
+                // Rebuilds the font at the new scale, which itself reflows
+                // (and re-applies contentsScale).
+                t.rebuild_font(family.as_deref());
+            } else {
+                t.reflow();
+            }
+        }
+    }
+
     /// The plain-text screen dump of the active tab's engine (smoke/test only).
     /// `None` if there is no active tab. Used by the synthetic-input smoke
     /// (`GHOSTTY_APP_SMOKE_TYPE`) to assert a typed command round-tripped
@@ -296,6 +369,19 @@ impl Controller {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
         state.tabs.get(&tab).map(|t| t.engine.screen_dump())
+    }
+
+    /// The active tab's most recently *presented* frame coverage: the max
+    /// per-pixel L1 delta from the theme background in the last frame actually
+    /// attached to the CoreAnimation layer (smoke/test only; only populated
+    /// when presented-pixel capture is enabled — `GHOSTTY_APP_ASSERT_PRESENT`
+    /// or a frame dump). `None` if there is no active tab. A value near `0`
+    /// means the presented surface was blank (background only); a large value
+    /// means real glyph/foreground pixels reached the layer.
+    pub fn active_present_delta(&self) -> Option<i32> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state.tabs.get(&tab).map(|t| t.last_present_delta)
     }
 
     /// The active tab's `NSWindow` (smoke/test only): the target the synthetic
@@ -559,9 +645,27 @@ impl Controller {
         let init_h = (INITIAL_HEIGHT * scale) as usize;
         let (cols, rows) = geometry::grid_size(init_w, init_h, cw, ch);
 
+        // The theme background is what fills the presented surface (the frame
+        // clears to it); it's the baseline the presented-pixel coverage metric
+        // measures glyphs against. Fall back to the renderer's default grey
+        // (`0x18`) when no theme sets an explicit background.
+        let default_bg = startup_colors
+            .background
+            .get()
+            .map(|c| (c.r, c.g, c.b))
+            .unwrap_or((0x18, 0x18, 0x18));
+
         let engine = Engine::with_colors(cols, rows, startup_colors);
         let pty = PtySession::spawn_in_dir(cols as u16, rows as u16, cwd.as_deref()).ok()?;
         let render = RenderEngine::new(cw, ch).ok();
+
+        // Debug frame dump + presented-pixel capture (both env-gated; off in
+        // normal use). `capture_present` also turns on when the presented-pixel
+        // smoke asks for it, so `last_present_delta` is populated for the
+        // assertion.
+        let frame_dump = crate::frame_dump::FrameDump::from_env();
+        let capture_present =
+            frame_dump.is_some() || std::env::var_os("GHOSTTY_APP_ASSERT_PRESENT").is_some();
 
         // Register first so the view can carry the id.
         let id = self.0.borrow_mut().registry.add();
@@ -591,6 +695,10 @@ impl Controller {
             mouse_button_down: false,
             selection_anchor: None,
             selection_colors,
+            default_bg,
+            frame_dump,
+            last_present_delta: 0,
+            capture_present,
         };
 
         // Correct the scale from the real window, then reflow to the actual view
@@ -686,6 +794,27 @@ define_class!(
         fn window_did_become_key(&self, _notification: &NSNotification) {
             let ivars = self.ivars();
             ivars.controller.set_active(ivars.tab);
+        }
+
+        /// The window resized: reflow the tab to the new view size (and
+        /// re-apply the layer's contentsScale). Without this the grid + surface
+        /// stay frozen at the initial content size while the view grows, so the
+        /// terminal fills only the initial corner of a resized window.
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _notification: &NSNotification) {
+            let ivars = self.ivars();
+            ivars.controller.resync_tab_geometry(ivars.tab);
+        }
+
+        /// The window's backing properties changed — most importantly the
+        /// backing-scale factor when the window moves between a Retina and a
+        /// non-Retina display. Re-resolve the scale and rebuild so the
+        /// device-pixel surface and the layer's contentsScale match the new
+        /// display (the cross-display half of the "blank window" bug).
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn window_did_change_backing_properties(&self, _notification: &NSNotification) {
+            let ivars = self.ivars();
+            ivars.controller.resync_tab_geometry(ivars.tab);
         }
     }
 );
@@ -928,18 +1057,47 @@ impl AppDelegate {
         // again. We require at least one occurrence (the echo) as proof the
         // keystrokes reached the PTY and rendered; two means the command also
         // ran. Either way, zero means typing was completely dead.
-        if occurrences >= 1 {
-            println!(
-                "OK: synthetic-input smoke — marker '{marker}' found {occurrences}x in screen"
-            );
-            std::process::exit(0);
-        } else {
+        if occurrences < 1 {
             eprintln!(
                 "FAIL: synthetic-input smoke — marker '{marker}' not found; \
                  typing produced no output.\n----- screen -----\n{screen}\n------------------"
             );
             std::process::exit(1);
         }
+
+        // Presented-pixel assertion (the gap the engine-text-only check missed):
+        // when capture is enabled, require that the frame actually attached to
+        // the CoreAnimation layer contains real glyph coverage — not just that
+        // the engine's text buffer does. This is what catches the "window shows
+        // only the theme background, zero glyphs" bug (presentation geometry /
+        // never-re-presenting), which the old assertion sailed past because it
+        // read the engine, never the screen.
+        if std::env::var_os("GHOSTTY_APP_ASSERT_PRESENT").is_some() {
+            // 40 matches the offscreen smoke's coverage floor: a blank clear
+            // leaves max-delta ~0; a single rasterized glyph pushes it well
+            // past this.
+            const COVERAGE_FLOOR: i32 = 40;
+            let delta = self.ivars().controller.active_present_delta().unwrap_or(0);
+            if delta <= COVERAGE_FLOOR {
+                eprintln!(
+                    "FAIL: presented-frame smoke — the marker reached the engine \
+                     (found {occurrences}x) but the PRESENTED frame is blank \
+                     (max background delta {delta} <= {COVERAGE_FLOOR}). The layer \
+                     is showing only the background: presentation geometry \
+                     (contentsScale) or re-present path is broken."
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "OK: synthetic-input + presented-pixel smoke — marker '{marker}' \
+                 found {occurrences}x in engine AND presented frame has glyph \
+                 coverage (max background delta {delta})"
+            );
+            std::process::exit(0);
+        }
+
+        println!("OK: synthetic-input smoke — marker '{marker}' found {occurrences}x in screen");
+        std::process::exit(0);
     }
 
     /// Start the ~16 ms pace timer (repeating) on the main run loop.
