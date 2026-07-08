@@ -118,8 +118,9 @@ macOS, renders THROUGH this stack for ghostty-identical output. Work splits acro
       frames out, injectable font+size, deterministic) — the rewrite-prompt's embeddability
       artifact, now unblocked since the offscreen stack is proven (specimen/first-pixels
       tests ARE this flow already; the example packages it)
-- [ ] MB3 (here): sprite golden-parity vs upstream PNGs (TUI-aesthetics quality bar) — IN
-      FLIGHT
+- [x] MB3 — DONE 2026-07-08: pixel-identical on all integer-path glyphs (braille/octants
+      0.00%); AA fringes on curves within per-family budgets, permanently gated (36 upstream
+      golden atlases vendored)
 - [ ] MB4 (betamax): render via ghostty-renderer offscreen on macOS (Metal readback);
       Linux CI stays on betamax's cosmic-text path until the software-raster ADR (M6)
 - [ ] MB5 (here): publishing prep for ghostty-vt/-sprite/-font/-renderer (versioning,
