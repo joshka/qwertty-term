@@ -61,10 +61,17 @@ jj log -r "$CH" --no-graph -T 'if(conflict, "CONFLICT", "clean")'
 # if CONFLICT: jj new "$CH"; fix files (see conflict notes); jj squash
 jj bookmark move main --to "$CH" && jj new main
 # GATE (all must pass BEFORE the bookmark stays):
-cargo check --workspace && cargo test --workspace && cargo fmt --check
+cargo check --workspace --all-targets && cargo test --workspace && cargo fmt --check
 cargo test -p vt-diff --features reference    # when engine code changed
 markdownlint-cli2 "**/*.md" "!target"          # when docs changed
 # then: ledger row update + roadmap checkbox, one commit, move main again
+# FINAL HANDOVER CHECK (added 2026-07-08 after a stale-checkout shipped conflict
+# markers to the user): after the LAST jj op of the integration, re-run
+#   jj st && grep -rn '<<<<<<<' crates/ --include='*.rs' | head
+# in work/default. Concurrent sessions/editors sharing work/default re-stale the
+# checkout between your gate and the user's build; the committed state can be
+# clean while the materialized files are not. The USER should build/run from
+# their own workspace (work/josh) — never share work/default with integration.
 ```
 
 Conflict notes: `crates/ghostty-vt/src/lib.rs` module lists conflict often — resolve as the
