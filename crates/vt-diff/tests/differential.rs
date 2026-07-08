@@ -124,6 +124,67 @@ fn hand_insert_delete() {
     );
 }
 
+// ---- resize + alt-screen regression (field crash) ----------------------
+
+/// Feed `pre`, resize both engines to `cols2`x`rows2`, feed `post`, and assert
+/// identical observable state. Exercises the mid-stream resize path the corpus
+/// format cannot express.
+fn assert_agree_resize(
+    label: &str,
+    cols1: u16,
+    rows1: u16,
+    pre: &[u8],
+    cols2: u16,
+    rows2: u16,
+    post: &[u8],
+) {
+    let mut reference = ReferenceTerminal::new(cols1, rows1);
+    let mut rust = RustTerminal::new(cols1, rows1);
+    reference.feed(pre);
+    rust.feed(pre);
+    reference.resize(cols2, rows2);
+    rust.resize(cols2, rows2);
+    reference.feed(post);
+    rust.feed(post);
+
+    let rd = reference.dump();
+    let ud = rust.dump();
+    assert_eq!(rd.text, ud.text, "TEXT diverged for `{label}`");
+    assert_eq!(rd.cursor, ud.cursor, "CURSOR diverged for `{label}`");
+}
+
+/// Field crash: resize the terminal larger (window-appearance), then enter the
+/// alternate screen and move the cursor to the far corner. Before the fix the
+/// Rust port panicked in `cursor_absolute` in release builds because the
+/// alternate screen was created at the stale construction-time size. Now it must
+/// match the Zig oracle.
+#[test]
+fn resize_then_alt_screen_field_crash() {
+    assert_agree_resize(
+        "resize_then_alt_screen",
+        80,
+        24,
+        b"",
+        120,
+        40,
+        b"\x1B[?1049h\x1B[999;999Hhello from the alt screen",
+    );
+}
+
+/// Same class, with primary content and a deep cursor before the switch.
+#[test]
+fn resize_deep_cursor_then_alt_screen() {
+    assert_agree_resize(
+        "resize_deep_cursor_alt",
+        80,
+        24,
+        b"top line\r\nsecond line\r\nthird line",
+        100,
+        50,
+        b"\x1B[45;90Hdeep\x1B[?1049halt\x1B[?1049lback",
+    );
+}
+
 // ---- fixture-loading helpers (kept in sync with smoke.rs) --------------
 
 fn read_size(path: &Path) -> (u16, u16) {

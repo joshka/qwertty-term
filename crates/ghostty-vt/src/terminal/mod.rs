@@ -1554,6 +1554,26 @@ impl Terminal {
 
     // ---- alt-screen / reset --------------------------------------------
 
+    /// Build the [`screen::Options`] a lazily-initialized screen should be
+    /// created with, using the terminal's *current* dimensions. Mirrors the
+    /// `.{ .cols = self.cols, .rows = self.rows, .max_scrollback = ... }` block
+    /// upstream passes to `screens.getInit`: the primary inherits the primary's
+    /// scrollback budget, the alternate screen never keeps scrollback.
+    fn screen_opts(&self, key: ScreenKey) -> crate::screen::Options {
+        let max_scrollback = match key {
+            ScreenKey::Primary => self.screens.get(ScreenKey::Primary).map_or(0, |s| {
+                let m = s.pages.explicit_max_size();
+                if m == usize::MAX { 0 } else { m }
+            }),
+            ScreenKey::Alternate => 0,
+        };
+        crate::screen::Options {
+            cols: self.cols,
+            rows: self.rows,
+            max_scrollback,
+        }
+    }
+
     /// Switch the active screen (primary↔alternate). Copies charset, clears
     /// selection, ends hyperlink state on the old screen. Returns the previous
     /// active key if a switch happened. Port of `switchScreen`.
@@ -1567,8 +1587,12 @@ impl Terminal {
         self.screen_mut().end_hyperlink();
         let old_charset = self.screen().charset;
 
-        // Ensure the target screen exists.
-        let new = self.screens.get_init(key);
+        // Ensure the target screen exists. Build the init options from the
+        // CURRENT terminal dimensions so a lazily-created alternate screen
+        // matches the (possibly resized) terminal, not its construction-time
+        // size. See `ScreenSet::get_init`.
+        let opts = self.screen_opts(key);
+        let new = self.screens.get_init(key, opts);
         debug_assert_eq!(new.cursor.hyperlink_id, 0);
         new.charset = old_charset;
         new.clear_selection();
@@ -1741,22 +1765,30 @@ impl Terminal {
         let redraw = self.flags.shell_redraws_prompt;
         let reflow = self.modes.get(Mode::Wraparound);
 
-        // Resize primary screen, which supports reflow.
-        self.screens.get_init(ScreenKey::Primary).resize(Resize {
-            cols,
-            rows,
-            reflow,
-            prompt_redraw: redraw,
-        });
+        // Resize primary screen, which supports reflow. The primary screen is
+        // always initialized, so the passed opts are ignored; they are only
+        // consulted when a screen is first created.
+        let primary_opts = self.screen_opts(ScreenKey::Primary);
+        self.screens
+            .get_init(ScreenKey::Primary, primary_opts)
+            .resize(Resize {
+                cols,
+                rows,
+                reflow,
+                prompt_redraw: redraw,
+            });
 
         // Alternate screen, if it exists, doesn't reflow.
         if self.screens.get(ScreenKey::Alternate).is_some() {
-            self.screens.get_init(ScreenKey::Alternate).resize(Resize {
-                cols,
-                rows,
-                reflow: false,
-                prompt_redraw: redraw,
-            });
+            let alt_opts = self.screen_opts(ScreenKey::Alternate);
+            self.screens
+                .get_init(ScreenKey::Alternate, alt_opts)
+                .resize(Resize {
+                    cols,
+                    rows,
+                    reflow: false,
+                    prompt_redraw: redraw,
+                });
         }
 
         // Whenever we resize we just mark it as a screen clear.

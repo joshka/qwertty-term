@@ -518,6 +518,13 @@ impl PageList {
         self.explicit_max_size.max(self.min_max_size)
     }
 
+    /// The explicitly-requested max scrollback size (bytes), i.e. the
+    /// `max_scrollback` the list was constructed with. `usize::MAX` means
+    /// "unbounded". Port of reading `pages.explicit_max_size`.
+    pub fn explicit_max_size(&self) -> usize {
+        self.explicit_max_size
+    }
+
     /// The active-area top-left node/y helper used widely.
     #[allow(dead_code)]
     pub(crate) fn active_top_left(&self) -> Pin {

@@ -20,8 +20,6 @@ pub struct ScreenSet {
     active_key: ScreenKey,
     primary: Box<Screen>,
     alternate: Option<Box<Screen>>,
-    /// Options used to lazily initialize the alternate screen.
-    opts: Options,
     gen_primary: usize,
     gen_alternate: usize,
 }
@@ -33,7 +31,6 @@ impl ScreenSet {
             active_key: ScreenKey::Primary,
             primary: Box::new(Screen::init(opts)),
             alternate: None,
-            opts,
             gen_primary: 0,
             gen_alternate: 0,
         }
@@ -85,13 +82,25 @@ impl ScreenSet {
         }
     }
 
-    /// Get the screen for `key`, initializing it if necessary. Port of `getInit`.
-    pub fn get_init(&mut self, key: ScreenKey) -> &mut Screen {
+    /// Get the screen for `key`, initializing it (with `opts`) if necessary.
+    /// Port of `getInit`.
+    ///
+    /// IMPORTANT: `opts` must carry the *current* terminal dimensions. Upstream
+    /// passes fresh options (built from `self.cols`/`self.rows`) on every call;
+    /// this is load-bearing. A previous version of this port cached the
+    /// construction-time options and re-used them here, which created the
+    /// alternate screen at the *original* size even after the terminal had been
+    /// resized. Copying the (larger) primary cursor into that stale-sized
+    /// alternate then walked the cursor pin off the page list — a release-build
+    /// panic in `cursor_absolute` (`debug_assert!` bounds checks are compiled
+    /// out in release). `opts` is only consulted on first initialization; for an
+    /// already-initialized screen it is ignored (matching upstream).
+    pub fn get_init(&mut self, key: ScreenKey, opts: Options) -> &mut Screen {
         match key {
             ScreenKey::Primary => &mut self.primary,
             ScreenKey::Alternate => {
                 if self.alternate.is_none() {
-                    self.alternate = Some(Box::new(Screen::init(self.opts)));
+                    self.alternate = Some(Box::new(Screen::init(opts)));
                 }
                 self.alternate.as_mut().unwrap()
             }
@@ -126,7 +135,7 @@ mod tests {
         assert_eq!(set.generation(ScreenKey::Alternate), 0);
 
         // Initialize a secondary screen.
-        let _ = set.get_init(ScreenKey::Alternate);
+        let _ = set.get_init(ScreenKey::Alternate, Options::default());
         assert_eq!(set.generation(ScreenKey::Alternate), 0);
 
         // Switch to it.
