@@ -1,0 +1,28 @@
+# Manifest of vendored shell-integration scripts, copied VERBATIM (byte-for-
+# byte) from upstream Ghostty's `src/shell-integration/` at pinned commit
+# `2da015cd6` (`2da015cd6ac06cedc89e09756e895d2c1715205d`). Plan decision 5
+# (`docs/plans/m2-termio.md`): these are shell code, not Zig, and only the
+# injection logic (`shell_integration.rs`) is ported — the scripts themselves
+# must stay byte-identical to upstream.
+#
+# Regenerate after a deliberate re-vendor (upstream pin bump) with:
+#   cd crates/ghostty-termio/resources/shell-integration
+#   find . -type f | sort | while read -r f; do
+#     rel="${f#./}"; hash=$(shasum -a 256 "$f" | awk '{print $1}')
+#     size=$(wc -c < "$f" | tr -d ' ')
+#     echo "$hash  $size  $rel"
+#   done
+#
+# `tests/shell_integration_scripts.rs` fails loudly if the vendored tree
+# drifts from this manifest (hand-edit, partial re-vendor, or an upstream pin
+# bump that wasn't accompanied by a manifest regeneration + review).
+#
+# format: <sha256>  <size-bytes>  <path relative to shell-integration/>
+329f4ba5090269248e764caa8d9527687e4f5d6d9104745e690c051269500c50  4139  README.md
+24d8b80577fa0e630e89a6b0284205323df568559ea85b4168074714832996e4  14601  bash/bash-preexec.sh
+9c250c90d00f11c02a4245e940e5330e7e5d1eabae46d70c53b141b46b4921f0  10210  bash/ghostty.bash
+9fb49e9e885e45fcfbb0c41827ee68e65fc397f84b2ff2c72b1221f20070e7fe  4129  elvish/lib/ghostty-integration.elv
+d78d03a5f602cd95eb15f7310ce42c96c560bc28dec37a792576535eefac8bf3  6886  fish/vendor_conf.d/ghostty-shell-integration.fish
+b5bf0a6f4b25d21e06160056d3a201845570b31fb2b9ce117736c6d914d94bb4  1701  nushell/vendor/autoload/ghostty.nu
+a9885383cd13cd9f0297b1d13a7bade2526f7f91c0a097f255e9a39a508fcba4  2723  zsh/.zshenv
+1a2bcb867f06667d5d743221aea42b1d322f3ae402e1a62ba941cba3c5d17f19  19396  zsh/ghostty-integration

@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use ghostty_termio::exec::{Command, Config, Notifier};
 use ghostty_termio::hub::{HubHandler, Termio, Writer};
+use ghostty_termio::shell_integration::{self, EnvMap, Shell, ShellIntegrationFeatures};
 use ghostty_termio::size::{CellSize, GridSize, ScreenSize, Size};
 
 use crate::engine::Engine;
@@ -110,6 +111,38 @@ impl TabIo {
         let working_directory = cwd
             .filter(|p| p.is_dir())
             .map(|p| p.to_string_lossy().into_owned());
+
+        // Shell integration (M2 chunk G, `docs/analysis/shell-integration.md`):
+        // OSC 133 prompt marks, OSC 7 cwd reporting, and (feature `cursor`,
+        // on by default) the DECSCUSR bar-cursor-at-prompt all come from the
+        // vendored scripts in `ghostty-termio/resources/shell-integration/`,
+        // auto-sourced by mutating the child's env/command the same way
+        // `Exec.Subprocess.init`'s `shell:` block does upstream. Forced to
+        // zsh (the plan's default-enabled target) rather than upstream's
+        // basename-`detect`, since this app always launches `$SHELL` as a
+        // `Command::Direct` argv (no shell-parsed command line to sniff) and
+        // zsh is macOS's default login shell.
+        let mut si_env = EnvMap::from_pairs(std::env::vars().collect());
+        shell_integration::setup_features(&mut si_env, ShellIntegrationFeatures::default(), true);
+        let command = command.map(|cmd| {
+            match shell_integration::setup(
+                &shell_integration::resources_dir(),
+                &cmd,
+                &mut si_env,
+                Some(Shell::Zsh),
+            ) {
+                Some(integration) => integration.command,
+                None => {
+                    // Resources missing or the zsh dir isn't there (e.g. a
+                    // dev checkout run from an unexpected cwd): fall back to
+                    // the unmodified command. GHOSTTY_SHELL_FEATURES is still
+                    // set above for anyone who sources the integration
+                    // manually.
+                    cmd
+                }
+            }
+        });
+
         let config = Config {
             command,
             working_directory,
@@ -118,8 +151,10 @@ impl TabIo {
             // default is an EMPTY env -- omitting this spawns a shell that
             // can't find `ls`/`git`/anything (field-found: oh-my-zsh init
             // spewing "command not found" and the shell dying, which closed
-            // the tab and looked like an app crash).
-            env: std::env::vars().collect(),
+            // the tab and looked like an app crash). shell_integration::setup
+            // has already layered ZDOTDIR/GHOSTTY_SHELL_FEATURES/etc. on top
+            // of this same base.
+            env: si_env.into_pairs(),
             ..Config::default()
         };
 

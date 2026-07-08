@@ -35,6 +35,16 @@
 //!   terminal-touching side (sync reset, renderer wakeup) is a
 //!   [`hub::HubHandler`] seam the caller fills (M2 chunk E).
 //!
+//! * [`shell_integration`] — the RC-injection machinery
+//!   (`src/termio/shell_integration.zig`, M2 chunk G): shell detection, the
+//!   per-shell env/command mutation (zsh ZDOTDIR indirection, bash
+//!   `--posix`+`ENV` trickery, fish/elvish/nushell XDG_DATA_DIRS), and the
+//!   `GHOSTTY_SHELL_FEATURES` flag string. The vendored scripts themselves
+//!   (copied verbatim from upstream, plan decision 5) live in
+//!   `resources/shell-integration/`; `docs/analysis/shell-integration.md` has
+//!   the full write-up including what the scripts emit (OSC 133, OSC 7,
+//!   DECSCUSR bar-cursor-at-prompt).
+//!
 //! Deliberately NOT here (deferred):
 //!
 //! * `termio/Options.zig` — a field bag of pointers into config / renderer /
@@ -49,6 +59,7 @@ pub mod hub;
 pub mod mailbox;
 pub mod message;
 pub mod pty;
+pub mod shell_integration;
 pub mod size;
 
 pub use exec::{Command, Config, Exec, Notifier, Subprocess, ThreadData, WriterLoop};
@@ -56,3 +67,6 @@ pub use hub::{HubHandler, NullHandler, Termio, Writer};
 pub use mailbox::{CAPACITY, Receiver, Sender, TrySendError, Waker, channel};
 pub use message::Message;
 pub use pty::{Mode, Pty, Winsize};
+pub use shell_integration::{
+    EnvMap, Shell, ShellIntegration, ShellIntegrationFeatures, resources_dir, setup, setup_features,
+};
