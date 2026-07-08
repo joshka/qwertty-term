@@ -827,8 +827,17 @@ fn make_window(mtm: MainThreadMarker, view: &TerminalView) -> Retained<NSWindow>
 
     unsafe {
         window.setTitle(&NSString::from_str("ghostty-rs"));
-        // Native tabbing: prefer tabs so Cmd-T / drag-out behave like Terminal.
-        window.setTabbingMode(NSWindowTabbingMode::Preferred);
+        // Native tabbing: `.automatic` (the AppKit default) lets a lone window
+        // stay tab-bar-free, matching macOS convention (and real Ghostty) —
+        // the tab bar only appears once a window has 2+ tabs. This does not
+        // affect Cmd-T: `new_tab_in` always calls `addTabbedWindow:ordered:`
+        // explicitly (below), which groups windows into the same tabbed
+        // window regardless of `tabbingMode`; that mode only governs the
+        // *implicit* behavior AppKit applies to windows opened without an
+        // explicit group (e.g. Cmd-N's `new_window`). `.preferred` used to be
+        // set here, which forces the tab bar always-on even for a single
+        // window — the reported "empty dark strip" bug.
+        window.setTabbingMode(NSWindowTabbingMode::Automatic);
         window.setContentView(Some(view));
         window.setReleasedWhenClosed(false);
     }

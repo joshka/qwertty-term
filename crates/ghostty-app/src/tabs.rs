@@ -9,8 +9,9 @@
 //! are held elsewhere (`crate::app`), keyed by the same [`TabId`].
 //!
 //! macOS native tabbing groups these windows visually (each tab is a real
-//! `NSWindow` with `tabbingMode = .preferred`), but the *ownership* model — one
-//! engine+PTY per tab — is exactly this registry.
+//! `NSWindow` with `tabbingMode = .automatic`, and Cmd-T explicitly calls
+//! `addTabbedWindow:ordered:` to join the parent's window group), but the
+//! *ownership* model — one engine+PTY per tab — is exactly this registry.
 
 use std::path::PathBuf;
 
