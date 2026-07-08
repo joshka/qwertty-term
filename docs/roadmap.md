@@ -123,7 +123,7 @@ macOS, renders THROUGH this stack for ghostty-identical output. Work splits acro
 - [ ] MB1 (betamax repo): swap `libghostty-vt-sys` -> `ghostty-vt` path/git dep. The VT
       surface it consumes exists (Terminal/Stream/snapshot/formatter). Prompt for the
       betamax thread: `work/betamax-thread-prompt.md`
-- [ ] MB2 (here): headless frame-capture example (`examples/frame-capture`: bytes in, PNG
+- [x] MB2 — DONE 2026-07-10: headless frame-capture example (`examples/frame-capture`: bytes in, PNG
       frames out, injectable font+size, deterministic) — the rewrite-prompt's embeddability
       artifact, now unblocked since the offscreen stack is proven (specimen/first-pixels
       tests ARE this flow already; the example packages it)
