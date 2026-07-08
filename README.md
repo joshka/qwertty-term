@@ -1,364 +1,43 @@
 # ghostty-rs
 
-Rust proof-of-concept for a focused slice of Ghostty's VT core and terminal IO.
+A full Rust rewrite of [Ghostty](https://ghostty.org) — terminal emulator engine, font
+stack, Metal renderer, and native macOS app — ported subsystem-by-subsystem from the Zig
+source (pinned at `2da015cd6`) with differential testing against the original as the
+correctness oracle.
 
-This is not a full Ghostty port. It keeps the VT state machine, grid, cursor,
-style, and screen behavior small enough to inspect while borrowing behavior
-from Ghostty's terminal and stream tests.
+Status: **daily-drivable on macOS.** Native AppKit app with tabs, splits (zoom, dimming,
+equalize), Cmd+F search, scrollback, IME, kitty + legacy keyboard protocols, mouse
+reporting, shell integration, themes, ligatures, Apple Color Emoji, and nerd-font glyph
+sizing at parity with upstream. First [vtebench](https://github.com/alacritty/vtebench)
+baselines: faster than Ghostty 1.3.1 in 9 of 10 suites on the same machine
+(`docs/benchmarks/`).
 
-> **Now running on `ghostty-vt`.** Both frontends (the terminal-hosted mode and
-> the native window) are driven by the `ghostty-vt` engine crate — the
-> page-based Rust port of Ghostty's terminal core — via a thin adapter
-> (`crates/spike/src/engine.rs`). The frontends feed PTY bytes into
-> `ghostty-vt`, drain its reply queue back to the PTY, and render an owned
-> styled snapshot (`ghostty_vt::snapshot::Snapshot`) of the grid + scrollback.
-> The spike's original in-tree VT core has been removed.
-
-## Run
-
-There are four useful run modes. The native window is the closest thing to
-"run the terminal app"; the terminal-hosted mode is useful when you want to
-exercise the PTY and VT core without opening another window.
-
-The spike binary is `ghostty-spike`. Bare `cargo run -- <args>` from the
-workspace root resolves to it; `cargo run -p ghostty-spike -- <args>` is the
-explicit form.
-
-### Terminal-Hosted Shell
-
-Start a PTY-backed terminal running your `$SHELL` inside the terminal you used
-to launch Cargo:
-
-```bash
-cargo run -p ghostty-spike
+```sh
+cargo run -p ghostty-app --release          # the terminal
+cargo run -p frame-capture -- --help        # headless VT-bytes → PNG (embeddability demo)
+cargo test --workspace                      # ~1500 engine tests + differential + smokes
 ```
 
-The app uses the local terminal as a simple renderer, starts a real PTY, and
-feeds PTY output through the Rust VT core. Keyboard input goes to the PTY.
-Press `Ctrl-Q` to exit the wrapper. `Esc` and `Ctrl-C` are sent to the shell or
-foreground application.
-
-Use this mode for quick terminal-core checks. It is not the native macOS app
-experience.
-
-### Native Window
-
-Start the experimental native macOS window frontend:
-
-```bash
-cargo run -p ghostty-spike -- --window
-```
-
-This opens a separate window backed by the same PTY and VT core. Close the
-window, or exit the shell inside it, when you are done. The Cargo process stays
-attached to the launching terminal while the window is open.
-
-The window path supports mouse-wheel scrollback and `Shift-PageUp` /
-`Shift-PageDown`. The window derives its grid size from the active monospace
-font metrics. It loads local Nerd Fonts automatically when they are installed,
-preferring mono regular variants, and falls back to egui's bundled monospace
-font otherwise. Drag with the primary mouse button to select visible text, then
-copy with the platform copy shortcut (or automatically, if `copy-on-select` is
-enabled in the config — see [Config](#config) below). When a terminal app
-enables mouse reporting, the window sends click, drag, and wheel events to the
-PTY; hold `Shift` to select text instead. The window closes after a successful
-shell exit and keeps an error banner visible when the child exits
-unsuccessfully.
-
-Override the native window font with:
-
-```bash
-GHOSTTY_RS_FONT_PATH="$HOME/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf" \
-  cargo run -- --window
-GHOSTTY_RS_FONT_SIZE=16 cargo run -- --window
-```
-
-When `GHOSTTY_RS_FONT_PATH` is set, that font is installed first and discovered
-Nerd Fonts are kept as bounded fallbacks. This gives explicit family selection
-priority while still leaving local symbol fonts available for devicons and
-Powerline-style glyphs. The preferences window shows a compact coverage readout
-for installed terminal fonts, currently probing Powerline separator glyphs and
-a small devicon set.
-
-Print the same font coverage report without opening the UI:
-
-```bash
-cargo run -- --font-report
-```
-
-Print the deterministic renderer-run probe for the same symbol set:
-
-```bash
-cargo run -- --render-probe
-```
-
-### Native App (Metal, `ghostty-app`)
-
-`ghostty-app` is the native macOS AppKit host that renders through the Metal
-stack (renderer chunks R1–R4) instead of egui. It is the successor to the
-`ghostty-spike --window` frontend above; the spike stays runnable until this
-path reaches visual parity.
-
-```bash
-cargo run -p ghostty-app --bin ghostty-app          # native window (default)
-```
-
-What works:
-
-- **Metal rendering** of the live terminal via an IOSurface-backed `CALayer`
-  (no `CAMetalLayer`, no copy).
-- **Native window tabs** — `Cmd-T` opens a new tab (each tab its own engine +
-  PTY), inheriting the active tab's working directory (OSC 7). Drag a tab out of
-  the tab bar to detach it into its own window. `Cmd-N` opens a new window,
-  `Cmd-W` closes the tab/window.
-- **Menu bar** (App / Shell / Edit / View) with `Cmd-N`/`T`/`W`, `Cmd-C`/`V`,
-  `Cmd-+`/`-`/`0` (font size), and `Cmd-Q`.
-- **Full macOS text input** through an `NSTextInputClient` view: dead keys, IME
-  composition, `macos-option-as-alt`, and correct Cmd/Ctrl routing.
-- **Mouse reporting** to programs that enable it (click, drag, scroll).
-
-Deferred in this build (see `docs/analysis/renderer-r5.md`): text selection and
-copy-on-select, inline IME-preedit rendering, theme-file → palette resolution,
-and CVDisplayLink pacing (a plain run-loop timer is used).
-
-Headless checks (no window, useful in CI):
-
-```bash
-# Full engine+PTY+renderer pipeline → IOSurface readback assertion. Exits 0 on
-# success (or on a graceful skip when no Metal device is present).
-cargo run -p ghostty-app --bin ghostty-app -- --offscreen-smoke
-
-# Launch the real app and auto-exit cleanly after N milliseconds (startup/
-# teardown smoke — no human needed to close the window).
-GHOSTTY_APP_SMOKE_MS=3000 cargo run -p ghostty-app --bin ghostty-app
-```
-
-`ghostty-app` reads the same `~/.config/ghostty-rs/config.toml` as the spike
-(`theme`, `copy-on-select`, `font-size`, `font-family`); see [Config](#config)
-below. `font-family` loads a CoreText family by name (falling back to the
-embedded JetBrains Mono).
-
-### Config
-
-The native window reads a small TOML config on startup:
-
-```text
-~/.config/ghostty-rs/config.toml
-```
-
-The file is created automatically on first run with every key commented out
-(all settings at their defaults). Recognized keys:
-
-```toml
-# Theme name, resolved against ~/.config/ghostty/themes/<name>, then the
-# shared ghostty themes directory (see below). An absolute path is used as-is.
-theme = "GruvboxDarkHard"
-
-# Copy the mouse selection to the clipboard as soon as the drag finishes.
-copy-on-select = true
-
-# Terminal font size in points.
-font-size = 14.0
-
-# Prefer a discovered font whose file name contains this substring.
-font-family = "JetBrainsMono Nerd Font Mono"
-```
-
-Unknown keys are ignored, and a missing or unparsable config file falls back
-to defaults (`copy-on-select = false`, no theme, no font overrides) rather
-than failing to start.
-
-`theme` names a ghostty theme file (upstream's `key = value` format, not the
-window's own TOML). It is resolved in order:
-
-1. an absolute path, used as-is;
-2. `~/.config/ghostty/themes/<name>`;
-3. the shared ghostty themes directory — `$GHOSTTY_RS_THEMES_DIR` if set,
-   otherwise `/Users/joshka/local/ghostty/zig-out/share/ghostty/themes`
-   (set the env var on machines without that checkout at that exact path).
-
-The theme's `palette = N=#RRGGBB` entries, `background`, and `foreground` seed
-the terminal's startup 256-color palette and default colors; a running
-program's own OSC 4/10/11/104/110/111 sequences still override them at
-runtime, same as with the built-in default palette. `cursor-color` is parsed
-but not yet applied by the renderer, which doesn't draw a themed cursor color
-today.
-
-### App Bundle
-
-Build a local macOS `.app` bundle and open it:
-
-```bash
-cargo run -p xtask -- bundle
-open target/ghostty-rs.app
-```
-
-The bundle is a local development wrapper around `cargo run -- --window`, not a
-release-ready signed app. Closing the opened window is enough to stop the app
-process. The bundle step generates `Resources/ghostty-rs.icns` locally and
-writes `CFBundleIconFile` into `Info.plist`.
-
-The native window has a small first-pass macOS app shell:
-
-- `Command-N` opens another terminal window.
-- `Command-,` opens preferences with a font-size control.
-- `Command-Q` closes the current window.
-
-Window size and font size are restored through:
-
-```text
-~/Library/Application Support/ghostty-rs/preferences
-```
-
-### Replay And Smoke Checks
-
-Replay piped VT bytes and print the plain-text screen dump:
-
-```bash
-printf 'Hello \033[31mred\033[0m\n' | cargo run --quiet
-```
-
-Run a repeatable PTY smoke command:
-
-```bash
-cargo run -- --smoke-command 'printf READY'
-```
-
-The native renderer maps 256-color indexed SGR values through the xterm color
-cube and grayscale ramp. It also plans visible rows into text runs before
-painting, which is the current attachment point for future shaping, fallback,
-and glyph caching work.
-
-### Which Command Should I Use?
-
-- Use `cargo run -- --window` for the current UI.
-- Use `cargo run -p xtask -- bundle && open target/ghostty-rs.app` to try the
-  local `.app` wrapper.
-- Use `cargo run -- --font-report` to check local Nerd Font symbol coverage.
-- Use `cargo run -- --render-probe` to check renderer run planning for the
-  Nerd Font probe glyphs.
-- Use `cargo run` for the terminal-hosted PTY wrapper.
-- Use `cargo run -- --smoke-command 'printf READY'` for a noninteractive check.
-- Use piped input when you want a deterministic VT replay screen dump.
-
-## Implemented Core
-
-- `Terminal::new(cols, rows)`
-- `Terminal::write(&mut self, bytes: &[u8])`
-- grid, cell, cursor, current-style, screen, title, scrollback, and bell
-  accessors
-- styled scrollback rows for native renderers
-- viewport resize with visible cell preservation and cursor clamping
-- PTY-backed shell process with read, write, and resize propagation
-- terminal-hosted and native-window frontends
-- terminal-to-PTY responses for DSR operating status, cursor position reports,
-  color-scheme query, and primary/secondary device attributes
-- DEC private modes for application cursor keys, cursor visibility,
-  wraparound, alternate screen, bracketed paste, focus reporting, and basic
-  mouse reporting
-- DECSCUSR cursor shape control for block, underline, and bar cursors
-- plain-text screen dump
-- UTF-8 printable text, including code points split across writes and basic
-  wide-character cell handling
-- C0 controls: BS, HT, LF, VT, FF, CR, and BEL counting
-- ESC: IND, NEL, RI, save/restore cursor, RIS, and DECALN
-- CSI: CUU, CUD, CUF, CUB, CUP, HVP, ED, EL, SU, SD, scroll region,
-  save/restore cursor, ICH, DCH, ECH, IL, DL, CHA, VPA, CNL, CPL, CHT,
-  CBT, REP, TBC, DEC wraparound mode, and alternate screen
-- SGR: reset, bold, faint, italic, underline, blink, inverse, strikethrough,
-  ANSI colors, bright ANSI colors, 256-color, and RGB foreground/background
-  colors
-- OSC 0/2 title setting and OSC 52 clipboard writes with BEL and ST
-  terminators
-- pending wrap and scroll-up at the bottom row
-
-## Module Layout
-
-- `src/lib.rs`: small public facade and re-exports.
-- `src/terminal.rs`: terminal state, parser dispatch, high-level mode dispatch,
-  and reset behavior.
-- `src/terminal/edit.rs`: screen editing, cursor movement, tabs, wrapping,
-  scroll regions, alternate screen switching, and DECALN.
-- `src/terminal/effects.rs`: OSC-driven host-facing side effects such as title
-  and clipboard writes.
-- `src/terminal/modes.rs`: terminal-specific mode policy for DEC private modes
-  and cursor-shape control.
-- `src/terminal/report.rs`: terminal-to-PTY reports such as DSR, cursor
-  position, color-scheme query, and device attributes.
-- `src/screen.rs`: grid, cursor, scrollback, and plain-text screen helpers.
-- `src/mode.rs`: terminal mode state and value types shared by core and
-  frontends.
-- `src/osc.rs`: pure OSC payload decoding.
-- `src/parser.rs`: parser state, CSI sequence shape, and parameter parsing
-  helpers.
-- `src/color.rs`, `src/style.rs`, `src/cell.rs`: focused value types,
-  including SGR style mutation.
-- `src/pty.rs`: small PTY session wrapper.
-- `src/main.rs`: runnable crossterm terminal, replay CLI, and PTY smoke mode.
-- `src/window/`: experimental native egui window frontend, app-shell
-  shortcuts, renderer row/run planning, input encoding, font loading, and
-  color mapping. Font loading includes glyph coverage probes for expected Nerd
-  Font symbols.
-- `xtask/`: local development helper for generating a macOS `.app` bundle.
-  It builds the launcher, writes bundle metadata, and generates the app icon.
-
-## Reference Files
-
-The Zig checkout at `/Users/joshka/local/ghostty` is used only as reference.
-The main files consulted are:
-
-- `src/terminal/Parser.zig`
-- `src/terminal/stream.zig`
-- `src/terminal/stream_terminal.zig`
-- `src/terminal/Terminal.zig`
-- `src/terminal/Screen.zig`
-- `src/terminal/PageList.zig`
-- `src/terminal/page.zig`
-- `src/terminal/style.zig`
-- `src/terminal/color.zig`
-
-## Roadmap
-
-See `docs/roadmap.md` for the recent progress list, prioritized next work, and
-the current gap to Ghostty proper.
-
-Useful continuation docs:
-
-- `docs/handoff.md`: agent pickup packet with current state, validation,
-  tradeoffs, lessons, and next chunks.
-- `docs/architecture.md`: current architecture, module boundaries, and known
-  architecture debt.
-- `docs/ghostty-gap.md`: explicit gap between this prototype and Ghostty proper.
-
-## Intentional Omissions
-
-The implementation uses `TODO(port): ...` comments for omitted behavior that
-would belong in a fuller port, including:
-
-- full C0/C1 coverage
-- charset designation and locking shifts
-- most device reports and queries beyond the implemented DSR/DA subset
-- complete DEC private mode behavior
-- OSC palette, clipboard readback policy, hyperlinks, shell integration, and
-  Kitty protocols
-- full Unicode grapheme correctness and ambiguous-width policy
-- renderer architecture, font shaping, Kitty graphics, tmux, search, C ABI,
-  and `build.zig` integration
-
-## Validation
-
-Run:
-
-```bash
-cargo fmt --check
-cargo test --workspace
-markdownlint-cli2 "**/*.md"
-```
-
-Replay compatibility fixtures live under `tests/fixtures/replay/*`. Each fixture
-has:
-
-- `size.txt`: `cols rows`
-- `input.esc`: terminal stream using escaped bytes such as `\e`, `\n`, `\r`,
-  and `\xHH`
-- `expected.txt`: expected plain-text screen dump
+## Design highlights
+
+- `ghostty-vt` — the VT engine: page-based scrollback, ref-counted styles, kitty
+  graphics/keyboard, verified by a 176-case differential corpus against `libghostty-vt`,
+  fuzzing (incl. resize-interleaved), and Miri.
+- `ghostty-font` — CoreText faces + discovery, rustybuzz shaping, procedural sprite glyphs
+  (`ghostty-sprite`, pixel-identical to upstream goldens), emoji + nerd-font constraints.
+- `ghostty-renderer` — Metal, IOSurface-backed presentation, upstream's shaders verbatim,
+  run-based shaping with caching, per-row dirty tracking (equality-proven vs full redraw).
+- `ghostty-termio` — rustix PTY + upstream's two-stage read pipeline (no async runtime;
+  see `docs/adr/002`).
+- Embeddable by construction: `examples/frame-capture` renders deterministic PNGs from
+  bytes through public APIs only.
+
+Docs: `docs/rewrite-prompt.md` (mission/constitution), `docs/roadmap.md` (work breakdown),
+`docs/analysis/` (~30 commit-stamped subsystem analyses), `docs/adr/` (decisions).
+
+## Relationship to upstream
+
+Not affiliated with the Ghostty project. Ported code preserves upstream semantics and
+attribution (MIT, see LICENSE); deliberate deviations (TOML config, no tokio, native-Rust
+app shell) are recorded as ADRs. Upstream bugs found during porting are reported back
+(`work/upstream/`).
