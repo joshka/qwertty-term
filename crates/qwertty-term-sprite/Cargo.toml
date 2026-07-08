@@ -1,11 +1,10 @@
 [package]
 name = "qwertty-term-sprite"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Procedural glyph rasterizer for terminal sprite fonts: box drawing, block elements, braille, powerline, git-branch, and legacy computing symbols, plus cursors and underlines. Rendered seam-free at arbitrary cell metrics."
-publish = false
 
 [lib]
 name = "qwertty_term_sprite"

@@ -1,11 +1,10 @@
 [package]
 name = "qwertty-term-ffi"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "C ABI (cdylib + staticlib) over the qwertty-term engine, mirroring upstream include/ghostty.h shapes for a Swift/AppKit shell"
-publish = false
 
 [lib]
 name = "qwertty_term_ffi"
@@ -15,8 +14,8 @@ name = "qwertty_term_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-qwertty-term-vt = { path = "../qwertty-term-vt" }
-qwertty-term-input = { path = "../qwertty-term-input" }
+qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
+qwertty-term-input = { version = "0.1.0", path = "../qwertty-term-input" }
 
 [dev-dependencies]
 # cbindgen drives the drift-check test (tests/header_drift.rs), which

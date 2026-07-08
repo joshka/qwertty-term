@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "image",
@@ -2913,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-ffi"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cbindgen",
  "qwertty-term-input",
@@ -2936,11 +2936,11 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-input"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "qwertty-term-renderer"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-termio"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "polling",
@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-vt"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "criterion",

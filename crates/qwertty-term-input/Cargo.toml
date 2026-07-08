@@ -1,11 +1,10 @@
 [package]
 name = "qwertty-term-input"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Input encoding primitives ported from Ghostty: key/mouse/paste event -> PTY byte encoders"
-publish = false
 
 [lib]
 name = "qwertty_term_input"

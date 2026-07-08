@@ -1,11 +1,10 @@
 [package]
 name = "qwertty-term-termio"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Terminal IO foundations ported from Ghostty: PTY primitive plus termio message/mailbox/backend plumbing"
-publish = false
 
 # M2 chunks A+B+D+E (docs/plans/m2-termio.md). Analysis:
 # docs/analysis/termio-foundations.md (A+B), docs/analysis/termio-exec.md (D),
@@ -18,7 +17,7 @@ name = "qwertty_term_termio"
 [dependencies]
 # The terminal core: Message carries terminal::ScrollViewport 1:1 with
 # upstream (termio/message.zig imports terminal.Terminal.ScrollViewport).
-qwertty-term-vt = { path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
 
 # PTY + termios syscalls (plan decision 1: rustix, not portable-pty — we
 # need IUTF8, termios polling, and exact TIOCSWINSZ semantics). `pipe` is the

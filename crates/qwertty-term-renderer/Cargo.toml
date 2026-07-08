@@ -1,17 +1,16 @@
 [package]
 name = "qwertty-term-renderer"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Renderer core ported from Ghostty: geometry, cursor style resolution, row heuristics, and the RenderSnapshot contract between qwertty-term-vt and any renderer backend"
-publish = false
 
 [lib]
 name = "qwertty_term_renderer"
 
 [dependencies]
-qwertty-term-vt = { path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
 
 # Metal backend (chunk R1). All versions already present in the workspace
 # lockfile (transitively via eframe/winit), so these add no new lock entries.
@@ -61,10 +60,10 @@ dispatch2 = { version = "0.3.1", default-features = false, features = [
 # The font substrate the cell engine (R4) drives: shaping + glyph→atlas render
 # cache (`Grid`), and sprite dispatch for cursors/decorations/box-drawing.
 # Both are macOS-only in the reduced cut (CoreText face + rasterization).
-qwertty-term-font = { path = "../qwertty-term-font" }
-qwertty-term-sprite = { path = "../qwertty-term-sprite" }
+qwertty-term-font = { version = "0.1.0", path = "../qwertty-term-font" }
+qwertty-term-sprite = { version = "0.1.0", path = "../qwertty-term-sprite" }
 
 [dev-dependencies]
 # The acceptance test (R4) drives a real qwertty-term-vt Terminal through a Stream to
 # produce the snapshot the engine renders.
-qwertty-term-vt = { path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }

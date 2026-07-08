@@ -1,11 +1,10 @@
 [package]
 name = "qwertty-term-vt"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Terminal emulation core ported from Ghostty: VT parser, terminal state machine, page-based scrollback"
-publish = false
 
 [lib]
 name = "qwertty_term_vt"
