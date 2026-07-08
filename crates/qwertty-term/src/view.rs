@@ -59,7 +59,7 @@ define_class!(
     //   ivar and implement key handling + `NSTextInputClient`.
     // - No `Drop` touches the objc runtime unsafely.
     #[unsafe(super(NSView))]
-    #[name = "GhosttyTerminalView"]
+    #[name = "QwerttyTermTerminalView"]
     #[ivars = Ivars]
     #[thread_kind = MainThreadOnly]
     pub struct TerminalView;

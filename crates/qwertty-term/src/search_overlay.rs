@@ -63,7 +63,7 @@ define_class!(
     // SAFETY: NSVisualEffectView subclass implementing NSTextFieldDelegate; no
     // unsafe Drop. All access is main-thread-only (AppKit guarantee).
     #[unsafe(super(NSVisualEffectView))]
-    #[name = "GhosttySearchOverlay"]
+    #[name = "QwerttyTermSearchOverlay"]
     #[ivars = SearchOverlayIvars]
     #[thread_kind = MainThreadOnly]
     pub struct SearchOverlay;

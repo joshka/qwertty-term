@@ -52,7 +52,7 @@ define_class!(
     // SAFETY: NSView subclass; overrides `isFlipped` + `setFrameSize:`. No
     // unsafe Drop.
     #[unsafe(super(NSView))]
-    #[name = "GhosttySplitContainer"]
+    #[name = "QwerttyTermSplitContainer"]
     #[ivars = ContainerIvars]
     #[thread_kind = MainThreadOnly]
     pub struct SplitContainer;
@@ -119,7 +119,7 @@ pub struct DividerIvars {
 define_class!(
     // SAFETY: NSView subclass; overrides mouse handling + cursor. No unsafe Drop.
     #[unsafe(super(NSView))]
-    #[name = "GhosttySplitDivider"]
+    #[name = "QwerttyTermSplitDivider"]
     #[ivars = DividerIvars]
     #[thread_kind = MainThreadOnly]
     pub struct SplitDivider;

@@ -2643,7 +2643,7 @@ pub struct WindowDelegateIvars {
 define_class!(
     // SAFETY: NSObject subclass implementing NSWindowDelegate; no unsafe Drop.
     #[unsafe(super(NSObject))]
-    #[name = "GhosttyWindowDelegate"]
+    #[name = "QwerttyTermWindowDelegate"]
     #[ivars = WindowDelegateIvars]
     #[thread_kind = MainThreadOnly]
     pub struct WindowDelegate;
@@ -2757,7 +2757,7 @@ define_class!(
     // SAFETY: NSObject subclass; implements NSApplicationDelegate + a menu action
     // selector. No unsafe Drop.
     #[unsafe(super(NSObject))]
-    #[name = "GhosttyAppDelegate"]
+    #[name = "QwerttyTermAppDelegate"]
     #[ivars = DelegateIvars]
     #[thread_kind = MainThreadOnly]
     pub struct AppDelegate;

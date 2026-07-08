@@ -70,7 +70,7 @@ define_class!(
     // - `IOSurfaceLayer` implements `Drop` (to free the boxed callback); the
     //   `Drop` impl calls no overridden methods and does not retain `self`.
     #[unsafe(super(CALayer))]
-    #[name = "GhosttyIOSurfaceLayer"]
+    #[name = "QwerttyTermIOSurfaceLayer"]
     #[ivars = Ivars]
     pub struct IOSurfaceLayer;
 
