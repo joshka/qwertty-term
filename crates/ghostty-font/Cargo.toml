@@ -17,6 +17,14 @@ ttf-parser = "0.25"
 # `Face` and a ttf-parser `Face` read the same font bytes without a version
 # skew.
 rustybuzz = "0.20"
+# Unicode `Emoji_Presentation` property data. The resolver derives a bare
+# codepoint's default presentation (text vs emoji) from this, the direct analog
+# of upstream's `uucode.get(.is_emoji_presentation, cp)`
+# (CodepointResolver.zig:152-157). `char::emoji_status()` returns an
+# `EmojiStatus`; the `EmojiPresentation*` variants are the UCD property.
+unicode-properties = { version = "0.1", default-features = false, features = [
+    "emoji",
+] }
 # Procedural sprite-glyph rasterizer (box drawing, block elements, etc.). The
 # reduced resolver dispatches sprite codepoints to this crate.
 ghostty-sprite = { path = "../ghostty-sprite" }
@@ -34,6 +42,13 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFData",
     "CFString",
     "CFCGTypes",
+    # Discovery (F5-full) builds search descriptors and reads back matching
+    # descriptor arrays: attribute dictionaries, a codepoint character set, a
+    # numeric size/traits value, and the CTFontCollection result array.
+    "CFArray",
+    "CFDictionary",
+    "CFCharacterSet",
+    "CFNumber",
 ] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
@@ -45,6 +60,7 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
 objc2-core-text = { version = "0.3", default-features = false, features = [
     "std",
     "CTFont",
+    "CTFontCollection",
     "CTFontDescriptor",
     "CTFontManager",
     "CTFontTraits",

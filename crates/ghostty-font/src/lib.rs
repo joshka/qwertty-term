@@ -56,10 +56,15 @@ pub mod backend;
 pub mod collection;
 #[cfg(target_os = "macos")]
 pub mod coretext;
+#[cfg(target_os = "macos")]
+pub mod deferred;
+#[cfg(target_os = "macos")]
+pub mod discovery;
 pub mod embedded;
 #[cfg(target_os = "macos")]
 pub mod grid;
 pub mod metrics;
+pub mod presentation;
 #[cfg(target_os = "macos")]
 pub mod resolver;
 #[cfg(target_os = "macos")]
@@ -69,11 +74,16 @@ pub mod tables;
 pub use atlas::Atlas;
 pub use backend::Backend;
 pub use metrics::{FaceMetrics, Metrics};
+pub use presentation::{Presentation, PresentationMode};
 
 #[cfg(target_os = "macos")]
 pub use collection::{Collection, FontIndex, Style};
 #[cfg(target_os = "macos")]
-pub use grid::{CachedGlyph, Grid};
+pub use deferred::DeferredFace;
+#[cfg(target_os = "macos")]
+pub use discovery::Descriptor;
+#[cfg(target_os = "macos")]
+pub use grid::{AtlasKind, CachedGlyph, Grid};
 #[cfg(target_os = "macos")]
 pub use resolver::CodepointResolver;
 #[cfg(target_os = "macos")]

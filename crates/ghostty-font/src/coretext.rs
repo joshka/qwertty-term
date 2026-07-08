@@ -129,12 +129,20 @@ pub struct Face {
     color: Option<ColorState>,
 }
 
-/// Color-glyph detection state (coretext.zig:890-968, reduced).
+/// Color-glyph detection state (coretext.zig:890-968).
+///
+/// A face carrying any recognized color-glyph table renders every glyph as
+/// color. Upstream's reduced check keys on `sbix` (Apple's bitmap emoji);
+/// F5-full extends this to the other common color formats so discovered system
+/// emoji fonts — Noto Color Emoji (`COLR`/`CPAL` or `CBDT`/`CBLC`), Apple Color
+/// Emoji (`sbix`) — are all recognized as color. Per-glyph SVG-table membership
+/// is still deferred (treated as whole-face color when the `SVG ` table is
+/// present).
 struct ColorState {
-    /// True if the face has a non-empty `sbix` table (bitmap emoji). Upstream
-    /// treats sbix presence as "every glyph is color" (coretext.zig:909-914,
-    /// 958-959). Full SVG-table membership is deferred.
-    sbix: bool,
+    /// True if the face has any non-empty color-glyph table
+    /// (`sbix` | `COLR` | `CBDT` | `SVG `). Upstream treats such presence as
+    /// "every glyph is color" (coretext.zig:909-959).
+    color_table: bool,
 }
 
 impl Face {
@@ -204,13 +212,30 @@ impl Face {
         Ok(Face::from_ct_font(font, Some(bytes)))
     }
 
+    /// Copy an existing `CTFont` at a new pixel size into a [`Face`]
+    /// (coretext.zig `initFontCopy`; DeferredFace `loadCoreText`).
+    ///
+    /// Used by [`crate::deferred::DeferredFace::load`] to materialize a
+    /// discovered system font at the render size. The resulting face has no
+    /// `source_bytes` (system faces aren't byte-backed), so its metrics come
+    /// from CoreText accessors.
+    pub(crate) fn from_ct_font_at_size(font: &CTFont, size_px: f64) -> Result<Face, Error> {
+        // SAFETY: font is a valid CTFont; null matrix = identity; no descriptor
+        // overrides. Analog of upstream `base.copyWithAttributes(size, null,
+        // null)`.
+        let copy = unsafe { font.copy_with_attributes(size_px as CGFloat, std::ptr::null(), None) };
+        Ok(Face::from_ct_font(copy, None))
+    }
+
     fn from_ct_font(font: CFRetained<CTFont>, source_bytes: Option<&'static [u8]>) -> Face {
         // SAFETY: font is a valid CTFont.
         let traits = unsafe { font.symbolic_traits() };
         let color = if traits.contains(CTFontSymbolicTraits::TraitColorGlyphs) {
-            Some(ColorState {
-                sbix: has_table(&font, b"sbix"),
-            })
+            let color_table = has_table(&font, b"sbix")
+                || has_table(&font, b"COLR")
+                || has_table(&font, b"CBDT")
+                || has_table(&font, b"SVG ");
+            Some(ColorState { color_table })
         } else {
             None
         };
@@ -250,8 +275,76 @@ impl Face {
         self.color.is_some()
     }
 
+    /// Borrow the underlying `CTFont` (for discovery: building a per-codepoint
+    /// substitute font via `CTFontCreateForString`).
+    pub(crate) fn ct_font(&self) -> &CTFont {
+        &self.font
+    }
+
+    /// The presentation this face advertises via its symbolic traits: a face
+    /// with the color-glyph trait presents as [`Presentation::Emoji`], else
+    /// [`Presentation::Text`] (DeferredFace.zig:370-373, Collection.zig gate).
+    pub fn presentation(&self) -> crate::presentation::Presentation {
+        if self.has_color() {
+            crate::presentation::Presentation::Emoji
+        } else {
+            crate::presentation::Presentation::Text
+        }
+    }
+
+    /// True if this face satisfies `cp` under presentation mode `p_mode`,
+    /// mirroring the *loaded-face* arm of upstream `Entry.hasCodepoint`
+    /// (Collection.zig:816-831).
+    ///
+    /// - [`PresentationMode::Any`]: the face merely has a glyph for `cp`.
+    /// - [`PresentationMode::Explicit`] / [`PresentationMode::Default`]: the
+    ///   face has a glyph AND its glyph's color-ness matches the requested
+    ///   presentation (`Text ⇒ !is_color_glyph`, `Emoji ⇒ is_color_glyph`).
+    ///
+    /// `fallback` selects the default-mode asymmetry (Collection.zig:808-814):
+    /// a non-fallback (user/primary) face accepts a `Default(p)` request with
+    /// any presentation, whereas a fallback (discovered) face is held to the
+    /// explicit `p`.
+    pub fn has_codepoint(
+        &self,
+        cp: u32,
+        p_mode: crate::presentation::PresentationMode,
+        fallback: bool,
+    ) -> bool {
+        use crate::presentation::PresentationMode;
+
+        let effective = match p_mode {
+            PresentationMode::Any => None,
+            PresentationMode::Explicit(p) => Some(p),
+            PresentationMode::Default(p) => {
+                if fallback {
+                    Some(p)
+                } else {
+                    None
+                }
+            }
+        };
+
+        let Some(ch) = char::from_u32(cp) else {
+            return false;
+        };
+        let Some(gid) = self.glyph_index(ch) else {
+            return false;
+        };
+
+        match effective {
+            None => true,
+            Some(crate::presentation::Presentation::Text) => !self.is_color_glyph(gid),
+            Some(crate::presentation::Presentation::Emoji) => self.is_color_glyph(gid),
+        }
+    }
+
     /// True if a specific glyph id is a color glyph (coretext.zig:264-267,
-    /// 952-967, reduced to the sbix gate).
+    /// 952-967).
+    ///
+    /// A >16-bit glyph id is never color (special ids). Otherwise a glyph is
+    /// color iff the face carries a color-glyph table (sbix/COLR/CBDT/SVG) —
+    /// the whole-face approximation upstream also uses for sbix.
     pub fn is_color_glyph(&self, glyph_id: u32) -> bool {
         let Some(color) = &self.color else {
             return false;
@@ -259,7 +352,7 @@ impl Face {
         if u16::try_from(glyph_id).is_err() {
             return false;
         }
-        color.sbix
+        color.color_table
     }
 
     /// Look up the glyph id for a Unicode scalar, or `None` if the face has no

@@ -21,8 +21,37 @@ use std::collections::HashMap;
 
 use crate::atlas::{Atlas, Format, Region};
 use crate::collection::{FontIndex, Style};
+use crate::coretext::PixelFormat;
 use crate::metrics::Metrics;
+use crate::presentation::Presentation;
 use crate::resolver::CodepointResolver;
+
+/// Which atlas a cached glyph lives in — the renderer's texture selector.
+///
+/// This is the **atlas-selector bit** the color-atlas follow-up chunk consumes:
+/// the grid tags each glyph with the atlas it was uploaded to, and the renderer
+/// maps this to the frozen `CellText.atlas` field (grayscale vs color). See
+/// `docs/analysis/font-discovery.md` §8. Sprites and text (outline) glyphs go
+/// to [`AtlasKind::Grayscale`]; color (emoji/BGRA) glyphs go to
+/// [`AtlasKind::Color`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AtlasKind {
+    /// The grayscale (alpha8) atlas: text outlines, sprites.
+    Grayscale,
+    /// The color (BGRA) atlas: emoji / color glyphs.
+    Color,
+}
+
+impl AtlasKind {
+    /// The presentation this atlas kind corresponds to (`Grayscale ⇒ text`,
+    /// `Color ⇒ emoji`), the analog of upstream `getPresentation`.
+    pub fn presentation(self) -> Presentation {
+        match self {
+            AtlasKind::Grayscale => Presentation::Text,
+            AtlasKind::Color => Presentation::Emoji,
+        }
+    }
+}
 
 /// A cached, atlas-resident glyph: its atlas region plus placement offsets.
 ///
@@ -30,7 +59,8 @@ use crate::resolver::CodepointResolver;
 /// top-left of the region in the atlas texture; `offset_x` is the left bearing
 /// (cell-left to ink-left); `offset_y` is the top bearing (cell-bottom to
 /// ink-top, baseline-relative, +Y up). A fully blank glyph (space) has a
-/// zero-size region.
+/// zero-size region. `atlas` names which texture the region lives in — the
+/// renderer's atlas selector (see [`AtlasKind`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CachedGlyph {
     pub atlas_x: u32,
@@ -39,6 +69,8 @@ pub struct CachedGlyph {
     pub height: u32,
     pub offset_x: i32,
     pub offset_y: i32,
+    /// Which atlas this glyph was uploaded to (grayscale vs color).
+    pub atlas: AtlasKind,
 }
 
 /// Errors from rendering a glyph into the grid.
@@ -75,11 +107,21 @@ struct GlyphKey {
     glyph: u32,
 }
 
-/// The reduced shared font grid: resolver + grayscale atlas + caches.
+/// The reduced shared font grid: resolver + grayscale/color atlases + caches.
+///
+/// F5-full adds the **color (BGRA) atlas** alongside the grayscale one so that
+/// discovered color faces (emoji) rasterize and store correctly. `render_glyph`
+/// routes each glyph by its rasterized pixel format: text/sprite (alpha8) → the
+/// grayscale atlas, color (BGRA) → the color atlas. Each [`CachedGlyph`] carries
+/// an [`AtlasKind`] tag so the renderer knows which texture to sample (the
+/// atlas-selector seam; see `docs/analysis/font-discovery.md` §8).
 pub struct Grid {
     resolver: CodepointResolver,
     metrics: Metrics,
+    /// Grayscale (alpha8) atlas: text outlines + sprites.
     atlas: Atlas,
+    /// Color (BGRA) atlas: emoji / color glyphs.
+    color_atlas: Atlas,
     /// Codepoint → resolved font index (caches negatives too, as upstream).
     index_cache: HashMap<u32, Option<FontIndex>>,
     /// (index, glyph) → atlas-resident glyph.
@@ -93,16 +135,19 @@ pub struct Grid {
 const INITIAL_ATLAS_SIZE: u32 = 512;
 
 impl Grid {
-    /// Build a grid over `resolver` with cell `metrics`, allocating a fresh
-    /// grayscale atlas.
+    /// Build a grid over `resolver` with cell `metrics`, allocating fresh
+    /// grayscale and color atlases.
     pub fn new(resolver: CodepointResolver, metrics: Metrics) -> Result<Grid, Error> {
         let atlas =
             Atlas::new(INITIAL_ATLAS_SIZE, Format::Grayscale).map_err(|_| Error::AtlasFull)?;
+        let color_atlas =
+            Atlas::new(INITIAL_ATLAS_SIZE, Format::Bgra).map_err(|_| Error::AtlasFull)?;
         let sprite_metrics = sprite_metrics_from(&metrics);
         Ok(Grid {
             resolver,
             metrics,
             atlas,
+            color_atlas,
             index_cache: HashMap::new(),
             glyph_cache: HashMap::new(),
             sprite_metrics,
@@ -114,9 +159,14 @@ impl Grid {
         &self.metrics
     }
 
-    /// The underlying atlas (for GPU upload / inspection).
+    /// The grayscale atlas (text outlines + sprites).
     pub fn atlas(&self) -> &Atlas {
         &self.atlas
+    }
+
+    /// The color (BGRA) atlas (emoji / color glyphs).
+    pub fn color_atlas(&self) -> &Atlas {
+        &self.color_atlas
     }
 
     /// The resolver (for shaping, which needs the primary face).
@@ -205,6 +255,13 @@ impl Grid {
             .ok_or(Error::NoFace)?;
         let bmp = face.rasterize(glyph_index).map_err(Error::Rasterize)?;
 
+        // Route by pixel format: BGRA color glyphs → color atlas, alpha8 text
+        // glyphs → grayscale atlas.
+        let kind = match bmp.format {
+            PixelFormat::Alpha8 => AtlasKind::Grayscale,
+            PixelFormat::Bgra => AtlasKind::Color,
+        };
+
         // Blank glyph (space, control): a zero-size region with no ink.
         if bmp.width == 0 || bmp.height == 0 {
             return Ok(CachedGlyph {
@@ -214,11 +271,12 @@ impl Grid {
                 height: 0,
                 offset_x: bmp.bearing_x,
                 offset_y: bmp.bearing_y,
+                atlas: kind,
             });
         }
 
-        let region = self.reserve_growing(bmp.width, bmp.height)?;
-        self.atlas.set(region, &bmp.data);
+        let region = self.reserve_growing(kind, bmp.width, bmp.height)?;
+        self.atlas_mut(kind).set(region, &bmp.data);
         Ok(CachedGlyph {
             atlas_x: region.x,
             atlas_y: region.y,
@@ -226,10 +284,12 @@ impl Grid {
             height: bmp.height,
             offset_x: bmp.bearing_x,
             offset_y: bmp.bearing_y,
+            atlas: kind,
         })
     }
 
-    /// Rasterize a sprite glyph (`cp` == the codepoint) and upload it.
+    /// Rasterize a sprite glyph (`cp` == the codepoint) and upload it. Sprites
+    /// are always grayscale.
     fn render_sprite(&mut self, cp: u32) -> Result<CachedGlyph, Error> {
         let glyph = ghostty_sprite::render(cp, &self.sprite_metrics).ok_or(Error::SpriteMissing)?;
 
@@ -241,10 +301,11 @@ impl Grid {
                 height: 0,
                 offset_x: glyph.offset_x,
                 offset_y: glyph.offset_y,
+                atlas: AtlasKind::Grayscale,
             });
         }
 
-        let region = self.reserve_growing(glyph.width, glyph.height)?;
+        let region = self.reserve_growing(AtlasKind::Grayscale, glyph.width, glyph.height)?;
         self.atlas.set(region, &glyph.alpha);
         Ok(CachedGlyph {
             atlas_x: region.x,
@@ -253,20 +314,33 @@ impl Grid {
             height: glyph.height,
             offset_x: glyph.offset_x,
             offset_y: glyph.offset_y,
+            atlas: AtlasKind::Grayscale,
         })
     }
 
-    /// Reserve a region, growing the atlas to 2× and retrying once on
-    /// `AtlasFull` (mirrors `SharedGrid.renderGlyph`'s grow-and-retry).
-    fn reserve_growing(&mut self, width: u32, height: u32) -> Result<Region, Error> {
-        match self.atlas.reserve(width, height) {
+    /// The atlas for a given kind (mutable).
+    fn atlas_mut(&mut self, kind: AtlasKind) -> &mut Atlas {
+        match kind {
+            AtlasKind::Grayscale => &mut self.atlas,
+            AtlasKind::Color => &mut self.color_atlas,
+        }
+    }
+
+    /// Reserve a region in the `kind` atlas, growing it to 2× and retrying once
+    /// on `AtlasFull` (mirrors `SharedGrid.renderGlyph`'s grow-and-retry).
+    fn reserve_growing(
+        &mut self,
+        kind: AtlasKind,
+        width: u32,
+        height: u32,
+    ) -> Result<Region, Error> {
+        let atlas = self.atlas_mut(kind);
+        match atlas.reserve(width, height) {
             Ok(r) => Ok(r),
             Err(crate::atlas::Error::AtlasFull) => {
-                let new_size = self.atlas.size().saturating_mul(2);
-                self.atlas.grow(new_size).map_err(|_| Error::AtlasFull)?;
-                self.atlas
-                    .reserve(width, height)
-                    .map_err(|_| Error::AtlasFull)
+                let new_size = atlas.size().saturating_mul(2);
+                atlas.grow(new_size).map_err(|_| Error::AtlasFull)?;
+                atlas.reserve(width, height).map_err(|_| Error::AtlasFull)
             }
             Err(_) => Err(Error::AtlasFull),
         }
