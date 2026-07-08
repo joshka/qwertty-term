@@ -147,6 +147,17 @@ impl TabIo {
             }
         });
 
+        // Bench-lane override (`scripts/bench-vtebench.sh`): if
+        // `GHOSTTY_RS_COMMAND` is set, spawn `/bin/sh -c <value>` instead of
+        // the interactive `$SHELL`, skipping the zsh shell-integration
+        // wrapping above (it targets interactive zsh, not one-shot commands).
+        // Deliberately an env var rather than a config key to keep this diff
+        // minimal — the app crate is owned by a sibling chunk.
+        let command = match std::env::var("GHOSTTY_RS_COMMAND") {
+            Ok(cmd) => Some(Command::Direct(vec!["/bin/sh".into(), "-c".into(), cmd])),
+            Err(_) => command,
+        };
+
         let config = Config {
             command,
             working_directory,
