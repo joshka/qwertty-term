@@ -6,7 +6,24 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
-## State as of 2026-07-09 (later)
+## State as of 2026-07-10
+
+**Splits slice 1 landed** (`docs/analysis/splits.md`): Tab refactored to a Surface tree
+(engine+TabIo+view per pane); cmd+d / cmd+shift+d (+ upstream's ctrl+shift+o/e aliases),
+ctrl+alt+arrows / ctrl+cmd+brackets navigation, divider drag with per-pane WINCH,
+close-collapse, input isolation via first-responder, hollow cursor on unfocused panes.
+Deferred: zoom, equalize, resize chords, dimming. **Tab-nav keybinds landed** (ctrl+tab,
+cmd+1-9 physical, cmd+shift+brackets; close_tab re-entrancy fix). **Two release-only field
+bugs fixed** (first --release run): cursor_absolute pin-walk panic (alt-1049+resize desync;
+corpus case) and grapheme debug_assert side-effect (Zig assert ALWAYS evaluates — see
+memory + orchestration release lane, now part of the standard gate). Config import
+corrected: real ghostty loads TWO files; Josh actually runs FiraCode NFM @16pt (now in
+ghostty-rs config). Invisible-FiraCode-text fixed (byteless named faces: unshaped
+fallback; ligatures for named faces still pending). In flight: family-styles (FiraCode
+real Bold). Queued: emoji-discovery (we pick Noto, ghostty picks Apple), named-face
+ligatures, nerd-font constraint sizing.
+
+## Earlier: 2026-07-09 (later)
 
 **"Font feels thin" root-caused and fixed: bold/italic never rendered.** A text-weight
 chunk first PROVED rasterization flags, alpha-blending mode, pixel formats, and the
