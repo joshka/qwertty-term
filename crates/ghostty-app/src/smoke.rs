@@ -134,5 +134,87 @@ pub fn run() -> Result<bool, String> {
         ));
     }
 
+    // --- Search match-highlight ink assertion ---------------------------
+    //
+    // Re-snapshot the same content, tint a one-cell match highlight over a
+    // known cell (the amber match background), render it, and assert that
+    // cell's pixels now differ substantially from the *plain* render at the
+    // same cell. This proves the match-highlight tint reaches real ink,
+    // distinct from normal rendering — using the exact `tint_matches` path the
+    // app render loop uses. The marker "GHOSTTY-RS-SMOKE-OK" occupies row 0
+    // (printed by the scripted command's echo); tint its first character cell.
+    {
+        use crate::selection::{MatchColors, ScreenRange, tint_matches};
+
+        // The default render at the target cell (row 0, col 0 region).
+        let (tx, ty) = (0usize, 0usize); // cell coordinates
+        let plain = cell_avg(&pixels, sw, sh, cw as usize, ch as usize, tx, ty);
+
+        let mut window = engine.lock().unwrap().snapshot_window(0);
+        let match_range = ScreenRange {
+            top_left: (tx, ty),
+            bottom_right: (tx, ty),
+            rectangle: false,
+        };
+        tint_matches(&mut window, &[match_range], Some(0), MatchColors::default());
+        let snapshot = FullSnapshot::from_window(window);
+        render.update_frame(&snapshot, &mut grid, FrameOptions::default());
+        render
+            .sync_atlas(&grid)
+            .map_err(|e| format!("sync atlas (highlight): {e}"))?;
+        let hl_pixels = render
+            .draw_frame()
+            .map_err(|e| format!("draw frame (highlight): {e}"))?;
+        let highlighted = cell_avg(&hl_pixels, sw, sh, cw as usize, ch as usize, tx, ty);
+
+        // The amber match background (#FFE082) is far from the #181818 default
+        // background and from the plain glyph render; require a substantial
+        // shift at the tinted cell.
+        let delta = (highlighted.r as i32 - plain.r as i32).abs()
+            + (highlighted.g as i32 - plain.g as i32).abs()
+            + (highlighted.b as i32 - plain.b as i32).abs();
+        if delta <= 60 {
+            return Err(format!(
+                "search match-highlight produced no distinct ink at the match \
+                 cell (plain rgb=({},{},{}) vs highlighted rgb=({},{},{}), delta \
+                 {delta})",
+                plain.r, plain.g, plain.b, highlighted.r, highlighted.g, highlighted.b,
+            ));
+        }
+        eprintln!(
+            "offscreen: search match-highlight ink present at the match cell \
+             (plain→highlighted rgb delta {delta})"
+        );
+    }
+
     Ok(true)
+}
+
+/// Average BGRA pixel over the cell at cell-coordinate `(cx, cy)` in a readback
+/// buffer of `sw`×`sh` pixels with cell size `cw`×`ch`. Used to compare the
+/// plain vs match-highlighted render of a single cell.
+fn cell_avg(pixels: &[u8], sw: usize, sh: usize, cw: usize, ch: usize, cx: usize, cy: usize) -> Px {
+    let x0 = cx * cw;
+    let y0 = cy * ch;
+    let (mut sr, mut sg, mut sb, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for y in y0..(y0 + ch).min(sh) {
+        for x in x0..(x0 + cw).min(sw) {
+            let i = (y * sw + x) * 4;
+            if i + 3 >= pixels.len() {
+                continue;
+            }
+            sb += pixels[i] as u64;
+            sg += pixels[i + 1] as u64;
+            sr += pixels[i + 2] as u64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return Px { r: 0, g: 0, b: 0 };
+    }
+    Px {
+        r: (sr / n) as u8,
+        g: (sg / n) as u8,
+        b: (sb / n) as u8,
+    }
 }

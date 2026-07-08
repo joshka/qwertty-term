@@ -305,6 +305,16 @@ struct Surface {
     /// Whether the one-shot crash banner has already been painted into the
     /// (recovered) engine. Prevents re-writing it every tick.
     banner_drawn: Cell<bool>,
+    /// This pane's scrollback-search state (needle, matches, current index).
+    /// Drives the match highlights in [`Surface::render`] and the counter in
+    /// the overlay. Empty/inactive when search is closed.
+    search: crate::search::SearchState,
+    /// The AppKit search-bar overlay for this pane, created lazily on first
+    /// Cmd+F and reused thereafter (shown/hidden). `None` until first opened.
+    search_overlay: Option<Retained<crate::search_overlay::SearchOverlay>>,
+    /// Match-highlight tint colors (amber matches, salmon current), from the
+    /// selection-tint family. Static defaults for slice 1.
+    match_colors: crate::selection::MatchColors,
 }
 
 /// Lock an engine mutex, recovering a poisoned lock instead of panicking.
@@ -504,6 +514,18 @@ impl Surface {
         if let Some(range) = range {
             tint_selection(&mut window, range, self.selection_colors);
         }
+        // Search-match highlights: a second CPU-side tint pass over the same
+        // snapshot window (matches are absolute-screen ranges, so they line up
+        // with the window's `window_top`). The current match gets a distinct
+        // color. Only when the search bar is open.
+        if self.search.is_active() && self.search.count() > 0 {
+            crate::selection::tint_matches(
+                &mut window,
+                self.search.matches(),
+                self.search.current_index(),
+                self.match_colors,
+            );
+        }
         let snapshot = FullSnapshot::from_window(window);
         let render = self.render.as_mut().expect("checked above");
         let opts = FrameOptions {
@@ -578,6 +600,115 @@ impl Surface {
     fn snap_to_bottom(&mut self) {
         self.scrollback_offset = 0;
         self.wheel = crate::scroll::WheelState::default();
+    }
+
+    // -- search ----------------------------------------------------------
+
+    /// The pane view's bounds in points (for overlay placement).
+    fn view_bounds(&self) -> NSRect {
+        self.view.bounds()
+    }
+
+    /// Open the search bar on this pane: create the overlay lazily (parented to
+    /// this pane's view), show it, focus its field, and mark the search state
+    /// active. Idempotent — re-opening just re-focuses the existing overlay.
+    fn search_open(
+        &mut self,
+        mtm: MainThreadMarker,
+        controller: Controller,
+        tab: TabId,
+        surface: SurfaceId,
+    ) {
+        self.search.open();
+        let bounds = self.view_bounds();
+        if self.search_overlay.is_none() {
+            let overlay =
+                crate::search_overlay::SearchOverlay::new(mtm, controller, tab, surface, bounds);
+            self.view.addSubview(&overlay);
+            self.search_overlay = Some(overlay);
+        }
+        if let Some(overlay) = &self.search_overlay {
+            overlay.open(bounds);
+            overlay.set_counter(&self.search.counter_label());
+        }
+    }
+
+    /// Close the search bar: hide the overlay (returning focus to the terminal),
+    /// clear the match state, and snap back to the live viewport.
+    fn search_close(&mut self) {
+        if let Some(overlay) = &self.search_overlay {
+            overlay.close();
+        }
+        self.search.close();
+        // Returning to the live view after a scrolled-to match is the least
+        // surprising default (matches scroll-to-bottom on keystroke).
+        self.scrollback_offset = 0;
+    }
+
+    /// Re-run the search for a new needle (incremental, on the engine under the
+    /// lock), update the match set + counter, and scroll the first match into
+    /// view. A no-op if the search bar is not open.
+    fn search_set_needle(&mut self, needle: &str) {
+        if !self.search.is_active() {
+            return;
+        }
+        let matches = self.engine().search_all(needle.as_bytes());
+        self.search.set_results(needle.to_string(), matches);
+        if let Some(range) = self.search.current_match() {
+            self.scroll_match_into_view(range);
+        }
+        if let Some(overlay) = &self.search_overlay {
+            overlay.set_counter(&self.search.counter_label());
+        }
+    }
+
+    /// Move to the next (`forward`) or previous match, scroll it into view, and
+    /// update the counter. A no-op if search is closed or there are no matches.
+    fn search_navigate(&mut self, forward: bool) {
+        if !self.search.is_active() {
+            return;
+        }
+        let range = if forward {
+            self.search.next()
+        } else {
+            self.search.previous()
+        };
+        if let Some(range) = range {
+            self.scroll_match_into_view(range);
+        }
+        if let Some(overlay) = &self.search_overlay {
+            overlay.set_counter(&self.search.counter_label());
+        }
+    }
+
+    /// Set this pane's scrollback offset so `range`'s top row sits at the top of
+    /// the viewport (clamped to the live-area/top-of-history bounds). Reuses the
+    /// same `scrollback_offset` machinery wheel-scroll drives.
+    ///
+    /// The snapshot maps `window_top = total_rows - (offset + rows)`, i.e.
+    /// `window_top = scrollback_len - offset`; to put absolute row `R` at the
+    /// top we need `offset = scrollback_len - R`, clamped to `[0,
+    /// scrollback_len]`.
+    fn scroll_match_into_view(&mut self, range: crate::selection::ScreenRange) {
+        let scrollback_len = self.engine().scrollback_len();
+        let row = range.top_left.1;
+        let offset = scrollback_len.saturating_sub(row);
+        self.scrollback_offset = offset.min(scrollback_len);
+    }
+
+    /// Whether this pane's search bar is currently open (smoke/test).
+    fn search_is_active(&self) -> bool {
+        self.search.is_active()
+    }
+
+    /// This pane's current match count (smoke/test).
+    fn search_match_count(&self) -> usize {
+        self.search.count()
+    }
+
+    /// This pane's current (navigated-to) match index, 0-based (smoke/test).
+    fn search_current_index(&self) -> Option<usize> {
+        self.search.current_index()
     }
 
     /// Apply one wheel event to this pane: run the decision ladder over the
@@ -1028,6 +1159,130 @@ impl Controller {
             .get(&tab)
             .and_then(|t| t.focused_surface())
             .map(|s| s.view.clone())
+    }
+
+    // -- search dispatch -------------------------------------------------
+
+    /// Open (toggle-on) the search bar on the focused pane of `tab`. If it is
+    /// already open, re-focus it (a second Cmd+F is a no-op-ish re-focus, not a
+    /// close — matching upstream where `end_search` is a separate binding).
+    pub fn search_start(&self, tab: TabId) {
+        let mtm = self.0.borrow().mtm;
+        let controller = self.clone();
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab) else {
+            return;
+        };
+        let surface_id = t.tree.focused();
+        if let Some(s) = t.surfaces.get_mut(&surface_id) {
+            s.search_open(mtm, controller, tab, surface_id);
+        }
+    }
+
+    /// Close the search bar on `surface` in `tab` (Escape / Cmd+Shift+F).
+    pub fn search_end(&self, tab: TabId, surface: SurfaceId) {
+        let mut state = self.0.borrow_mut();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            s.search_close();
+        }
+    }
+
+    /// The needle changed in `surface`'s search field (`tab`): re-run the
+    /// incremental search and update highlights + counter + scroll.
+    pub fn search_set_needle(&self, tab: TabId, surface: SurfaceId, needle: &str) {
+        let mut state = self.0.borrow_mut();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            s.search_set_needle(needle);
+        }
+    }
+
+    /// Navigate to the next match in `surface`'s search (`tab`).
+    pub fn search_navigate_next(&self, tab: TabId, surface: SurfaceId) {
+        let mut state = self.0.borrow_mut();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            s.search_navigate(true);
+        }
+    }
+
+    /// Navigate to the previous match in `surface`'s search (`tab`).
+    pub fn search_navigate_previous(&self, tab: TabId, surface: SurfaceId) {
+        let mut state = self.0.borrow_mut();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            s.search_navigate(false);
+        }
+    }
+
+    /// Dispatch a resolved [`SearchAction`](crate::searchkeys::SearchAction)
+    /// from a key chord to the focused pane of `tab`. `Start`/`End` target the
+    /// focused pane; `Next`/`Previous` target it too. Called from the view's
+    /// `performKeyEquivalent:`.
+    pub fn handle_search_action(&self, tab: TabId, action: crate::searchkeys::SearchAction) {
+        use crate::searchkeys::SearchAction;
+        let surface = {
+            let state = self.0.borrow();
+            state.tabs.get(&tab).map(|t| t.tree.focused())
+        };
+        let Some(surface) = surface else { return };
+        match action {
+            SearchAction::Start => self.search_start(tab),
+            SearchAction::End => self.search_end(tab, surface),
+            SearchAction::Next => self.search_navigate_next(tab, surface),
+            SearchAction::Previous => self.search_navigate_previous(tab, surface),
+        }
+    }
+
+    /// Whether the focused pane of the active tab has its search bar open
+    /// (smoke/test, and used by the view to gate the Escape chord so a plain
+    /// Escape still reaches the PTY when not searching).
+    pub fn active_search_is_active(&self) -> bool {
+        let state = self.0.borrow();
+        let Some(tab) = state.registry.active() else {
+            return false;
+        };
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .map(|s| s.search_is_active())
+            .unwrap_or(false)
+    }
+
+    /// The focused pane's search match count (smoke/test).
+    pub fn active_search_match_count(&self) -> Option<usize> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .map(|s| s.search_match_count())
+    }
+
+    /// The focused pane's current (navigated-to) match index (smoke/test).
+    pub fn active_search_current_index(&self) -> Option<usize> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .and_then(|s| s.search_current_index())
     }
 
     /// Mark `tab` active (called when its window becomes key).
@@ -1783,6 +2038,9 @@ impl Controller {
             dead: Cell::new(false),
             dead_reason: RefCell::new(None),
             banner_drawn: Cell::new(false),
+            search: crate::search::SearchState::default(),
+            search_overlay: None,
+            match_colors: crate::selection::MatchColors::default(),
         })
     }
 
@@ -2264,6 +2522,12 @@ pub struct DelegateIvars {
     smoke_focus: bool,
     /// Focus smoke phase state: the tab + the two panes' `(SurfaceId)` ids.
     focus_state: RefCell<Option<(TabId, SurfaceId, SurfaceId)>>,
+    /// Search smoke (`GHOSTTY_APP_SMOKE_SEARCH`): fill scrollback with 3
+    /// markers, Cmd+F, type the needle, assert the counter reads 3, navigate,
+    /// and assert Escape restores PTY input. See [`AppDelegate::run_search_smoke`].
+    smoke_search: bool,
+    /// Search smoke phase state: the tab + focused surface under test.
+    search_state: RefCell<Option<(TabId, SurfaceId)>>,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -2306,6 +2570,7 @@ define_class!(
             let has_splits = self.ivars().smoke_splits;
             let has_keybind = self.ivars().smoke_keybind;
             let has_focus = self.ivars().smoke_focus;
+            let has_search = self.ivars().smoke_search;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -2315,6 +2580,8 @@ define_class!(
                 self.schedule_keybind_smoke();
             } else if has_focus {
                 self.schedule_focus_smoke();
+            } else if has_search {
+                self.schedule_search_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -2445,6 +2712,20 @@ define_class!(
         fn focus_smoke_check(&self, _timer: &AnyObject) {
             self.finish_focus_smoke();
         }
+
+        /// Search smoke phase 1: fill scrollback with markers, Cmd+F, type the
+        /// needle.
+        #[unsafe(method(ghosttySearchSmoke:))]
+        fn search_smoke(&self, _timer: &AnyObject) {
+            self.run_search_smoke();
+        }
+
+        /// Search smoke phase 2: assert counter + navigation + escape-restores-
+        /// input, exit.
+        #[unsafe(method(ghosttySearchSmokeCheck:))]
+        fn search_smoke_check(&self, _timer: &AnyObject) {
+            self.finish_search_smoke();
+        }
     }
 );
 
@@ -2461,6 +2742,7 @@ impl AppDelegate {
         smoke_splits: bool,
         smoke_keybind: bool,
         smoke_focus: bool,
+        smoke_search: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -2473,6 +2755,8 @@ impl AppDelegate {
             smoke_keybind,
             smoke_focus,
             focus_state: RefCell::new(None),
+            smoke_search,
+            search_state: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -3599,6 +3883,201 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the search smoke: give the shell a beat, then run phase 1.
+    fn schedule_search_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttySearchSmoke:));
+    }
+
+    /// Search smoke phase 1. Fill the focused pane's scrollback with known
+    /// content (many filler lines plus 3 lines carrying a distinctive marker,
+    /// pushing the first markers up into history), then drive **Cmd+F** through
+    /// the real `performKeyEquivalent:` path (opening the overlay), and set the
+    /// needle to the marker (the exact call the overlay's field delegate makes
+    /// on each keystroke). Assert the counter reads 3. Phase 2 navigates and
+    /// checks that Escape restores PTY input.
+    fn run_search_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let mtm = self.mtm();
+        let fail = search_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at search smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at search smoke start".into());
+        };
+
+        // Fill the scrollback deterministically by feeding engine output
+        // directly (no async pty round-trip): 60 filler lines interleaved with
+        // exactly 3 marker lines, so the first markers land in history and the
+        // whole-scrollback search must reach them.
+        let marker = "NEEDLEZZ";
+        let mut content = String::new();
+        for i in 0..60u32 {
+            if i == 5 || i == 30 || i == 55 {
+                content.push_str(marker);
+                content.push_str(" line\r\n");
+            } else {
+                content.push_str("filler filler filler\r\n");
+            }
+        }
+        controller.feed_surface_output(tab, surface, content.as_bytes());
+
+        // Cmd+F through the real interception path → opens the overlay.
+        Self::send_key_equiv(controller, mtm, KEYCODE_F, TAB_MOD_CMD);
+        if !controller.active_search_is_active() {
+            fail("Cmd+F did not open the search bar (search state not active)".into());
+        }
+
+        // Type the needle (the field-delegate path).
+        controller.search_set_needle(tab, surface, marker);
+
+        let count = controller.active_search_match_count().unwrap_or(0);
+        if count != 3 {
+            fail(format!(
+                "expected 3 matches for '{marker}' over the scrollback, saw {count}"
+            ));
+        }
+        // The first match is current (index 0) and the viewport scrolled to it.
+        if controller.active_search_current_index() != Some(0) {
+            fail(format!(
+                "first search result should be current (index 0), saw {:?}",
+                controller.active_search_current_index()
+            ));
+        }
+
+        *self.ivars().search_state.borrow_mut() = Some((tab, surface));
+        self.schedule_selector(0.3, sel!(ghosttySearchSmokeCheck:));
+    }
+
+    /// Search smoke phase 2: navigate next/next/prev asserting the current-match
+    /// index (and thus the viewport offset — each match is on a distinct row, so
+    /// the offset lands on that row) advances, then Escape and assert typed bytes
+    /// reach the pty again (input restored). Exits 0/1.
+    fn finish_search_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let mtm = self.mtm();
+        let fail = search_fail;
+        let (tab, surface) = self
+            .ivars()
+            .search_state
+            .borrow()
+            .unwrap_or_else(|| fail("search smoke phase-2 state missing".into()));
+
+        // Record each match's scroll offset as we navigate — every match is on a
+        // different scrollback row, so the offset must change on each step.
+        let off0 = controller
+            .surface_scrollback_offset(tab, surface)
+            .unwrap_or(0);
+
+        // next → index 1 (the middle marker).
+        controller.search_navigate_next(tab, surface);
+        if controller.active_search_current_index() != Some(1) {
+            fail(format!(
+                "after next, expected current index 1, saw {:?}",
+                controller.active_search_current_index()
+            ));
+        }
+        let off1 = controller
+            .surface_scrollback_offset(tab, surface)
+            .unwrap_or(0);
+
+        // next → index 2 (the last marker; near the live area → smaller offset).
+        controller.search_navigate_next(tab, surface);
+        if controller.active_search_current_index() != Some(2) {
+            fail(format!(
+                "after next, expected current index 2, saw {:?}",
+                controller.active_search_current_index()
+            ));
+        }
+        let off2 = controller
+            .surface_scrollback_offset(tab, surface)
+            .unwrap_or(0);
+
+        // prev → back to index 1, and the offset must return to off1.
+        controller.search_navigate_previous(tab, surface);
+        if controller.active_search_current_index() != Some(1) {
+            fail(format!(
+                "after prev, expected current index 1, saw {:?}",
+                controller.active_search_current_index()
+            ));
+        }
+        let off1b = controller
+            .surface_scrollback_offset(tab, surface)
+            .unwrap_or(0);
+
+        // The offsets must be distinct across rows and deterministic per match:
+        // earlier markers are further up history (larger offset).
+        if !(off0 > off1 && off1 > off2) {
+            fail(format!(
+                "viewport offsets should decrease as we navigate toward newer \
+                 matches (off0={off0}, off1={off1}, off2={off2})"
+            ));
+        }
+        if off1b != off1 {
+            fail(format!(
+                "navigating back to a match must land on the same viewport offset \
+                 (off1={off1}, off1b={off1b})"
+            ));
+        }
+
+        // Escape restores PTY input: send Escape (gated on search active) via the
+        // real key-equiv path → closes the bar. Then type a marker through the
+        // real keyDown path and assert it reaches the pty (echoes back).
+        Self::send_key_equiv(controller, mtm, KEYCODE_ESCAPE, TAB_MOD_NONE);
+        if controller.active_search_is_active() {
+            fail("Escape did not close the search bar".into());
+        }
+
+        // Type a distinctive marker string through the real window key path (the
+        // focused pane's view should be first responder again after close).
+        let app = NSApplication::sharedApplication(mtm);
+        let win_num: isize = app
+            .keyWindow()
+            .or_else(|| controller.active_window())
+            .map(|w| w.windowNumber())
+            .unwrap_or(0);
+        for ch in "echo AFTERSEARCH".chars() {
+            let (keycode, chars) = synth_key_for_char(ch);
+            Self::send_keydown(
+                &app,
+                win_num,
+                keycode,
+                &chars,
+                NSEventModifierFlags::empty(),
+            );
+        }
+        Self::send_keydown(
+            &app,
+            win_num,
+            KEYCODE_RETURN,
+            "\r",
+            NSEventModifierFlags::empty(),
+        );
+
+        // Let the shell echo + run it.
+        Self::spin(1.0);
+        let screen = controller
+            .surface_screen_text(tab, surface)
+            .unwrap_or_default();
+        if !screen.contains("AFTERSEARCH") {
+            fail(format!(
+                "after Escape, typed input did not reach the pty (marker \
+                 'AFTERSEARCH' absent) — closing search did not restore terminal \
+                 first-responder focus.\n--- screen ---\n{screen}"
+            ));
+        }
+
+        println!(
+            "OK: search smoke — Cmd+F opened the overlay, typing the needle found \
+             all 3 markers across scrollback (counter 1/3), next/next/prev moved the \
+             current match and scrolled the viewport to each match's row (offsets \
+             {off0} → {off1} → {off2}, back to {off1b}), and Escape closed the bar, \
+             restoring PTY input (typed text reached the shell)."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -3719,6 +4198,12 @@ fn focus_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a search smoke failure and exit non-zero.
+fn search_fail(msg: String) -> ! {
+    eprintln!("FAIL: search smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -3730,6 +4215,8 @@ fn tabkeys_fail(msg: String) -> ! {
 // synthetic events. Layout-independent, matching `crate::input::keymap`.
 const KEYCODE_TAB: u16 = 0x30; // kVK_Tab
 const KEYCODE_RETURN: u16 = 0x24; // kVK_Return
+const KEYCODE_F: u16 = 0x03; // kVK_ANSI_F
+const KEYCODE_ESCAPE: u16 = 0x35; // kVK_Escape
 const KEYCODE_I: u16 = 0x22; // kVK_ANSI_I
 const KEYCODE_1: u16 = 0x12; // kVK_ANSI_1
 const KEYCODE_3: u16 = 0x14; // kVK_ANSI_3
@@ -3822,6 +4309,7 @@ pub fn run(
     smoke_splits: bool,
     smoke_keybind: bool,
     smoke_focus: bool,
+    smoke_search: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -3838,6 +4326,7 @@ pub fn run(
         smoke_splits,
         smoke_keybind,
         smoke_focus,
+        smoke_search,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

@@ -54,6 +54,18 @@ impl PageListSearch {
         PageListSearch { window, pin }
     }
 
+    /// Initialize a whole-history search starting from the bottom-most node (the
+    /// active area), searching in reverse toward the top of scrollback. This is
+    /// the safe entry point for a caller that just wants "search everything" and
+    /// does not track its own `*mut Node` — it resolves the start node from
+    /// `list` internally. Not present upstream (whose `ScreenSearch` threads the
+    /// active-search node in), but a thin convenience over [`PageListSearch::init`]
+    /// for the app-side synchronous driver.
+    pub fn from_end(needle: &[u8], list: &mut PageList) -> PageListSearch {
+        let start = list.last_node();
+        PageListSearch::init(needle, list, start)
+    }
+
     /// Untrack the pin. Modifies the `PageList`, so the caller must ensure that is safe. Port
     /// of `PageListSearch.deinit`.
     pub fn deinit(self, list: &mut PageList) {

@@ -44,6 +44,11 @@
 //!   `cat -v` panes with mode 1004 enabled; focus-switch and assert the focus-in
 //!   (`CSI I`) / focus-out (`CSI O`) bytes reach the correct per-surface ptys,
 //!   then exit 0/1.
+//! - `GHOSTTY_APP_SMOKE_SEARCH=1` — run the scrollback-search smoke: fill the
+//!   focused pane's scrollback with 3 marker lines, drive Cmd+F (opening the
+//!   overlay), set the needle, assert the match counter reads 3, navigate
+//!   next/next/prev asserting the viewport offset lands on each match's row, and
+//!   assert Escape closes the bar and restores PTY input, then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -131,6 +136,9 @@ fn run_window() {
     // focus-switch between them and assert the focus-in/out bytes reach the right
     // ptys (see app::run).
     let smoke_focus = std::env::var_os("GHOSTTY_APP_SMOKE_FOCUS").is_some();
+    // Search smoke: fill scrollback with markers, Cmd+F, type the needle, assert
+    // the counter, navigate, and assert Escape restores PTY input (see app::run).
+    let smoke_search = std::env::var_os("GHOSTTY_APP_SMOKE_SEARCH").is_some();
     ghostty_app::app::run(
         &config,
         smoke_ms,
@@ -140,6 +148,7 @@ fn run_window() {
         smoke_splits,
         smoke_keybind,
         smoke_focus,
+        smoke_search,
     );
 }
 

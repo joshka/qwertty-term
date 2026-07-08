@@ -120,6 +120,88 @@ pub fn tint_selection(window: &mut SnapshotWindow, range: ScreenRange, colors: S
     }
 }
 
+/// Search-match highlight colors: the tint applied to every match in the
+/// viewport, plus the distinct tint for the *current* match. Upstream's
+/// defaults (`Config.zig` `search-background` `#FFE082` amber /
+/// `search-selected-background` `#F2A57E` salmon, both with black foreground)
+/// are the fallback; a theme could override these later. Both are explicit RGB
+/// (search highlights are not an inverse-video concept upstream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchColors {
+    /// Non-current match: bg/fg.
+    pub match_bg: Rgb,
+    pub match_fg: Rgb,
+    /// Current (navigated-to) match: bg/fg.
+    pub current_bg: Rgb,
+    pub current_fg: Rgb,
+}
+
+impl Default for MatchColors {
+    fn default() -> Self {
+        MatchColors {
+            match_bg: Rgb::new(0xFF, 0xE0, 0x82),
+            match_fg: Rgb::new(0, 0, 0),
+            current_bg: Rgb::new(0xF2, 0xA5, 0x7E),
+            current_fg: Rgb::new(0, 0, 0),
+        }
+    }
+}
+
+/// Overlay search-match highlights onto `window`. Every range in `matches` is
+/// tinted with the match color; the `current` index (if any) is tinted with the
+/// distinct current-match color instead, so the navigated-to hit stands out.
+/// Cells outside every match are untouched.
+///
+/// This runs as a second CPU-side pass after [`tint_selection`] in the render
+/// path — the same "swap the snapshot cells' resolved colors before the renderer
+/// sees them" mechanism, so no renderer changes are needed. Match ranges are in
+/// the same absolute-screen space as a [`ScreenRange`], compared against each
+/// window row's `window_top + row_idx` absolute row.
+pub fn tint_matches(
+    window: &mut SnapshotWindow,
+    matches: &[ScreenRange],
+    current: Option<usize>,
+    colors: MatchColors,
+) {
+    if matches.is_empty() {
+        return;
+    }
+    let window_top = window.window_top;
+    for (row_idx, row) in window.window.iter_mut().enumerate() {
+        let absolute_row = window_top + row_idx;
+        for (col, cell) in row.cells.iter_mut().enumerate() {
+            // The current match takes precedence over a plain match if they
+            // overlap (they never do for distinct matches, but be robust).
+            let mut hit: Option<bool> = None; // Some(is_current)
+            for (i, range) in matches.iter().enumerate() {
+                if range.contains(col, absolute_row) {
+                    let is_current = current == Some(i);
+                    hit = Some(is_current);
+                    if is_current {
+                        break;
+                    }
+                }
+            }
+            let Some(is_current) = hit else { continue };
+            let (bg, fg) = if is_current {
+                (colors.current_bg, colors.current_fg)
+            } else {
+                (colors.match_bg, colors.match_fg)
+            };
+            cell.style.bg = SnapshotColor::Rgb {
+                r: bg.r,
+                g: bg.g,
+                b: bg.b,
+            };
+            cell.style.fg = SnapshotColor::Rgb {
+                r: fg.r,
+                g: fg.g,
+                b: fg.b,
+            };
+        }
+    }
+}
+
 /// Resolve a symbolic [`SnapshotColor::Default`] to a concrete RGB using the
 /// window's default fg/bg (falling back to a mid-gray/black pair if the
 /// terminal has no dynamic default set — matching the renderer's own
@@ -284,6 +366,57 @@ mod tests {
                 }
             );
         }
+    }
+
+    // ---- tint_matches ----------------------------------------------------
+
+    #[test]
+    fn tint_matches_colors_current_distinctly() {
+        let mut window = blank_window(10, 3);
+        let colors = MatchColors::default();
+        let matches = vec![
+            ScreenRange {
+                top_left: (0, 0),
+                bottom_right: (2, 0),
+                rectangle: false,
+            },
+            ScreenRange {
+                top_left: (0, 1),
+                bottom_right: (2, 1),
+                rectangle: false,
+            },
+        ];
+        // Current = match index 1 (row 1).
+        tint_matches(&mut window, &matches, Some(1), colors);
+
+        // Row 0 (non-current) gets the plain match bg.
+        assert_eq!(
+            window.window[0].cells[0].style.bg,
+            SnapshotColor::Rgb {
+                r: colors.match_bg.r,
+                g: colors.match_bg.g,
+                b: colors.match_bg.b
+            }
+        );
+        // Row 1 (current) gets the current bg.
+        assert_eq!(
+            window.window[1].cells[0].style.bg,
+            SnapshotColor::Rgb {
+                r: colors.current_bg.r,
+                g: colors.current_bg.g,
+                b: colors.current_bg.b
+            }
+        );
+        // A cell outside every match (row 2) is untouched.
+        assert_eq!(window.window[2].cells[0].style, CellStyle::default());
+    }
+
+    #[test]
+    fn tint_matches_empty_is_noop() {
+        let mut window = blank_window(4, 2);
+        let before = window.window[0].cells[0].style;
+        tint_matches(&mut window, &[], None, MatchColors::default());
+        assert_eq!(window.window[0].cells[0].style, before);
     }
 
     #[test]

@@ -19,6 +19,8 @@ pub mod input;
 pub mod keybind;
 pub mod menu;
 pub mod scroll;
+pub mod search;
+pub mod searchkeys;
 pub mod selection;
 pub mod splitkeys;
 pub mod splits;
@@ -38,6 +40,8 @@ pub mod app;
 pub mod clipboard;
 #[cfg(target_os = "macos")]
 pub mod font;
+#[cfg(target_os = "macos")]
+pub mod search_overlay;
 #[cfg(target_os = "macos")]
 pub mod smoke;
 #[cfg(target_os = "macos")]

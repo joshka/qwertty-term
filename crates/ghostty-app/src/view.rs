@@ -115,7 +115,11 @@ define_class!(
         /// `false` and AppKit proceeds to `keyDown:` → the encoder unchanged.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            self.try_handle_tab_key(event)
+            // Search chords (cmd+f / cmd+g / cmd+shift+g / cmd+shift+f / escape)
+            // take precedence: they must fire whether the search field or the
+            // terminal is first responder (key equivalents reach the whole
+            // responder chain). Disjoint from the tab/split tables.
+            self.try_handle_search_key(event) || self.try_handle_tab_key(event)
         }
 
         /// Accept first responder so we receive key events.
@@ -389,6 +393,35 @@ impl TerminalView {
         self.with_controller(|c| c.handle_tab_action(action));
         // Consume regardless of whether a tab switch happened (e.g. the 1-tab
         // no-op case): a resolved chord must never fall through to the encoder.
+        true
+    }
+
+    /// If `event` is one of the built-in scrollback-search chords, run its
+    /// action against the controller and return `true` (consuming it). Otherwise
+    /// `false` so AppKit keeps dispatching. Called from `performKeyEquivalent:`.
+    ///
+    /// The bare `escape` chord only resolves *while the focused pane's search bar
+    /// is open* — otherwise it falls through so a plain Escape still reaches the
+    /// PTY encoder (e.g. vim). All other search chords carry Cmd, so they never
+    /// shadow ordinary keys.
+    fn try_handle_search_key(&self, event: &NSEvent) -> bool {
+        use ghostty_input::key::Key;
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let Some(action) = crate::searchkeys::resolve(key, mods) else {
+            return false;
+        };
+        // Gate a bare Escape on search being active for the focused pane.
+        if key == Key::Escape {
+            let active = self
+                .with_controller(|c| c.active_search_is_active())
+                .unwrap_or(false);
+            if !active {
+                return false;
+            }
+        }
+        let tab = self.ivars().tab;
+        self.with_controller(|c| c.handle_search_action(tab, action));
         true
     }
 

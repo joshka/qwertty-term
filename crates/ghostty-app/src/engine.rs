@@ -17,6 +17,7 @@ use ghostty_vt::modes::Mode;
 use ghostty_vt::pagelist::Pin;
 use ghostty_vt::point::Point;
 use ghostty_vt::screen::selection::Selection;
+use ghostty_vt::search::PageListSearch;
 use ghostty_vt::snapshot::SnapshotWindow;
 use ghostty_vt::stream::{Stream, TerminalHandler};
 use ghostty_vt::terminal::{Colors, Options, Terminal};
@@ -219,6 +220,79 @@ impl Engine {
     pub fn selection_string(&self) -> Option<String> {
         let sel = self.terminal().screen().selection.as_ref()?;
         Some(self.terminal().screen().selection_string(sel, true))
+    }
+
+    // -- search ----------------------------------------------------------
+
+    /// Run a literal case-insensitive-ASCII substring search over the *entire*
+    /// scrollback (history + active area) for `needle`, returning every match as
+    /// an ordered-top-to-bottom [`ScreenRange`] in absolute screen coordinates
+    /// (the same space [`Engine::screen_range`] and the tint pass consume).
+    ///
+    /// This drives `ghostty-vt`'s [`PageListSearch`] under the exact lock
+    /// discipline the rest of `Engine` uses (the caller holds the engine mutex):
+    /// [`PageListSearch::from_end`] starts at the bottom node and searches in
+    /// reverse toward the top of history, so `next()` yields matches most-recent
+    /// first; we collect them and reverse so the returned vector is in reading
+    /// order (top of scrollback → bottom of the active area). Empty needle → no
+    /// matches.
+    ///
+    /// Upstream runs this incrementally on a dedicated thread; for slice 1 the
+    /// app calls it synchronously on the main thread (measured — see the
+    /// `search_timing` bench test). The `feed`/`next` structure here is the same
+    /// one a future thread would drive.
+    pub fn search_all(&mut self, needle: &[u8]) -> Vec<crate::selection::ScreenRange> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+
+        let mut ranges: Vec<crate::selection::ScreenRange> = Vec::new();
+        {
+            let pages = &mut self.terminal_mut().screen_mut().pages;
+            let mut search = PageListSearch::from_end(needle, pages);
+            loop {
+                // Drain every match currently loaded in the window.
+                while let Some(flat) = search.next() {
+                    let untracked = flat.untracked();
+                    if let Some(range) =
+                        Self::flattened_to_range(pages, untracked.start, untracked.end)
+                    {
+                        ranges.push(range);
+                    }
+                }
+                // Load more history; stop when the whole list has been searched.
+                if !search.feed() {
+                    break;
+                }
+            }
+            search.deinit(pages);
+        }
+
+        // `PageListSearch` yields most-recent-first; reading order is top→bottom.
+        ranges.reverse();
+        ranges
+    }
+
+    /// Resolve a match's start/end [`Pin`] pair to an absolute-screen
+    /// [`ScreenRange`]. A search match is never a rectangle. Shared shape with
+    /// [`Engine::screen_range`], but the pins come straight from the searcher
+    /// (already ordered start≤end), so no `Selection` reordering is needed.
+    fn flattened_to_range(
+        pages: &ghostty_vt::pagelist::PageList,
+        start: Pin,
+        end: Pin,
+    ) -> Option<crate::selection::ScreenRange> {
+        let tl = pages
+            .point_from_pin(ghostty_vt::point::Tag::Screen, start)?
+            .coord();
+        let br = pages
+            .point_from_pin(ghostty_vt::point::Tag::Screen, end)?
+            .coord();
+        Some(crate::selection::ScreenRange {
+            top_left: (tl.x as usize, tl.y as usize),
+            bottom_right: (br.x as usize, br.y as usize),
+            rectangle: false,
+        })
     }
 
     /// The OSC 7 working directory as a filesystem path, if the running shell
@@ -490,6 +564,88 @@ mod tests {
         engine.clear_selection();
         assert!(engine.selection().is_none());
         assert!(engine.selection_string().is_none());
+    }
+
+    #[test]
+    fn search_all_finds_every_match_in_reading_order() {
+        let mut engine = Engine::new(20, 5);
+        // Three lines, two contain the needle "fox".
+        engine.write(b"the quick fox\r\nlazy dog\r\nfox again\r\n");
+        let matches = engine.search_all(b"fox");
+        assert_eq!(matches.len(), 2, "two 'fox' occurrences");
+        // Reading order: the first row's match comes before the later row's.
+        assert!(matches[0].top_left.1 < matches[1].top_left.1);
+        // First match is on row 0 at column 10 ("the quick fox").
+        assert_eq!(matches[0].top_left, (10, 0));
+    }
+
+    #[test]
+    fn search_all_is_case_insensitive_ascii() {
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"Hello WORLD\r\n");
+        assert_eq!(engine.search_all(b"world").len(), 1);
+        assert_eq!(engine.search_all(b"HELLO").len(), 1);
+    }
+
+    #[test]
+    fn search_all_empty_needle_is_no_matches() {
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"anything\r\n");
+        assert!(engine.search_all(b"").is_empty());
+    }
+
+    #[test]
+    fn search_all_reaches_into_scrollback() {
+        // A tiny viewport with many rows pushes early matches into history; the
+        // whole-list search must still find them.
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"MARKER-top\r\n");
+        for _ in 0..50 {
+            engine.write(b"filler\r\n");
+        }
+        engine.write(b"MARKER-bot\r\n");
+        assert_eq!(engine.search_all(b"MARKER-top").len(), 1);
+        assert_eq!(engine.search_all(b"MARKER-bot").len(), 1);
+    }
+
+    /// Timing probe for the synchronous-vs-thread decision (slice 1). Fills a
+    /// full 10k-line scrollback with realistic text (a scattering of matches),
+    /// with a scrollback budget large enough that all 10k lines are retained,
+    /// then times one whole-list `search_all` on this thread. Not a hard bound
+    /// (CI machines vary); it prints the measured time so the threading decision
+    /// is evidence-backed. Run with `--nocapture` to see it.
+    #[test]
+    fn search_timing_10k_scrollback() {
+        use std::time::Instant;
+        // Build a Terminal directly with a large scrollback budget so the whole
+        // 10k-line history is kept (the default 10_000-byte budget would prune
+        // most of it, understating the search cost).
+        let terminal = Terminal::new(Options {
+            cols: 120,
+            rows: 40,
+            max_scrollback: 64 * 1024 * 1024,
+            colors: Colors::default(),
+        });
+        let mut engine = Engine {
+            stream: Stream::new(TerminalHandler::new(terminal)),
+        };
+        for i in 0..10_000u32 {
+            if i % 37 == 0 {
+                engine.write(b"the needle is here in this line of output\r\n");
+            } else {
+                engine.write(b"lorem ipsum dolor sit amet consectetur adipiscing elit sed do\r\n");
+            }
+        }
+        let start = Instant::now();
+        let matches = engine.search_all(b"needle");
+        let elapsed = start.elapsed();
+        eprintln!(
+            "search_timing: {} matches over 10k lines in {:?} ({:.3} ms)",
+            matches.len(),
+            elapsed,
+            elapsed.as_secs_f64() * 1000.0
+        );
+        assert!(matches.len() >= 270, "expected ~271 needle lines");
     }
 
     #[test]
