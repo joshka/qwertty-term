@@ -18,6 +18,7 @@ pub mod geometry;
 pub mod input;
 pub mod menu;
 pub mod selection;
+pub mod tabkeys;
 pub mod tabs;
 pub mod theme;
 

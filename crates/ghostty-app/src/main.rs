@@ -24,6 +24,11 @@
 //! - `GHOSTTY_APP_DUMP_EVERY=<n>` — dump cadence (default 30 presents).
 //! - `GHOSTTY_APP_ASSERT_PRESENT=1` — with `GHOSTTY_APP_SMOKE_TYPE`, also assert
 //!   the *presented* frame has glyph coverage (not just the engine buffer).
+//! - `GHOSTTY_APP_SMOKE_TABKEYS=1` — run the tab-navigation keybind smoke: open
+//!   3 tabs, drive the built-in tab chords (ctrl+tab, ctrl+shift+tab, cmd+1..9,
+//!   cmd+shift+[/]) through the real `performKeyEquivalent:` path, assert the
+//!   active-tab index after each, and check the pty-encoding regression, then
+//!   exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -87,7 +92,10 @@ fn run_window() {
     // Tab-strip geometry smoke: dump + assert window geometry across the
     // 1-tab→2-tab→1-tab transition, then exit (see app::run).
     let smoke_geometry = std::env::var_os("GHOSTTY_APP_SMOKE_GEOMETRY").is_some();
-    ghostty_app::app::run(&config, smoke_ms, smoke_type, smoke_geometry);
+    // Tab-navigation keybind smoke: open 3 tabs, drive the built-in tab chords,
+    // assert the active-tab index after each, then exit (see app::run).
+    let smoke_tabkeys = std::env::var_os("GHOSTTY_APP_SMOKE_TABKEYS").is_some();
+    ghostty_app::app::run(&config, smoke_ms, smoke_type, smoke_geometry, smoke_tabkeys);
 }
 
 #[cfg(not(target_os = "macos"))]

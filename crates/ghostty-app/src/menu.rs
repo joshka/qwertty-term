@@ -31,6 +31,10 @@ pub enum MenuAction {
     FontSizeDown,
     /// Reset font size to the configured default (Cmd-0).
     FontSizeReset,
+    /// Show the next tab (Window menu; standard macOS Cmd-Shift-]). Wraps.
+    ShowNextTab,
+    /// Show the previous tab (Window menu; standard macOS Cmd-Shift-[). Wraps.
+    ShowPreviousTab,
     /// Quit the application (Cmd-Q).
     Quit,
 }
@@ -38,7 +42,7 @@ pub enum MenuAction {
 impl MenuAction {
     /// All actions, in menu-construction order. Drives both the NSMenu build and
     /// the completeness test that every action has a key equivalent.
-    pub const ALL: [MenuAction; 9] = [
+    pub const ALL: [MenuAction; 11] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::CloseTab,
@@ -47,6 +51,8 @@ impl MenuAction {
         MenuAction::FontSizeUp,
         MenuAction::FontSizeDown,
         MenuAction::FontSizeReset,
+        MenuAction::ShowNextTab,
+        MenuAction::ShowPreviousTab,
         MenuAction::Quit,
     ];
 
@@ -61,6 +67,8 @@ impl MenuAction {
             MenuAction::FontSizeUp => "Increase Font Size",
             MenuAction::FontSizeDown => "Decrease Font Size",
             MenuAction::FontSizeReset => "Reset Font Size",
+            MenuAction::ShowNextTab => "Show Next Tab",
+            MenuAction::ShowPreviousTab => "Show Previous Tab",
             MenuAction::Quit => "Quit ghostty-rs",
         }
     }
@@ -78,12 +86,22 @@ impl MenuAction {
             MenuAction::FontSizeUp => '=', // Cmd-= is Cmd-+ without Shift
             MenuAction::FontSizeDown => '-',
             MenuAction::FontSizeReset => '0',
+            // Standard macOS tab-cycling equivalents (Cmd-Shift-] / Cmd-Shift-[).
+            MenuAction::ShowNextTab => ']',
+            MenuAction::ShowPreviousTab => '[',
             MenuAction::Quit => 'q',
         }
     }
 
+    /// Whether this action's key equivalent includes Shift (in addition to the
+    /// Command modifier every menu item carries). The tab-cycling items use the
+    /// standard macOS Cmd-Shift-]/[ equivalents; everything else is plain Cmd.
+    pub fn key_equivalent_shift(self) -> bool {
+        matches!(self, MenuAction::ShowNextTab | MenuAction::ShowPreviousTab)
+    }
+
     /// Which top-level menu this action belongs under (App / Shell / Edit /
-    /// View). Drives the NSMenu grouping.
+    /// View / Window). Drives the NSMenu grouping.
     pub fn menu(self) -> TopMenu {
         match self {
             MenuAction::Quit => TopMenu::App,
@@ -92,6 +110,7 @@ impl MenuAction {
             MenuAction::FontSizeUp | MenuAction::FontSizeDown | MenuAction::FontSizeReset => {
                 TopMenu::View
             }
+            MenuAction::ShowNextTab | MenuAction::ShowPreviousTab => TopMenu::Window,
         }
     }
 
@@ -110,6 +129,8 @@ impl MenuAction {
             '-' => Some(MenuAction::FontSizeDown),
             '0' => Some(MenuAction::FontSizeReset),
             'q' => Some(MenuAction::Quit),
+            // ShowNextTab / ShowPreviousTab are Cmd-Shift chords, resolved via
+            // the view's performKeyEquivalent tab path, not this Cmd-only map.
             _ => None,
         }
     }
@@ -127,6 +148,8 @@ impl MenuAction {
             MenuAction::FontSizeUp => 6,
             MenuAction::FontSizeDown => 7,
             MenuAction::FontSizeReset => 8,
+            MenuAction::ShowNextTab => 10,
+            MenuAction::ShowPreviousTab => 11,
             MenuAction::Quit => 9,
         }
     }
@@ -144,11 +167,20 @@ pub enum TopMenu {
     Shell,
     Edit,
     View,
+    /// The macOS Window menu — hosts the tab-cycling items (Show Next/Previous
+    /// Tab), matching where real Ghostty's menu places them.
+    Window,
 }
 
 impl TopMenu {
-    /// The four top-level menus in bar order.
-    pub const ALL: [TopMenu; 4] = [TopMenu::App, TopMenu::Shell, TopMenu::Edit, TopMenu::View];
+    /// The five top-level menus in bar order.
+    pub const ALL: [TopMenu; 5] = [
+        TopMenu::App,
+        TopMenu::Shell,
+        TopMenu::Edit,
+        TopMenu::View,
+        TopMenu::Window,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -156,6 +188,7 @@ impl TopMenu {
             TopMenu::Shell => "Shell",
             TopMenu::Edit => "Edit",
             TopMenu::View => "View",
+            TopMenu::Window => "Window",
         }
     }
 }
@@ -165,8 +198,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_action_has_a_key_equivalent_that_round_trips() {
+    fn every_cmd_action_has_a_key_equivalent_that_round_trips() {
         for action in MenuAction::ALL {
+            // The tab-cycling items are Cmd-Shift chords resolved via the view's
+            // tab path, not the Cmd-only `for_key` map; skip them here.
+            if action.key_equivalent_shift() {
+                continue;
+            }
             let ch = action.key_equivalent();
             // for_key must resolve the equivalent back to the same action
             // (FontSizeUp's '=' is its canonical equivalent).
@@ -176,6 +214,16 @@ mod tests {
                 "{action:?} key '{ch}' did not round-trip"
             );
         }
+    }
+
+    #[test]
+    fn tab_cycling_items_live_under_window_menu_with_bracket_equivalents() {
+        assert_eq!(MenuAction::ShowNextTab.menu(), TopMenu::Window);
+        assert_eq!(MenuAction::ShowPreviousTab.menu(), TopMenu::Window);
+        assert_eq!(MenuAction::ShowNextTab.key_equivalent(), ']');
+        assert_eq!(MenuAction::ShowPreviousTab.key_equivalent(), '[');
+        assert!(MenuAction::ShowNextTab.key_equivalent_shift());
+        assert!(MenuAction::ShowPreviousTab.key_equivalent_shift());
     }
 
     #[test]

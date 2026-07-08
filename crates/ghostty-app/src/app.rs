@@ -60,6 +60,7 @@ use crate::geometry;
 use crate::input::translate::{InputConfig, RawKeyEvent};
 use crate::menu::{MenuAction, TopMenu};
 use crate::selection::{SelectionColors, tint_selection};
+use crate::tabkeys::TabAction;
 use crate::tabs::{self, TabId, TabRegistry};
 use crate::termio::{IoEvent, TabIo};
 use crate::view::TerminalView;
@@ -539,12 +540,21 @@ impl Controller {
     }
 
     /// Close a tab: drop its bundle, close its window, update the registry.
+    ///
+    /// `NSWindow::close` synchronously transfers key focus to a sibling tab,
+    /// which fires `windowDidBecomeKey:` → [`Controller::set_active`] →
+    /// `borrow_mut`. So the controller borrow must be released *before* the
+    /// close, or that re-entrant borrow panics ("already borrowed"). We remove
+    /// the tab bundle under a scoped borrow, drop it, then close the window with
+    /// no borrow held, then re-borrow to update the registry.
     pub fn close_tab(&self, tab: TabId) {
-        let mut state = self.0.borrow_mut();
-        if let Some(t) = state.tabs.remove(&tab) {
+        let removed = self.0.borrow_mut().tabs.remove(&tab);
+        if let Some(t) = removed {
+            // No controller borrow is held here: the synchronous
+            // windowDidBecomeKey → set_active re-entrancy is now safe.
             t.window.close();
         }
-        state.registry.remove(tab);
+        self.0.borrow_mut().registry.remove(tab);
     }
 
     /// The active tab, if any.
@@ -621,6 +631,77 @@ impl Controller {
         self.0.borrow_mut().registry.activate(tab);
     }
 
+    /// Execute a built-in tab-navigation action against the active window's
+    /// native tab group. Returns whether it did anything (a live tab existed).
+    ///
+    /// Runtime semantics are ported from upstream `onGotoTab`
+    /// (`macos/Sources/Features/Terminal/TerminalController.swift` ~1500–1546):
+    /// next/previous **wrap** (cyclic), `GotoTab(N)` is 1-based and **clamps**
+    /// to the last tab (`min(N-1, count-1)`), `LastTab` selects the last tab.
+    ///
+    /// Ordering follows the native `tabGroup.windows` order (what the user sees
+    /// in the tab bar), not our registry's insertion order — they can differ
+    /// once tabs are reordered by drag. We select the target window with
+    /// `makeKeyAndOrderFront`, exactly as upstream does; that fires
+    /// `windowDidBecomeKey:` on the target's [`WindowDelegate`], which calls
+    /// [`Controller::set_active`], so the registry's active pointer resyncs
+    /// through the same path a manual tab-bar click uses (no separate
+    /// bookkeeping to drift).
+    pub fn handle_tab_action(&self, action: TabAction) -> bool {
+        // The window we're currently on (the OS key window of the active tab).
+        let Some(window) = self.active_window() else {
+            return false;
+        };
+
+        // The tab group's windows in visual (tab-bar) order. A lone,
+        // ungrouped window has no tab group; treat it as a single-tab group of
+        // just itself so chords are harmless no-ops (never beep/crash) at 1 tab.
+        let (windows, selected): (Vec<Retained<NSWindow>>, Option<Retained<NSWindow>>) =
+            match window.tabGroup() {
+                Some(group) => (
+                    group.windows().iter().collect(),
+                    group.selectedWindow().or(Some(window.clone())),
+                ),
+                None => (vec![window.clone()], Some(window.clone())),
+            };
+        let count = windows.len();
+        if count == 0 {
+            return false;
+        }
+
+        // Index of the currently selected window in the visual order.
+        let selected_idx = selected
+            .as_ref()
+            .and_then(|sel| windows.iter().position(|w| w == sel))
+            .unwrap_or(0);
+
+        // Resolve the target index per upstream semantics.
+        let target_idx = match action {
+            TabAction::NextTab => {
+                if selected_idx + 1 >= count {
+                    0
+                } else {
+                    selected_idx + 1
+                }
+            }
+            TabAction::PreviousTab => {
+                if selected_idx == 0 {
+                    count - 1
+                } else {
+                    selected_idx - 1
+                }
+            }
+            // 1-based; clamp to the last tab (upstream `min(N-1, count-1)`).
+            TabAction::GotoTab(n) => n.saturating_sub(1).min(count - 1),
+            TabAction::LastTab => count - 1,
+        };
+
+        // Selecting the same window is a harmless no-op (the 1-tab case). Bring
+        // the target to the front; its `windowDidBecomeKey:` resyncs `active`.
+        windows[target_idx].makeKeyAndOrderFront(None);
+        true
+    }
+
     /// Snapshot the active tab's window/view/tab-group geometry (smoke/test
     /// only). The field the "spurious top band" bug lives in: if the terminal
     /// view does not fill `contentLayoutRect` exactly, the exposed slice is
@@ -637,6 +718,23 @@ impl Controller {
             surface_px,
             t.default_bg,
         ))
+    }
+
+    /// The active window's 1-based position in its native tab group's visual
+    /// order, plus the tab count (smoke/test only). `None` if there is no active
+    /// tab. The tab-keys smoke asserts on this after each chord.
+    pub fn active_visual_index(&self) -> Option<(usize, usize)> {
+        let window = self.active_window()?;
+        match window.tabGroup() {
+            Some(group) => {
+                let windows: Vec<Retained<NSWindow>> = group.windows().iter().collect();
+                let count = windows.len();
+                let selected = group.selectedWindow().unwrap_or_else(|| window.clone());
+                let idx = windows.iter().position(|w| *w == selected).unwrap_or(0);
+                Some((idx + 1, count))
+            }
+            None => Some((1, 1)),
+        }
     }
 
     /// Encode a raw key event and write it to `tab`'s PTY. Reads the tab's live
@@ -775,6 +873,12 @@ impl Controller {
             MenuAction::FontSizeUp => self.font_size_active(FontStep::Up),
             MenuAction::FontSizeDown => self.font_size_active(FontStep::Down),
             MenuAction::FontSizeReset => self.font_size_active(FontStep::Reset),
+            MenuAction::ShowNextTab => {
+                self.handle_tab_action(TabAction::NextTab);
+            }
+            MenuAction::ShowPreviousTab => {
+                self.handle_tab_action(TabAction::PreviousTab);
+            }
             MenuAction::Quit => {
                 let mtm = self.0.borrow().mtm;
                 NSApplication::sharedApplication(mtm).terminate(None);
@@ -1149,6 +1253,11 @@ pub struct DelegateIvars {
     /// window geometry across the 1-tab → 2-tab → 1-tab transition, then exit.
     /// See [`AppDelegate::run_geometry_smoke`].
     smoke_geometry: bool,
+    /// Tab-navigation keybind smoke (`GHOSTTY_APP_SMOKE_TABKEYS`): open 3 tabs,
+    /// drive the built-in tab chords, and assert the active-tab index after each
+    /// (plus the pty-encoding regression: tab chords send nothing, plain Tab /
+    /// Shift+Tab still encode). See [`AppDelegate::run_tabkeys_smoke`].
+    smoke_tabkeys: bool,
 }
 
 define_class!(
@@ -1183,8 +1292,11 @@ define_class!(
             // other smokes (it exits itself). Then synthetic-input, then the
             // plain auto-exit.
             let has_geometry = self.ivars().smoke_geometry;
+            let has_tabkeys = self.ivars().smoke_tabkeys;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
-            if has_geometry {
+            if has_tabkeys {
+                self.schedule_tabkeys_smoke();
+            } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
                 self.schedule_type_smoke();
@@ -1271,6 +1383,12 @@ define_class!(
         fn geom_smoke_closed(&self, _timer: &AnyObject) {
             self.geometry_smoke_closed();
         }
+
+        /// Tab-keys smoke: run the whole chord sequence and exit 0/1.
+        #[unsafe(method(ghosttyTabKeysSmoke:))]
+        fn tabkeys_smoke(&self, _timer: &AnyObject) {
+            self.run_tabkeys_smoke();
+        }
     }
 );
 
@@ -1282,12 +1400,14 @@ impl AppDelegate {
         smoke_ms: u64,
         smoke_type: String,
         smoke_geometry: bool,
+        smoke_tabkeys: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
             smoke_ms,
             smoke_type: RefCell::new(smoke_type),
             smoke_geometry,
+            smoke_tabkeys,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -1617,6 +1737,225 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the tab-keys smoke: give the first window a beat to settle on a
+    /// screen, then run the whole chord sequence in one shot.
+    fn schedule_tabkeys_smoke(&self) {
+        self.schedule_selector(0.5, sel!(ghosttyTabKeysSmoke:));
+    }
+
+    /// Tab-navigation keybind smoke. Opens 3 tabs, drives the built-in chords as
+    /// real synthetic `performKeyEquivalent:` events through the active view, and
+    /// asserts the active-tab (1-based visual) index after each. Also runs the
+    /// pty-encoding regression: the tab chords are *consumed* by
+    /// `performKeyEquivalent:` (return `true` → never reach the encoder), while
+    /// plain Tab, Shift+Tab, and Ctrl+I are *not* (return `false` → fall through
+    /// to `keyDown:` → the encoder, which still emits their exact bytes). Exits
+    /// 0 on success, 1 on the first failed assertion.
+    fn run_tabkeys_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let mtm = self.mtm();
+        // Alias the free `!`-returning failure fn so the call sites read cleanly.
+        let fail = tabkeys_fail;
+
+        // --- Open two more tabs so the group has 3 (the first already exists). ---
+        for _ in 0..2 {
+            if let Some(active) = controller.active_tab() {
+                controller.new_tab_in(active);
+            }
+        }
+        // A freshly opened tab is the active/selected one → index 3 of 3.
+        let (idx, count) = controller
+            .active_visual_index()
+            .unwrap_or_else(|| fail("no active tab after opening 3".into()));
+        if count != 3 {
+            fail(format!("expected 3 tabs, saw {count}"));
+        }
+        if idx != 3 {
+            fail(format!("newest tab should be selected (3), saw {idx}"));
+        }
+
+        // --- ctrl+tab cycles 1→2→3→1 (wrapping). We start at 3, so one ctrl+tab
+        // wraps to 1, then 2, then 3. Drive as real synthetic events through the
+        // view's performKeyEquivalent so interception is exercised, not asserted. ---
+        // Move to tab 1 first via cmd+1 so the cycle assertion starts from a
+        // known point.
+        Self::send_key_equiv(controller, mtm, KEYCODE_1, TAB_MOD_CMD);
+        Self::expect_index(controller, 1, "cmd+1 → tab 1");
+
+        Self::send_key_equiv(controller, mtm, KEYCODE_TAB, TAB_MOD_CTRL);
+        Self::expect_index(controller, 2, "ctrl+tab 1→2");
+        Self::send_key_equiv(controller, mtm, KEYCODE_TAB, TAB_MOD_CTRL);
+        Self::expect_index(controller, 3, "ctrl+tab 2→3");
+        Self::send_key_equiv(controller, mtm, KEYCODE_TAB, TAB_MOD_CTRL);
+        Self::expect_index(controller, 1, "ctrl+tab 3→1 (wrap)");
+
+        // --- ctrl+shift+tab reverses: 1→3→2→1 (wrapping backward). ---
+        Self::send_key_equiv(controller, mtm, KEYCODE_TAB, TAB_MOD_CTRL_SHIFT);
+        Self::expect_index(controller, 3, "ctrl+shift+tab 1→3 (wrap back)");
+        Self::send_key_equiv(controller, mtm, KEYCODE_TAB, TAB_MOD_CTRL_SHIFT);
+        Self::expect_index(controller, 2, "ctrl+shift+tab 3→2");
+
+        // --- cmd+3 selects the third tab; cmd+9 selects the last. ---
+        Self::send_key_equiv(controller, mtm, KEYCODE_3, TAB_MOD_CMD);
+        Self::expect_index(controller, 3, "cmd+3 → tab 3");
+        Self::send_key_equiv(controller, mtm, KEYCODE_1, TAB_MOD_CMD);
+        Self::expect_index(controller, 1, "cmd+1 → tab 1");
+        Self::send_key_equiv(controller, mtm, KEYCODE_9, TAB_MOD_CMD);
+        Self::expect_index(controller, 3, "cmd+9 → last tab (3)");
+
+        // --- cmd+5 (beyond the 3 tabs) clamps to the last tab (upstream min). ---
+        Self::send_key_equiv(controller, mtm, KEYCODE_1, TAB_MOD_CMD);
+        Self::expect_index(controller, 1, "cmd+1 → tab 1 (reset)");
+        Self::send_key_equiv(controller, mtm, KEYCODE_5, TAB_MOD_CMD);
+        Self::expect_index(controller, 3, "cmd+5 clamps to last (3)");
+
+        // --- Interception / pty-encoding regression on the ACTIVE view. ---
+        // Tab chords must be consumed by performKeyEquivalent (return true), so
+        // they never reach keyDown → the encoder → the pty.
+        let view = controller
+            .active_view()
+            .unwrap_or_else(|| fail("no active view for interception check".into()));
+        let consumed_ctrl_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_CTRL);
+        if !consumed_ctrl_tab {
+            fail("ctrl+tab was NOT consumed by performKeyEquivalent (would reach the pty)".into());
+        }
+        let consumed_ctrl_shift_tab =
+            Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_CTRL_SHIFT);
+        if !consumed_ctrl_shift_tab {
+            fail("ctrl+shift+tab was NOT consumed by performKeyEquivalent".into());
+        }
+        let consumed_cmd_3 = Self::perform_on_view(&view, mtm, KEYCODE_3, TAB_MOD_CMD);
+        if !consumed_cmd_3 {
+            fail("cmd+3 was NOT consumed by performKeyEquivalent".into());
+        }
+
+        // Plain Tab, Shift+Tab, and Ctrl+I must NOT be consumed — they fall
+        // through to keyDown → the encoder. (performKeyEquivalent returns false.)
+        let consumed_plain_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_NONE);
+        if consumed_plain_tab {
+            fail(
+                "plain Tab was WRONGLY consumed by performKeyEquivalent (won't reach the pty)"
+                    .into(),
+            );
+        }
+        let consumed_shift_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_SHIFT);
+        if consumed_shift_tab {
+            fail("Shift+Tab was WRONGLY consumed (CSI Z won't reach the pty)".into());
+        }
+        let consumed_ctrl_i = Self::perform_on_view(&view, mtm, KEYCODE_I, TAB_MOD_CTRL);
+        if consumed_ctrl_i {
+            fail("Ctrl+I was WRONGLY consumed (its byte won't reach the pty)".into());
+        }
+
+        // The exact-bytes half of the regression: plain Tab and Shift+Tab still
+        // encode to their PTY bytes via the pure encoder path the view uses.
+        let tab_bytes = encode_tab_key(false);
+        if tab_bytes != b"\t" {
+            fail(format!("plain Tab must encode to \\t, got {tab_bytes:?}"));
+        }
+        let shift_tab_bytes = encode_tab_key(true);
+        // Shift+Tab is CSI Z (back-tab) in the default (non-kitty) encoder.
+        if shift_tab_bytes != b"\x1b[Z" {
+            fail(format!(
+                "Shift+Tab must encode to CSI Z, got {shift_tab_bytes:?}"
+            ));
+        }
+
+        // --- Chords at 1 tab are harmless no-ops (no beep/crash). Close down to
+        // a single tab and drive every chord; each must leave index=1/count=1. ---
+        controller.close_tab(controller.active_tab().unwrap());
+        controller.close_tab(controller.active_tab().unwrap());
+        let (idx1, count1) = controller
+            .active_visual_index()
+            .unwrap_or_else(|| fail("no active tab after closing to 1".into()));
+        if count1 != 1 || idx1 != 1 {
+            fail(format!(
+                "expected 1 tab at index 1, saw index {idx1} of {count1}"
+            ));
+        }
+        for (kc, m, label) in [
+            (KEYCODE_TAB, TAB_MOD_CTRL, "ctrl+tab @1"),
+            (KEYCODE_TAB, TAB_MOD_CTRL_SHIFT, "ctrl+shift+tab @1"),
+            (KEYCODE_3, TAB_MOD_CMD, "cmd+3 @1"),
+            (KEYCODE_9, TAB_MOD_CMD, "cmd+9 @1"),
+        ] {
+            Self::send_key_equiv(controller, mtm, kc, m);
+            let (i, c) = controller
+                .active_visual_index()
+                .unwrap_or_else(|| fail(format!("{label}: lost the active tab")));
+            if i != 1 || c != 1 {
+                fail(format!("{label} was not a no-op: index {i} of {c}"));
+            }
+        }
+
+        println!(
+            "OK: tab-keys smoke — ctrl+tab cycles 1→2→3→1, ctrl+shift+tab \
+             reverses, cmd+3/cmd+9 select tab 3/last, cmd+5 clamps to last; tab \
+             chords are consumed by performKeyEquivalent while plain Tab \
+             (\\t) / Shift+Tab (CSI Z) / Ctrl+I fall through to the encoder; and \
+             every chord at 1 tab is a no-op."
+        );
+        std::process::exit(0);
+    }
+
+    /// Resolve the active view and dispatch a synthetic `performKeyEquivalent:`
+    /// event with the given physical keycode + tab modifiers, so the chord goes
+    /// through the *real* interception path. No-op (returns) if there is no view.
+    fn send_key_equiv(
+        controller: &Controller,
+        mtm: MainThreadMarker,
+        keycode: u16,
+        mods: NSEventModifierFlags,
+    ) {
+        if let Some(view) = controller.active_view() {
+            let _ = Self::perform_on_view(&view, mtm, keycode, mods);
+        }
+    }
+
+    /// Build a synthetic keyDown `NSEvent` for `keycode`+`mods` and send it to
+    /// `view.performKeyEquivalent:`. Returns whether the view consumed it.
+    fn perform_on_view(
+        view: &TerminalView,
+        _mtm: MainThreadMarker,
+        keycode: u16,
+        mods: NSEventModifierFlags,
+    ) -> bool {
+        let empty = NSString::from_str("");
+        // SAFETY: standard keyEvent constructor; nil context; then a normal
+        // performKeyEquivalent: dispatch on the main thread.
+        unsafe {
+            let cls = objc2::class!(NSEvent);
+            let event: Option<Retained<objc2_app_kit::NSEvent>> = msg_send![
+                cls,
+                keyEventWithType: NSEventType::KeyDown,
+                location: NSPoint::new(0.0, 0.0),
+                modifierFlags: mods,
+                timestamp: 0.0_f64,
+                windowNumber: 0_isize,
+                context: std::ptr::null::<AnyObject>(),
+                characters: &*empty,
+                charactersIgnoringModifiers: &*empty,
+                isARepeat: false,
+                keyCode: keycode,
+            ];
+            match event {
+                Some(event) => msg_send![view, performKeyEquivalent: &*event],
+                None => false,
+            }
+        }
+    }
+
+    /// Assert the active tab's 1-based visual index equals `want`, else fail.
+    fn expect_index(controller: &Controller, want: usize, label: &str) {
+        match controller.active_visual_index() {
+            Some((idx, _)) if idx == want => {}
+            Some((idx, count)) => tabkeys_fail(format!(
+                "{label}: expected index {want}, saw {idx} of {count}"
+            )),
+            None => tabkeys_fail(format!("{label}: no active tab")),
+        }
+    }
+
     /// Schedule a one-shot `selector` on `self` `secs` out.
     fn schedule_selector(&self, secs: f64, selector: Sel) {
         let target: &AnyObject = self.as_ref();
@@ -1694,7 +2033,13 @@ fn build_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMenu> {
             unsafe {
                 menu_item.setTag(action.tag());
                 menu_item.setTarget(Some(target));
-                menu_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+                // Every item carries Command; the tab-cycling items add Shift
+                // (standard macOS Cmd-Shift-]/[ ).
+                let mut mask = NSEventModifierFlags::Command;
+                if action.key_equivalent_shift() {
+                    mask |= NSEventModifierFlags::Shift;
+                }
+                menu_item.setKeyEquivalentModifierMask(mask);
             }
             submenu.addItem(&menu_item);
         }
@@ -1704,6 +2049,52 @@ fn build_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMenu> {
     }
 
     main
+}
+
+/// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
+/// works inside `Option::unwrap_or_else` closures (which need the never type).
+fn tabkeys_fail(msg: String) -> ! {
+    eprintln!("FAIL: tab-keys smoke — {msg}");
+    std::process::exit(1);
+}
+
+// macOS physical (Carbon `kVK_*`) keycodes used by the tab-keys smoke's
+// synthetic events. Layout-independent, matching `crate::input::keymap`.
+const KEYCODE_TAB: u16 = 0x30; // kVK_Tab
+const KEYCODE_I: u16 = 0x22; // kVK_ANSI_I
+const KEYCODE_1: u16 = 0x12; // kVK_ANSI_1
+const KEYCODE_3: u16 = 0x14; // kVK_ANSI_3
+const KEYCODE_5: u16 = 0x17; // kVK_ANSI_5
+const KEYCODE_9: u16 = 0x19; // kVK_ANSI_9
+
+// Modifier-flag combos for the tab-keys smoke's synthetic events.
+const TAB_MOD_NONE: NSEventModifierFlags = NSEventModifierFlags::empty();
+const TAB_MOD_SHIFT: NSEventModifierFlags = NSEventModifierFlags::Shift;
+const TAB_MOD_CTRL: NSEventModifierFlags = NSEventModifierFlags::Control;
+const TAB_MOD_CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
+const TAB_MOD_CTRL_SHIFT: NSEventModifierFlags =
+    NSEventModifierFlags(NSEventModifierFlags::Control.0 | NSEventModifierFlags::Shift.0);
+
+/// Encode a Tab keypress (optionally Shift-modified) through the *pure* encoder
+/// with default (non-kitty) options — the exact path the view's `keyDown:` uses
+/// for a tab that is not a built-in chord. Used by the tab-keys smoke's
+/// pty-encoding regression: plain Tab → `\t`, Shift+Tab → CSI Z.
+fn encode_tab_key(shift: bool) -> Vec<u8> {
+    let raw = RawKeyEvent {
+        keycode: KEYCODE_TAB,
+        shift,
+        text: if shift {
+            String::new()
+        } else {
+            "\t".to_string()
+        },
+        ..Default::default()
+    };
+    crate::input::translate::encode_raw(
+        &raw,
+        &InputConfig::default(),
+        ghostty_input::key_encode::Options::default(),
+    )
 }
 
 /// Map a script character to a synthetic `(macOS keyCode, characters-string)`
@@ -1740,20 +2131,30 @@ fn smoke_marker(script: &str) -> String {
 /// smoke test; a non-empty `smoke_type` instead runs the synthetic-input smoke
 /// (type the string through the real keyDown path, assert its round-trip, exit);
 /// `smoke_geometry` instead runs the tab-strip geometry smoke (dump + assert the
-/// window geometry across the 1-tab→2-tab→1-tab transition, exit). Returns after
-/// the run loop exits.
+/// window geometry across the 1-tab→2-tab→1-tab transition, exit);
+/// `smoke_tabkeys` instead runs the tab-navigation keybind smoke (open 3 tabs,
+/// drive the built-in tab chords via real `performKeyEquivalent:` events, assert
+/// the active-tab index after each, exit). Returns after the run loop exits.
 pub fn run(
     config: &crate::config::Config,
     smoke_ms: u64,
     smoke_type: String,
     smoke_geometry: bool,
+    smoke_tabkeys: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
     let controller = Controller::new(config, mtm);
-    let delegate = AppDelegate::new(mtm, controller, smoke_ms, smoke_type, smoke_geometry);
+    let delegate = AppDelegate::new(
+        mtm,
+        controller,
+        smoke_ms,
+        smoke_type,
+        smoke_geometry,
+        smoke_tabkeys,
+    );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
 

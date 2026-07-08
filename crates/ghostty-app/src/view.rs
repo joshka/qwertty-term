@@ -28,8 +28,10 @@ use objc2_foundation::{
 use objc2_quartz_core::{CALayer, kCAGravityBottomLeft};
 
 use crate::app::Controller;
+use crate::input::keymap::key_from_macos_keycode;
 use crate::input::preedit::Preedit;
 use crate::input::translate::RawKeyEvent;
+use crate::tabkeys::{self, TabMods};
 use crate::tabs::TabId;
 
 /// Interior state for the terminal input view.
@@ -71,6 +73,29 @@ define_class!(
             }
 
             self.finish_key_event(&raw);
+        }
+
+        /// `performKeyEquivalent:` — intercept the built-in tab-navigation
+        /// chords *before* `keyDown:` and the PTY encoder ever see them.
+        ///
+        /// This is the interception point (not `keyDown:`) for two reasons that
+        /// the task's correctness notes call out:
+        ///
+        /// 1. On macOS, `ctrl+tab` / `ctrl+shift+tab` are frequently consumed as
+        ///    key equivalents (or by the window's tab group) and never reach
+        ///    `keyDown:`. `performKeyEquivalent:` runs earlier in the responder
+        ///    chain and reliably catches them.
+        /// 2. Returning `true` tells AppKit the event is fully handled, so it is
+        ///    NOT forwarded to `keyDown:` → the encoder. That is exactly what
+        ///    keeps `ctrl+tab` from ever sending `\t` / a CSI-u sequence to the
+        ///    shell (real Ghostty consumes these chords).
+        ///
+        /// Crucially, [`tabkeys::resolve`] only matches the *exact* tab chords,
+        /// so plain Tab, Shift+Tab, and Ctrl+I do not resolve here: we return
+        /// `false` and AppKit proceeds to `keyDown:` → the encoder unchanged.
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            self.try_handle_tab_key(event)
         }
 
         /// Accept first responder so we receive key events.
@@ -294,6 +319,25 @@ impl TerminalView {
         gravity.to_string() == want.to_string()
     }
 
+    /// If `event` is one of the built-in tab-navigation chords, run its action
+    /// against the controller and return `true` (consuming the event so it never
+    /// reaches the PTY encoder). Otherwise return `false` so AppKit keeps
+    /// dispatching (→ `keyDown:` → encoder). Called from `performKeyEquivalent:`.
+    ///
+    /// Uses the *physical* keycode (layout-independent) for the digit keys, so
+    /// `cmd+1..9` work on non-US layouts — matching upstream's `physical:one..`.
+    fn try_handle_tab_key(&self, event: &NSEvent) -> bool {
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let Some(action) = tabkeys::resolve(key, mods) else {
+            return false;
+        };
+        self.with_controller(|c| c.handle_tab_action(action));
+        // Consume regardless of whether a tab switch happened (e.g. the 1-tab
+        // no-op case): a resolved chord must never fall through to the encoder.
+        true
+    }
+
     /// Encode any committed text + the key event, then close the per-keyDown
     /// window. Split out so it can be driven by synthetic raw data in tests.
     fn finish_key_event(&self, raw: &RawKeyEvent) {
@@ -447,6 +491,18 @@ fn mods_from_flags(flags: NSEventModifierFlags) -> ghostty_input::key_mods::Mods
         alt: flags.contains(NSEventModifierFlags::Option),
         super_: flags.contains(NSEventModifierFlags::Command),
         ..Default::default()
+    }
+}
+
+/// Build the tab-keybind [`TabMods`] from NSEvent modifier flags. Distinct from
+/// [`mods_from_flags`] (which yields the encoder's `ghostty_input` mods): this is
+/// the four-modifier bitset the built-in tab table matches on.
+fn tab_mods_from_flags(flags: NSEventModifierFlags) -> TabMods {
+    TabMods {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        super_: flags.contains(NSEventModifierFlags::Command),
     }
 }
 
