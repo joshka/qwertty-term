@@ -45,9 +45,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSColor, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication,
+    NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSColor,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSView, NSWindow,
+    NSWindowDelegate, NSWindowLevel, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -1235,6 +1236,40 @@ pub struct ControllerState {
     /// The configured `unfocused-split-fill` color, if any. When `None`, each
     /// surface dims toward its own terminal background (upstream default).
     unfocused_dim_fill: Option<qwertty_term_vt::color::Rgb>,
+    /// The quick-terminal (dropdown) state, lazily created on first toggle.
+    /// Its window + single surface live in [`Self::tabs`] under the reserved
+    /// [`QUICK_TERMINAL_TAB`] id (so input routing + the pace-tick pump/render
+    /// work unchanged), while it stays out of [`Self::registry`] (so tab
+    /// navigation, the tab bar, and `tab_count` all exclude it). See
+    /// [`Controller::toggle_quick_terminal`].
+    quick_terminal: Option<QuickTerminal>,
+    /// Quick-terminal config, resolved once at startup (position/size/
+    /// animation-duration/autohide).
+    quick_terminal_config: QuickTerminalConfig,
+}
+
+/// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
+/// id space so it never collides with a registry-minted tab id.
+const QUICK_TERMINAL_TAB: TabId = TabId(u64::MAX);
+
+/// Resolved quick-terminal configuration (see [`crate::config`] +
+/// [`crate::quickterm`]).
+#[derive(Debug, Clone, Copy)]
+struct QuickTerminalConfig {
+    position: crate::quickterm::Position,
+    size: crate::quickterm::Size,
+    animation_duration: f64,
+    autohide: bool,
+}
+
+/// Live quick-terminal state. The window + surface are in the controller's
+/// `tabs` map under [`QUICK_TERMINAL_TAB`]; this tracks only what's specific to
+/// the dropdown: whether it's currently shown, and the delegate (kept alive).
+struct QuickTerminal {
+    /// Whether the dropdown is currently animated in (visible).
+    visible: bool,
+    /// The window delegate (autohide on resign-key); stored to keep it alive.
+    _delegate: Retained<QuickTermDelegate>,
 }
 
 /// The controller handle passed to views and menu targets.
@@ -1285,6 +1320,13 @@ impl Controller {
             // opacity clamped to [0.15, 1.0]. Opacity 1.0 → alpha 0 → no dimming.
             unfocused_dim_alpha: 1.0 - config.unfocused_split_opacity(),
             unfocused_dim_fill: config.unfocused_split_fill(),
+            quick_terminal: None,
+            quick_terminal_config: QuickTerminalConfig {
+                position: config.quick_terminal_position(),
+                size: config.quick_terminal_size(),
+                animation_duration: config.quick_terminal_animation_duration,
+                autohide: config.quick_terminal_autohide,
+            },
         })))
     }
 
@@ -1334,6 +1376,272 @@ impl Controller {
     /// The active tab, if any.
     pub fn active_tab(&self) -> Option<TabId> {
         self.0.borrow().registry.active()
+    }
+
+    // -- quick terminal ---------------------------------------------------
+
+    /// Toggle the quick-terminal dropdown: create it on first use, then animate
+    /// it in (if hidden) or out (if visible). The QT is a borderless,
+    /// `popUpMenu`-level window hosting one surface, positioned by
+    /// `quick-terminal-position`/`-size` and slid in/out over
+    /// `quick-terminal-animation-duration` (upstream `QuickTerminalController`).
+    pub fn toggle_quick_terminal(&self) {
+        // If the QT existed but its shell exited (its tab was closed), forget
+        // the stale state so we recreate a fresh dropdown.
+        {
+            let mut state = self.0.borrow_mut();
+            if state.quick_terminal.is_some() && !state.tabs.contains_key(&QUICK_TERMINAL_TAB) {
+                state.quick_terminal = None;
+            }
+        }
+
+        let exists = self.0.borrow().quick_terminal.is_some();
+        if !exists {
+            if !self.build_quick_terminal() {
+                return;
+            }
+            self.animate_quick_terminal(true);
+            return;
+        }
+
+        let visible = self
+            .0
+            .borrow()
+            .quick_terminal
+            .as_ref()
+            .map(|q| q.visible)
+            .unwrap_or(false);
+        self.animate_quick_terminal(!visible);
+    }
+
+    /// Build the quick-terminal window + surface (lazy, first toggle). Returns
+    /// whether it was created (false if the surface couldn't be built, e.g. no
+    /// PTY). Mirrors [`Self::spawn_tab`] but with a borderless key-capable
+    /// window kept out of the tab registry.
+    fn build_quick_terminal(&self) -> bool {
+        let mtm = self.0.borrow().mtm;
+        let scale = 2.0; // provisional; corrected from the real window below.
+        let tab = QUICK_TERMINAL_TAB;
+        let surface_id = SurfaceId(0);
+
+        let Some(mut surface) = self.build_surface(mtm, tab, surface_id, scale, None) else {
+            return false;
+        };
+        let default_bg = surface.default_bg;
+
+        let controller_ptr: *const Controller = self;
+        let container = crate::splitview::SplitContainer::new(
+            mtm,
+            controller_ptr,
+            tab,
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+            ),
+        );
+        container.addSubview(&surface.view);
+
+        let window = make_quick_terminal_window(mtm, &container);
+        set_window_background(&window, default_bg);
+
+        let delegate = QuickTermDelegate::new(mtm, self.clone());
+        window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+
+        let mut tree = SplitTree::leaf(surface_id);
+        tree.focus(surface_id);
+
+        let real_scale = window.backingScaleFactor();
+        surface.scale = real_scale;
+        if (real_scale - scale).abs() > f64::EPSILON {
+            let family = self.0.borrow().font_family.clone();
+            surface.rebuild_font(family.as_deref());
+        }
+
+        let mut surfaces = HashMap::new();
+        surfaces.insert(surface_id, surface);
+
+        let mut qt_tab = Tab {
+            tree,
+            surfaces,
+            window: window.clone(),
+            container: container.clone(),
+            dividers: Vec::new(),
+            // Reuse the normal delegate slot for a placeholder; the QT's real
+            // delegate is the `QuickTermDelegate` stored in `QuickTerminal`.
+            _window_delegate: WindowDelegate::new(mtm, self.clone(), tab),
+            next_surface: 1,
+            created: std::time::Instant::now(),
+            last_title: RefCell::new(String::new()),
+        };
+
+        // Size the window to the configured dropdown size on the target screen,
+        // placed at its off-screen initial origin (alpha 0), before layout.
+        if let Some((frame, _)) = self.quick_terminal_frames(mtm, &window) {
+            window.setFrame_display(frame, false);
+        }
+        qt_tab.relayout(controller_ptr, tab, mtm);
+
+        {
+            let mut state = self.0.borrow_mut();
+            state.tabs.insert(tab, qt_tab);
+            state.quick_terminal = Some(QuickTerminal {
+                visible: false,
+                _delegate: delegate,
+            });
+        }
+        true
+    }
+
+    /// The `(initial, final)` window frames for the quick terminal on its
+    /// target screen, from the configured position + size. `None` if there's
+    /// no screen. Both are full `NSRect`s (origin + the configured size).
+    fn quick_terminal_frames(
+        &self,
+        mtm: MainThreadMarker,
+        window: &NSWindow,
+    ) -> Option<(NSRect, NSRect)> {
+        let cfg = self.0.borrow().quick_terminal_config;
+        // Prefer the window's current screen; fall back to the main screen.
+        let screen = window.screen().or_else(|| NSScreen::mainScreen(mtm))?;
+        let vf = screen.visibleFrame();
+        let visible = crate::quickterm::Rect {
+            x: vf.origin.x,
+            y: vf.origin.y,
+            width: vf.size.width,
+            height: vf.size.height,
+        };
+        let (w, h) = cfg
+            .size
+            .calculate(cfg.position, visible.width, visible.height);
+        let (ix, iy) = crate::quickterm::initial_origin(cfg.position, &visible, w, h);
+        let (fx, fy) = crate::quickterm::final_origin(cfg.position, &visible, w, h);
+        let size = NSSize::new(w, h);
+        Some((
+            NSRect::new(NSPoint::new(ix, iy), size),
+            NSRect::new(NSPoint::new(fx, fy), size),
+        ))
+    }
+
+    /// Animate the quick terminal in (`show = true`) or out. Idempotent: a
+    /// no-op if already in the requested state. Grabs everything it needs under
+    /// a scoped borrow, then runs the AppKit animation with **no controller
+    /// borrow held** (the completion + key-window changes re-enter the
+    /// controller — the house re-entrancy rule).
+    fn animate_quick_terminal(&self, show: bool) {
+        let mtm = self.0.borrow().mtm;
+        let (window, duration) = {
+            let state = self.0.borrow();
+            let Some(qt) = state.quick_terminal.as_ref() else {
+                return;
+            };
+            if qt.visible == show {
+                return;
+            }
+            let Some(t) = state.tabs.get(&QUICK_TERMINAL_TAB) else {
+                return;
+            };
+            (
+                t.window.clone(),
+                state.quick_terminal_config.animation_duration,
+            )
+        };
+
+        let Some((initial, final_)) = self.quick_terminal_frames(mtm, &window) else {
+            return;
+        };
+
+        // Record the new visibility up front (so a resign fired mid-animation
+        // sees the intended state).
+        if let Some(qt) = self.0.borrow_mut().quick_terminal.as_mut() {
+            qt.visible = show;
+        }
+
+        // Raise above the menu bar so a top/edge dropdown can render over
+        // everything (upstream uses `.popUpMenu`).
+        window.setLevel(POPUP_MENU_WINDOW_LEVEL);
+
+        if show {
+            // Start off-screen + invisible, order in, then animate to the
+            // in-position frame at full alpha.
+            window.setFrame_display(initial, false);
+            window.setAlphaValue(0.0);
+            window.makeKeyAndOrderFront(None);
+            // Focus the surface so typing lands in the dropdown.
+            if let Some(view) = self.surface_view(QUICK_TERMINAL_TAB, SurfaceId(0)) {
+                window.makeFirstResponder(Some(&view));
+            }
+            run_window_slide(&window, final_, 1.0, duration, None);
+        } else {
+            // Animate back to the off-screen frame + invisible, then order out.
+            let window_out = window.clone();
+            run_window_slide(
+                &window,
+                initial,
+                0.0,
+                duration,
+                Some(Box::new(move || window_out.orderOut(None))),
+            );
+        }
+    }
+
+    /// Called from the QT window delegate's `windowDidResignKey:`. If
+    /// `quick-terminal-autohide` is on and the dropdown is visible, animate it
+    /// out. No controller borrow is held across the animation.
+    pub fn quick_terminal_autohide_on_resign(&self) {
+        let (autohide, visible) = {
+            let state = self.0.borrow();
+            (
+                state.quick_terminal_config.autohide,
+                state
+                    .quick_terminal
+                    .as_ref()
+                    .map(|q| q.visible)
+                    .unwrap_or(false),
+            )
+        };
+        if autohide && visible {
+            self.animate_quick_terminal(false);
+        }
+    }
+
+    /// Whether the quick terminal is currently animated in (smoke/test).
+    pub fn quick_terminal_visible(&self) -> bool {
+        self.0
+            .borrow()
+            .quick_terminal
+            .as_ref()
+            .map(|q| q.visible)
+            .unwrap_or(false)
+    }
+
+    /// The quick terminal's current window frame as `(x, y, w, h)`
+    /// (smoke/test), or `None` if it hasn't been created.
+    pub fn quick_terminal_frame(&self) -> Option<(f64, f64, f64, f64)> {
+        let state = self.0.borrow();
+        let t = state.tabs.get(&QUICK_TERMINAL_TAB)?;
+        let f = t.window.frame();
+        Some((f.origin.x, f.origin.y, f.size.width, f.size.height))
+    }
+
+    /// The quick terminal's target in-position frame `(x, y, w, h)` for the
+    /// current config/screen (smoke/test): what the window frame should equal
+    /// once fully animated in.
+    pub fn quick_terminal_final_frame(&self) -> Option<(f64, f64, f64, f64)> {
+        let mtm = self.0.borrow().mtm;
+        let window = self
+            .0
+            .borrow()
+            .tabs
+            .get(&QUICK_TERMINAL_TAB)?
+            .window
+            .clone();
+        let (_, final_) = self.quick_terminal_frames(mtm, &window)?;
+        Some((
+            final_.origin.x,
+            final_.origin.y,
+            final_.size.width,
+            final_.size.height,
+        ))
     }
 
     /// Re-resolve `tab`'s backing scale from its window and reflow it. Called on
@@ -2233,6 +2541,9 @@ impl Controller {
             MenuAction::ShowPreviousTab => {
                 self.handle_tab_action(TabAction::PreviousTab);
             }
+            MenuAction::ToggleQuickTerminal => {
+                self.toggle_quick_terminal();
+            }
             MenuAction::Quit => {
                 let mtm = self.0.borrow().mtm;
                 NSApplication::sharedApplication(mtm).terminate(None);
@@ -2890,6 +3201,85 @@ fn make_window(mtm: MainThreadMarker, content_view: &NSView) -> Retained<NSWindo
     window
 }
 
+/// The `NSPopUpMenuWindowLevel` — high enough to render over the menu bar and
+/// off-screen, which upstream found is the level a dropdown needs
+/// (`QuickTerminalController.swift:445`, `window.level = .popUpMenu`). The
+/// AppKit constant isn't surfaced by objc2, so use its documented raw value.
+const POPUP_MENU_WINDOW_LEVEL: NSWindowLevel = 101;
+
+/// Build the borderless, key-capable window that hosts the quick-terminal
+/// surface. Borderless so it reads as a dropdown (no titlebar/controls);
+/// [`QuickTerminalWindow`] overrides `canBecomeKeyWindow` so typing works;
+/// `Resizable` in the mask so `setFrame` animates the size cleanly. Never
+/// added to a native tab group.
+fn make_quick_terminal_window(mtm: MainThreadMarker, content_view: &NSView) -> Retained<NSWindow> {
+    let content = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+    );
+    // Borderless + resizable/titled-less. A borderless window can still be
+    // resized programmatically via setFrame (needed for the slide animation).
+    let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::Resizable;
+
+    // `.set_ivars(())` converts the `Allocated` into the `PartialInit` receiver
+    // objc2 requires for a super-init of a defined class (the subclass has no
+    // ivars, so `()`).
+    let alloc = QuickTerminalWindow::alloc(mtm).set_ivars(());
+    // SAFETY: standard designated NSWindow initializer via the subclass.
+    let window: Retained<QuickTerminalWindow> = unsafe {
+        msg_send![
+            super(alloc),
+            initWithContentRect: content,
+            styleMask: style,
+            backing: NSBackingStoreType::Buffered,
+            defer: false
+        ]
+    };
+    let window: Retained<NSWindow> = window.into_super();
+    unsafe {
+        window.setReleasedWhenClosed(false);
+        // Never participates in native tabbing.
+        window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+        window.setContentView(Some(content_view));
+    }
+    window
+}
+
+/// Slide `window` to `frame` and fade to `alpha` over `duration` seconds,
+/// ease-in (upstream `QuickTerminalController` animates at
+/// `quick-terminal-animation-duration` with `.easeIn`). If `completion` is
+/// given it runs on the main thread when the animation ends (used to
+/// `orderOut` the dropdown after it slides away). No controller borrow is held
+/// across this call — the completion re-enters AppKit safely.
+fn run_window_slide(
+    window: &NSWindow,
+    frame: NSRect,
+    alpha: f64,
+    duration: f64,
+    completion: Option<Box<dyn Fn()>>,
+) {
+    let animator = window.animator();
+    let changes = block2::RcBlock::new(move |ctx: core::ptr::NonNull<NSAnimationContext>| {
+        // SAFETY: `ctx` is the live animation context AppKit passes in.
+        let ctx = unsafe { ctx.as_ref() };
+        ctx.setDuration(duration);
+        let ease_in = unsafe {
+            objc2_quartz_core::CAMediaTimingFunction::functionWithName(
+                objc2_quartz_core::kCAMediaTimingFunctionEaseIn,
+            )
+        };
+        ctx.setTimingFunction(Some(&ease_in));
+        // The animator proxy makes these property sets animate.
+        animator.setFrame_display(frame, true);
+        animator.setAlphaValue(alpha);
+    });
+    // The completion (if any) is already a `Box<dyn Fn()>`, whose `IntoBlock`
+    // `Dyn` is `dyn Fn()`, so `RcBlock::new` yields the `RcBlock<dyn Fn()>` the
+    // AppKit binding expects directly.
+    let completion_block = completion.map(block2::RcBlock::new);
+    NSAnimationContext::runAnimationGroup_completionHandler(&changes, completion_block.as_deref());
+}
+
 /// Set `window`'s background colour to `(r, g, b)` (0–255 sRGB), so any sub-cell
 /// remainder of the content area not covered by the terminal surface reads as
 /// terminal background rather than the default system chrome grey.
@@ -2997,6 +3387,97 @@ impl WindowDelegate {
 }
 
 // ---------------------------------------------------------------------------
+// Quick terminal (dropdown) — window subclass + delegate
+// ---------------------------------------------------------------------------
+
+define_class!(
+    // SAFETY: NSWindow subclass overriding only `canBecomeKeyWindow`/
+    // `canBecomeMainWindow` (a borderless window returns NO by default, which
+    // would keep keystrokes from ever reaching the dropdown). No ivars, no
+    // unsafe Drop.
+    #[unsafe(super(NSWindow))]
+    #[name = "QwerttyTermQuickTerminalWindow"]
+    #[thread_kind = MainThreadOnly]
+    pub struct QuickTerminalWindow;
+
+    impl QuickTerminalWindow {
+        /// A borderless window must opt in to key status, else the terminal
+        /// view never becomes first responder and no typing works.
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key_window(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(canBecomeMainWindow))]
+        fn can_become_main_window(&self) -> bool {
+            true
+        }
+    }
+);
+
+/// Ivars for the quick-terminal window delegate: just the controller (the QT
+/// tab id is the fixed [`QUICK_TERMINAL_TAB`]).
+pub struct QuickTermDelegateIvars {
+    controller: Controller,
+}
+
+define_class!(
+    // SAFETY: NSObject subclass implementing NSWindowDelegate; no unsafe Drop.
+    #[unsafe(super(NSObject))]
+    #[name = "QwerttyTermQuickTermDelegate"]
+    #[ivars = QuickTermDelegateIvars]
+    #[thread_kind = MainThreadOnly]
+    pub struct QuickTermDelegate;
+
+    unsafe impl NSObjectProtocol for QuickTermDelegate {}
+
+    unsafe impl NSWindowDelegate for QuickTermDelegate {
+        /// The dropdown became key: route focus-IN to its surface (mode-1004
+        /// reporting + password poll), matching a normal tab's window. It is
+        /// deliberately NOT marked the *active* registry tab (the QT isn't in
+        /// the registry).
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            self.ivars()
+                .controller
+                .tab_window_focus(QUICK_TERMINAL_TAB, true);
+        }
+
+        /// The dropdown resigned key (focus moved elsewhere): route focus-OUT,
+        /// and — when `quick-terminal-autohide` is on — animate it back out of
+        /// view (upstream `quick-terminal-autohide`, default true on macOS).
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            let controller = self.ivars().controller.clone();
+            controller.tab_window_focus(QUICK_TERMINAL_TAB, false);
+            controller.quick_terminal_autohide_on_resign();
+        }
+
+        /// Reflow on resize / backing-scale change, same as a normal window.
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _notification: &NSNotification) {
+            self.ivars()
+                .controller
+                .resync_tab_geometry(QUICK_TERMINAL_TAB);
+        }
+
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn window_did_change_backing_properties(&self, _notification: &NSNotification) {
+            self.ivars()
+                .controller
+                .resync_tab_geometry(QUICK_TERMINAL_TAB);
+        }
+    }
+);
+
+impl QuickTermDelegate {
+    fn new(mtm: MainThreadMarker, controller: Controller) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(QuickTermDelegateIvars { controller });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AppDelegate + menu target
 // ---------------------------------------------------------------------------
 
@@ -3050,6 +3531,10 @@ pub struct DelegateIvars {
     /// tabs and assert per-tab window/tab titles + the ghost-emoji fallback.
     /// See [`AppDelegate::run_title_smoke`].
     smoke_title: bool,
+    /// Quick-terminal smoke (`QWERTTY_TERM_SMOKE_QUICKTERM`): toggle the
+    /// dropdown in/out and assert visibility, geometry, and a live shell. See
+    /// [`AppDelegate::run_quickterm_smoke`].
+    smoke_quickterm: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -3095,6 +3580,7 @@ define_class!(
             let has_search = self.ivars().smoke_search;
             let has_selection = self.ivars().smoke_selection;
             let has_title = self.ivars().smoke_title;
+            let has_quickterm = self.ivars().smoke_quickterm;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -3110,6 +3596,8 @@ define_class!(
                 self.schedule_selection_smoke();
             } else if has_title {
                 self.schedule_title_smoke();
+            } else if has_quickterm {
+                self.schedule_quickterm_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -3266,6 +3754,12 @@ define_class!(
         fn title_smoke(&self, _timer: &AnyObject) {
             self.run_title_smoke();
         }
+
+        /// Quick-terminal smoke: toggle the dropdown in/out, assert, exit 0/1.
+        #[unsafe(method(ghosttyQuickTermSmoke:))]
+        fn quickterm_smoke(&self, _timer: &AnyObject) {
+            self.run_quickterm_smoke();
+        }
     }
 );
 
@@ -3285,6 +3779,7 @@ impl AppDelegate {
         smoke_search: bool,
         smoke_selection: bool,
         smoke_title: bool,
+        smoke_quickterm: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -3301,6 +3796,7 @@ impl AppDelegate {
             search_state: RefCell::new(None),
             smoke_selection,
             smoke_title,
+            smoke_quickterm,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -5191,6 +5687,104 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the quick-terminal smoke: let the first window settle, then run.
+    fn schedule_quickterm_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyQuickTermSmoke:));
+    }
+
+    /// Quick-terminal smoke: exercise the dropdown end to end.
+    ///
+    /// 1. Toggle in → assert it becomes visible, its window frame lands at the
+    ///    configured screen edge (== the computed final frame), and its shell
+    ///    echoes typed input (a live PTY behind the dropdown).
+    /// 2. Toggle out → assert it's no longer visible.
+    /// 3. Toggle in again → assert it re-shows (the reuse path, not a fresh
+    ///    build), preserving its shell.
+    ///
+    /// Exits 0/1.
+    fn run_quickterm_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = quickterm_fail;
+        let qt_tab = QUICK_TERMINAL_TAB;
+        let qt_surface = SurfaceId(0);
+
+        // 1. Toggle in.
+        controller.toggle_quick_terminal();
+        Self::spin(0.6); // animation (default 0.2s) + settle
+        if !controller.quick_terminal_visible() {
+            fail("toggle did not make the quick terminal visible".into());
+        }
+
+        // The window frame should have animated to the configured final frame.
+        let frame = controller
+            .quick_terminal_frame()
+            .unwrap_or_else(|| fail("quick terminal has no window frame".into()));
+        let target = controller
+            .quick_terminal_final_frame()
+            .unwrap_or_else(|| fail("quick terminal has no computed final frame".into()));
+        let close = |a: f64, b: f64| (a - b).abs() <= 1.5;
+        if !(close(frame.0, target.0)
+            && close(frame.1, target.1)
+            && close(frame.2, target.2)
+            && close(frame.3, target.3))
+        {
+            fail(format!(
+                "quick terminal window frame {frame:?} did not reach the configured \
+                 position {target:?}"
+            ));
+        }
+        // Default position is `top`: the window's top edge sits at the screen's
+        // visible top and it spans the full visible width — sanity-check the
+        // shape so a wrong-axis regression is caught, not just "some frame".
+        if frame.2 < 200.0 || frame.3 < 100.0 {
+            fail(format!(
+                "quick terminal frame looks degenerate (w={}, h={})",
+                frame.2, frame.3
+            ));
+        }
+
+        // The dropdown hosts a live shell: type a command and assert the echo.
+        controller.write_to_surface(qt_tab, qt_surface, b"echo QTLIVEMARKER\r");
+        Self::spin(1.0);
+        let screen = controller
+            .surface_screen_text(qt_tab, qt_surface)
+            .unwrap_or_default();
+        if !screen.contains("QTLIVEMARKER") {
+            fail(format!(
+                "quick terminal shell did not echo typed input (marker absent).\n\
+                 --- screen ---\n{screen}"
+            ));
+        }
+
+        // 2. Toggle out.
+        controller.toggle_quick_terminal();
+        Self::spin(0.6);
+        if controller.quick_terminal_visible() {
+            fail("second toggle did not hide the quick terminal".into());
+        }
+
+        // 3. Toggle back in (reuse path): still the same surface, re-shown.
+        controller.toggle_quick_terminal();
+        Self::spin(0.6);
+        if !controller.quick_terminal_visible() {
+            fail("third toggle did not re-show the quick terminal".into());
+        }
+        // The reused shell still holds its scrollback (the earlier marker).
+        let screen = controller
+            .surface_screen_text(qt_tab, qt_surface)
+            .unwrap_or_default();
+        if !screen.contains("QTLIVEMARKER") {
+            fail("re-shown quick terminal lost its shell/scrollback (marker gone)".into());
+        }
+
+        println!(
+            "OK: quick-terminal smoke — toggle showed the dropdown at the configured \
+             top edge (frame {frame:?}), its shell echoed typed input, toggling hid \
+             it, and toggling again re-showed the same live surface."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -5331,6 +5925,12 @@ fn title_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a quick-terminal-smoke failure and exit non-zero.
+fn quickterm_fail(msg: String) -> ! {
+    eprintln!("FAIL: quick-terminal smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -5439,6 +6039,7 @@ pub fn run(
     smoke_search: bool,
     smoke_selection: bool,
     smoke_title: bool,
+    smoke_quickterm: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -5458,6 +6059,7 @@ pub fn run(
         smoke_search,
         smoke_selection,
         smoke_title,
+        smoke_quickterm,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

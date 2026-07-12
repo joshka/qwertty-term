@@ -35,6 +35,10 @@ pub enum MenuAction {
     ShowNextTab,
     /// Show the previous tab (Window menu; standard macOS Cmd-Shift-[). Wraps.
     ShowPreviousTab,
+    /// Toggle the quick-terminal dropdown (Cmd-`). In-app scope; a true global
+    /// hotkey (works when another app is frontmost) needs accessibility perms —
+    /// see `docs/adr/0002-quick-terminal-global-hotkey.md`.
+    ToggleQuickTerminal,
     /// Quit the application (Cmd-Q).
     Quit,
 }
@@ -42,7 +46,7 @@ pub enum MenuAction {
 impl MenuAction {
     /// All actions, in menu-construction order. Drives both the NSMenu build and
     /// the completeness test that every action has a key equivalent.
-    pub const ALL: [MenuAction; 11] = [
+    pub const ALL: [MenuAction; 12] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::CloseTab,
@@ -51,6 +55,7 @@ impl MenuAction {
         MenuAction::FontSizeUp,
         MenuAction::FontSizeDown,
         MenuAction::FontSizeReset,
+        MenuAction::ToggleQuickTerminal,
         MenuAction::ShowNextTab,
         MenuAction::ShowPreviousTab,
         MenuAction::Quit,
@@ -69,6 +74,7 @@ impl MenuAction {
             MenuAction::FontSizeReset => "Reset Font Size",
             MenuAction::ShowNextTab => "Show Next Tab",
             MenuAction::ShowPreviousTab => "Show Previous Tab",
+            MenuAction::ToggleQuickTerminal => "Toggle Quick Terminal",
             MenuAction::Quit => "Quit qwertty-term",
         }
     }
@@ -89,6 +95,8 @@ impl MenuAction {
             // Standard macOS tab-cycling equivalents (Cmd-Shift-] / Cmd-Shift-[).
             MenuAction::ShowNextTab => ']',
             MenuAction::ShowPreviousTab => '[',
+            // Cmd-` for the dropdown (the common dropdown-terminal chord).
+            MenuAction::ToggleQuickTerminal => '`',
             MenuAction::Quit => 'q',
         }
     }
@@ -107,9 +115,10 @@ impl MenuAction {
             MenuAction::Quit => TopMenu::App,
             MenuAction::NewWindow | MenuAction::NewTab | MenuAction::CloseTab => TopMenu::Shell,
             MenuAction::Copy | MenuAction::Paste => TopMenu::Edit,
-            MenuAction::FontSizeUp | MenuAction::FontSizeDown | MenuAction::FontSizeReset => {
-                TopMenu::View
-            }
+            MenuAction::FontSizeUp
+            | MenuAction::FontSizeDown
+            | MenuAction::FontSizeReset
+            | MenuAction::ToggleQuickTerminal => TopMenu::View,
             MenuAction::ShowNextTab | MenuAction::ShowPreviousTab => TopMenu::Window,
         }
     }
@@ -128,6 +137,7 @@ impl MenuAction {
             '=' | '+' => Some(MenuAction::FontSizeUp),
             '-' => Some(MenuAction::FontSizeDown),
             '0' => Some(MenuAction::FontSizeReset),
+            '`' => Some(MenuAction::ToggleQuickTerminal),
             'q' => Some(MenuAction::Quit),
             // ShowNextTab / ShowPreviousTab are Cmd-Shift chords, resolved via
             // the view's performKeyEquivalent tab path, not this Cmd-only map.
@@ -150,6 +160,7 @@ impl MenuAction {
             MenuAction::FontSizeReset => 8,
             MenuAction::ShowNextTab => 10,
             MenuAction::ShowPreviousTab => 11,
+            MenuAction::ToggleQuickTerminal => 12,
             MenuAction::Quit => 9,
         }
     }

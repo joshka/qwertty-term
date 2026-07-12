@@ -61,6 +61,10 @@
 //!   tab label) tracks its own title live, updates on change, and falls back
 //!   to the ghost emoji after the 500ms grace when a title is cleared, then
 //!   exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_QUICKTERM=1` — run the quick-terminal smoke: toggle the
+//!   dropdown in (assert it becomes visible, its window frame lands at the
+//!   configured screen edge, and its shell echoes typed input), toggle it out
+//!   (assert hidden), and toggle back in (assert re-shown), then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -157,6 +161,9 @@ fn run_window() {
     // Title smoke: feed OSC 2 titles into two tabs and assert per-tab window/
     // tab titles + the ghost-emoji fallback.
     let smoke_title = std::env::var_os("QWERTTY_TERM_SMOKE_TITLE").is_some();
+    // Quick-terminal smoke: toggle the dropdown in/out and assert visibility,
+    // geometry, and a live shell.
+    let smoke_quickterm = std::env::var_os("QWERTTY_TERM_SMOKE_QUICKTERM").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -169,6 +176,7 @@ fn run_window() {
         smoke_search,
         smoke_selection,
         smoke_title,
+        smoke_quickterm,
     );
 }
 
