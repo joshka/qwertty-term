@@ -949,6 +949,61 @@ fn csi_entry_max_params_overflow_match_statemachine() {
 }
 
 // -------------------------------------------------------------------------
+// Wide-class print_slice fill: the batched (wide, spacer_tail) pair path
+// (feed's print_slice) must match the per-codepoint state machine (next ->
+// print). These feed CJK/emoji runs through both paths and diff screen +
+// cursor. Port coverage for printSliceFill(.wide) (47e26df60).
+// -------------------------------------------------------------------------
+
+#[test]
+fn wide_cjk_run_matches_statemachine() {
+    // A pure run of wide CJK: every codepoint fills a (wide, spacer_tail) pair.
+    assert_fastpath_vs_statemachine(20, 4, "你好世界这是宽字符测试".as_bytes());
+}
+
+#[test]
+fn wide_emoji_run_matches_statemachine() {
+    // Wide emoji (width 2, no clustering by default at these codepoints).
+    assert_fastpath_vs_statemachine(16, 4, "🍎🍊🍇🍓🍉🍋🍈🍒".as_bytes());
+}
+
+#[test]
+fn wide_mixed_narrow_and_wide_matches_statemachine() {
+    // Narrow ASCII and wide CJK interleaved: the fill switches width class at
+    // each boundary, so runs stop and restart. Also crosses soft-wrap.
+    assert_fastpath_vs_statemachine(10, 6, "ab你cd好ef世gh界\r\nij".as_bytes());
+}
+
+#[test]
+fn wide_at_row_edge_spacer_head_matches_statemachine() {
+    // A wide char landing on the last column of the row: print() writes a
+    // spacer head and wraps. Odd width forces a wide char to hit the edge.
+    // 11 cols: after 5 wide chars (10 cells) the cursor is at col 10 with 1
+    // cell left, so the 6th wide char triggers the spacer-head + wrap path.
+    assert_fastpath_vs_statemachine(11, 4, "一二三四五六七八九十".as_bytes());
+}
+
+#[test]
+fn wide_then_narrow_wrap_boundary_matches_statemachine() {
+    // Wide run that exactly fills to the edge, then narrow text — exercises
+    // the pending-wrap carry between a wide batch and the next print.
+    assert_fastpath_vs_statemachine(8, 5, "日本語ok日本 b".as_bytes());
+}
+
+#[test]
+fn wide_over_styled_cells_matches_statemachine() {
+    // Wide chars overwriting previously-styled cells: the general path must
+    // release the style ref of BOTH cells of each overwritten pair. Paint a
+    // styled row, home, then repaint with wide chars.
+    let mut input = Vec::new();
+    input.extend_from_slice(b"\x1b[31m"); // red
+    input.extend_from_slice("aaaaaaaa".as_bytes());
+    input.extend_from_slice(b"\x1b[H\x1b[0m"); // home, reset
+    input.extend_from_slice("漢字テス".as_bytes());
+    assert_fastpath_vs_statemachine(8, 3, &input);
+}
+
+// -------------------------------------------------------------------------
 // M1 seam closure: kitty keyboard, XTWINOPS title, XTSHIFTESCAPE, REP.
 // Spy-routing tests ported from `stream.zig`; integration tests exercise the
 // concrete `TerminalHandler`.
