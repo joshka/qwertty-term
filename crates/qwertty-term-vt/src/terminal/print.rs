@@ -733,7 +733,11 @@ impl Terminal {
                     // So integrity checks pass while we clear the wide head to
                     // our left; the subsequent print overwrites this cell
                     // anyway. Mirrors Terminal.zig:1166's runtime_safety gate.
-                    #[cfg(debug_assertions)]
+                    // Gated on the feature that enables the integrity scans
+                    // (NOT debug_assertions): the scans run in release too
+                    // when opted in, and skipping the fixup there trips
+                    // InvalidSpacerTailLocation (ADR 0001).
+                    #[cfg(feature = "slow_runtime_safety")]
                     (*self.screen_mut().cursor.page_cell).set_wide(Wide::Narrow);
                     let page = self.screen().cursor_page();
                     let row = self.screen().cursor.page_row;

@@ -93,6 +93,9 @@ jj git fetch && jj rebase -d main ...               # rebase your line onto new 
 cargo check --workspace --all-targets   # zero warnings
 cargo test --workspace
 cargo test -p qwertty-term-vt --release --all-targets   # release lane — NEVER skip
+cargo test -p qwertty-term-vt --release --lib --features slow_runtime_safety
+                        # paranoid lane (ADR 0001 integrity scans in release) —
+                        # this combo caught a real release-only bug on 2026-07-11
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p qwertty-term --release -- --offscreen-smoke  # + ALL app smokes if app touched
 cargo test -p vt-diff            # + --features reference when engine semantics touched
