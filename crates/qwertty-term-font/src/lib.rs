@@ -52,7 +52,11 @@
 
 pub mod atlas;
 pub mod backend;
-#[cfg(target_os = "macos")]
+/// Font collection: faces grouped by style with per-style fallback lists.
+/// Available with either face backend (CoreText on macOS, FreeType under the
+/// `freetype` feature); system-font *discovery* fallback is macOS-only, so on
+/// Linux the collection uses the embedded + synthetic style chain only.
+#[cfg(any(target_os = "macos", feature = "freetype"))]
 pub mod collection;
 pub mod constraint;
 #[cfg(target_os = "macos")]
@@ -68,7 +72,8 @@ pub mod embedded;
 /// testing the FreeType face against the CoreText one).
 #[cfg(feature = "freetype")]
 pub mod freetype;
-#[cfg(target_os = "macos")]
+/// Glyph render cache + atlas upload. Available with either face backend.
+#[cfg(any(target_os = "macos", feature = "freetype"))]
 pub mod grid;
 pub mod metrics;
 pub mod nerd_font_constraints;
@@ -76,7 +81,10 @@ pub mod presentation;
 /// Platform-neutral rasterized-glyph output ([`raster::Bitmap`] /
 /// [`raster::PixelFormat`]), shared by every face backend.
 pub mod raster;
-#[cfg(target_os = "macos")]
+/// Codepoint → font resolution (sprite + primary + style/fallback chain).
+/// Available with either face backend; the discovery-fallback step (step 6) is
+/// macOS-only, so on Linux resolution stops at the collection's own faces.
+#[cfg(any(target_os = "macos", feature = "freetype"))]
 pub mod resolver;
 /// rustybuzz run shaping ([`shaper::Shaper`]) over any [`shaper::ShapeFace`] —
 /// platform-agnostic (pure Rust); both the CoreText and FreeType faces
@@ -90,15 +98,29 @@ pub use metrics::{FaceMetrics, Metrics};
 pub use presentation::{Presentation, PresentationMode};
 pub use raster::{Bitmap, PixelFormat};
 
-#[cfg(target_os = "macos")]
+/// The platform font face and its error type: CoreText (`coretext::Face`) on
+/// macOS by default, FreeType (`freetype::Face`) whenever the `freetype` feature
+/// is enabled. The font stack (`collection`/`resolver`/`grid`) is written against
+/// these aliases so it compiles and renders on both backends.
+///
+/// Enabling `freetype` selects FreeType **even on macOS** — since FreeType is
+/// cross-platform, `--features freetype` on macOS builds and tests the exact
+/// Linux font stack (the only place the bundled C FreeType links locally). So
+/// "the CoreText backend" means `macos && !feature=freetype`.
+#[cfg(all(target_os = "macos", not(feature = "freetype")))]
+pub use coretext::{Error as FaceError, Face};
+#[cfg(feature = "freetype")]
+pub use freetype::{Error as FaceError, Face};
+
+#[cfg(any(target_os = "macos", feature = "freetype"))]
 pub use collection::{Collection, FontIndex, Style};
 #[cfg(target_os = "macos")]
 pub use deferred::DeferredFace;
 #[cfg(target_os = "macos")]
 pub use discovery::Descriptor;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "freetype"))]
 pub use grid::{AtlasKind, CachedGlyph, Grid};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "freetype"))]
 pub use resolver::CodepointResolver;
 pub use shaper::{ShapeFace, ShapedCell, Shaper};
 

@@ -275,9 +275,17 @@ impl Face {
     /// A synthetic-italic copy of this face: a shear applied via
     /// `FT_Set_Transform` at rasterization (upstream `syntheticItalic`, via the
     /// FreeType transform matrix rather than manual outline skew).
-    pub fn synthetic_italic(mut self) -> Face {
-        self.synthetic.italic = true;
-        self
+    ///
+    /// Takes `&self` and returns a new face (a byte-backed reload with the
+    /// existing synthetic flags plus italic), matching
+    /// `coretext::Face::synthetic_italic`'s "copy the font" shape and `Result`
+    /// (whose CoreText copy can fail), so the shared collection code drives both
+    /// faces uniformly.
+    pub fn synthetic_italic(&self) -> Result<Face, Error> {
+        let mut f = Face::load_from_bytes_indexed(&self.bytes, self.size_px, self.face_index)?;
+        f.synthetic = self.synthetic;
+        f.synthetic.italic = true;
+        Ok(f)
     }
 
     /// Rasterize an outline glyph to a grayscale (`Alpha8`) [`Bitmap`].
@@ -538,6 +546,7 @@ mod tests {
         let italic = Face::load_embedded(32.0)
             .unwrap()
             .synthetic_italic()
+            .unwrap()
             .rasterize(gid)
             .unwrap();
         assert!(!italic.is_blank(), "italic 'H' must still have ink");

@@ -10,7 +10,7 @@
 //! subsystem, not a face.
 //!
 //! macOS only (the shaping path needs the CoreText `Face` for rasterization).
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", not(feature = "freetype")))]
 
 use qwertty_term_font::coretext::Face;
 use qwertty_term_font::grid::CachedGlyph;

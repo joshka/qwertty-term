@@ -16,15 +16,28 @@
 //! Loading model: F5-full loads discovered fallback faces **eagerly** when the
 //! resolver adds them (it has the render size in hand), storing a loaded
 //! [`Face`]. Deferred faces exist transiently during discovery probing (the
-//! resolver probes candidates with the cheap [`crate::deferred::DeferredFace`]
-//! `has_codepoint` and loads only the winner). Upstream keeps entries deferred
+//! resolver probes candidates with the cheap `deferred::DeferredFace`
+//! `has_codepoint` and loads only the winner, macOS only). Upstream keeps entries deferred
 //! and loads lazily in `getFaceFromEntry`; the eager-on-add reduction keeps the
 //! `get_face(index) -> &Face` contract simple while still exercising the
 //! deferred probe path. Size-adjustment of fallback faces (`ic_width` rescale)
 //! is a documented deferral.
 
-use crate::coretext::Face;
 use crate::presentation::PresentationMode;
+use crate::{Face, FaceError};
+
+/// Discover a styled member of `family` by system font lookup. macOS uses
+/// CoreText discovery; on other platforms (no fontconfig yet) it returns `None`,
+/// so `new_with_family_styles` falls through to the synthetic ladder.
+#[cfg(all(target_os = "macos", not(feature = "freetype")))]
+fn discover_family_style(family: &str, bold: bool, italic: bool, size_px: f64) -> Option<Face> {
+    crate::discovery::discover_family_style(family, bold, italic, size_px)
+}
+
+#[cfg(not(all(target_os = "macos", not(feature = "freetype"))))]
+fn discover_family_style(_family: &str, _bold: bool, _italic: bool, _size_px: f64) -> Option<Face> {
+    None
+}
 
 /// Font style. Same 4-value grouping as upstream `font.Style` (`main.zig:54`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,21 +147,21 @@ impl Collection {
     pub fn new_with_default_fallbacks(
         primary: Face,
         size_px: f64,
-    ) -> Result<Collection, crate::coretext::Error> {
+    ) -> Result<Collection, FaceError> {
         let mut collection = Collection::new(primary);
 
         // Complete the style table from the embedded variable fonts, mirroring
         // upstream's default-config `wght`-variation mechanism.
-        let bold = crate::coretext::Face::load_embedded_bold(size_px)?;
+        let bold = Face::load_embedded_bold(size_px)?;
         collection.add_fallback(Style::Bold, bold);
 
-        let italic = crate::coretext::Face::load_embedded_italic(size_px)?;
+        let italic = Face::load_embedded_italic(size_px)?;
         collection.add_fallback(Style::Italic, italic);
 
-        let bold_italic = crate::coretext::Face::load_embedded_bold_italic(size_px)?;
+        let bold_italic = Face::load_embedded_bold_italic(size_px)?;
         collection.add_fallback(Style::BoldItalic, bold_italic);
 
-        let symbols = crate::coretext::Face::load_embedded_symbols_nerd_font(size_px)?;
+        let symbols = Face::load_embedded_symbols_nerd_font(size_px)?;
         collection.add_fallback(Style::Regular, symbols);
 
         // macOS: pre-seed the system emoji font as a fallback so emoji resolve
@@ -170,16 +183,16 @@ impl Collection {
     /// Color Emoji (more glyphs → wins the discovery Score tiebreak) instead of
     /// Apple Color Emoji. A no-op if the font can't be discovered (never expected
     /// on macOS, where it ships with the OS).
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "freetype")))]
     fn add_apple_emoji_fallback(&mut self, size_px: f64) {
         if let Some(face) = crate::discovery::discover_family("Apple Color Emoji", size_px) {
             self.add_fallback(Style::Regular, face);
         }
     }
 
-    /// Non-macOS: no system Apple emoji font to pre-seed (upstream adds the
-    /// embedded Noto emoji fonts on those platforms instead). No-op here.
-    #[cfg(not(target_os = "macos"))]
+    /// Without the CoreText backend: no system Apple emoji font to pre-seed
+    /// (upstream adds the embedded Noto emoji fonts there instead). No-op.
+    #[cfg(not(all(target_os = "macos", not(feature = "freetype"))))]
     fn add_apple_emoji_fallback(&mut self, _size_px: f64) {}
 
     /// Create a collection for a **configured `font-family`** (`primary`), whose
@@ -201,7 +214,7 @@ impl Collection {
     ///
     /// 2. **`completeStyles` synthetic ladder** (`Collection.zig:319-465`) for any
     ///    slot the family didn't provide (FiraCode has no italic / bold-italic):
-    ///    - **italic** absent → synthetic italic via the [`ITALIC_SKEW`] matrix
+    ///    - **italic** absent → synthetic italic via the `ITALIC_SKEW` matrix
     ///      (`Collection.zig:373-393` → `face/coretext.zig:174-178`), falling back
     ///      to an **alias to regular** if the skew copy fails.
     ///    - **bold** absent → synthetic bold via the stroke mechanism
@@ -216,29 +229,26 @@ impl Collection {
     /// a codepoint the configured family lacks still resolves. Emoji discovery is
     /// unchanged (handled by the resolver, not here).
     ///
-    /// [`ITALIC_SKEW`]: crate::coretext::ITALIC_SKEW
+    /// (`ITALIC_SKEW` = `coretext::ITALIC_SKEW` on macOS.)
     pub fn new_with_family_styles(
         primary: Face,
         family: &str,
         size_px: f64,
-    ) -> Result<Collection, crate::coretext::Error> {
-        use crate::discovery::discover_family_style;
-
+    ) -> Result<Collection, FaceError> {
         let mut collection = Collection::new(primary);
 
         // --- Phase 1: discover the configured family's own styled members. ---
         // A real discovered styled member is a non-fallback (user) face: it is
-        // the configured font, just a different weight/slant.
-        let disc_bold = discover_family_style(family, true, false, size_px);
-        if let Some(face) = disc_bold {
+        // the configured font, just a different weight/slant. On Linux (no
+        // system discovery yet) these all return None and Phase 2's synthetic
+        // ladder fills every styled slot.
+        if let Some(face) = discover_family_style(family, true, false, size_px) {
             collection.add(Style::Bold, face);
         }
-        let disc_italic = discover_family_style(family, false, true, size_px);
-        if let Some(face) = disc_italic {
+        if let Some(face) = discover_family_style(family, false, true, size_px) {
             collection.add(Style::Italic, face);
         }
-        let disc_bold_italic = discover_family_style(family, true, true, size_px);
-        if let Some(face) = disc_bold_italic {
+        if let Some(face) = discover_family_style(family, true, true, size_px) {
             collection.add(Style::BoldItalic, face);
         }
 
@@ -419,7 +429,7 @@ impl Collection {
 
     /// An independent copy of the primary face at `size_px` (used as the base
     /// for synthetic styled faces, so the stored primary is not consumed).
-    fn primary_clone(&self, size_px: f64) -> Result<Face, crate::coretext::Error> {
+    fn primary_clone(&self, size_px: f64) -> Result<Face, FaceError> {
         self.primary().try_clone(size_px)
     }
 
@@ -429,7 +439,7 @@ impl Collection {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "macos", not(feature = "freetype")))]
 mod tests {
     use super::*;
     use crate::presentation::PresentationMode;
