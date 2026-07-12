@@ -45,6 +45,23 @@ impl KittyColorKind {
         }
         key.parse::<u8>().ok().map(KittyColorKind::Palette)
     }
+
+    /// True if this key is backed by terminal color state. A query for such a
+    /// key with no current value still gets an empty `key=` report (rather than
+    /// being skipped entirely). Palette entries plus the foreground/background/
+    /// cursor specials qualify. Port of `kitty/color.zig` `Kind.hasTerminalQueryColor`
+    /// (14c829883).
+    pub fn has_terminal_query_color(self) -> bool {
+        matches!(
+            self,
+            KittyColorKind::Palette(_)
+                | KittyColorKind::Special(
+                    KittyColorSpecial::Foreground
+                        | KittyColorSpecial::Background
+                        | KittyColorSpecial::Cursor,
+                )
+        )
+    }
 }
 
 impl std::fmt::Display for KittyColorKind {

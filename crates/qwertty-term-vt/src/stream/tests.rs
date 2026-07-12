@@ -468,6 +468,72 @@ fn osc12_cursor() {
     assert_eq!((cur.r, cur.g, cur.b), (0x00, 0x00, 0xff));
 }
 
+// OSC 4 palette query: reply in the 16-bit `rgb:RRRR/GGGG/BBBB` form (each
+// byte doubled). Port of the color-query path (14c829883).
+#[test]
+fn osc4_palette_query_reports_16bit() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b]4;1;rgb:12/34/56\x1b\\"); // set palette 1
+    s.feed(b"\x1b]4;1;?\x1b\\"); // query it
+    assert_eq!(
+        s.handler.take_output(),
+        b"\x1b]4;1;rgb:1212/3434/5656\x1b\\"
+    );
+}
+
+// OSC 10/11 dynamic query replies only when the color is set; the reply uses
+// the OSC number of the color (10=fg, 11=bg).
+#[test]
+fn osc10_11_query_when_set_and_silent_when_unset() {
+    let mut s = term(10, 10);
+    // Unset: no reply.
+    s.feed(b"\x1b]10;?\x1b\\");
+    assert!(s.handler.take_output().is_empty());
+
+    s.feed(b"\x1b]10;rgb:ab/cd/ef\x1b\\");
+    s.feed(b"\x1b]10;?\x1b\\");
+    assert_eq!(s.handler.take_output(), b"\x1b]10;rgb:abab/cdcd/efef\x1b\\");
+}
+
+// OSC 12 cursor query falls back to the foreground color when no cursor color
+// is set (matches upstream `colorForXterm`).
+#[test]
+fn osc12_query_falls_back_to_foreground() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b]10;rgb:11/22/33\x1b\\"); // set fg, leave cursor unset
+    s.feed(b"\x1b]12;?\x1b\\");
+    assert_eq!(s.handler.take_output(), b"\x1b]12;rgb:1111/2222/3333\x1b\\");
+}
+
+// Multiple queries in one OSC coalesce into a single reply message.
+#[test]
+fn osc_color_query_coalesces() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b]4;1;rgb:12/34/56\x1b\\");
+    s.feed(b"\x1b]4;1;?;2;?\x1b\\"); // query palette 1 and 2 in one request
+    let out = s.handler.take_output();
+    // Palette 1 was set; palette 2 is its default — both reported, concatenated.
+    assert!(out.starts_with(b"\x1b]4;1;rgb:1212/3434/5656\x1b\\\x1b]4;2;rgb:"));
+}
+
+// OSC 21 (kitty color) query: 8-bit `rgb:RR/GG/BB`, empty value for an unset
+// terminal-backed key, prefixed once with `\x1b]21`.
+#[test]
+fn osc21_kitty_query() {
+    let mut s = term(10, 10);
+    // Unset foreground -> empty value.
+    s.feed(b"\x1b]21;foreground=?\x1b\\");
+    assert_eq!(s.handler.take_output(), b"\x1b]21;foreground=\x1b\\");
+
+    // Set foreground -> 8-bit report.
+    s.feed(b"\x1b]10;rgb:ab/cd/ef\x1b\\");
+    s.feed(b"\x1b]21;foreground=?\x1b\\");
+    assert_eq!(
+        s.handler.take_output(),
+        b"\x1b]21;foreground=rgb:ab/cd/ef\x1b\\"
+    );
+}
+
 // BEL (0x07) latches a drainable pending-bell flag for the apprt to fire its
 // `bell-features`. A no-op on terminal state; coalesces a burst to one.
 #[test]
