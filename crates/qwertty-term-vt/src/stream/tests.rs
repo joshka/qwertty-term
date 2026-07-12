@@ -779,6 +779,119 @@ fn fastpath_esc_at_run_boundary() {
 }
 
 // -------------------------------------------------------------------------
+// CSI-entry fast path: true fast-path-vs-state-machine differential.
+//
+// `assert_fastpath_equiv` above only proves chunking invariance — a single
+// byte still enters the fast paths through `feed`. To prove the `csi_entry`
+// / `csi_param` fast paths dispatch identically to the pure state machine,
+// this drives one terminal through `feed` (fast paths) and a reference
+// terminal byte-by-byte through `next`, which routes every non-ground byte
+// through `Parser::next` (`next_non_utf8`), bypassing both fast paths.
+// -------------------------------------------------------------------------
+
+fn snapshot_via_next(cols: u16, rows: u16, input: &[u8]) -> (String, (u16, u16)) {
+    let mut s = term(cols, rows);
+    for &b in input {
+        s.next(b);
+    }
+    let cur = &s.handler.terminal.screen().cursor;
+    (
+        normalize(&s.handler.terminal.plain_string()),
+        (cur.x, cur.y),
+    )
+}
+
+fn assert_fastpath_vs_statemachine(cols: u16, rows: u16, input: &[u8]) {
+    let fast = snapshot(cols, rows, &[input]); // feed: csi_entry + csi_param fast paths
+    let sm = snapshot_via_next(cols, rows, input); // next per byte: pure Parser::next
+    assert_eq!(fast, sm, "fast path diverged from state machine");
+}
+
+#[test]
+fn csi_entry_parameterless_finals_match_statemachine() {
+    // Parameterless finals dispatched straight from csi_entry (no params, no
+    // separators): cursor home, erases, SGR reset, save/restore, DECSC-style.
+    assert_fastpath_vs_statemachine(
+        24,
+        6,
+        b"ab\x1b[Hx\x1b[Ky\x1b[Jz\x1b[m\x1b[s\x1b[uW\x1b[7mQ\x1b[0m",
+    );
+}
+
+#[test]
+fn csi_entry_digit_and_empty_first_param_match_statemachine() {
+    // First-digit path (CUP with two params) and empty-first-param path
+    // (`\x1b[;5H`), both starting in csi_entry.
+    assert_fastpath_vs_statemachine(
+        30,
+        10,
+        b"\x1b[10;20Hhere\x1b[;5Hthere\x1b[3;3Hx\x1b[;Hcorner",
+    );
+}
+
+#[test]
+fn csi_entry_private_marker_match_statemachine() {
+    // Private-marker path (`0x3C..=0x3F` right after `[`): DEC private modes.
+    assert_fastpath_vs_statemachine(
+        20,
+        6,
+        b"\x1b[?25lhi\x1b[?25h\x1b[?2004h\x1b[?1049hA\x1b[?1049lB\x1b[>4;2m",
+    );
+}
+
+#[test]
+fn csi_entry_defer_cases_match_statemachine() {
+    // Bytes the csi_entry fast path must DEFER to the state machine: an
+    // intermediate immediately after `[` (`\x1b[ q` DECSCUSR, space = 0x20),
+    // a colon right after `[` (the csi_entry colon edge case), and a C0
+    // control mid-entry (cancels the sequence).
+    assert_fastpath_vs_statemachine(24, 6, b"\x1b[ qA\x1b[:5mB\x1b[\x18[mC\x1b[!pD");
+}
+
+#[test]
+fn csi_entry_colon_separator_only_on_m_match_statemachine() {
+    // Colon/mixed separators are only honored for the 'm' final; other finals
+    // with colon params are dropped. The parameterless-final drop path in
+    // csi_entry can't hit this (no params), but csi_param can — verify the
+    // combined fast paths agree with the state machine on both.
+    assert_fastpath_vs_statemachine(20, 6, b"\x1b[38:2:1:2:3mX\x1b[1:2Hshouldnt-move\x1b[4:3m~");
+}
+
+#[test]
+fn dropped_final_then_nonascii_ground_byte_match_statemachine() {
+    // Regression (found by the feed-vs-state-machine differential fuzz): a CSI
+    // that is DROPPED on its final byte (colon separator + non-'m' final, e.g.
+    // "ESC [ 7 : l") returns the bulk CSI-param consume to Ground. The byte
+    // that follows is a GROUND byte and must go through the UTF-8 decoder, not
+    // `next_non_utf8`. A trailing non-ASCII byte (0xB4, a lone UTF-8
+    // continuation) must decode to U+FFFD identically on both paths.
+    assert_fastpath_vs_statemachine(20, 4, b"\x1b[7:l\xb4");
+    // The exact fuzz-minimized input (leading ESC then C1 CSI 0x9B enters
+    // csi_entry, then the dropped-final + trailing continuation byte).
+    assert_fastpath_vs_statemachine(20, 4, &[0x1b, 0x9b, 0x37, 0x3a, 0x6c, 0xb4]);
+    // A few more dropped-final finals with trailing non-ASCII and multi-byte
+    // UTF-8, to cover the class rather than the single found input.
+    assert_fastpath_vs_statemachine(20, 4, b"\x1b[1:2H\xc3\xa9ok");
+    assert_fastpath_vs_statemachine(20, 4, b"\x1b[3:4J\xe4\xbd\xa0z");
+}
+
+#[test]
+fn csi_entry_max_params_overflow_match_statemachine() {
+    // A CSI with more than MAX_PARAMS parameters is dropped entirely; the
+    // fast path's overflow rule must match the state machine's.
+    let mut input = Vec::new();
+    input.extend_from_slice(b"\x1b[");
+    for i in 0..40 {
+        if i > 0 {
+            input.push(b';');
+        }
+        input.extend_from_slice(b"1");
+    }
+    input.extend_from_slice(b"mAfter");
+    assert_fastpath_vs_statemachine(20, 4, &input);
+}
+
+// -------------------------------------------------------------------------
 // M1 seam closure: kitty keyboard, XTWINOPS title, XTSHIFTESCAPE, REP.
 // Spy-routing tests ported from `stream.zig`; integration tests exercise the
 // concrete `TerminalHandler`.
