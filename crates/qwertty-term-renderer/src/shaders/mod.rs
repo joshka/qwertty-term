@@ -21,7 +21,11 @@ use crate::wire::{CellText, Image};
 
 #[cfg(test)]
 mod color_math;
-#[cfg(test)]
+// The smoke test compiles the embedded MSL through a live Metal device
+// (`objc2-metal`), which only exists on macOS — where `objc2*` is even a
+// dependency (see Cargo.toml's `cfg(target_os = "macos")` deps). Gate it so
+// `cargo test` builds on Linux (ADR 003, P1).
+#[cfg(all(test, target_os = "macos"))]
 mod smoke;
 
 /// The embedded MSL source for the first-pixels shader subset. Compiled at
