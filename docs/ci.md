@@ -34,10 +34,10 @@ the core is healthy, **not** that the app is shippable.
 
 The Linux clippy step lints an **explicit allowlist** of the platform-independent crates
 (`qwertty-term-vt`, `vt-diff`, `qwertty-term-input`, `qwertty-term-sprite`,
-`qwertty-term-termio`, `qwertty-term-ffi`, `qwertty-term-renderer`, `spike-runtime`,
-`frame-capture`, `xtask`) rather than `--workspace --exclude ...`. The macOS-surface crates
-are deliberately left off, each for a different reason, and a new crate must be added
-consciously:
+`qwertty-term-termio`, `qwertty-term-ffi`, `qwertty-term-renderer`, `qwertty-term-font`,
+`spike-runtime`, `frame-capture`, `xtask`) rather than `--workspace --exclude ...`. The
+macOS-surface crates are deliberately left off, each for a different reason, and a new crate
+must be added consciously:
 
 - `qwertty-term-spike` — source is not cfg-gated for non-macOS targets, so it does not even
   compile on Linux.
@@ -47,7 +47,8 @@ consciously:
   `--all-targets` clippy compiles the test code but the macOS-gated acceptance tests are
   empty there; the platform-agnostic unit tests (geometry, cells, swap-chain semaphore) do
   run. The software backend (P1 next slice) will add real Linux render coverage.
-- `qwertty-term-font` — compiles, but a non-macOS test cfg has an unused import (T2 Inbox).
+- `qwertty-term-font` — **now included**: T2 gated the non-macOS test's unused import, so it
+  compiles and lints clean on Linux.
 - `qwertty-term` (the app) — compiles, but its theme/color code is
   `#[cfg(target_os = "macos")]`-gated, so on Linux it is dead code and trips `-D dead_code`.
   The app's clippy runs on the macOS job, which lints the full workspace.
@@ -61,11 +62,20 @@ consciously:
   the sleep duration on every shared runner points at a real measurement bug — the runtime
   accounting isn't bracketing the full child lifetime, not just runner slowness. Filed to
   T4's Inbox (`docs/threads/status/t4.md`). Remove both `--skip`s once fixed.
+- `qwertty-term-termio::throughput_cat_10mib` is skipped on both test steps. It asserts a
+  pipe throughput of `> 40 MiB/s` (a deliberately loose floor), which still dips below 40 on
+  a loaded shared runner while passing reliably on local hardware. Unlike the runtime test
+  this is plain timing noise, not a suspected logic bug — a CI-appropriate fix is to gate the
+  throughput floor behind an env flag (or `#[ignore]` it under CI). Filed to T4's Inbox.
 
 ## Toolchain pin
 
-CI pins the Rust toolchain (see `RUST_TOOLCHAIN` in `ci.yml`, currently `1.96.0`) instead
-of tracking `stable`: Rust 1.97 (2026-07-07) introduced new clippy lints that are red on
-`main` in `qwertty-term-vt`, `-input`, and `-font`. The fixes are one-liners filed in the
-owning threads' Inboxes (`docs/threads/status/`). Once they land, bump the pin (or switch
-to `stable`) and re-include `qwertty-term-font` in the Linux clippy lane.
+CI pins the Rust toolchain to an explicit version (see `RUST_TOOLCHAIN` in `ci.yml`, currently
+`1.97.0`) instead of tracking `stable`. The point is that a new rustc release can't turn the
+shared gate red mid-work for every thread — which is exactly what 1.97's new clippy lints
+(`question_mark`, `useless_borrows_in_formatting`) did on 2026-07-07. T8 owns bumping the pin:
+after a rustc release, verify `cargo clippy`/`cargo fmt` are green at the new version across
+both lanes, then bump `RUST_TOOLCHAIN` here and in `docs/ci.md`.
+
+History: pinned to `1.96.0` as a stopgap when 1.97 landed; bumped to `1.97.0` once the lint
+fixes landed (T1 #9, T2 font fix) and clippy/fmt were re-verified green at 1.97 on both lanes.
