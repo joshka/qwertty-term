@@ -74,7 +74,16 @@ pub fn resolve_action(set: &Set, key: Key, mods: TabMods) -> Option<Action> {
 /// actions dispatch via [`crate::app::Controller::perform_keybind_chord`], and
 /// menu-covered chords via the menu.
 pub fn resolve_text_bytes(set: &Set, key: Key, mods: TabMods) -> Option<Vec<u8>> {
-    match lookup_action(set, key, to_mods(mods))? {
+    action_bytes(lookup_action(set, key, to_mods(mods))?)
+}
+
+/// The pty bytes a byte-emitting action (`text:` / `esc:` / `csi:`) sends, or
+/// `None` for any other action. `text:` decodes its Zig-string-literal value via
+/// [`unescape_text`]; `esc:` is `ESC` + the raw value; `csi:` is `ESC [` + the
+/// raw value. Shared by the single-key seam ([`resolve_text_bytes`]) and the
+/// leader-sequence dispatch.
+pub fn action_bytes(action: &Action) -> Option<Vec<u8>> {
+    match action {
         Action::Text(value) => unescape_text(value).ok(),
         Action::Esc(value) => {
             let mut bytes = vec![0x1b];
@@ -88,6 +97,63 @@ pub fn resolve_text_bytes(set: &Set, key: Key, mods: TabMods) -> Option<Vec<u8>>
         }
         _ => None,
     }
+}
+
+/// The outcome of feeding one key to an in-progress leader sequence (see
+/// [`sequence_step`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SeqStep {
+    /// The key completed a binding; dispatch this action and end the sequence.
+    Leaf(Action),
+    /// The key is a further leader; the sequence continues one level deeper. The
+    /// carried [`Trigger`] is the one that matched (pushed onto the path).
+    Descend(Trigger),
+    /// The key matches nothing at this level; abort the sequence.
+    NoMatch,
+}
+
+/// Feed one key to a leader sequence. `path` is the leader triggers pressed so
+/// far (empty ⇒ we're matching against the root, i.e. testing whether `key` is
+/// itself a leader or a top-level leaf). Navigates the `Set`'s
+/// `Leader`/`Leaf` storage: descends each `path` leader from the root, then looks
+/// up `(key, mods)` (physical trigger then the key's codepoint) in that level —
+/// a `Leaf` completes, a `Leader` descends, anything else is [`SeqStep::NoMatch`].
+///
+/// Runtime port of the leader-key half of Ghostty's `getEvent` sequence
+/// handling; the idle-timeout flush is deferred (a follow-up).
+pub fn sequence_step(set: &Set, path: &[Trigger], key: Key, mods: TabMods) -> SeqStep {
+    // Descend to the current level along the leader path.
+    let mut level = set;
+    for t in path {
+        match level.get_leader(*t) {
+            Some(child) => level = child,
+            None => return SeqStep::NoMatch, // stale path (config changed)
+        }
+    }
+    let m = to_mods(mods);
+    for trigger in candidate_triggers(key, m) {
+        if let Some(bound) = level.get(trigger) {
+            return SeqStep::Leaf(bound.action.clone());
+        }
+        if level.get_leader(trigger).is_some() {
+            return SeqStep::Descend(trigger);
+        }
+    }
+    SeqStep::NoMatch
+}
+
+/// The physical then codepoint triggers to probe for a `(key, mods)`, matching
+/// the first two probes of [`Set::get_event`].
+fn candidate_triggers(key: Key, mods: Mods) -> impl Iterator<Item = Trigger> {
+    let physical = Some(Trigger {
+        key: TriggerKey::Physical(key),
+        mods,
+    });
+    let unicode = key.codepoint().map(|cp| Trigger {
+        key: TriggerKey::Unicode(cp),
+        mods,
+    });
+    physical.into_iter().chain(unicode)
 }
 
 /// The `text:` value stored by the port is the raw, still-escaped string; look
@@ -261,6 +327,35 @@ mod tests {
         assert_eq!(
             resolve_text_bytes(&set, Key::KeyA, ctrl_alt()),
             Some(b"\x1b[1;2A".to_vec())
+        );
+    }
+
+    #[test]
+    fn leader_sequence_steps_descend_then_complete() {
+        let set = build_set(&["ctrl+a>c=text:zz".to_string()]);
+
+        // `ctrl+a` at the root is a leader → descend (carrying its trigger).
+        let leader = match sequence_step(&set, &[], Key::KeyA, ctrl()) {
+            SeqStep::Descend(t) => t,
+            other => panic!("expected Descend, got {other:?}"),
+        };
+
+        // Then `c` completes the sequence → its leaf action.
+        assert_eq!(
+            sequence_step(&set, &[leader], Key::KeyC, TabMods::default()),
+            SeqStep::Leaf(Action::Text("zz".to_string()))
+        );
+
+        // An unrelated key after the leader aborts (NoMatch).
+        assert_eq!(
+            sequence_step(&set, &[leader], Key::KeyX, TabMods::default()),
+            SeqStep::NoMatch
+        );
+
+        // `c` at the *root* (no leader pressed) is not a sequence key here.
+        assert_eq!(
+            sequence_step(&set, &[], Key::KeyC, TabMods::default()),
+            SeqStep::NoMatch
         );
     }
 

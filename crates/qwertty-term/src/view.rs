@@ -120,10 +120,12 @@ define_class!(
         /// and AppKit proceeds to `keyDown:` → the encoder unchanged.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            // One unified keybind lookup for chord actions (search / split / tab)
-            // that must fire whether the search field or the terminal is first
-            // responder (key equivalents reach the whole responder chain).
-            self.try_handle_keybind_chord(event)
+            // Leader-key sequences (`ctrl+a>c`) get first crack: a leader key, or
+            // any key while a sequence is in progress, is consumed here. Only when
+            // the key is not sequence-related do we fall to the single-chord lookup
+            // (search / split / tab), which must fire whether the search field or
+            // the terminal is first responder.
+            self.try_handle_keybind_sequence(event) || self.try_handle_keybind_chord(event)
         }
 
         /// Accept first responder so we receive key events.
@@ -435,6 +437,17 @@ impl TerminalView {
     ///
     /// Uses the *physical* keycode (layout-independent) for the digit keys, so
     /// `cmd+1..9` work on non-US layouts — matching upstream's `physical:one..`.
+    /// Feed the event to the leader-key sequence state machine (see
+    /// [`crate::app::Controller::handle_key_sequence`]). Returns `true` if it was
+    /// consumed (started/continued/completed/aborted a sequence).
+    fn try_handle_keybind_sequence(&self, event: &NSEvent) -> bool {
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| c.handle_key_sequence(tab, surface, key, mods))
+            .unwrap_or(false)
+    }
+
     fn try_handle_keybind_chord(&self, event: &NSEvent) -> bool {
         let key = key_from_macos_keycode(event.keyCode());
         let mods = tab_mods_from_flags(event.modifierFlags());
