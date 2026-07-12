@@ -509,6 +509,37 @@ impl<H: Handler> Stream<H> {
                 if offset >= input.len() {
                     return;
                 }
+
+                // Fast path: "ESC [" is by far the most common escape prefix,
+                // so handle the '[' inline rather than paying a `next_non_utf8`
+                // call to advance Escape -> CsiEntry. Port of the inline "ESC ["
+                // match in upstream `consumeUntilGround` (300f42c7a).
+                if self.parser.state() == State::Escape && input[offset] == b'[' {
+                    self.parser.enter_csi_entry();
+                    offset += 1;
+                    continue;
+                }
+
+                // Fast path for the single byte in CsiEntry (right after
+                // "ESC ["): a digit, private marker, empty param, or a
+                // parameterless final. Dispatches finals directly without
+                // materializing the parser's `[Option<Action>; 3]` return.
+                // Port of upstream `csiEntryByte` (1a88f3622 + 300f42c7a).
+                if self.parser.state() == State::CsiEntry {
+                    let (handled, action) = self.parser.csi_entry_byte(input[offset]);
+                    // Materialize the borrowed action before dispatch so the
+                    // parser borrow ends first, matching next_non_utf8.
+                    let emitted = action.map(Emitted::from_action);
+                    if handled {
+                        offset += 1;
+                        if let Some(Emitted::Csi(csi)) = emitted {
+                            self.csi_dispatch(&csi);
+                        }
+                        continue;
+                    }
+                    // Not a fast-path byte: fall through to the per-byte path.
+                }
+
                 // Bulk-consume CSI parameter bytes (digits/separators and the
                 // final byte) without stepping the parser byte-by-byte. This is
                 // the hot path for control-dense streams (SGR params, cursor
@@ -527,8 +558,20 @@ impl<H: Handler> Stream<H> {
                         continue;
                     }
                     offset += consumed;
-                    // Still in csi_param: the next byte isn't a parameter byte;
-                    // fall through to the per-byte path below to handle it.
+                    // Two ways to reach here with no action:
+                    //  - stopped at a non-parameter byte, still in CsiParam:
+                    //    fall through to the per-byte path to handle it;
+                    //  - a final byte that was DROPPED (e.g. a colon separator
+                    //    with a non-'m' final) was consumed, returning to
+                    //    Ground: the next byte is a ground byte and MUST go
+                    //    through the UTF-8 decoder, not `next_non_utf8`
+                    //    (`Parser::next`) — so re-enter the outer loop and let
+                    //    the ground path take it. Missing this routed non-ASCII
+                    //    ground bytes through the parser (found by the feed-vs-
+                    //    state-machine differential fuzz).
+                    if self.parser.state() == State::Ground {
+                        continue;
+                    }
                     if offset >= input.len() {
                         return;
                     }

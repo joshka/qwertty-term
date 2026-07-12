@@ -539,6 +539,92 @@ impl Parser {
         self.params_idx = idx;
         (offset, None)
     }
+
+    /// Transition `Escape` -> `CsiEntry` for the stream's `"ESC ["` fast path.
+    ///
+    /// The state machine's `CsiEntry` entry action is `clear()`, but escape
+    /// entry already cleared every accumulator and nothing collects a byte
+    /// while the parser sits in `Escape` (the very next byte drives this
+    /// transition), so the clear is redundant here. Skipping it matches
+    /// upstream's inline `"ESC ["` handling in `consumeUntilGround`.
+    ///
+    /// # Panics (debug)
+    /// Asserts the parser is in `Escape` state on entry.
+    #[inline]
+    pub fn enter_csi_entry(&mut self) {
+        debug_assert_eq!(self.state, State::Escape);
+        self.state = State::CsiEntry;
+    }
+
+    /// Handle the single byte in `CsiEntry` (the state right after `"ESC ["`)
+    /// without materializing the parser's `[Option<Action>; 3]` return.
+    /// Virtually every CSI sequence spends exactly one byte here — a digit, a
+    /// private marker, or a final byte. Port of upstream `csiEntryByte`.
+    ///
+    /// Returns `(handled, action)`:
+    /// - `handled == false`: the byte is not one this fast path covers (a C0
+    ///   control, an intermediate `0x20..=0x2F`, or a colon); the parser state
+    ///   is unchanged and the caller must drive `c` through the state machine.
+    /// - `handled == true`, `action == None`: the byte advanced parser state
+    ///   (a first digit / empty first param / private marker); state is now
+    ///   `CsiParam`.
+    /// - `handled == true`, `action == Some(CsiDispatch)`: a parameterless
+    ///   final was reached and dispatched; state is now `Ground`. (A dropped
+    ///   final — impossible from `CsiEntry` since it has no accumulated params
+    ///   or separators, but handled for symmetry — yields `None` with state
+    ///   `Ground`.)
+    ///
+    /// # Panics (debug)
+    /// Asserts the parser is in `CsiEntry` state on entry.
+    pub fn csi_entry_byte(&mut self, c: u8) -> (bool, Option<Action<'_>>) {
+        debug_assert_eq!(self.state, State::CsiEntry);
+        match c {
+            // First parameter digit. param_acc is zero (cleared on escape
+            // entry), so accumulating is just the digit value.
+            b'0'..=b'9' => {
+                self.state = State::CsiParam;
+                self.param_acc = (c - b'0') as u16;
+                self.param_acc_idx = 1;
+                (true, None)
+            }
+            // An empty first parameter.
+            b';' => {
+                self.state = State::CsiParam;
+                self.params[0] = 0;
+                self.params_idx = 1;
+                (true, None)
+            }
+            // Private marker (e.g. '?' in "ESC [ ? 2004 h").
+            0x3C..=0x3F => {
+                self.state = State::CsiParam;
+                self.collect(c);
+                (true, None)
+            }
+            // A final byte: a parameterless CSI. Finalize + drop rules match
+            // `do_action`'s CsiDispatch (and `bulk_consume_csi_params`).
+            0x40..=0x7E => {
+                self.state = State::Ground;
+                let emit = if self.params_idx as usize >= MAX_PARAMS {
+                    Emit::None
+                } else {
+                    if self.param_acc_idx > 0 {
+                        self.params[self.params_idx as usize] = self.param_acc;
+                        self.params_idx += 1;
+                    }
+                    if c != b'm' && self.params_sep.count() > 0 {
+                        Emit::None
+                    } else {
+                        Emit::CsiDispatch
+                    }
+                };
+                let action = self.build(emit, c);
+                (true, action)
+            }
+            // Defer to the state machine for anything else (C0 controls,
+            // intermediates 0x20..=0x2F, the csi_entry colon edge case).
+            _ => (false, None),
+        }
+    }
 }
 
 #[cfg(test)]

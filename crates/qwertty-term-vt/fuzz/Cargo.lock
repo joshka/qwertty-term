@@ -50,21 +50,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qwertty-term-vt"
-version = "0.0.0"
-dependencies = [
- "base64",
-]
-
-[[package]]
-name = "qwertty-term-vt-fuzz"
-version = "0.0.0"
-dependencies = [
- "qwertty-term-vt",
- "libfuzzer-sys",
-]
-
-[[package]]
 name = "jobserver"
 version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -88,6 +73,21 @@ checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
 dependencies = [
  "arbitrary",
  "cc",
+]
+
+[[package]]
+name = "qwertty-term-vt"
+version = "0.1.0"
+dependencies = [
+ "base64",
+]
+
+[[package]]
+name = "qwertty-term-vt-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "qwertty-term-vt",
 ]
 
 [[package]]

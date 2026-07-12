@@ -12,8 +12,21 @@
 #![no_main]
 
 use qwertty_term_vt::parser::Parser;
+use qwertty_term_vt::stream::{Stream, TerminalHandler};
+use qwertty_term_vt::terminal::{Options, Terminal};
 use qwertty_term_vt::utf8_decoder::Utf8Decoder;
 use libfuzzer_sys::fuzz_target;
+
+/// Build a small terminal + stream for the feed-path fuzz below.
+fn stream() -> Stream<TerminalHandler> {
+    let terminal = Terminal::new(Options {
+        cols: 40,
+        rows: 12,
+        max_scrollback: 0,
+        colors: Default::default(),
+    });
+    Stream::new(TerminalHandler::new(terminal))
+}
 
 fuzz_target!(|data: &[u8]| {
     // 1. Raw bytes straight through the parser. Assert internal bounds after
@@ -55,4 +68,28 @@ fuzz_target!(|data: &[u8]| {
             assert!(guard < 4, "decoder re-fed the same byte too many times");
         }
     }
+
+    // 3. Bytes through the full `Stream::feed` fast paths (csi_entry /
+    //    csi_param bulk consume, ground-run batching), and separately
+    //    byte-at-a-time through `Stream::next` (pure state machine). Both must
+    //    (a) never panic and (b) reach identical terminal state — a fast-path-
+    //    vs-state-machine differential over arbitrary input.
+    let mut fast = stream();
+    fast.feed(data);
+    let mut slow = stream();
+    for &b in data {
+        slow.next(b);
+    }
+    let fast_screen = fast.handler.terminal.screen().dump_string(
+        qwertty_term_vt::point::Tag::Screen,
+        false,
+    );
+    let slow_screen = slow.handler.terminal.screen().dump_string(
+        qwertty_term_vt::point::Tag::Screen,
+        false,
+    );
+    assert_eq!(
+        fast_screen, slow_screen,
+        "Stream::feed fast path diverged from byte-at-a-time state machine"
+    );
 });
