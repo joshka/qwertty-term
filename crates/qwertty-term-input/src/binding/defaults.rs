@@ -751,10 +751,17 @@ mod tests {
     use super::*;
     use crate::binding::action::{AdjustSelection, CopyToClipboard};
 
-    /// The set is non-trivially large (sanity check on the port).
+    /// The set is non-trivially large (sanity check on the port). This runs on
+    /// every platform, so the bound must hold for BOTH the macOS keymap (93
+    /// binds) and the smaller non-Darwin keymap (Cmd-block bindings are
+    /// `#[cfg(target_os = "macos")]`, so the Linux/Windows set is smaller) — a
+    /// range, not a floor, so it can't silently pass on one platform and panic
+    /// on another. The exact per-platform count is pinned by `macos_len_is_exact`
+    /// (macOS) below.
     #[test]
     fn len_is_reasonable() {
-        assert!(default_set().len() > 80, "len = {}", default_set().len());
+        let len = default_set().len();
+        assert!((70..=110).contains(&len), "len = {len}");
     }
 
     /// On macOS the port installs exactly 93 bindings.

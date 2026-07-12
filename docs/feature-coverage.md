@@ -146,9 +146,12 @@ items are `[ ]` wholesale unless noted.
       prefixes, `=`-splitter, chain + sequence parsing, compat table) **and** the
       runtime `Set` (case-folded `mods.binding()` lookup, 5-probe `get_event`, `put`
       overwrite, **reverse action→trigger map** `get_trigger` for menu accelerators)
-      **and** the full macOS `default_set()` (93 upstream-verified default binds).
-      Next: `parse_and_put` (sequences/leaders + chains + `unbind`), then app-crate
-      dispatch integration (collapse the four bespoke tables; gated on T4).
+      **and** the full macOS `default_set()` (93 upstream-verified default binds)
+      **and** `parse_and_put` (config-string application: `>`-sequences/leaders,
+      `chain=`, `unbind`, with validate-before-mutate + empty-leader pruning). The
+      whole config→`Set` build path is done; what remains is app-crate dispatch
+      integration (collapse the four bespoke tables + runtime sequence/chain
+      dispatch; gated on T4).
 - [ ] Full `Binding.zig` system runtime: leader/chains dispatch, key tables, `global`
       binds, `performable` fallthrough (model parsed; runtime `Set` pending)
 - [ ] Most keybind *actions*: `jump_to_prompt`, `write_scrollback_file`, `inspector`,
