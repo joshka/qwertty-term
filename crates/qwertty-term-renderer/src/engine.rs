@@ -193,6 +193,12 @@ pub struct Engine {
     /// `update_frame`); `prepare_image_frame` evicts cached textures whose id
     /// left this set (R6 slice 3 — delete + `image-storage-limit` eviction).
     pending_live_ids: Vec<u32>,
+    /// Z-order bucket boundaries into the (z-sorted) `pending_placements` (R6
+    /// slice 4): `[0, image_bg_end)` draws below the cell backgrounds,
+    /// `[image_bg_end, image_text_end)` below text, `[image_text_end, ..)` above
+    /// text. Set by `update_frame`.
+    image_bg_end: usize,
+    image_text_end: usize,
 }
 
 /// A GPU-resident kitty image: its texture plus the `generation` it was
@@ -272,6 +278,8 @@ impl Engine {
             pending_placements: Vec::new(),
             pending_images: Vec::new(),
             pending_live_ids: Vec::new(),
+            image_bg_end: 0,
+            image_text_end: 0,
         })
     }
 
@@ -422,6 +430,18 @@ impl Engine {
         self.pending_live_ids.clear();
         self.pending_live_ids
             .extend_from_slice(snapshot.kitty_live_ids());
+
+        // R6 slice 4: sort placements by z (tie-break image id) and split into
+        // the three z-order buckets upstream draws at different points in the
+        // pass. Port of `image.zig`'s sort + `kitty_bg_end`/`kitty_text_end`:
+        //   below-bg    z < i32::MIN/2   (drawn after bg_color)
+        //   below-text  i32::MIN/2..0    (drawn after cell_bg)
+        //   above-text  z >= 0           (drawn after cell_text)
+        self.pending_placements
+            .sort_by(|a, b| a.z.cmp(&b.z).then(a.image_id.cmp(&b.image_id)));
+        const BG_LIMIT: i32 = i32::MIN / 2;
+        self.image_bg_end = self.pending_placements.partition_point(|p| p.z < BG_LIMIT);
+        self.image_text_end = self.pending_placements.partition_point(|p| p.z < 0);
     }
 
     /// Build the frame uniforms (port of `updateScreenSizeUniforms` + the
@@ -1229,6 +1249,8 @@ impl Engine {
             self.contents.fg_lists().iter().map(Vec::as_slice).collect();
 
         let (sw, sh) = (self.screen_width, self.screen_height);
+        // Kitty z-order bucket boundaries (into the z-sorted placements).
+        let (img_bg_end, img_text_end) = (self.image_bg_end, self.image_text_end);
 
         // Disjoint borrows: the swap chain (for the slot), the backend (for the
         // frame + resizes), the pipelines, and the kitty image state. Splitting
@@ -1282,6 +1304,17 @@ impl Engine {
                 draw: Draw::vertices(Primitive::Triangle, 3),
             });
 
+            // 1b. Kitty images below the cell backgrounds (z < i32::MIN/2).
+            encode_image_steps(
+                &pass,
+                image_pipeline,
+                slot.uniforms.buffer(),
+                images,
+                image_instances,
+                pending_placements,
+                0..img_bg_end,
+            );
+
             // 2. Per-cell backgrounds (full-screen triangle sampling bg_cells).
             pass.step(&Step {
                 pipeline_state: cell_bg_pipeline.state(),
@@ -1292,6 +1325,17 @@ impl Engine {
                 samplers: &[],
                 draw: Draw::vertices(Primitive::Triangle, 3),
             });
+
+            // 2b. Kitty images below text (i32::MIN/2 <= z < 0).
+            encode_image_steps(
+                &pass,
+                image_pipeline,
+                slot.uniforms.buffer(),
+                images,
+                image_instances,
+                pending_placements,
+                img_bg_end..img_text_end,
+            );
 
             // 3. Text (instanced glyph quads). Vertex buffer 0 = CellText
             //    instances; extras[0] (buffer 2) = bg_cells (for min-contrast);
@@ -1310,9 +1354,9 @@ impl Engine {
                 },
             });
 
-            // 4. Kitty images (one quad per placement, above text). R6 slice 1
-            //    draws every placement here; z-order buckets (below-bg /
-            //    below-text / above-text) are slice 4.
+            // 3b. Kitty images above text (z >= 0). R6 slice 4: the three
+            //     buckets are drawn at bg / below-text / above-text points; the
+            //     placements were z-sorted in `update_frame`.
             encode_image_steps(
                 &pass,
                 image_pipeline,
@@ -1320,6 +1364,7 @@ impl Engine {
                 images,
                 image_instances,
                 pending_placements,
+                img_text_end..pending_placements.len(),
             );
 
             pass.complete();
@@ -1476,6 +1521,8 @@ impl Engine {
         &HashMap<u32, ImageEntry>,
         &[Buffer<Image>],
         &[KittyPlacement],
+        usize,
+        usize,
     ) {
         (
             &self.backend,
@@ -1487,6 +1534,8 @@ impl Engine {
             &self.images,
             &self.image_instances,
             &self.pending_placements,
+            self.image_bg_end,
+            self.image_text_end,
         )
     }
 }
@@ -1537,11 +1586,13 @@ impl Frame {
     }
 }
 
-/// Encode one image draw step per kitty placement, in the given render pass.
-/// Each placement is a 4-vertex triangle-strip quad reading its own `Image`
-/// instance buffer and binding its image's texture (port of upstream
-/// `image.zig`'s per-image `pass.step`). Placements whose image isn't uploaded
-/// yet, or that lack an instance buffer, are skipped.
+/// Encode one image draw step for each placement in `range` (an index range
+/// into the z-sorted `placements` / `image_instances` — one z-order bucket, R6
+/// slice 4), in the given render pass. Each placement is a 4-vertex
+/// triangle-strip quad reading its own `Image` instance buffer and binding its
+/// image's texture (port of upstream `image.zig`'s per-image `pass.step`).
+/// Placements whose image isn't uploaded yet, or that lack an instance buffer,
+/// are skipped.
 pub(crate) fn encode_image_steps(
     pass: &RenderPass,
     pipeline: &Pipeline,
@@ -1549,8 +1600,12 @@ pub(crate) fn encode_image_steps(
     images: &HashMap<u32, ImageEntry>,
     image_instances: &[Buffer<Image>],
     placements: &[KittyPlacement],
+    range: std::ops::Range<usize>,
 ) {
-    for (i, placement) in placements.iter().enumerate() {
+    for i in range {
+        let Some(placement) = placements.get(i) else {
+            continue;
+        };
         let Some(entry) = images.get(&placement.image_id) else {
             continue;
         };

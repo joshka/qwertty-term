@@ -98,6 +98,8 @@ impl Engine {
             images,
             image_instances,
             placements,
+            img_bg_end,
+            img_text_end,
         ) = self.present_parts();
 
         let mut guard = swap_chain.next_frame().ok_or(MetalError::MetalFailed)?;
@@ -127,6 +129,16 @@ impl Engine {
                 samplers: &[],
                 draw: Draw::vertices(Primitive::Triangle, 3),
             });
+            // Kitty images below the cell backgrounds (R6 slice 4).
+            crate::engine::encode_image_steps(
+                &pass,
+                image_pipe,
+                slot.uniforms.buffer(),
+                images,
+                image_instances,
+                placements,
+                0..img_bg_end,
+            );
             pass.step(&Step {
                 pipeline_state: cell_bg_pipe.state(),
                 vertex: None,
@@ -136,6 +148,16 @@ impl Engine {
                 samplers: &[],
                 draw: Draw::vertices(Primitive::Triangle, 3),
             });
+            // Kitty images below text.
+            crate::engine::encode_image_steps(
+                &pass,
+                image_pipe,
+                slot.uniforms.buffer(),
+                images,
+                image_instances,
+                placements,
+                img_bg_end..img_text_end,
+            );
             pass.step(&Step {
                 pipeline_state: cell_text_pipe.state(),
                 vertex: Some(slot.cells.buffer()),
@@ -150,7 +172,7 @@ impl Engine {
                 },
             });
 
-            // Kitty images (above text; z-order buckets are R6 slice 4).
+            // Kitty images above text.
             crate::engine::encode_image_steps(
                 &pass,
                 image_pipe,
@@ -158,6 +180,7 @@ impl Engine {
                 images,
                 image_instances,
                 placements,
+                img_text_end..placements.len(),
             );
 
             pass.complete();
