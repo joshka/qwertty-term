@@ -1,7 +1,7 @@
 //! CoreText font discovery: family/codepoint search with `Score` ranking.
 //!
 //! Port of the `CoreText` arm of Ghostty's `src/font/discovery.zig` (commit
-//! `2da015cd6`): the [`Descriptor`] search query, the [`Score`] ranking system
+//! `2da015cd6`): the [`Descriptor`] search query, the `Score` ranking system
 //! (traits + raw-table + variable-axis scoring + fuzzy name matching), the
 //! `CTFontCollection` family search, and the `CTFontCreateForString`
 //! per-codepoint fallback (with Han-block routing and LastResort rejection).
@@ -147,7 +147,7 @@ impl Descriptor {
 /// (`CoreText.discover`, discovery.zig:354-383).
 ///
 /// Builds a `CTFontCollection` from the descriptor, reads its matching
-/// descriptors, ranks them with [`Score`], and wraps each as a [`DeferredFace`].
+/// descriptors, ranks them with `Score`, and wraps each as a [`DeferredFace`].
 /// Returns an empty vec on no match.
 pub fn discover(desc: &Descriptor) -> Vec<DeferredFace> {
     let ct_desc = desc.to_ct_descriptor();
@@ -231,7 +231,7 @@ fn strip_character_set(ct_desc: &CTFontDescriptor) -> CFRetained<CTFontDescripto
 ///
 /// The `CTFontCollection`/`Score` path (already used for the regular family
 /// discovery) is the mechanism upstream's CoreText discovery backend uses; the
-/// symbolic-trait descriptor is assembled in [`Descriptor::to_ct_descriptor`].
+/// symbolic-trait descriptor is assembled in `Descriptor::to_ct_descriptor`.
 pub fn discover_family_style(family: &str, bold: bool, italic: bool, size_px: f64) -> Option<Face> {
     let desc = Descriptor {
         family: Some(family.to_string()),
