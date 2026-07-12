@@ -198,7 +198,9 @@ items are `[ ]` wholesale unless noted.
 
 ## Notifications, bell, progress
 
-- [ ] Bell (`bell-features`, `bell-audio-path`/`-volume`)
+- [~] Bell (`bell-features`): system beep + dock attention + 🔔 title indicator
+      on BEL, cleared on refocus (bell smoke). Deferred: `audio`
+      (`bell-audio-path`/`-volume`) + `border` flash
 - [ ] `desktop-notifications` / `app-notifications`
 - [ ] `notify-on-command-finish` (+ action/after), `abnormal-command-exit-runtime`
 - [ ] `progress-style` (OSC 9;4 progress bar)

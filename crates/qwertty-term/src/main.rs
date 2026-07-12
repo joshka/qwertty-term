@@ -65,6 +65,10 @@
 //!   dropdown in (assert it becomes visible, its window frame lands at the
 //!   configured screen edge, and its shell echoes typed input), toggle it out
 //!   (assert hidden), and toggle back in (assert re-shown), then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_BELL=1` — run the bell smoke: feed a BEL into the
+//!   focused pane's engine, tick, and assert the tab shows the 🔔 title
+//!   indicator (default `bell-features` = attention+title); then refocus the
+//!   window and assert the indicator clears, then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -164,6 +168,9 @@ fn run_window() {
     // Quick-terminal smoke: toggle the dropdown in/out and assert visibility,
     // geometry, and a live shell.
     let smoke_quickterm = std::env::var_os("QWERTTY_TERM_SMOKE_QUICKTERM").is_some();
+    // Bell smoke: feed a BEL and assert the tab's 🔔 title indicator appears,
+    // then clears on refocus.
+    let smoke_bell = std::env::var_os("QWERTTY_TERM_SMOKE_BELL").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -177,6 +184,7 @@ fn run_window() {
         smoke_selection,
         smoke_title,
         smoke_quickterm,
+        smoke_bell,
     );
 }
 
