@@ -1261,11 +1261,17 @@ pub struct ControllerState {
     /// upstream's valid range.
     scroll_multiplier: crate::scroll::ScrollMultiplier,
     /// User keybindings parsed from `config.keybind` at startup into the ported
-    /// `Binding.zig` [`Set`](qwertty_term_input::binding::Set). Resolved in the
-    /// key path BEFORE the encoder; currently only `text:` actions are dispatched
-    /// from here (a bound chord sends its literal bytes instead of the encoder's
-    /// default) — the remaining actions are wired as the bespoke tables collapse.
+    /// `Binding.zig` [`Set`](qwertty_term_input::binding::Set), layered over the
+    /// default keymap. Resolved in the key path BEFORE the encoder: chord actions
+    /// (tab/split/search) via `perform_keybind_chord`, byte actions (`text:`/
+    /// `esc:`/`csi:`) via `crate::keybind::resolve_text_bytes`, and `>`-sequences
+    /// via `key_sequence` below.
     keybinds: qwertty_term_input::binding::Set,
+    /// In-progress leader-key sequence: the leader triggers pressed so far (e.g.
+    /// `[ctrl+a]` after pressing `ctrl+a` of a `ctrl+a>c` binding). `None` when
+    /// not mid-sequence. The next key is resolved against this path into
+    /// [`Self::keybinds`] (see `handle_key_sequence`).
+    key_sequence: Option<Vec<qwertty_term_input::binding::Trigger>>,
     /// Unfocused-split dimming overlay alpha (`1 - unfocused-split-opacity`,
     /// clamped). 0 disables dimming (opacity 1.0). Applied to unfocused panes of
     /// multi-pane tabs only.
@@ -1359,6 +1365,7 @@ impl Controller {
             }
             .clamped(),
             keybinds: crate::keybind::build_set(&config.keybind),
+            key_sequence: None,
             // Overlay alpha = 1 - opacity (upstream `SurfaceView.swift` getter),
             // opacity clamped to [0.15, 1.0]. Opacity 1.0 → alpha 0 → no dimming.
             unfocused_dim_alpha: 1.0 - config.unfocused_split_opacity(),
@@ -2382,6 +2389,90 @@ impl Controller {
             // it.
             _ => false,
         }
+    }
+
+    /// Feed a key to the leader-key sequence state machine (`ctrl+a>c`-style
+    /// bindings). Returns `true` if the key was consumed by sequence handling:
+    /// it started a sequence (a leader key), continued one (a further leader),
+    /// completed one (dispatching its action), or aborted one (an unrecognized
+    /// key mid-sequence is swallowed). Returns `false` when the key is not
+    /// sequence-related, so normal single-key handling proceeds. Called first in
+    /// `performKeyEquivalent:`.
+    ///
+    /// Deferred vs upstream (follow-ups): the idle **timeout** that auto-cancels a
+    /// dangling leader, and **flush-on-abort** (upstream replays the buffered keys
+    /// to the terminal; we drop them).
+    pub fn handle_key_sequence(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+        key: qwertty_term_input::key::Key,
+        mods: crate::tabkeys::TabMods,
+    ) -> bool {
+        use crate::keybind::SeqStep;
+
+        // Resolve the step against the current path under a short borrow.
+        let (step, in_sequence) = {
+            let state = self.0.borrow();
+            let path = state.key_sequence.as_deref().unwrap_or(&[]);
+            (
+                crate::keybind::sequence_step(&state.keybinds, path, key, mods),
+                state.key_sequence.is_some(),
+            )
+        };
+
+        match step {
+            // A leader key: enter a new sequence (path empty) or descend an
+            // existing one. Either way, consume and wait for the next key.
+            SeqStep::Descend(trigger) => {
+                self.0
+                    .borrow_mut()
+                    .key_sequence
+                    .get_or_insert_with(Vec::new)
+                    .push(trigger);
+                true
+            }
+            // Completing key of an in-progress sequence: dispatch + end.
+            SeqStep::Leaf(action) if in_sequence => {
+                self.0.borrow_mut().key_sequence = None;
+                self.dispatch_keybind_action(tab, surface, &action);
+                true
+            }
+            // Unrecognized key mid-sequence: abort (and swallow the key).
+            SeqStep::NoMatch if in_sequence => {
+                self.0.borrow_mut().key_sequence = None;
+                true
+            }
+            // Not in a sequence and not a leader — a top-level single-key binding
+            // (or nothing). Hand off to the normal single-key path, which routes
+            // menu-scoped actions to the menu and byte actions via keyDown.
+            SeqStep::Leaf(_) | SeqStep::NoMatch => false,
+        }
+    }
+
+    /// Dispatch an action resolved from a completed leader sequence: byte actions
+    /// (`text:`/`esc:`/`csi:`) write their bytes to the focused surface's pty;
+    /// chord actions go through [`Self::perform_keybind_chord`]. Menu-scoped
+    /// actions are not dispatched from here yet (they return `false`).
+    fn dispatch_keybind_action(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+        action: &qwertty_term_input::binding::Action,
+    ) -> bool {
+        if let Some(bytes) = crate::keybind::action_bytes(action) {
+            let mut state = self.0.borrow_mut();
+            if let Some(s) = state
+                .tabs
+                .get_mut(&tab)
+                .and_then(|t| t.surfaces.get_mut(&surface))
+            {
+                s.snap_to_bottom();
+                s.io.write(&bytes);
+            }
+            return true;
+        }
+        self.perform_keybind_chord(tab, action)
     }
 
     pub fn handle_tab_action(&self, action: TabAction) -> bool {

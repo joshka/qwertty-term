@@ -159,12 +159,16 @@ items are `[ ]` wholesale unless noted.
       macOS split/search/tab chords are now upstream's exact defaults. Remaining: wire
       the remaining action categories (font-size, scroll, clipboard, window, …) + the
       runtime sequence/chain (leader-key) dispatch.
-- [ ] Full `Binding.zig` system runtime: leader/chains dispatch, key tables, `global`
-      binds, `performable` fallthrough (model parsed; runtime `Set` pending)
-- [ ] Most keybind *actions*: `jump_to_prompt`, `write_scrollback_file`, `inspector`,
-      `scroll_page_*`, `adjust_selection`, `navigate_search` binds, `crash`, config-reload
-- [ ] `key-remap`, `keybind` config parsing beyond the `text:` subset (parse model
-      landed; app-crate dispatch wiring gated on T4)
+- [~] `Binding.zig` runtime: **leader-key sequences dispatched** (`ctrl+a>c`, via
+      `handle_key_sequence` — a leader stack over the `Set`'s `Leader`/`Leaf` storage;
+      idle-timeout + flush-on-abort deferred). Remaining: chained-action (`chain=`)
+      dispatch, key tables, `global` binds, `performable` fallthrough.
+- [ ] Most keybind *actions* that need new behavior: `jump_to_prompt`,
+      `write_scrollback_file`, `inspector`, `scroll_page_*`, `adjust_selection`,
+      `select_all`, `clear_screen`, `crash`, config-reload
+- [x] `keybind` config parsing — the full trigger/action grammar (not just `text:`)
+      parses and, for the wired action categories, dispatches
+- [ ] `key-remap` (`RemapSet` ported but unwired — issue #23)
 
 ## Mouse
 
