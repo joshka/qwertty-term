@@ -222,11 +222,17 @@ items are `[ ]` wholesale unless noted.
 - [x] Headless offscreen render + RGBA/PNG readback (`examples/frame-capture`)
 - [x] VT / fonts / renderer as plain Rust crates, no global state
 - [x] Injectable fonts; deterministic output (betamax reference consumer)
-- [~] Injectable clock (seams present; not all paths threaded)
+- [x] Embedding guide + one-call render API (`docs/embedding.md`; `Engine::render` →
+      `Frame`, `FullSnapshot::capture_live`, `Engine::for_grid`)
+- [x] MB4: betamax's offscreen render path (via `qwertty-term-renderer`) is exercised by
+      `examples/frame-capture`; betamax's own adoption tracked in the betamax repo
+- [~] Injectable clock (deterministic render proven; cursor-blink phase injected via
+      `FrameOptions`, but the blink *mode* isn't threaded through the snapshot yet — #57)
 - [x] **crates.io publish — all 8 crates at 0.1.0** (`qwertty-term` + `-vt`/`-font`/
       `-renderer`/`-termio`/`-input`/`-sprite`/`-ffi`; published 2026-07-08, docs.rs built)
-- [~] MB5 API polish (6 items from MB2: Display errors, matched Engine+Grid pair, RGBA
-      readback, one-call render) — may still remain despite the 0.1.0 cut
+- [x] MB5 API polish (Display/Error on font errors [already in 0.1.0]; matched `Engine::for_grid`;
+      typed `Frame` RGBA readback; one-call `Engine::render`; `Stream::terminal()`;
+      `capture_live`) — shipped in #5; docs.rs full-API + quickstart in #51
 
 ## Advanced / tooling
 
