@@ -140,9 +140,9 @@ items are `[ ]` wholesale unless noted.
 
 - [x] Kitty keyboard encoding, full legacy encoder, 117-entry macOS keymap
 - [x] Bracketed paste, `macos-option-as-alt`
-- [x] `keybind = text:` (custom byte sequences, e.g. shift+enter) — now dispatched
-      through the ported `Binding.zig` `Set` (`crate::keybind::build_set` /
-      `resolve_text_bytes`), retiring the bespoke `text:`-only table
+- [x] Byte-emitting keybinds `text:` / `esc:` / `csi:` (e.g. shift+enter, the
+      default `alt+left`=esc:b word-motion) — dispatched through the ported
+      `Binding.zig` `Set` (`crate::keybind::build_set` / `resolve_text_bytes`)
 - [~] Font-size binds (increase/decrease/set) — actions exist, not all wired to config
 - [~] `Binding.zig` port in `qwertty-term-input::binding`: trigger/action/flags model
       + parse layer (10-rule `Trigger::parse`, 85-action enum + `Action::parse`, flag

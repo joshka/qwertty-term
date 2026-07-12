@@ -58,18 +58,34 @@ pub fn resolve_action(set: &Set, key: Key, mods: TabMods) -> Option<Action> {
     lookup_action(set, key, to_mods(mods)).cloned()
 }
 
-/// Resolve a physical key + modifier state to the bytes a `text:` binding emits,
-/// or `None` if no `text:` binding matches. Probes the physical trigger first,
-/// then the key's Unicode codepoint (mirroring the first two probes of
-/// [`Set::get_event`]) — a `text:` binding may be declared either way
-/// (`shift+enter` parses to physical `enter`; `ctrl+a` parses to unicode `a`).
+/// Resolve a physical key + modifier state to the bytes a byte-emitting binding
+/// sends to the pty (`text:` / `esc:` / `csi:`), or `None` for any other (or no)
+/// binding. Probes the physical trigger first, then the key's Unicode codepoint
+/// (mirroring the first two probes of [`Set::get_event`]) — a byte binding may be
+/// declared either way (`shift+enter` parses to physical `enter`; `ctrl+a` parses
+/// to unicode `a`).
 ///
-/// Only `text:` is dispatched here for now; any other bound action falls through
-/// (returns `None`), preserving today's behaviour until the remaining actions
-/// are wired.
+/// The three byte actions, per `Surface.performBindingAction` (Binding.zig /
+/// Surface.zig): `text:` sends its Zig-string-literal value decoded via
+/// [`unescape_text`]; `esc:` sends `ESC` + the raw value; `csi:` sends `ESC [` +
+/// the raw value (the value is not string-literal-unescaped for `esc`/`csi`).
+/// This is what makes e.g. the default `alt+left`=`esc:b` / `alt+right`=`esc:f`
+/// word-motion bindings work. Non-byte actions fall through (`None`) — chord
+/// actions dispatch via [`crate::app::Controller::perform_keybind_chord`], and
+/// menu-covered chords via the menu.
 pub fn resolve_text_bytes(set: &Set, key: Key, mods: TabMods) -> Option<Vec<u8>> {
     match lookup_action(set, key, to_mods(mods))? {
         Action::Text(value) => unescape_text(value).ok(),
+        Action::Esc(value) => {
+            let mut bytes = vec![0x1b];
+            bytes.extend_from_slice(value.as_bytes());
+            Some(bytes)
+        }
+        Action::Csi(value) => {
+            let mut bytes = vec![0x1b, b'['];
+            bytes.extend_from_slice(value.as_bytes());
+            Some(bytes)
+        }
         _ => None,
     }
 }
@@ -186,6 +202,21 @@ mod tests {
         }
     }
 
+    fn alt() -> TabMods {
+        TabMods {
+            alt: true,
+            ..Default::default()
+        }
+    }
+
+    fn ctrl_alt() -> TabMods {
+        TabMods {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn maintainer_shift_enter_binding_sends_esc_cr() {
         // The maintainer's real config line.
@@ -211,6 +242,25 @@ mod tests {
         assert_eq!(
             resolve_text_bytes(&set, Key::KeyA, ctrl()),
             Some(b"\x1b[A".to_vec())
+        );
+    }
+
+    #[test]
+    fn esc_action_sends_esc_plus_value() {
+        // The default `alt+left`=`esc:b` word-motion binding: ESC + "b".
+        let set = build_set(&["alt+left=esc:b".to_string()]);
+        assert_eq!(
+            resolve_text_bytes(&set, Key::ArrowLeft, alt()),
+            Some(b"\x1bb".to_vec())
+        );
+    }
+
+    #[test]
+    fn csi_action_sends_esc_bracket_plus_value() {
+        let set = build_set(&["ctrl+alt+a=csi:1;2A".to_string()]);
+        assert_eq!(
+            resolve_text_bytes(&set, Key::KeyA, ctrl_alt()),
+            Some(b"\x1b[1;2A".to_vec())
         );
     }
 
