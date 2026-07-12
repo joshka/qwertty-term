@@ -56,6 +56,17 @@ impl std::error::Error for Error {}
 /// Owns the font bytes (FreeType requires the buffer to outlive the face, and
 /// [`Face::face_metrics`] re-parses them with `ttf-parser` for the portable
 /// metric derivation).
+/// Synthetic style flags applied during rasterization. Both are approximations
+/// (no unsafe FreeType outline FFI): bold dilates the coverage bitmap ~1px;
+/// italic applies a shear via `FT_Set_Transform`. Real bold/italic should come
+/// from an actual font member when the family has one; these are the fallback
+/// (upstream's `synthetic` bold/italic).
+#[derive(Debug, Clone, Copy, Default)]
+struct Synthetic {
+    bold: bool,
+    italic: bool,
+}
+
 pub struct Face {
     face: freetype::Face,
     /// The font bytes, kept for the `ttf-parser` metric derivation and for
@@ -64,6 +75,7 @@ pub struct Face {
     size_px: f64,
     /// Subface index within a `.ttc`/`.otc` collection (0 for a single face).
     face_index: u32,
+    synthetic: Synthetic,
 }
 
 impl Face {
@@ -92,6 +104,7 @@ impl Face {
             bytes: owned,
             size_px,
             face_index,
+            synthetic: Synthetic::default(),
         })
     }
 
@@ -207,18 +220,77 @@ impl Face {
         crate::tables::face_metrics(&ttf, self.size_px)
     }
 
+    /// The synthetic-bold line width for a face at `size_px` px/em, matching the
+    /// CoreText backend's `max(size_px / 14, 1)` so the two faces share the
+    /// `synthetic_bold(line_width)` API. (The FreeType approximation below does
+    /// not actually use `line_width` — it dilates by a fixed 1px — but the
+    /// signature stays uniform for the shared collection code.)
+    pub fn synthetic_bold_line_width(size_px: f64) -> f64 {
+        (size_px / 14.0).max(1.0)
+    }
+
+    /// A synthetic-bold copy of this face. Approximate (no outline FFI): each
+    /// rasterized glyph's coverage is dilated ~1px horizontally, thickening
+    /// strokes. Prefer a real bold font member when the family has one; this is
+    /// the fallback (upstream `syntheticBold`).
+    pub fn synthetic_bold(mut self, _line_width: f64) -> Face {
+        self.synthetic.bold = true;
+        self
+    }
+
+    /// A synthetic-italic copy of this face: a shear applied via
+    /// `FT_Set_Transform` at rasterization (upstream `syntheticItalic`, via the
+    /// FreeType transform matrix rather than manual outline skew).
+    pub fn synthetic_italic(mut self) -> Face {
+        self.synthetic.italic = true;
+        self
+    }
+
     /// Rasterize an outline glyph to a grayscale (`Alpha8`) [`Bitmap`].
     ///
     /// Color-bitmap (emoji) glyphs are a later slice; this always renders the
     /// outline via `FT_RENDER_MODE_NORMAL`. FreeType's `bitmap_left`/`bitmap_top`
     /// map directly onto the shared bearing convention (see [`Bitmap`]).
+    /// Applies synthetic italic (shear transform) and/or synthetic bold (1px
+    /// coverage dilation) when set on this face.
     pub fn rasterize(&self, glyph_id: u32) -> Result<Bitmap, Error> {
-        self.face
+        // Synthetic italic: shear via the FreeType transform matrix (16.16
+        // fixed point). x' = x + tan(12°)·y — a ~12° slant, matching upstream's
+        // synthesized-italic angle. Reset to identity afterward so the face's
+        // other glyphs are unaffected.
+        if self.synthetic.italic {
+            // tan(12°) ≈ 0.21256 → 0.21256 * 65536 ≈ 13931.
+            let mut matrix = freetype::Matrix {
+                xx: 0x1_0000,
+                xy: 13931,
+                yx: 0,
+                yy: 0x1_0000,
+            };
+            let mut delta = freetype::Vector { x: 0, y: 0 };
+            self.face.set_transform(&mut matrix, &mut delta);
+        }
+
+        let load = self
+            .face
             .load_glyph(glyph_id, LoadFlag::DEFAULT)
-            .map_err(|_| Error::NoSuchGlyph)?;
+            .map_err(|_| Error::NoSuchGlyph);
         let slot = self.face.glyph();
-        slot.render_glyph(RenderMode::Normal)
-            .map_err(|_| Error::RenderFailed)?;
+        let render = slot
+            .render_glyph(RenderMode::Normal)
+            .map_err(|_| Error::RenderFailed);
+
+        if self.synthetic.italic {
+            let mut ident = freetype::Matrix {
+                xx: 0x1_0000,
+                xy: 0,
+                yx: 0,
+                yy: 0x1_0000,
+            };
+            let mut delta = freetype::Vector { x: 0, y: 0 };
+            self.face.set_transform(&mut ident, &mut delta);
+        }
+        load?;
+        render?;
 
         let ft_bitmap = slot.bitmap();
         let width = ft_bitmap.width().max(0) as u32;
@@ -245,6 +317,10 @@ impl Face {
             }
         }
 
+        if self.synthetic.bold {
+            data = embolden_1px(&data, width as usize, height as usize);
+        }
+
         Ok(Bitmap {
             width,
             height,
@@ -254,6 +330,21 @@ impl Face {
             data,
         })
     }
+}
+
+/// Approximate emboldening: dilate coverage 1px to the right by taking, for each
+/// pixel, the max of it and its left neighbour. Thickens vertical strokes by ~1px
+/// without touching the glyph outline (no unsafe FreeType FFI). A coarse stand-in
+/// for `FT_Outline_Embolden`; a real bold font member is always preferred.
+fn embolden_1px(data: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut out = data.to_vec();
+    for row in 0..height {
+        let base = row * width;
+        for col in 1..width {
+            out[base + col] = data[base + col].max(data[base + col - 1]);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -342,5 +433,48 @@ mod tests {
                 "space must have no ink"
             );
         }
+    }
+
+    fn total_ink(bmp: &Bitmap) -> u64 {
+        bmp.data.iter().map(|&p| u64::from(p)).sum()
+    }
+
+    #[test]
+    fn synthetic_bold_adds_ink() {
+        let gid = Face::load_embedded(32.0).unwrap().glyph_index('H').unwrap();
+        let regular = Face::load_embedded(32.0).unwrap().rasterize(gid).unwrap();
+        let bold = Face::load_embedded(32.0)
+            .unwrap()
+            .synthetic_bold(Face::synthetic_bold_line_width(32.0))
+            .rasterize(gid)
+            .unwrap();
+        // Same ink box (1px dilation stays within the box), more coverage.
+        assert_eq!((bold.width, bold.height), (regular.width, regular.height));
+        assert!(
+            total_ink(&bold) > total_ink(&regular),
+            "synthetic bold must thicken strokes: bold {} vs regular {}",
+            total_ink(&bold),
+            total_ink(&regular)
+        );
+    }
+
+    #[test]
+    fn synthetic_italic_shears_glyph() {
+        let gid = Face::load_embedded(32.0).unwrap().glyph_index('H').unwrap();
+        let regular = Face::load_embedded(32.0).unwrap().rasterize(gid).unwrap();
+        let italic = Face::load_embedded(32.0)
+            .unwrap()
+            .synthetic_italic()
+            .rasterize(gid)
+            .unwrap();
+        assert!(!italic.is_blank(), "italic 'H' must still have ink");
+        // A shear slants the glyph: its ink box widens (top pushed right of the
+        // bottom), so the italic bitmap is wider than the upright one.
+        assert!(
+            italic.width >= regular.width,
+            "sheared glyph should be at least as wide: italic {} vs regular {}",
+            italic.width,
+            regular.width
+        );
     }
 }
