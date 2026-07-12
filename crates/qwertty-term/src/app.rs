@@ -2282,18 +2282,31 @@ impl Controller {
     pub fn handle_keybind_chord(
         &self,
         tab: TabId,
+        surface: SurfaceId,
         key: qwertty_term_input::key::Key,
         mods: crate::tabkeys::TabMods,
     ) -> bool {
         // Resolve under a short immutable borrow, then dispatch (the handlers
-        // take their own borrows).
-        let action = {
+        // take their own borrows). A plain binding yields one action; a `chain=`
+        // binding yields several, run in order.
+        let actions = {
             let state = self.0.borrow();
-            crate::keybind::resolve_action(&state.keybinds, key, mods)
+            crate::keybind::resolve_actions(&state.keybinds, key, mods)
         };
-        match action {
-            Some(action) => self.perform_keybind_chord(tab, &action),
-            None => false,
+        match actions.as_slice() {
+            [] => false,
+            // A single action: return whether it was performed, so menu-scoped
+            // actions (which `dispatch_keybind_action` reports as not-performed)
+            // fall through to the menu — preserving pre-chain behaviour.
+            [single] => self.dispatch_keybind_action(tab, surface, single),
+            // A chained binding is explicitly bound to this trigger: run every
+            // action and consume the key.
+            many => {
+                for action in many {
+                    self.dispatch_keybind_action(tab, surface, action);
+                }
+                true
+            }
         }
     }
 
@@ -2446,10 +2459,13 @@ impl Controller {
                     .push(trigger);
                 true
             }
-            // Completing key of an in-progress sequence: dispatch + end.
-            SeqStep::Leaf(action) if in_sequence => {
+            // Completing key of an in-progress sequence: dispatch its action(s)
+            // (a `chain=` leaf runs several, in order) and end the sequence.
+            SeqStep::Leaf(actions) if in_sequence => {
                 self.0.borrow_mut().key_sequence = None;
-                self.dispatch_keybind_action(tab, surface, &action);
+                for action in &actions {
+                    self.dispatch_keybind_action(tab, surface, action);
+                }
                 true
             }
             // Unrecognized key mid-sequence: abort (and swallow the key).

@@ -451,7 +451,7 @@ impl TerminalView {
     fn try_handle_keybind_chord(&self, event: &NSEvent) -> bool {
         let key = key_from_macos_keycode(event.keyCode());
         let mods = tab_mods_from_flags(event.modifierFlags());
-        let tab = self.ivars().tab;
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
         // One lookup against the unified keybind `Set` (default keymap + user
         // config), replacing the former separate search / split / tab tables. The
         // `Set` holds at most one binding per trigger, so there's no cross-table
@@ -459,7 +459,7 @@ impl TerminalView {
         // anything else (menu / byte actions) returns false and falls through to
         // `keyDown:`. `end_search` self-gates on an open search bar so a plain
         // Escape still reaches the PTY encoder.
-        self.with_controller(|c| c.handle_keybind_chord(tab, key, mods))
+        self.with_controller(|c| c.handle_keybind_chord(tab, surface, key, mods))
             .unwrap_or(false)
     }
 
