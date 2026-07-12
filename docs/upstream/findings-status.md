@@ -14,6 +14,30 @@
   `issue-3-osc21-query-reply.md`, `issue-4-color-operation-leak.md` in this directory.
   Drafts only — nothing filed.
 
+## Re-verification 2026-07-11 (T8) vs current main `a887df42c` — dispositions changed
+
+Re-checked all four findings against upstream main `a887df42c` (fetched 2026-07-11, 102 commits
+past the pin — see `drift.md`). **Two findings are now resolved upstream:**
+
+- **Finding 1 — `highlight.Flattened.init` compile bugs → STILL LIVE, fileable** (pending Josh).
+  `highlight.zig` at `a887df42c` still has `MultiArrayList(PageChunk)` (:146),
+  `.serial = chunk.node.serial` (:151), and `.end_x = end.x` (:158).
+- **Finding 2 — `max_scrollback` doc says lines, is bytes → do not file** (duplicate). Header
+  still says "lines" (`terminal.h:187`); still a dup of discussion #12769.
+- **Finding 3 — OSC color queries get no lib-vt reply → RESOLVED upstream, do not file.**
+  `14c829883` (2026-07-07) "report OSC color queries in lib-vt" implements OSC 4/10/11/12 plus
+  Kitty OSC 21 replies via the `write_pty` effect (PR #12631's successor). Now a port-side
+  *feature* gap → T5 Inbox.
+- **Finding 4 — `Parser.reset()` leaks `color_operation` list → RESOLVED upstream, do not file.**
+  `14c829883`'s `osc.zig` reset now deinits the `color_operation` requests list. Now a port-side
+  *bug to mirror* → T1 Inbox.
+
+**Net (updated):** one fileable finding remains, Finding 1 (pending Josh's approval to file);
+Finding 2 is a duplicate; Findings 3 and 4 are fixed upstream. Findings 3 (feature) and 4
+(bug-mirror) are now port work routed to the owning threads' Inboxes, not upstream reports. The
+original analysis below is retained for provenance; it reflects the `c41c6b81a464` (2026-07-07)
+checkout.
+
 ## Finding 1 — `highlight.zig` `Flattened.init` does not compile: **CONFIRMED** (and worse than analyzed)
 
 - `src/terminal/highlight.zig` `Flattened.init` is dead code (zero in-tree callers; the
@@ -63,7 +87,9 @@
   the stale one.
 - **Rust port note:** treat the field as bytes; expose 0 = no scrollback.
 
-## Finding 3 — OSC 21 queries get no reply: **NOT CONFIRMED AS STATED** (analysis was wrong for the app; real but different gap in libghostty-vt)
+## Finding 3 — OSC 21 queries get no reply: **NOT CONFIRMED AS STATED**
+
+(Analysis was wrong for the app; real but different gap in libghostty-vt.)
 
 - The claim "the parser produces `kitty_color_protocol` commands but no response-writer
   exists (compare OSC 4/10/11 in src/termio/stream_handler.zig)" is **wrong at HEAD and
@@ -118,14 +144,27 @@
 
 ## Tracker cross-check (searched issues + discussions + PRs, 2026-07-07)
 
-| Finding | Duplicate on tracker? | Action |
-| --- | --- | --- |
-| 1 — Flattened.init | **None** (9 searches, clean; only unrelated hits) | New — file it |
-| 2 — max_scrollback doc | **YES** — [discussion #12769](https://github.com/ghostty-org/ghostty/discussions/12769) (Issue Triage, open, 2026-05-22) reports the exact lines-vs-bytes doc mismatch | Do NOT file. Optionally upvote / add the `Screen.zig` "zero" contradiction as a comment |
-| 3 — color query replies | **Partial** — open [PR #12631](https://github.com/ghostty-org/ghostty/pull/12631) "libghostty-vt: handle OSC color queries" (noib3, open, mergeable, not updated since 2026-05-08) implements the lib-layer `.query` arm for OSC 10/11/12 and (via a `colorQuery` palette helper) OSC 4. Its added test covers only 10/11. **OSC 21 (kitty) `.query` in `kittyColorOperation` is NOT addressed.** Also closed [issue #7951](https://github.com/ghostty-org/ghostty/issues/7951) covered app-layer reply *formatting/batching* (different bug). | Don't file 10/11/12 (redundant with #12631). The OSC 21 lib gap looks untracked — a comment on #12631 asking whether kitty OSC 21 is in scope is the lightest-touch option. Low priority since the app already replies. |
-| 4 — color_operation leak | **None** (8 searches, clean). Leak surface was introduced by merged [PR #7429](https://github.com/ghostty-org/ghostty/pull/7429) "OSC: allow multiple set/reset/report operations per OSC" (2025-05-30), which added the `SegmentedList`-backed `requests` | New — file it |
+> Superseded for findings 3 and 4 by the 2026-07-11 re-verification above — both are now fixed
+> in upstream main. This section reflects the tracker state as of 2026-07-07.
 
-**Net:** two genuinely new, fileable findings (1 and 4); one duplicate (2); one already-in-progress-but-partial (3).
+- **1 — Flattened.init:** no duplicate (9 searches, clean; only unrelated hits). New — file it.
+- **2 — max_scrollback doc:** duplicate of
+  [discussion #12769](https://github.com/ghostty-org/ghostty/discussions/12769) (Issue Triage,
+  open, 2026-05-22), which reports the exact lines-vs-bytes doc mismatch. Do NOT file; optionally
+  upvote / add the `Screen.zig` "zero" contradiction as a comment.
+- **3 — color query replies:** was partial — open
+  [PR #12631](https://github.com/ghostty-org/ghostty/pull/12631) "libghostty-vt: handle OSC color
+  queries" implemented the lib-layer `.query` arm for OSC 10/11/12 and (via a `colorQuery` helper)
+  OSC 4, but not OSC 21 (kitty). Closed [issue #7951](https://github.com/ghostty-org/ghostty/issues/7951)
+  covered app-layer reply formatting (a different bug). **Now moot: `14c829883` merged the full
+  OSC 4/10/11/12/21 lib-vt reply support (2026-07-07).**
+- **4 — color_operation leak:** no duplicate (8 searches, clean). Leak surface was introduced by
+  merged [PR #7429](https://github.com/ghostty-org/ghostty/pull/7429) "OSC: allow multiple
+  set/reset/report operations per OSC" (2025-05-30), which added the `SegmentedList`-backed
+  `requests`. **Now fixed upstream in `14c829883`.**
+
+**Net (as of 2026-07-07):** two new fileable findings (1 and 4); one duplicate (2); one
+in-progress-but-partial (3). See the 2026-07-11 re-verification above for the current dispositions.
 
 ## Contribution process (see `contribution-process.md` in this dir for the full writeup)
 
