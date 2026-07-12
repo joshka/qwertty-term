@@ -665,6 +665,47 @@ fn decrqss_sgr_reply() {
     assert_eq!(s.handler.take_output(), b"\x1BP1$r0;1;31m\x1B\\");
 }
 
+// An unrecognized DECRQSS setting still gets a reply: the invalid form
+// `\eP0$r\e\\` (valid=0), matching xterm/upstream (we ALWAYS answer).
+#[test]
+fn decrqss_invalid_replies_zero() {
+    let mut s = term(20, 4);
+    s.feed(b"\x1BP$qz\x1B\\"); // 'z' is not a known DECRQSS setting
+    assert_eq!(s.handler.take_output(), b"\x1BP0$r\x1B\\");
+}
+
+// DECRQSS DECSCUSR (`\eP$q q\e\\`) reports the cursor style + blink as the
+// 1..6 DECSCUSR parameter.
+#[test]
+fn decrqss_decscusr_reply() {
+    let mut s = term(20, 4);
+    // Steady block (CSI 2 SP q) -> "2 q".
+    s.feed(b"\x1B[2 q");
+    s.feed(b"\x1BP$q q\x1B\\");
+    assert_eq!(s.handler.take_output(), b"\x1BP1$r2 q\x1B\\");
+
+    // Blinking bar (CSI 5 SP q) -> "5 q".
+    s.feed(b"\x1B[5 q");
+    s.feed(b"\x1BP$q q\x1B\\");
+    assert_eq!(s.handler.take_output(), b"\x1BP1$r5 q\x1B\\");
+}
+
+// DECRQSS DECSLRM only reports when left/right-margin mode (DECLRMM, mode 69)
+// is enabled; otherwise the request is invalid (valid=0).
+#[test]
+fn decrqss_decslrm_gated_on_declrmm() {
+    let mut s = term(20, 4);
+    // Margin mode off -> invalid.
+    s.feed(b"\x1BP$qs\x1B\\");
+    assert_eq!(s.handler.take_output(), b"\x1BP0$r\x1B\\");
+
+    // Enable DECLRMM (mode 69) and set margins (DECSLRM: cols 3..10) -> report.
+    s.feed(b"\x1B[?69h");
+    s.feed(b"\x1B[3;10s");
+    s.feed(b"\x1BP$qs\x1B\\");
+    assert_eq!(s.handler.take_output(), b"\x1BP1$r3;10s\x1B\\");
+}
+
 // Primary device attributes reply.
 #[test]
 fn da_primary_reply() {
