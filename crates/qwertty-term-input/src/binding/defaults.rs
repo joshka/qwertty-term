@@ -36,8 +36,8 @@ use crate::key::Key;
 use crate::key_mods::Mods;
 
 use super::action::{
-    Action, CloseTabMode, CopyToClipboard, NavigateSearch, ResizeSplit, SplitDirection,
-    SplitFocusDirection, SplitResizeDirection, WriteScreen, WriteScreenAction, WriteScreenFormat,
+    Action, CloseTabMode, CopyToClipboard, ResizeSplit, SplitDirection, SplitFocusDirection,
+    SplitResizeDirection, WriteScreen, WriteScreenAction, WriteScreenFormat,
 };
 use super::flags::Flags;
 use super::parser::Binding;
@@ -397,12 +397,12 @@ fn build_macos(set: &mut Set) {
     put_perf(
         set,
         uni('g', mods!(super_)),
-        Action::NavigateSearch(NavigateSearch::Next),
+        Action::NavigateSearch(super::action::NavigateSearch::Next),
     ); // 7093
     put_perf(
         set,
         uni('g', mods!(super_, shift)),
-        Action::NavigateSearch(NavigateSearch::Previous),
+        Action::NavigateSearch(super::action::NavigateSearch::Previous),
     ); // 7099
 
     // Inspector, matching Chromium (Config.zig:7106-7111).
