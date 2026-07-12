@@ -613,6 +613,44 @@ fn cpr_reply() {
     assert_eq!(out, b"\x1B[3;5R");
 }
 
+// The private form `CSI ? 6 n` is NOT a CPR request — upstream's entry table
+// only accepts `CSI 6 n` (question=false). We must stay silent, not reply CPR.
+#[test]
+fn dsr_private_6_is_rejected() {
+    let mut s = term(80, 24);
+    s.feed(b"\x1B[3;5H");
+    s.feed(b"\x1B[?6n");
+    assert!(
+        s.handler.take_output().is_empty(),
+        "CSI ? 6 n must not produce a CPR reply"
+    );
+}
+
+// `CSI ? 996 n` (DSR color-scheme) with no scheme set stays silent, mirroring
+// upstream's null `color_scheme` effect.
+#[test]
+fn dsr_color_scheme_unset_is_silent() {
+    let mut s = term(80, 24);
+    s.feed(b"\x1B[?996n");
+    assert!(s.handler.take_output().is_empty());
+}
+
+// Once a scheme is set, `CSI ? 996 n` reports it: dark -> `?997;1n`,
+// light -> `?997;2n`.
+#[test]
+fn dsr_color_scheme_reports_when_set() {
+    use crate::stream::ColorScheme;
+
+    let mut s = term(80, 24);
+    s.handler.set_color_scheme(ColorScheme::Dark);
+    s.feed(b"\x1B[?996n");
+    assert_eq!(s.handler.take_output(), b"\x1B[?997;1n");
+
+    s.handler.set_color_scheme(ColorScheme::Light);
+    s.feed(b"\x1B[?996n");
+    assert_eq!(s.handler.take_output(), b"\x1B[?997;2n");
+}
+
 // DECRQSS SGR query reflects the active attributes.
 #[test]
 fn decrqss_sgr_reply() {
