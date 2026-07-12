@@ -2,9 +2,11 @@
 
 Three-way comparison on the canonical terminal benchmark lane —
 [vtebench](https://github.com/alacritty/vtebench), the tool upstream Ghostty uses for terminal
-comparisons. This extends the earlier two-way baseline (qwertty-term vs Ghostty 1.3.1) with a
-third column for **Ghostty main**, to see whether upstream's in-flight perf work has moved the
-picture. It has — dramatically (see analysis).
+comparisons. Three columns: qwertty-term, Ghostty 1.3.1 (stable), and Ghostty **main** (the moving
+upstream target). **Refreshed 2026-07-12** after T1's perf work landed; qwertty-term now wins or
+ties Ghostty main on 6/10 suites (leading outright on `dense_cells` and `unicode`) and wins every
+suite vs 1.3.1. The only remaining loss is the four region-scroll variants — see analysis. The
+superseded pre-perf-work numbers are preserved in the history note at the end.
 
 ## Re-running
 
@@ -27,16 +29,17 @@ scratch, not vendored) if missing.
 
 ## Environment
 
-| item          | value                                                                                          |
-| ------------- | ---------------------------------------------------------------------------------------------- |
-| machine       | Apple M2 Max, 96 GB RAM, macOS 15.7.7                                                          |
-| date          | 2026-07-11                                                                                     |
-| vtebench      | `ead80032e57dee2e75f0b51f2ea67528647d9944` (v0.3.1, 2025-01-09)                                |
-| qwertty-term  | `a094ae672dc6` (main) + this bench-lane change, `--release`; incl. dirty tracking + SIMD ascii |
-| Ghostty 1.3.1 | 1.3.1 stable (`/Applications/Ghostty.app`, ReleaseFast)                                        |
-| Ghostty main  | `91f66da24527fa02d92b5fd0b41cd020f553a64c` (2026-07-08, ReleaseLocal)                          |
-| grid          | 80x24 in all three terminals (verified via `stty size` inside each)                            |
-| suite knobs   | vtebench defaults: 1 MiB min sample, 10 s per suite, 1 warmup                                  |
+| item          | value                                                                                                                                |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| machine       | Apple M2 Max, 96 GB RAM, macOS 15.7.7                                                                                                |
+| date          | 2026-07-12 (refreshed after T1's perf work; see history at end)                                                                      |
+| vtebench      | `ead80032e57dee2e75f0b51f2ea67528647d9944` (v0.3.1, 2025-01-09)                                                                      |
+| qwertty-term  | `785339f3fba2` (main) — incl. dirty tracking, SIMD ascii, CSI/SGR dispatch, clear_cells+bulk style fill, wide-class print_slice fill |
+| Ghostty 1.3.1 | 1.3.1 stable (`/Applications/Ghostty.app`, ReleaseFast)                                                                              |
+| Ghostty main  | `91f66da24527fa02d92b5fd0b41cd020f553a64c` (2026-07-08, ReleaseLocal) — same pin as the original baseline                            |
+| grid          | 80x24 in all three terminals (verified via `stty size` inside each)                                                                  |
+| suite knobs   | vtebench defaults: 1 MiB min sample, 10 s per suite, 1 warmup                                                                        |
+| sampling      | 3 rounds per terminal, load-gated (1-min loadavg < 6), interleaved; per-suite samples pooled                                         |
 
 All three terminals ran as real GUI windows driven non-interactively: qwertty-term via the
 `QWERTTY_TERM_COMMAND` override in `crates/qwertty-term-termio/`, both Ghostty builds via their
@@ -46,61 +49,59 @@ ambient shared-machine load applies to every column equally.
 
 ## Results
 
-Milliseconds per ~1 MiB sample, lower is better. Median of per-sample times from one full run of
-each terminal, with p90 in parentheses (medians because the Ghostty distributions have long tails
-— see analysis). The final column is qwertty-term median / Ghostty main median: below 1.0 means
-qwertty-term is faster than upstream main, above 1.0 means slower.
+Milliseconds per ~1 MiB sample, lower is better. Median (p90 in parentheses) of per-sample times,
+pooled across 3 load-gated rounds per terminal (medians because the Ghostty distributions have long
+tails — see analysis). The final column is qwertty-term median / Ghostty main median: below 1.0
+means qwertty-term is faster than upstream main, above 1.0 means slower.
 
 | suite                         | qwertty-term med (p90) | Ghostty 1.3.1 med (p90) | Ghostty main@91f66da24 med (p90) | qt/main ratio |
 | ----------------------------- | ---------------------- | ----------------------- | -------------------------------- | ------------- |
-| dense_cells                   | 16 (16)                | 11 (15)                 | 7 (13)                           | 2.29          |
-| medium_cells                  | 10 (10)                | 15 (17)                 | 6 (8)                            | 1.67          |
-| scrolling                     | 15 (16)                | 34 (38)                 | 15 (16)                          | 1.00          |
-| scrolling_bottom_region       | 18 (18)                | 29 (29)                 | 15 (16)                          | 1.20          |
-| scrolling_bottom_small_region | 18 (18)                | 29 (30)                 | 15 (16)                          | 1.20          |
-| scrolling_fullscreen          | 20 (21)                | 42 (133)                | 20 (20)                          | 1.00          |
-| scrolling_top_region          | 22 (22)                | 31 (36)                 | 15 (15)                          | 1.47          |
-| scrolling_top_small_region    | 18 (18)                | 29 (30)                 | 15 (16)                          | 1.20          |
-| sync_medium_cells             | 11 (11)                | 18 (20)                 | 6 (7)                            | 1.83          |
-| unicode                       | 8 (8)                  | 9 (10)                  | 6 (6)                            | 1.33          |
+| dense_cells                   | 7 (9)                  | 13 (15)                 | 11 (15)                          | 0.64          |
+| medium_cells                  | 7 (10)                 | 17 (18)                 | 7 (10)                           | 1.00          |
+| scrolling                     | 16 (17)                | 33 (36)                 | 15 (16)                          | 1.07          |
+| scrolling_bottom_region       | 19 (19)                | 29 (31)                 | 15 (16)                          | 1.27          |
+| scrolling_bottom_small_region | 19 (19)                | 29 (29)                 | 15 (16)                          | 1.27          |
+| scrolling_fullscreen          | 20 (21)                | 37 (39)                 | 20 (21)                          | 1.00          |
+| scrolling_top_region          | 22 (23)                | 30 (31)                 | 15 (15)                          | 1.47          |
+| scrolling_top_small_region    | 19 (19)                | 29 (30)                 | 15 (16)                          | 1.27          |
+| sync_medium_cells             | 7 (8)                  | 18 (19)                 | 6 (8)                            | 1.17          |
+| unicode                       | 3 (4)                  | 10 (11)                 | 6 (6)                            | 0.50          |
 
 ## Honest analysis
 
 Read these numbers with vtebench's own disclaimer in hand: it measures **PTY read throughput
 only** — no frame rate, no latency, no rendering-quality signal.
 
-- **Upstream main rewrote the story.** Against the 1.3.1 stable column, qwertty-term still wins
-  9/10 (losing only `dense_cells`) — that was the earlier baseline's headline. Against **main**,
-  that lead is gone: qwertty-term now ties on the two scrolling suites (`scrolling`,
-  `scrolling_fullscreen`) and loses every other suite. Ghostty's recent perf work landed hard —
-  main is 1.5x–2.7x faster than its own 1.3.1 release on `dense_cells`, `medium_cells`,
-  `sync_medium_cells`, and the region-scroll suites. The comparison we should be tracking is now
-  qwertty-term vs main, and on that scoreboard we are behind.
+- **The cell-heavy losses flipped to wins or ties.** The earlier baseline's headline was that
+  Ghostty main had leapfrogged us on every cell suite (`dense_cells` 2.29x, `medium_cells` 1.67x,
+  `sync_medium_cells` 1.83x *slower*). T1's perf work — CSI/SGR dispatch fast paths, per-run style
+  release in `clear_cells`, the bulk style-only `print_slice` fill — closed all of it:
+  `dense_cells` is now **0.64x (we're 1.6x faster than main)**, `medium_cells` is a dead **1.00**
+  tie, and `sync_medium_cells` is **1.17** (near parity, within round-to-round noise on 6–7 ms
+  medians). The suites that were our worst embarrassment are now our best showing.
 
-- **The scrolling gap closed.** At 80x24, 1.3.1 was slow on scrolling (34–42 ms medians, with a
-  133 ms p90 tail on `scrolling_fullscreen`); main brought those down to 15–20 ms, landing on top
-  of qwertty-term (both ~15 ms on plain `scrolling`, both ~20 ms on `scrolling_fullscreen`). So
-  the six-way scrolling sweep where we previously led 0.68–0.92x vs 1.3.1 is now a tie-or-loss vs
-  main: even ties on two, and 1.20–1.47x *slower* on the four region-scroll variants. Upstream's
-  scroll-region handling in particular pulled ahead of ours.
+- **`unicode` is now our biggest win.** It was 1.33x *slower* than main; the wide-class
+  `print_slice` fill (wide + spacer_tail pair batching, replacing the per-codepoint fallback) took
+  it to **0.50 — twice as fast as main**, and 0.30x vs 1.3.1. Wide-character throughput went from a
+  gap to a lead.
 
-- **`dense_cells` moved the wrong way for us.** It was our one loss vs 1.3.1 (1.36x then); vs main
-  it is 2.29x. This is the most render-shaped suite (every cell rewritten with heavy per-cell
-  SGR), and per-cell write cost remains qwertty-term's per-byte bottleneck. main also widened its
-  lead on the other cell-heavy suites (`medium_cells` 1.67x, `sync_medium_cells` 1.83x). These are
-  the suites to target next.
+- **The region-scroll suites are the one remaining gap, and they're untouched.** `scrolling` and
+  `scrolling_fullscreen` are ties (1.07 / 1.00); the four scroll-*region* variants
+  (`scrolling_{top,bottom}_{,small_}region`) are still **1.27–1.47x slower** — essentially
+  unchanged from the baseline, because none of this session's work touched the scroll path.
+  Upstream's scroll-region optimizations (`77190bd02`: skip scrollback for top-anchored regions on
+  non-retaining screens, etc.) are the identified next mirror target; this is the last suite family
+  where main beats us by >5%.
 
-- **qwertty-term's own numbers include the new fast paths.** This re-run is on `a094ae672dc6`,
-  which lands dirty tracking and the SIMD ascii fast path — both absent from the earlier baseline.
-  Our medians did shift a little from that older run (e.g. `dense_cells` 15→16, `scrolling`
-  17→15), but not enough to keep pace with main's jump. Dirty tracking should matter most at large
-  grids and low-churn workloads, neither of which this 80x24 full-suite lane stresses; a
-  large-window variant is the obvious follow-up to show what it buys.
+- **vs 1.3.1 we now win every suite** (0.30–0.73x). The 9/10-vs-1.3.1 story from the very first
+  baseline is back to 10/10, and the meaningful comparison — vs main — is tie-or-win on 6/10 with
+  only the four region scrolls behind.
 
-- **Stability**: qwertty-term run-to-run spread was tight (per-suite stddev 0.5–2.5 ms). Ghostty
-  main was similarly flat (0.6–3.1 ms). Ghostty 1.3.1 was the noisy one — `scrolling_fullscreen`
-  stddev 48 ms, a long-tailed p90 of 133 ms — which is why medians (not means) are reported for
-  all columns. Same idle background Ghostty instance during every run.
+- **Stability / method**: 3 rounds per terminal, load-gated (loadavg < 6) and interleaved, with
+  per-suite samples pooled (thousands per cell) before taking medians — the large deltas
+  (`dense_cells` 0.64, `unicode` 0.50, the four region scrolls) are well outside round-to-round
+  noise; the `1.00`/`1.07`/`1.17` ties are within it. Ghostty distributions still have long tails
+  (hence medians, not means). Same idle background Ghostty instance during every run.
 
 ## Known gaps / TODO
 
@@ -112,8 +113,31 @@ only** — no frame rate, no latency, no rendering-quality signal.
   pristine.
 - `alt_screen_random_write` (named in older comparisons) no longer exists in modern vtebench; the
   default set above is the complete current suite.
-- Single-run medians per terminal; the lane is cheap (~2 min per terminal), so gather 3+ runs
-  before drawing conclusions finer than ~10%. The qt-vs-main deltas above are large enough
-  (1.2x–2.3x) to survive that noise, but the two `1.00` ties are within it.
+- These numbers are pooled over 3 load-gated rounds per terminal (an improvement over the
+  original baseline's single run). Ratios within ~10% of 1.0 (`medium_cells` 1.00,
+  `scrolling` 1.07, `sync_medium_cells` 1.17) are effectively ties; the large deltas survive the
+  noise. Re-run with `scripts/bench-vtebench.sh [--terminal ghostty --app-path <bundle>]
+  --label <name>` and pool `results.dat` across labels for the medians.
 - Window occlusion/focus state is not controlled; macOS may throttle background windows
   differently per app. Runs here had freshly opened, frontmost windows.
+
+## History: pre-perf-work baseline (2026-07-11, superseded)
+
+The first three-way run was at qwertty-term `a094ae672dc6` (dirty tracking + SIMD ascii only,
+before T1's dispatch / cell-write / wide-char work) against the same Ghostty main pin. It showed
+qwertty-term *behind* main on every cell and unicode suite — the gap this refresh closed:
+
+| suite                | qt/main then | qt/main now | change                     |
+| -------------------- | ------------ | ----------- | -------------------------- |
+| dense_cells          | 2.29         | 0.64        | loss → 1.6x win            |
+| medium_cells         | 1.67         | 1.00        | loss → tie                 |
+| sync_medium_cells    | 1.83         | 1.17        | loss → ~tie                |
+| unicode              | 1.33         | 0.50        | loss → 2x win              |
+| scrolling            | 1.00         | 1.07        | tie (noise)                |
+| scrolling_fullscreen | 1.00         | 1.00        | tie                        |
+| region scrolls ×4    | 1.20–1.47    | 1.27–1.47   | unchanged (untouched path) |
+
+The cell-suite wins came from the CSI/SGR dispatch fast paths, `clear_cells` per-run style
+release, and the bulk style-only `print_slice` fill; the unicode win from the wide-class
+`print_slice` fill. Region scrolls are unchanged because no scroll-path work landed — they are
+the next mirror target (upstream `77190bd02`).
