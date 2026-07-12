@@ -12,7 +12,8 @@ the core is healthy, **not** that the app is shippable.
   on the platform-independent crate allowlist (see [Linux clippy scope](#linux-clippy-scope)).
 - **macOS build + unit** (`macos-14`): clippy `-D warnings` on the full workspace (renderer,
   font, app included); `cargo test --workspace` (debug), with one flaky timing test skipped
-  (see [Known CI-only skips](#known-ci-only-skips)).
+  (see [Known CI-only skips](#known-ci-only-skips)); plus the `qwertty-term-font` `freetype`
+  feature clippy + tests (see [Optional-feature coverage](#optional-feature-coverage)).
 - **markdownlint** (`ubuntu-latest`): only the `.md` files changed by the push/PR (matches the
   local "touched files" gate).
 
@@ -52,6 +53,19 @@ must be added consciously:
 - `qwertty-term` (the app) — compiles, but its theme/color code is
   `#[cfg(target_os = "macos")]`-gated, so on Linux it is dead code and trips `-D dead_code`.
   The app's clippy runs on the macOS job, which lints the full workspace.
+
+## Optional-feature coverage
+
+Default `cargo clippy`/`cargo test` only build default features, so any off-by-default feature
+is uncovered unless a job enables it explicitly:
+
+- **`qwertty-term-font` `freetype`** (ADR 003 P1/P2) — off by default (the CoreText face is the
+  macOS default; FreeType is the Linux/software path). The macOS job runs
+  `cargo clippy -p qwertty-term-font --features freetype --all-targets -- -D warnings` and
+  `cargo test -p qwertty-term-font --features freetype`. FreeType is cross-platform and builds
+  via `freetype-rs`'s bundled C build (`cc`), so no system FreeType is required. Without this
+  step the FreeType face path (`--features freetype`) would compile nowhere in CI and could rot
+  silently.
 
 ## Known CI-only skips
 

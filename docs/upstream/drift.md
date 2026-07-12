@@ -5,11 +5,25 @@ should mirror them. Maintained by thread T8. Re-run each session: `git -C ~/loca
 then diff `origin/main` against the pin for the ported subsystems.
 
 - **Port pin:** `2da015cd6` (2026-07-06)
-- **Upstream main at last scan:** `a887df42c` (2026-07-11)
-- **Last scan:** 2026-07-11 (T8, drift pass 1 — first scan since the port began)
-- **Range:** 102 non-merge commits upstream since the pin; 92 unique touch a ported subsystem
-  (`src/terminal/` 80, `src/renderer/` 9, `src/termio/` 5, `src/font/` 3, `src/Surface.zig` 1,
-  `src/input*` 0).
+- **Upstream main at last scan:** `a3ac713b7` (2026-07-12, drift pass 2)
+- **Last scan:** 2026-07-12 (T8, drift pass 2 — incremental `a887df42c..a3ac713b7`)
+- **Range (cumulative, pin → pass-1 scan `a887df42c`):** 102 non-merge commits upstream since the
+  pin; 92 unique touch a ported subsystem (`src/terminal/` 80, `src/renderer/` 9, `src/termio/` 5,
+  `src/font/` 3, `src/Surface.zig` 1, `src/input*` 0). See the classification below.
+
+## Drift pass 2 (`a887df42c..a3ac713b7`, 2026-07-12) — CLEAN, no must-mirror items
+
+Only 2 non-merge commits upstream since pass 1; 1 touches a ported subsystem:
+
+- `9659167ec` — `terminal/search`: reuse viewport fingerprint storage. **irrelevant (perf-only,
+  no behavior change)** — retains the fingerprint's backing slice instead of reallocating per
+  update; skips allocation for unchanged viewports. Pure allocation-reuse refactor of
+  `search/viewport.zig`; nothing to mirror for correctness. Low-priority perf-mirror candidate
+  for whoever ports viewport search (not on a vtebench hot path). No Inbox line filed.
+- `a3ac713b7` — "Update VOUCHED list (#13309)". **irrelevant** — upstream contributor-governance
+  file, not code.
+
+No new Inbox lines filed this pass. Cumulative classification (pass 1) unchanged below.
 
 Classification: **mirror** = a bug fix in logic the port has (likely) already ported — replicate
 it. **feature** = new functionality the port lacks — owning thread's backlog, not urgent.
@@ -199,7 +213,8 @@ are also correctness mirror items above.
 
 - Upstream history in this range is linear (no divergent branches), so path-hit counts double-count
   the 6 commits that touch two subsystems.
-- This is drift pass 1 (baseline). Future passes only need to scan `<last-scan-hash>..origin/main`.
+- The classification above is drift pass 1 (baseline). Each later pass only scans
+  `<last-scan-hash>..origin/main` (pass 2: `a887df42c..a3ac713b7`, clean — see header).
 - Re-pin proposal (backlog item) is not yet warranted at 102 commits, but the 26 terminal mirror
   items and the "verify the pin's own perf squash reproduced" finding argue for scheduling the
   port's correctness-mirror sweep before drift compounds further.
