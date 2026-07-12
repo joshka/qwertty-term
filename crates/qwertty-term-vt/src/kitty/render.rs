@@ -12,11 +12,12 @@
 //! result ([`RenderImagePlacement`]) carries no `Pin`, so it can safely cross
 //! the crate/thread boundary into the renderer.
 //!
-//! Scope note (R6 slice 1): this resolves both pin-anchored and virtual (`U=1`)
-//! placements to viewport coordinates, skipping any placement whose top-left is
-//! outside the current viewport (basic culling via
-//! [`PageList::point_from_pin`]). Pixel-accurate top/bottom clipping of
-//! partially-scrolled images and the three z-order buckets are R6 slices 2/4.
+//! Scope note (R6 slices 1–2): resolves both pin-anchored and virtual (`U=1`)
+//! placements to window-relative grid coordinates, positioned in absolute
+//! [`Tag::Screen`] rows against the window `scrollback_offset` rows up from the
+//! bottom (slice 2: images track scrollback, partially-scrolled images get a
+//! negative `grid_row` and are clipped by the GPU rasterizer, fully-off ones are
+//! culled). The three z-order buckets remain R6 slice 4.
 
 use std::borrow::Cow;
 
@@ -43,9 +44,13 @@ pub struct RenderImagePlacement {
     pub image_id: u32,
     /// Z-index: `< 0` draws below text, `>= 0` above (bucketing is R6 slice 4).
     pub z: i32,
-    /// Viewport-relative top-left grid cell (0-indexed from the visible top).
+    /// Viewport-relative top-left grid cell. `grid_row` is **signed**: a
+    /// placement whose top has scrolled above the visible window has a negative
+    /// row (its top quad edge is off-screen and the GPU rasterizer clips it),
+    /// while `grid_col` is scroll-invariant. Fully-off placements are culled by
+    /// the resolver, so a resolved placement always overlaps the window.
     pub grid_col: u32,
-    pub grid_row: u32,
+    pub grid_row: i32,
     /// Pixel offset from the top-left of the grid cell.
     pub cell_offset_x: u32,
     pub cell_offset_y: u32,
@@ -61,20 +66,65 @@ pub struct RenderImagePlacement {
     pub dest_height: u32,
 }
 
-/// Resolve every currently-visible placement in `storage` to a
-/// [`RenderImagePlacement`], using `pages` for pin→viewport mapping and `geo`
-/// for cell geometry. Returns placements in arbitrary order (the renderer sorts
-/// by z when the z-order buckets land in R6 slice 4).
+/// The visible window in absolute [`Tag::Screen`] row coordinates: rows
+/// `[top_y, top_y + rows - 1]`, `rows` rows ending `scrollback_offset` rows up
+/// from the bottom — exactly the window [`Screen::snapshot_window`] renders. All
+/// placement positions are expressed relative to `top_y`, so a placement scrolled
+/// above the window gets a negative `grid_row` and one scrolled below is culled.
+struct Window {
+    /// Absolute screen row of the top visible row (`window_top`).
+    top_y: u32,
+    /// Absolute screen row of the bottom visible row.
+    bot_y: u32,
+}
+
+impl Window {
+    fn compute(pages: &PageList, geo: &TerminalGeometry, scrollback_offset: usize) -> Window {
+        let rows = usize::from(geo.rows);
+        let total_rows = pages.total_rows();
+        let scrollback_len = total_rows.saturating_sub(rows);
+        let offset = scrollback_offset.min(scrollback_len);
+        // Mirrors `Screen::snapshot_window`'s `window_top`.
+        let top_y = total_rows.saturating_sub(offset + rows) as u32;
+        let bot_y = top_y + (rows.saturating_sub(1)) as u32;
+        Window { top_y, bot_y }
+    }
+
+    /// Map an image occupying `grid_rows` cells starting at absolute screen row
+    /// `img_top_y` to a window-relative signed row, or `None` if it's entirely
+    /// outside the visible window.
+    fn place_row(&self, img_top_y: u32, grid_rows: u32) -> Option<i32> {
+        if grid_rows == 0 {
+            return None;
+        }
+        let img_bot_y = img_top_y + (grid_rows - 1);
+        // Cull entirely-below (top past window bottom) or entirely-above
+        // (bottom before window top).
+        if img_top_y > self.bot_y || img_bot_y < self.top_y {
+            return None;
+        }
+        Some(i64::from(img_top_y) as i32 - i64::from(self.top_y) as i32)
+    }
+}
+
+/// Resolve every visible placement in `storage` to a [`RenderImagePlacement`],
+/// positioned relative to the window `scrollback_offset` rows up from the bottom
+/// (`0` = the live active area — see [`Window`]). `pages` maps pins to absolute
+/// screen rows, `geo` gives cell geometry. Returns placements in arbitrary order
+/// (the renderer sorts by z when the buckets land in R6 slice 4).
 ///
-/// A placement is skipped when its image is missing or its top-left cell is
-/// scrolled out of the viewport. Virtual (`U=1`) placements are resolved by
-/// walking the viewport's placeholder cells (port of `prepKittyVirtualPlacement`).
+/// Placements scrolled fully out of the window are culled; ones partially above
+/// it get a negative `grid_row` and are clipped by the GPU rasterizer. Virtual
+/// (`U=1`) placements walk the same window's placeholder cells (port of
+/// `prepKittyVirtualPlacement`).
 #[must_use]
 pub fn resolve_placements(
     storage: &ImageStorage,
     pages: &PageList,
     geo: &TerminalGeometry,
+    scrollback_offset: usize,
 ) -> Vec<RenderImagePlacement> {
+    let win = Window::compute(pages, geo, scrollback_offset);
     let mut out = Vec::new();
     let mut has_virtual = false;
 
@@ -95,9 +145,9 @@ pub fn resolve_placements(
             continue;
         };
 
-        // Basic viewport cull: skip placements whose top-left is not in the
-        // visible window (pixel-accurate partial clipping is R6 slice 2).
-        let Some(point) = pages.point_from_pin(Tag::Viewport, pin) else {
+        // Absolute screen position of the placement's top-left cell (works for
+        // pins scrolled anywhere in history, unlike the viewport frame).
+        let Some(point) = pages.point_from_pin(Tag::Screen, pin) else {
             continue;
         };
 
@@ -105,6 +155,10 @@ pub fn resolve_placements(
         if dest_width == 0 || dest_height == 0 {
             continue;
         }
+        let (_, grid_rows) = placement.grid_size(image, geo);
+        let Some(grid_row) = win.place_row(point.coord.y, grid_rows) else {
+            continue;
+        };
 
         let (source_x, source_width) =
             clamp_source(placement.source_x, placement.source_width, image.width);
@@ -115,7 +169,7 @@ pub fn resolve_placements(
             image_id,
             z: placement.z,
             grid_col: u32::from(point.coord.x),
-            grid_row: point.coord.y,
+            grid_row,
             cell_offset_x: placement.x_offset,
             cell_offset_y: placement.y_offset,
             source_x,
@@ -128,7 +182,7 @@ pub fn resolve_placements(
     }
 
     if has_virtual {
-        resolve_virtual(storage, pages, geo, &mut out);
+        resolve_virtual(storage, pages, geo, &win, scrollback_offset, &mut out);
     }
 
     out
@@ -185,14 +239,18 @@ fn clamp_source(origin: u32, extent: u32, image_extent: u32) -> (u32, u32) {
     (origin, extent)
 }
 
-/// Resolve virtual (`U=1`) placements by walking the viewport's placeholder
-/// cells. Port of `prepKittyVirtualPlacement` (`image.zig:465-521`): each run of
-/// placeholder cells resolves against its stored placement to a
-/// [`unicode::RenderPlacement`], which we then map to viewport grid coordinates.
+/// Resolve virtual (`U=1`) placements by walking the visible window's
+/// placeholder cells. Port of `prepKittyVirtualPlacement` (`image.zig:465-521`):
+/// each run of placeholder cells resolves against its stored placement to a
+/// [`unicode::RenderPlacement`], mapped to window-relative grid coordinates. The
+/// walked pin range is the same window [`Screen::snapshot_window`] renders, so
+/// virtual placements track scrollback the same way the pin-anchored path does.
 fn resolve_virtual(
     storage: &ImageStorage,
     pages: &PageList,
     geo: &TerminalGeometry,
+    win: &Window,
+    scrollback_offset: usize,
     out: &mut Vec<RenderImagePlacement>,
 ) {
     let cell_width = geo.width_px / u32::from(geo.cols);
@@ -201,14 +259,28 @@ fn resolve_virtual(
         return;
     }
 
-    let top = pages.get_top_left(Tag::Viewport);
-    // SAFETY: `top` is a live viewport pin; `down_overflow_clamped` walks at
-    // most `rows - 1` rows down the owned page chain, clamping at the end.
-    let bottom = unsafe { top.down_overflow_clamped(usize::from(geo.rows).saturating_sub(1)) };
+    // Window pin range (same construction as `Screen::snapshot_window`): the
+    // bottom is the screen's bottom-right pinned `offset` rows up; the top is
+    // that pinned another `rows - 1` up.
+    let rows = usize::from(geo.rows);
+    let total_rows = pages.total_rows();
+    let offset = scrollback_offset.min(total_rows.saturating_sub(rows));
+    let Some(bottom_right) = pages.get_bottom_right(Tag::Screen) else {
+        return;
+    };
+    // SAFETY: `bottom_right` addresses a live page; `up` only walks `prev`
+    // pointers within the same live page list.
+    let Some(win_bottom) = (unsafe { bottom_right.up(offset) }) else {
+        return;
+    };
+    // SAFETY: as above — `win_bottom` is a live pin derived by walking `prev`.
+    let Some(win_top) = (unsafe { win_bottom.up(rows.saturating_sub(1)) }) else {
+        return;
+    };
 
-    // SAFETY: `top`/`bottom` are live pins into `pages`; the iterator only reads
-    // cells within the owned page chain for the lifetime of this call.
-    let mut iter = unsafe { unicode::placement_iterator(top, Some(bottom)) };
+    // SAFETY: `win_top`/`win_bottom` are live pins into `pages`; the iterator
+    // only reads cells within the owned page chain for the lifetime of this call.
+    let mut iter = unsafe { unicode::placement_iterator(win_top, Some(win_bottom)) };
     // SAFETY (each `next`): the pins the iterator walks stay live for this call.
     while let Some(placement) = unsafe { iter.next() } {
         let Some(image) = storage.image_by_id(placement.image_id) else {
@@ -220,7 +292,12 @@ fn resolve_virtual(
         if rp.dest_width == 0 || rp.dest_height == 0 {
             continue;
         }
-        let Some(point) = pages.point_from_pin(Tag::Viewport, rp.top_left) else {
+        let Some(point) = pages.point_from_pin(Tag::Screen, rp.top_left) else {
+            continue;
+        };
+        // The run's top-left is inside the walked window by construction, so
+        // `place_row` (with the single anchoring cell) always resolves.
+        let Some(grid_row) = win.place_row(point.coord.y, 1) else {
             continue;
         };
 
@@ -229,7 +306,7 @@ fn resolve_virtual(
             // Upstream draws virtual placements below text (z = -1).
             z: -1,
             grid_col: u32::from(point.coord.x),
-            grid_row: point.coord.y,
+            grid_row,
             cell_offset_x: rp.offset_x,
             cell_offset_y: rp.offset_y,
             source_x: rp.source_x,
@@ -283,7 +360,7 @@ mod tests {
         transmit_and_display(&mut t, 1, 3, 2, "");
 
         let screen = t.screen();
-        let placements = resolve_placements(&screen.kitty_images, &screen.pages, &geo_of(&t));
+        let placements = resolve_placements(&screen.kitty_images, &screen.pages, &geo_of(&t), 0);
         assert_eq!(placements.len(), 1);
         let p = placements[0];
         assert_eq!(p.image_id, 1);
@@ -312,11 +389,72 @@ mod tests {
         transmit_and_display(&mut t, 1, 2, 2, ",c=4,r=3");
 
         let screen = t.screen();
-        let placements = resolve_placements(&screen.kitty_images, &screen.pages, &geo_of(&t));
+        let placements = resolve_placements(&screen.kitty_images, &screen.pages, &geo_of(&t), 0);
         assert_eq!(placements.len(), 1);
         assert_eq!(
             (placements[0].dest_width, placements[0].dest_height),
             (32, 24)
+        );
+    }
+
+    /// R6 slice 2: an image scrolled into history is culled in the live view,
+    /// clips its top (negative `grid_row`) when the window edge falls inside it,
+    /// sits at row 0 when scrolled fully back, and is culled once fully above.
+    #[test]
+    fn scrolled_placement_clips_top_and_culls() {
+        use crate::stream::{Stream, TerminalHandler};
+
+        let mut t = Terminal::new(Options {
+            cols: 10,
+            rows: 4,
+            ..Default::default()
+        });
+        t.width_px = 80; // 8px cells
+        t.height_px = 32; // 4 rows × 8px
+
+        // Display a 3-cell-tall image (c=3,r=3) at home (screen rows 0..=2), then
+        // push it into scrollback with plenty of newlines.
+        let rgba = [3u8, 3, 3, 255].repeat(4); // 2×2 RGBA
+        let payload = base64::engine::general_purpose::STANDARD.encode(&rgba);
+        let mut stream = Stream::new(TerminalHandler::new(t));
+        stream.feed(b"\x1b[H");
+        stream.feed(format!("\x1b_Ga=T,f=32,t=d,i=1,s=2,v=2,c=3,r=3;{payload}\x1b\\").as_bytes());
+        for _ in 0..12 {
+            stream.feed(b"scroll\r\n");
+        }
+        let t = stream.handler.terminal;
+
+        let geo = geo_of(&t);
+        let screen = t.screen();
+        let rows = usize::from(t.rows);
+        let total = screen.pages.total_rows();
+        let scrollback_len = total - rows;
+        assert!(scrollback_len >= 3, "need enough scrollback for the test");
+        let res = |off: usize| resolve_placements(&screen.kitty_images, &screen.pages, &geo, off);
+
+        // Live view: the image is far above the window → culled.
+        assert!(
+            res(0).is_empty(),
+            "scrolled-away image is culled in the live view"
+        );
+
+        // Scrolled fully to the top: window top row is screen row 0, so the image
+        // sits at grid_row 0, fully visible.
+        let top = res(scrollback_len);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].grid_row, 0);
+        assert_eq!(top[0].grid_col, 0);
+
+        // One row down: the window top falls on the image's second row, so its
+        // first row is clipped above the window → grid_row = -1 (rows 1..=2 show).
+        let mid = res(scrollback_len - 1);
+        assert_eq!(mid.len(), 1);
+        assert_eq!(mid[0].grid_row, -1);
+
+        // Three rows down: the whole image (rows 0..=2) is above the window → culled.
+        assert!(
+            res(scrollback_len - 3).is_empty(),
+            "image entirely above the window is culled"
         );
     }
 
@@ -328,7 +466,7 @@ mod tests {
             ..Default::default()
         });
         let screen = t.screen();
-        let placements = resolve_placements(&screen.kitty_images, &screen.pages, &geo_of(&t));
+        let placements = resolve_placements(&screen.kitty_images, &screen.pages, &geo_of(&t), 0);
         assert!(placements.is_empty());
     }
 
