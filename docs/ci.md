@@ -34,12 +34,19 @@ the core is healthy, **not** that the app is shippable.
 
 The Linux clippy step lints an **explicit allowlist** of the platform-independent crates
 (`qwertty-term-vt`, `vt-diff`, `qwertty-term-input`, `qwertty-term-sprite`,
-`qwertty-term-termio`, `qwertty-term-ffi`, `spike-runtime`, `frame-capture`, `xtask`) rather
-than `--workspace --exclude ...`. The macOS-surface crates are deliberately left off, each for
-a different reason, and a new crate must be added consciously:
+`qwertty-term-termio`, `qwertty-term-ffi`, `qwertty-term-renderer`, `spike-runtime`,
+`frame-capture`, `xtask`) rather than `--workspace --exclude ...`. The macOS-surface crates
+are deliberately left off, each for a different reason, and a new crate must be added
+consciously:
 
-- `qwertty-term-spike`, `qwertty-term-renderer` — source is not cfg-gated for non-macOS
-  targets, so they do not even compile on Linux.
+- `qwertty-term-spike` — source is not cfg-gated for non-macOS targets, so it does not even
+  compile on Linux.
+- `qwertty-term-renderer` — **now included** (ADR 003 P1): the lib is cfg-gated (the Metal
+  backend/engine/present are `#[cfg(target_os = "macos")]`) and its macOS-only tests are
+  gated, so it compiles and lints clean on Linux. It has no GPU backend on Linux yet, so
+  `--all-targets` clippy compiles the test code but the macOS-gated acceptance tests are
+  empty there; the platform-agnostic unit tests (geometry, cells, swap-chain semaphore) do
+  run. The software backend (P1 next slice) will add real Linux render coverage.
 - `qwertty-term-font` — compiles, but a non-macOS test cfg has an unused import (T2 Inbox).
 - `qwertty-term` (the app) — compiles, but its theme/color code is
   `#[cfg(target_os = "macos")]`-gated, so on Linux it is dead code and trips `-D dead_code`.

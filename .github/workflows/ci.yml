@@ -42,8 +42,11 @@ jobs:
       # Explicit allowlist of the platform-independent crates. Deliberately
       # NOT `--workspace --exclude ...`: the macOS-surface crates fail on Linux
       # for different reasons and a new one must be added here consciously.
-      #   qwertty-term-spike, qwertty-term-renderer — source not cfg-gated for
-      #     non-macOS targets (do not even compile on Linux).
+      #   qwertty-term-spike — source not cfg-gated for non-macOS targets
+      #     (does not even compile on Linux).
+      #   qwertty-term-renderer — compiles + lints clean on Linux since ADR 003
+      #     P1 gated its macOS-only tests (lib is already cfg-gated; the Metal
+      #     backend/engine are `#[cfg(target_os = "macos")]`). Included below.
       #   qwertty-term-font — compiles, but a non-macOS test cfg has an unused
       #     import (T2 Inbox); re-add once fixed.
       #   qwertty-term (the app) — compiles, but its theme/color code is
@@ -58,6 +61,7 @@ jobs:
           -p qwertty-term-sprite
           -p qwertty-term-termio
           -p qwertty-term-ffi
+          -p qwertty-term-renderer
           -p spike-runtime
           -p frame-capture
           -p xtask
