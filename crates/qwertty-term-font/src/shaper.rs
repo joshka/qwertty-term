@@ -26,7 +26,55 @@
 
 use rustybuzz::{BufferClusterLevel, UnicodeBuffer};
 
-use crate::coretext::Face;
+/// The minimal face contract [`Shaper::new`] needs: enough to build a rustybuzz
+/// face over the font's bytes and apply the right variation instance. Both face
+/// backends implement it — CoreText (`coretext::Face`, macOS) and FreeType
+/// (`freetype::Face`, the Linux/software path) — so the shaper (pure rustybuzz)
+/// is platform-agnostic. See the impls below.
+pub trait ShapeFace {
+    /// The font bytes to shape over, or `None` if unavailable (a synthesized
+    /// system face with no file); the caller then renders unshaped.
+    fn source_bytes(&self) -> Option<&[u8]>;
+    /// Subface index within a `.ttc` collection (`0` for a single face).
+    fn face_index(&self) -> u32;
+    /// Pixels-per-em, for scaling shaped positions.
+    fn size_px(&self) -> f64;
+    /// The applied `wght` variation instance, if any — so shaped glyph ids/
+    /// advances match the instance the face rasterizes.
+    fn wght(&self) -> Option<f32>;
+}
+
+#[cfg(target_os = "macos")]
+impl ShapeFace for crate::coretext::Face {
+    fn source_bytes(&self) -> Option<&[u8]> {
+        crate::coretext::Face::source_bytes(self)
+    }
+    fn face_index(&self) -> u32 {
+        crate::coretext::Face::face_index(self)
+    }
+    fn size_px(&self) -> f64 {
+        crate::coretext::Face::size_px(self)
+    }
+    fn wght(&self) -> Option<f32> {
+        crate::coretext::Face::wght(self)
+    }
+}
+
+#[cfg(feature = "freetype")]
+impl ShapeFace for crate::freetype::Face {
+    fn source_bytes(&self) -> Option<&[u8]> {
+        crate::freetype::Face::source_bytes(self)
+    }
+    fn face_index(&self) -> u32 {
+        crate::freetype::Face::face_index(self)
+    }
+    fn size_px(&self) -> f64 {
+        crate::freetype::Face::size_px(self)
+    }
+    fn wght(&self) -> Option<f32> {
+        crate::freetype::Face::wght(self)
+    }
+}
 
 /// One shaped cell: the placement of a single output glyph on the grid.
 ///
@@ -65,23 +113,24 @@ pub struct Shaper<'a> {
 }
 
 impl<'a> Shaper<'a> {
-    /// Build a shaper over `face`, which must have source bytes available
-    /// (`Face::source_bytes`). Returns `None` only for faces whose backing bytes
-    /// couldn't be obtained (e.g. a synthesized system face with no file URL);
-    /// the caller then renders unshaped per-codepoint. The shaper borrows the
-    /// face's bytes for `'a`, so `face` must outlive it (it always does — the
-    /// shaper is built, used, and dropped within a single cell-shaping call).
+    /// Build a shaper over any [`ShapeFace`], which must have source bytes
+    /// available ([`ShapeFace::source_bytes`]). Returns `None` only for faces
+    /// whose backing bytes couldn't be obtained (e.g. a synthesized system face
+    /// with no file URL); the caller then renders unshaped per-codepoint. The
+    /// shaper borrows the face's bytes for `'a`, so `face` must outlive it (it
+    /// always does — the shaper is built, used, and dropped within a single
+    /// cell-shaping call).
     ///
-    /// For a `.ttc` collection the face's recorded [`Face::face_index`] selects
-    /// the correct subface. If `face` carries a `wght` variation instance (a
-    /// bold face materialized from a variable font, see [`Face::wght`]), the
+    /// For a `.ttc` collection the face's recorded [`ShapeFace::face_index`]
+    /// selects the correct subface. If `face` carries a `wght` variation instance
+    /// (a bold face materialized from a variable font, [`ShapeFace::wght`]), the
     /// same variation is applied to the rustybuzz face so shaped glyph ids match
-    /// the instance CoreText rasterizes. Without this, the shaper would shape
+    /// the instance the face rasterizes. Without this, the shaper would shape
     /// against the default (`wght=400`) instance while the raster is bold — the
-    /// ids happen to align for JetBrains Mono's non-ligature glyphs, but
-    /// applying the variation keeps positioning (advances) correct for the bold
-    /// instance too.
-    pub fn new(face: &'a Face) -> Option<Shaper<'a>> {
+    /// ids happen to align for JetBrains Mono's non-ligature glyphs, but applying
+    /// the variation keeps positioning (advances) correct for the bold instance
+    /// too.
+    pub fn new<F: ShapeFace + ?Sized>(face: &'a F) -> Option<Shaper<'a>> {
         let bytes = face.source_bytes()?;
         let mut shaper = Shaper::from_bytes(bytes, face.face_index(), face.size_px())?;
         if let Some(wght) = face.wght() {
@@ -203,14 +252,18 @@ fn glyph_positions_of(glyphs: &rustybuzz::GlyphBuffer) -> &[rustybuzz::GlyphPosi
     glyphs.glyph_positions()
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    /// An embedded JetBrains Mono face; keep it alive in the test scope, then
-    /// build the shaper over it (the shaper borrows the face's bytes).
-    fn face() -> Face {
-        Face::load_embedded(16.0).expect("load embedded")
+    /// A shaper over the embedded JetBrains Mono bytes. Built via the Face-free
+    /// [`Shaper::from_bytes`] primitive so these shaping tests are
+    /// platform-agnostic (they exercise the pure rustybuzz path, which is the
+    /// same regardless of face backend). The `ShapeFace`-generic `Shaper::new`
+    /// path is covered per-backend in `new_*_facetrait` below.
+    fn shaper() -> Shaper<'static> {
+        Shaper::from_bytes(crate::embedded::JETBRAINS_MONO_VARIABLE, 0, 16.0)
+            .expect("embedded shaper")
     }
 
     /// Latin 1:1 case (analog of upstream's Latin cluster-mapping test): N
@@ -218,8 +271,7 @@ mod tests {
     /// strictly increasing cell X.
     #[test]
     fn ascii_maps_one_to_one() {
-        let f = face();
-        let mut s = Shaper::new(&f).expect("embedded face shaper");
+        let mut s = shaper();
         let cells = s.shape_run("hello");
         assert_eq!(cells.len(), 5, "expected 5 glyphs for 'hello'");
         for (i, c) in cells.iter().enumerate() {
@@ -228,6 +280,33 @@ mod tests {
             assert!(c.glyph_index > 0, "cell {i} got notdef");
             assert!(c.x_advance > 0, "cell {i} zero advance");
         }
+    }
+
+    /// The `ShapeFace`-generic `Shaper::new` works over a real CoreText face
+    /// (macOS): proves `coretext::Face: ShapeFace` and that shaping through it
+    /// matches the direct byte path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn new_coretext_facetrait() {
+        let f = crate::coretext::Face::load_embedded(16.0).expect("coretext face");
+        let mut s = Shaper::new(&f).expect("shaper over coretext face");
+        let cells = s.shape_run("hi");
+        assert_eq!(cells.len(), 2);
+        assert!(cells.iter().all(|c| c.glyph_index > 0));
+    }
+
+    /// The same generic path over a FreeType face — proves `freetype::Face:
+    /// ShapeFace` and that OpenType shaping runs on the non-CoreText backend
+    /// (the Linux path), verifiable here because FreeType is cross-platform.
+    #[cfg(feature = "freetype")]
+    #[test]
+    fn new_freetype_facetrait() {
+        let f = crate::freetype::Face::load_embedded(16.0).expect("freetype face");
+        let mut s = Shaper::new(&f).expect("shaper over freetype face");
+        let cells = s.shape_run("hi");
+        assert_eq!(cells.len(), 2, "two glyphs for 'hi'");
+        assert!(cells.iter().all(|c| c.glyph_index > 0), "no notdef");
+        assert!(cells.iter().all(|c| c.x_advance > 0), "advances present");
     }
 
     /// Wide-cell mapping semantics: a caller that lays out a wide glyph at cell
@@ -243,8 +322,7 @@ mod tests {
     /// `first_pixels_font_substrate` integration test using a CJK system font.
     #[test]
     fn wide_char_maps_to_single_cell() {
-        let f = face();
-        let mut s = Shaper::new(&f).expect("embedded face shaper");
+        let mut s = shaper();
         // One char occupying cell 0; the caller would mark cell 1 as a spacer.
         let cells = s.shape_run_with_clusters([('M', 0)]);
         assert_eq!(cells.len(), 1, "one glyph");
@@ -255,8 +333,7 @@ mod tests {
     /// An em dash shapes to a single glyph in a single cell.
     #[test]
     fn em_dash_single_glyph() {
-        let f = face();
-        let mut s = Shaper::new(&f).expect("embedded face shaper");
+        let mut s = shaper();
         let cells = s.shape_run("—"); // U+2014
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].cell_x, 0);
