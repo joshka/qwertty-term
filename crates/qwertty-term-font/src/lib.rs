@@ -78,7 +78,9 @@ pub mod presentation;
 pub mod raster;
 #[cfg(target_os = "macos")]
 pub mod resolver;
-#[cfg(target_os = "macos")]
+/// rustybuzz run shaping ([`shaper::Shaper`]) over any [`shaper::ShapeFace`] —
+/// platform-agnostic (pure Rust); both the CoreText and FreeType faces
+/// implement `ShapeFace`, so shaping works on Linux too.
 pub mod shaper;
 pub mod tables;
 
@@ -98,8 +100,7 @@ pub use discovery::Descriptor;
 pub use grid::{AtlasKind, CachedGlyph, Grid};
 #[cfg(target_os = "macos")]
 pub use resolver::CodepointResolver;
-#[cfg(target_os = "macos")]
-pub use shaper::{ShapedCell, Shaper};
+pub use shaper::{ShapeFace, ShapedCell, Shaper};
 
 #[cfg(test)]
 mod smoke_test {
