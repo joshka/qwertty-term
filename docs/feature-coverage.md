@@ -66,7 +66,10 @@ items are `[ ]` wholesale unless noted.
 - [ ] `background-image` (+ fit/position/repeat/opacity)
 - [ ] `background-blur`, `background-opacity-cells`
 - [ ] `custom-shader` (shadertoy) + animation
-- [ ] Kitty image *rendering* (R6 — engine parses, renderer doesn't draw yet)
+- [~] Kitty image *rendering* (R6 — slice 1 done: RGBA transmit→texture→placement
+      quads incl. unicode placeholders, via the capture path + offscreen readback +
+      dirty-equality; remaining: scroll/clip (2), delete/eviction (3), z-order (4),
+      live-app `SnapshotWindow` threading)
 - [ ] Link detection/underline overlay (R7), `link-url`, `link-previews`
 - [ ] `resize-overlay`, OpenGL backend (R9, Linux)
 

@@ -4,8 +4,9 @@
 // only edited where MSL compilation as a standalone runtime library requires
 // it (see the two `Divergence` notes below). Ported: the shared color-math
 // helpers, `full_screen_vertex`, `bg_color_fragment`, `cell_bg_fragment`,
-// `cell_text_vertex`, `cell_text_fragment`. SKIPPED (later chunks): the image
-// and bg_image vertex/fragment pairs and their supporting structs/enums.
+// `cell_text_vertex`, `cell_text_fragment`, and (R6 slice 1) `image_vertex` /
+// `image_fragment` for kitty graphics. SKIPPED (later chunks): the bg_image
+// vertex/fragment pair and its supporting structs/enums.
 //
 // Buffer index convention (frozen, `crates/qwertty-term-renderer/src/wire.rs`):
 // index 0 = vertex/instance data, index 1 = uniforms, 2+ = extras (e.g. the
@@ -567,4 +568,93 @@ fragment float4 cell_text_fragment(
       return color;
     }
   }
+}
+
+#pragma mark - Image Shader
+
+struct ImageVertexIn {
+  // The grid coordinates (x, y) where x < columns and y < rows where
+  // the image will be rendered. It will be rendered from the top left.
+  float2 grid_pos [[attribute(0)]];
+
+  // Offset in pixels from the top-left of the cell to make the top-left
+  // corner of the image.
+  float2 cell_offset [[attribute(1)]];
+
+  // The source rectangle of the texture to sample from.
+  float4 source_rect [[attribute(2)]];
+
+  // The final width/height of the image in pixels.
+  float2 dest_size [[attribute(3)]];
+};
+
+struct ImageVertexOut {
+  float4 position [[position]];
+  float2 tex_coord;
+};
+
+vertex ImageVertexOut image_vertex(
+  uint vid [[vertex_id]],
+  ImageVertexIn in [[stage_in]],
+  texture2d<uint> image [[texture(0)]],
+  constant Uniforms& uniforms [[buffer(1)]]
+) {
+  // We use a triangle strip with 4 vertices to render quads,
+  // so we determine which corner of the cell this vertex is in
+  // based on the vertex ID.
+  //
+  //   0 --> 1
+  //   |   .'|
+  //   |  /  |
+  //   | L   |
+  //   2 --> 3
+  //
+  // 0 = top-left  (0, 0)
+  // 1 = top-right (1, 0)
+  // 2 = bot-left  (0, 1)
+  // 3 = bot-right (1, 1)
+  float2 corner;
+  corner.x = float(vid == 1 || vid == 3);
+  corner.y = float(vid == 2 || vid == 3);
+
+  // The texture coordinates start at our source x/y
+  // and add the width/height depending on the corner.
+  //
+  // We don't need to normalize because we use pixel addressing for our sampler.
+  float2 tex_coord = in.source_rect.xy;
+  tex_coord += in.source_rect.zw * corner;
+
+  ImageVertexOut out;
+
+  // The position of our image starts at the top-left of the grid cell and
+  // adds the source rect width/height components.
+  float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
+  image_pos += in.dest_size * corner;
+
+  out.position =
+      uniforms.projection_matrix * float4(image_pos.x, image_pos.y, 0.0f, 1.0f);
+  out.tex_coord = tex_coord;
+  return out;
+}
+
+fragment float4 image_fragment(
+  ImageVertexOut in [[stage_in]],
+  texture2d<float> image [[texture(0)]],
+  constant Uniforms& uniforms [[buffer(1)]]
+) {
+  constexpr sampler textureSampler(
+    coord::pixel,
+    address::clamp_to_edge,
+    filter::linear
+  );
+
+  float4 rgba = image.sample(textureSampler, in.tex_coord);
+
+  if (!uniforms.use_linear_blending) {
+    rgba = unlinearize(rgba);
+  }
+
+  rgba.rgb *= rgba.a;
+
+  return rgba;
 }

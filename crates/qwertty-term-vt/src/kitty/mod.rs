@@ -37,12 +37,14 @@
 pub mod command;
 pub mod exec;
 pub mod image;
+pub mod render;
 pub mod storage;
 pub mod unicode;
 
 pub use command::{Command, Parser as CommandParser, Response};
 pub use exec::{execute, execute_with};
 pub use image::{Image, LoadingImage, Rect};
+pub use render::{RenderImagePlacement, image_rgba, resolve_placements};
 pub use storage::{
     AddImageError, ImageStorage, Location, Placement, PlacementId, PlacementKey, PlacementTag,
     next_generation,

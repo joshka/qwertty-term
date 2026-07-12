@@ -77,6 +77,10 @@ impl Engine {
             return Ok((false, Vec::new()));
         }
 
+        // Upload kitty image textures + sync placement instance buffers before
+        // the disjoint field borrows below (needs `&mut self`).
+        self.prepare_image_frame()?;
+
         let uniforms = self.uniforms_snapshot();
         let bg_cells = self.bg_cells_snapshot();
         let fg_count = self.fg_count();
@@ -84,7 +88,17 @@ impl Engine {
         let fg_lists: Vec<&[_]> = fg_lists_owned.iter().map(Vec::as_slice).collect();
         let (sw, sh) = (self.screen_width(), self.screen_height());
 
-        let (backend, swap_chain, bg_pipe, cell_bg_pipe, cell_text_pipe) = self.present_parts();
+        let (
+            backend,
+            swap_chain,
+            bg_pipe,
+            cell_bg_pipe,
+            cell_text_pipe,
+            image_pipe,
+            images,
+            image_instances,
+            placements,
+        ) = self.present_parts();
 
         let mut guard = swap_chain.next_frame().ok_or(MetalError::MetalFailed)?;
         let slot = guard.slot();
@@ -135,6 +149,16 @@ impl Engine {
                     instance_count: fg_count,
                 },
             });
+
+            // Kitty images (above text; z-order buckets are R6 slice 4).
+            crate::engine::encode_image_steps(
+                &pass,
+                image_pipe,
+                slot.uniforms.buffer(),
+                images,
+                image_instances,
+                placements,
+            );
 
             pass.complete();
         }
