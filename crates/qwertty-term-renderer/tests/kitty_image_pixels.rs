@@ -318,3 +318,76 @@ fn kitty_image_scrolled_clips_top() {
         );
     }
 }
+
+/// R6 slice 5: the LIVE-APP render path — `Terminal::snapshot_window` →
+/// `FullSnapshot::from_window` (no `&Terminal` held at render time, unlike
+/// `capture`) — now carries kitty image data and draws it. This is the path
+/// `crates/qwertty-term/src/app.rs` uses; before slice 5 it drew no images.
+#[test]
+fn kitty_image_via_from_window_live_app_path() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping from_window test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 20u16;
+    let rows = 6u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    let red = [255u8, 0, 0, 255].repeat(4);
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    stream.feed(b"\x1b[H");
+    stream.feed(&transmit_and_display_rgba(1, 2, 2, 6, 3, &red));
+    let term = stream.handler.terminal;
+
+    // The app path: take the owned window (this is all it holds across the lock
+    // release), then wrap it — no live terminal at render time.
+    let window = term.snapshot_window(0);
+    let snapshot = FullSnapshot::from_window(window);
+    assert_eq!(
+        snapshot.kitty_placements().len(),
+        1,
+        "from_window carries the resolved placement (slice 5)"
+    );
+    assert_eq!(
+        snapshot.kitty_images().len(),
+        1,
+        "from_window carries the image"
+    );
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    engine.update_frame(&snapshot, &mut grid, FrameOptions::default());
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+    let (sw, sh) = engine.screen_size();
+    let frame = Frame {
+        pixels,
+        width: sw,
+        height: sh,
+        cell_w: cw as usize,
+        cell_h: ch as usize,
+    };
+
+    // The image renders red on the live-app path.
+    for &(col, row) in &[(0usize, 0usize), (3, 1), (5, 2)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            p.r > 180 && p.g < 70 && p.b < 70,
+            "cell ({col},{row}) should be image-red via from_window, got {p:?}"
+        );
+    }
+}

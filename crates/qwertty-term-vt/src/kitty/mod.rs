@@ -44,7 +44,9 @@ pub mod unicode;
 pub use command::{Command, Parser as CommandParser, Response};
 pub use exec::{execute, execute_with};
 pub use image::{Image, LoadingImage, Rect};
-pub use render::{RenderImagePlacement, image_rgba, resolve_placements};
+pub use render::{
+    RenderImagePlacement, SnapshotKittyImage, image_rgba, resolve_placements, resolve_window,
+};
 pub use storage::{
     AddImageError, ImageStorage, Location, Placement, PlacementId, PlacementKey, PlacementTag,
     next_generation,

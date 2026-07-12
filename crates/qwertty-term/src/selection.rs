@@ -366,6 +366,9 @@ mod tests {
             row_dirty: vec![true; rows],
             global_dirty: qwertty_term_vt::snapshot::SnapshotDirty::default(),
             screen_key: qwertty_term_vt::terminal::ScreenKey::Primary,
+            kitty_placements: Vec::new(),
+            kitty_images: Vec::new(),
+            kitty_live_ids: Vec::new(),
         }
     }
 

@@ -308,14 +308,7 @@ impl FullSnapshot {
     /// `Full`) and does not touch the terminal's dirty state. For incremental
     /// redraw use [`FullSnapshot::capture_tracking`].
     pub fn capture(terminal: &Terminal, scrollback_offset: usize) -> FullSnapshot {
-        let (kitty_placements, kitty_images, kitty_live_ids) =
-            resolve_kitty(terminal, scrollback_offset);
-        FullSnapshot {
-            window: terminal.snapshot_window(scrollback_offset),
-            kitty_placements,
-            kitty_images,
-            kitty_live_ids,
-        }
+        FullSnapshot::from_window(terminal.snapshot_window(scrollback_offset))
     }
 
     /// Capture the live active area: [`FullSnapshot::capture`] with a
@@ -332,104 +325,55 @@ impl FullSnapshot {
     /// dirty state mutates the terminal, exactly as upstream `RenderState`'s
     /// snapshot does under the render lock).
     pub fn capture_tracking(terminal: &mut Terminal, scrollback_offset: usize) -> FullSnapshot {
-        let (kitty_placements, kitty_images, kitty_live_ids) =
-            resolve_kitty(terminal, scrollback_offset);
+        FullSnapshot::from_window(terminal.snapshot_window_tracking(scrollback_offset))
+    }
+
+    /// Wrap an already-captured [`SnapshotWindow`], converting the kitty image
+    /// data vt resolved into it (R6 slice 5: `Terminal::snapshot_window[_tracking]`
+    /// fills the window's `kitty_*` fields) into the renderer's GPU-ready
+    /// [`KittyPlacement`]/[`KittyImage`] shapes. **Every** capture path funnels
+    /// through here, so the live-app window host (which releases the terminal
+    /// lock before rendering) and the test/`capture` path draw images
+    /// identically. The `Arc<[u8]>` pixels are cloned (cheap, no copy).
+    pub fn from_window(window: qwertty_term_vt::snapshot::SnapshotWindow) -> FullSnapshot {
+        let kitty_placements = window
+            .kitty_placements
+            .iter()
+            .map(|r| KittyPlacement {
+                image_id: r.image_id,
+                z: r.z,
+                instance: crate::wire::Image {
+                    grid_pos: [r.grid_col as f32, r.grid_row as f32],
+                    cell_offset: [r.cell_offset_x as f32, r.cell_offset_y as f32],
+                    source_rect: [
+                        r.source_x as f32,
+                        r.source_y as f32,
+                        r.source_width as f32,
+                        r.source_height as f32,
+                    ],
+                    dest_size: [r.dest_width as f32, r.dest_height as f32],
+                },
+            })
+            .collect();
+        let kitty_images = window
+            .kitty_images
+            .iter()
+            .map(|i| KittyImage {
+                id: i.id,
+                generation: i.generation,
+                width: i.width,
+                height: i.height,
+                rgba: i.rgba.clone(),
+            })
+            .collect();
+        let kitty_live_ids = window.kitty_live_ids.clone();
         FullSnapshot {
-            window: terminal.snapshot_window_tracking(scrollback_offset),
+            window,
             kitty_placements,
             kitty_images,
             kitty_live_ids,
         }
     }
-
-    /// Wrap an already-captured [`SnapshotWindow`] (chunk R5, additive). A
-    /// window host that holds its engine behind a mutex takes the windowed
-    /// snapshot itself (releasing the lock before rendering), then wraps it here
-    /// — avoiding a second `snapshot_window` call and a longer lock hold.
-    /// Equivalent to [`FullSnapshot::capture`] once the window is captured.
-    ///
-    /// Carries no kitty image data: the resolver needs `&Terminal` (to walk the
-    /// pin-anchored placements), which this path deliberately doesn't hold. The
-    /// live-app path gets images once the resolved data is threaded through
-    /// `SnapshotWindow` itself (a later R6 slice).
-    pub fn from_window(window: qwertty_term_vt::snapshot::SnapshotWindow) -> FullSnapshot {
-        FullSnapshot {
-            window,
-            kitty_placements: Vec::new(),
-            kitty_images: Vec::new(),
-            kitty_live_ids: Vec::new(),
-        }
-    }
-}
-
-/// Resolve the visible kitty placements + their images from a live terminal
-/// (the `capture` path holds `&Terminal` under the caller's lock). Delegates
-/// the pin-deref/viewport-mapping to `qwertty_term_vt::kitty::resolve_placements`
-/// (see its docs for why that lives in the vt crate) and converts the flat
-/// result into GPU-ready [`KittyPlacement`]s + Arc-shared RGBA [`KittyImage`]s.
-fn resolve_kitty(
-    terminal: &Terminal,
-    scrollback_offset: usize,
-) -> (Vec<KittyPlacement>, Vec<KittyImage>, Vec<u32>) {
-    use qwertty_term_vt::kitty::{TerminalGeometry, image_rgba, resolve_placements};
-
-    let screen = terminal.screen();
-    let storage = &screen.kitty_images;
-    if !storage.enabled() {
-        return (Vec::new(), Vec::new(), Vec::new());
-    }
-
-    // The full set of images the terminal still holds (R6 slice 3). The renderer
-    // evicts any cached GPU texture whose id has left this set — which covers
-    // both explicit deletes and `image-storage-limit` eviction, since vt drops
-    // the image from `storage.images` either way. Cheap: just the u32 ids.
-    let live_ids: Vec<u32> = storage.images.keys().copied().collect();
-    if storage.placements.is_empty() {
-        // No placements to draw, but images may still exist — keep their
-        // textures (return the live set so they aren't evicted).
-        return (Vec::new(), Vec::new(), live_ids);
-    }
-
-    let geo = TerminalGeometry {
-        cols: terminal.cols,
-        rows: terminal.rows,
-        width_px: terminal.width_px,
-        height_px: terminal.height_px,
-    };
-    let resolved = resolve_placements(storage, &screen.pages, &geo, scrollback_offset);
-
-    let mut placements = Vec::with_capacity(resolved.len());
-    let mut images: Vec<KittyImage> = Vec::new();
-    for r in &resolved {
-        placements.push(KittyPlacement {
-            image_id: r.image_id,
-            z: r.z,
-            instance: crate::wire::Image {
-                grid_pos: [r.grid_col as f32, r.grid_row as f32],
-                cell_offset: [r.cell_offset_x as f32, r.cell_offset_y as f32],
-                source_rect: [
-                    r.source_x as f32,
-                    r.source_y as f32,
-                    r.source_width as f32,
-                    r.source_height as f32,
-                ],
-                dest_size: [r.dest_width as f32, r.dest_height as f32],
-            },
-        });
-
-        if !images.iter().any(|i| i.id == r.image_id)
-            && let Some(img) = storage.image_by_id(r.image_id)
-        {
-            images.push(KittyImage {
-                id: img.id,
-                generation: img.generation,
-                width: img.width,
-                height: img.height,
-                rgba: std::sync::Arc::from(image_rgba(img).into_owned()),
-            });
-        }
-    }
-    (placements, images, live_ids)
 }
 
 impl RenderSnapshot for FullSnapshot {

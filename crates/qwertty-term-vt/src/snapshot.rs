@@ -248,6 +248,15 @@ pub struct SnapshotWindow {
     /// screen switch (alt-screen enter/exit, DEC 1049), which upstream treats
     /// as a full rebuild (`t.screens.active_key != self.screen`).
     pub screen_key: ScreenKey,
+    /// Kitty graphics placements visible in this window, resolved to
+    /// window-relative draw data (R6 slice 5). Only populated by
+    /// [`Terminal::snapshot_window`] / `_tracking` (which have the pixel
+    /// geometry); the screen-level capture leaves these empty.
+    pub kitty_placements: Vec<crate::kitty::RenderImagePlacement>,
+    /// The decoded images referenced by `kitty_placements` (RGBA + generation).
+    pub kitty_images: Vec<crate::kitty::SnapshotKittyImage>,
+    /// Ids of all images the terminal still holds, for GPU texture eviction.
+    pub kitty_live_ids: Vec<u32>,
 }
 
 impl SnapshotWindow {
@@ -458,6 +467,11 @@ impl Screen {
             row_dirty,
             global_dirty: SnapshotDirty::default(),
             screen_key: ScreenKey::Primary,
+            // Kitty image data is filled in by `Terminal::snapshot_window`
+            // (which has the pixel geometry); the screen level leaves it empty.
+            kitty_placements: Vec::new(),
+            kitty_images: Vec::new(),
+            kitty_live_ids: Vec::new(),
         }
     }
 
@@ -548,6 +562,11 @@ impl Screen {
             row_dirty,
             global_dirty: SnapshotDirty::default(),
             screen_key: ScreenKey::Primary,
+            // Kitty image data is filled in by `Terminal::snapshot_window`
+            // (which has the pixel geometry); the screen level leaves it empty.
+            kitty_placements: Vec::new(),
+            kitty_images: Vec::new(),
+            kitty_live_ids: Vec::new(),
         }
     }
 
@@ -694,13 +713,40 @@ impl Terminal {
     /// site (e.g. a UI redraw loop): cost is proportional to `rows`, not to
     /// total scrollback length.
     pub fn snapshot_window(&self, scrollback_offset: usize) -> SnapshotWindow {
+        let (kitty_placements, kitty_images, kitty_live_ids) =
+            self.resolve_kitty_window(scrollback_offset);
         let mut snap = self.screen().snapshot_window(scrollback_offset);
         snap.cursor.visible = self.modes.get(crate::modes::Mode::CursorVisible);
         snap.palette = self.colors.palette.current;
         snap.default_fg = self.colors.foreground.get();
         snap.default_bg = self.colors.background.get();
         snap.screen_key = self.screens.active_key();
+        snap.kitty_placements = kitty_placements;
+        snap.kitty_images = kitty_images;
+        snap.kitty_live_ids = kitty_live_ids;
         snap
+    }
+
+    /// Resolve this frame's kitty image draw data for the window
+    /// `scrollback_offset` rows up (R6 slice 5). Uses the terminal's pixel
+    /// geometry + the active screen's image storage/pages; returns empty vecs
+    /// when kitty storage is disabled or holds no images.
+    fn resolve_kitty_window(
+        &self,
+        scrollback_offset: usize,
+    ) -> (
+        Vec<crate::kitty::RenderImagePlacement>,
+        Vec<crate::kitty::SnapshotKittyImage>,
+        Vec<u32>,
+    ) {
+        let screen = self.screen();
+        let geo = crate::kitty::TerminalGeometry {
+            cols: self.cols,
+            rows: self.rows,
+            width_px: self.width_px,
+            height_px: self.height_px,
+        };
+        crate::kitty::resolve_window(&screen.kitty_images, &screen.pages, &geo, scrollback_offset)
     }
 
     /// Build an owned [`SnapshotWindow`] for the incremental-redraw render
@@ -736,6 +782,10 @@ impl Terminal {
         let palette = self.colors.palette.current;
         let default_fg = self.colors.foreground.get();
         let default_bg = self.colors.background.get();
+        // Resolve kitty data under the immutable borrow, before taking
+        // `screen_mut` for the windowed capture.
+        let (kitty_placements, kitty_images, kitty_live_ids) =
+            self.resolve_kitty_window(scrollback_offset);
 
         let mut snap = self
             .screen_mut()
@@ -746,6 +796,9 @@ impl Terminal {
         snap.default_bg = default_bg;
         snap.global_dirty = global_dirty;
         snap.screen_key = screen_key;
+        snap.kitty_placements = kitty_placements;
+        snap.kitty_images = kitty_images;
+        snap.kitty_live_ids = kitty_live_ids;
 
         // Consume (clear) the global dirty flags, exactly as upstream's
         // `render.zig` `update` does at its tail (`t.flags.dirty = .{};
