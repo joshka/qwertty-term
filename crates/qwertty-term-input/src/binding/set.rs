@@ -2,11 +2,12 @@
 //! core of `Binding.Set` in `input/Binding.zig` (upstream `2da015cd6`,
 //! lines 2045-2695).
 //!
-//! Scope of this slice: the forward map with **case-folded, `mods.binding()`-
+//! Scope so far: the forward map with **case-folded, `mods.binding()`-
 //! normalized** lookup, `put` (with overwrite), the 5-probe [`Set::get_event`],
-//! and `remove`. Deferred to later slices (see `docs/analysis/keybinds.md` and
-//! issue #24): sequences/leaders + chains + `unbind` (`parse_and_put`), and the
-//! reverse action→trigger map used for GUI menu accelerators.
+//! `remove`, and the **reverse action→trigger map** ([`Set::get_trigger`]) used
+//! for GUI menu accelerators. Deferred to later slices (see
+//! `docs/analysis/keybinds.md` and issue #24): sequences/leaders + chains +
+//! `unbind` (`parse_and_put`).
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -100,9 +101,19 @@ impl Hash for SetKey {
 }
 
 /// The trigger→action binding table. Port of the dispatch core of `Binding.Set`.
+///
+/// The `reverse` map (action→trigger) supports GUI menu accelerators: given an
+/// action, find a trigger to display as its shortcut. It is an insertion-ordered
+/// `Vec` acting as a one-entry-per-action map (rather than a `HashMap`) because
+/// [`Action`] carries `f32` payloads and so is not `Hash`/`Eq`; lookups use
+/// `PartialEq`. This matches upstream's `Set.reverse` semantics
+/// (Binding.zig:2053-2077): **performable** bindings are never tracked (so
+/// toolkits don't register them as menu shortcuts), and only the most recently
+/// added trigger per action is kept.
 #[derive(Debug, Clone, Default)]
 pub struct Set {
     forward: HashMap<SetKey, Bound>,
+    reverse: Vec<(Action, Trigger)>,
 }
 
 impl Set {
@@ -115,14 +126,38 @@ impl Set {
     /// previous value — matching `Set.put`'s last-wins overwrite (which is why
     /// e.g. the default `ctrl+shift+w` registered twice ends up as the second
     /// binding). Folded equality means `ctrl+A` and `ctrl+a` are the same key.
+    ///
+    /// Reverse-map maintenance mirrors `Set.putFlags` (Binding.zig:2508-2573):
+    /// tracked only when the binding is not `performable`; overwriting a trigger
+    /// drops the reverse entry that pointed at it, then the new action→trigger
+    /// mapping replaces any prior entry for the same action.
     pub fn put(&mut self, binding: Binding) {
+        let trigger = binding.trigger;
+        let action = binding.action;
+        let flags = binding.flags;
+        let track_reverse = !flags.performable;
+        let key = SetKey(trigger);
+
+        // On overwrite of an existing leaf, drop the old action's reverse entry
+        // that pointed at this trigger (gated on the new binding being tracked,
+        // matching upstream).
+        if track_reverse && self.forward.contains_key(&key) {
+            self.reverse.retain(|(_, t)| *t != trigger);
+        }
+
         self.forward.insert(
-            SetKey(binding.trigger),
+            key,
             Bound {
-                action: binding.action,
-                flags: binding.flags,
+                action: action.clone(),
+                flags,
             },
         );
+
+        if track_reverse {
+            // reverse.put(action, trigger): upsert keyed by action.
+            self.reverse.retain(|(a, _)| *a != action);
+            self.reverse.push((action, trigger));
+        }
     }
 
     /// Look up an exact trigger (folded, binding-normalized). Port of `Set.get`.
@@ -130,10 +165,50 @@ impl Set {
         self.forward.get(&SetKey(trigger))
     }
 
+    /// Get a trigger bound to the given action, for GUI menu accelerators. An
+    /// action may have several triggers; this returns the tracked (most recent,
+    /// non-performable) one. Port of `Set.getTrigger` (Binding.zig:2647-2649).
+    pub fn get_trigger(&self, action: &Action) -> Option<Trigger> {
+        self.reverse
+            .iter()
+            .find(|(a, _)| a == action)
+            .map(|(_, t)| *t)
+    }
+
     /// Remove a trigger's binding, returning it if present. Port of the leaf
-    /// path of `Set.remove` (no reverse-map maintenance yet).
+    /// path of `Set.removeExact` (Binding.zig:2702-2730) including reverse-map
+    /// fixup.
     pub fn remove(&mut self, trigger: Trigger) -> Option<Bound> {
-        self.forward.remove(&SetKey(trigger))
+        let removed = self.forward.remove(&SetKey(trigger))?;
+        self.fixup_reverse_for_action(&removed.action, trigger);
+        Some(removed)
+    }
+
+    /// Fix up the reverse mapping after an action's binding is removed. If the
+    /// reverse entry for `action` still points at `old`, repoint it to any other
+    /// binding with the same action, or drop it if none remain. Port of
+    /// `Set.fixupReverseForAction` (Binding.zig:2749-2782).
+    fn fixup_reverse_for_action(&mut self, action: &Action, old: Trigger) {
+        let Some(idx) = self.reverse.iter().position(|(a, _)| a == action) else {
+            return;
+        };
+        // If the reverse map already points elsewhere, nothing to do.
+        if self.reverse[idx].1 != old {
+            return;
+        }
+        // Find another trigger mapping to the same action ("whatever" order,
+        // like upstream — the forward map is unordered).
+        let other = self
+            .forward
+            .iter()
+            .find(|(_, b)| &b.action == action)
+            .map(|(k, _)| k.0);
+        match other {
+            Some(t) => self.reverse[idx].1 = t,
+            None => {
+                self.reverse.remove(idx);
+            }
+        }
     }
 
     /// Number of bindings in the set.
@@ -313,5 +388,71 @@ mod tests {
         set.put(bind("physical:kp_enter=ignore"));
         let ev = event(Key::NumpadEnter, Mods::default(), "", 0);
         assert!(set.get_event(&ev).is_some());
+    }
+
+    #[test]
+    fn reverse_get_trigger() {
+        let mut set = Set::new();
+        set.put(bind("ctrl+t=new_tab"));
+        assert_eq!(
+            set.get_trigger(&Action::NewTab),
+            Some(bind("ctrl+t=ignore").trigger)
+        );
+        // Unknown action → None.
+        assert_eq!(set.get_trigger(&Action::Quit), None);
+    }
+
+    /// Port of the intent of `performable exclusion` (Binding.zig test 4065):
+    /// performable bindings never enter the reverse map.
+    #[test]
+    fn reverse_excludes_performable() {
+        let mut set = Set::new();
+        set.put(bind("performable:cmd+c=copy_to_clipboard"));
+        // Forward lookup works…
+        assert!(set.get(bind("cmd+c=ignore").trigger).is_some());
+        // …but there is no menu-accelerator reverse entry.
+        assert_eq!(
+            set.get_trigger(&Action::CopyToClipboard(
+                super::super::action::CopyToClipboard::Mixed
+            )),
+            None
+        );
+    }
+
+    /// Overriding a trigger with a different action removes the old action's
+    /// reverse entry (Binding.zig test 4098).
+    #[test]
+    fn reverse_override_updates() {
+        let mut set = Set::new();
+        set.put(bind("ctrl+x=new_tab"));
+        set.put(bind("ctrl+x=new_window"));
+        assert_eq!(set.get_trigger(&Action::NewTab), None);
+        assert_eq!(
+            set.get_trigger(&Action::NewWindow),
+            Some(bind("ctrl+x=ignore").trigger)
+        );
+    }
+
+    /// Removing a trigger repoints the reverse map to another trigger with the
+    /// same action, or drops it if none remain (Binding.zig test 4037).
+    #[test]
+    fn reverse_remove_repoints_then_drops() {
+        let mut set = Set::new();
+        set.put(bind("ctrl+t=new_tab"));
+        set.put(bind("cmd+t=new_tab")); // second trigger, same action
+        // Reverse points at the most-recent (cmd+t).
+        assert_eq!(
+            set.get_trigger(&Action::NewTab),
+            Some(bind("cmd+t=ignore").trigger)
+        );
+        // Remove cmd+t → reverse repoints to the remaining ctrl+t.
+        set.remove(bind("cmd+t=ignore").trigger);
+        assert_eq!(
+            set.get_trigger(&Action::NewTab),
+            Some(bind("ctrl+t=ignore").trigger)
+        );
+        // Remove the last one → reverse entry gone.
+        set.remove(bind("ctrl+t=ignore").trigger);
+        assert_eq!(set.get_trigger(&Action::NewTab), None);
     }
 }

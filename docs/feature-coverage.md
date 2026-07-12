@@ -145,8 +145,10 @@ items are `[ ]` wholesale unless noted.
       + parse layer (10-rule `Trigger::parse`, 85-action enum + `Action::parse`, flag
       prefixes, `=`-splitter, chain + sequence parsing, compat table) **and** the
       runtime `Set` (case-folded `mods.binding()` lookup, 5-probe `get_event`, `put`
-      overwrite) **and** the full macOS `default_set()` (93 upstream-verified default
-      binds). Next: reverse map + sequences/chains dispatch, then app-crate integration.
+      overwrite, **reverse action→trigger map** `get_trigger` for menu accelerators)
+      **and** the full macOS `default_set()` (93 upstream-verified default binds).
+      Next: `parse_and_put` (sequences/leaders + chains + `unbind`), then app-crate
+      dispatch integration (collapse the four bespoke tables; gated on T4).
 - [ ] Full `Binding.zig` system runtime: leader/chains dispatch, key tables, `global`
       binds, `performable` fallthrough (model parsed; runtime `Set` pending)
 - [ ] Most keybind *actions*: `jump_to_prompt`, `write_scrollback_file`, `inspector`,
