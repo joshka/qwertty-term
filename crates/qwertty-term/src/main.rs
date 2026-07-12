@@ -56,6 +56,11 @@
 //!   click clears, press-drag-release selects by cell, shift-click extends,
 //!   and a drag parked past the top edge autoscrolls the viewport into
 //!   scrollback while extending the selection, then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_TITLE=1` — run the tab-title smoke: feed OSC 2 titles
+//!   into two tabs' engines and assert each tab's window title (= its native
+//!   tab label) tracks its own title live, updates on change, and falls back
+//!   to the ghost emoji after the 500ms grace when a title is cleared, then
+//!   exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -149,6 +154,9 @@ fn run_window() {
     // Selection smoke: drive synthetic mouse gestures (double/triple click,
     // drag, shift-extend, edge autoscroll) and assert the selection text.
     let smoke_selection = std::env::var_os("QWERTTY_TERM_SMOKE_SELECTION").is_some();
+    // Title smoke: feed OSC 2 titles into two tabs and assert per-tab window/
+    // tab titles + the ghost-emoji fallback.
+    let smoke_title = std::env::var_os("QWERTTY_TERM_SMOKE_TITLE").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -160,6 +168,7 @@ fn run_window() {
         smoke_focus,
         smoke_search,
         smoke_selection,
+        smoke_title,
     );
 }
 

@@ -1067,6 +1067,16 @@ struct Tab {
     _window_delegate: Retained<WindowDelegate>,
     /// Next surface id to mint within this tab.
     next_surface: u64,
+    /// When this tab was created — the 500ms title-fallback grace period is
+    /// measured from here (upstream `SurfaceView_AppKit.swift:286-291`: a
+    /// timer shows the ghost emoji if no OSC title arrives within 0.5s).
+    created: std::time::Instant,
+    /// The window title last applied, so the per-tick title poll only calls
+    /// `setTitle` on a real change (upstream coalesces rapid changes with a
+    /// 75ms timer — `SurfaceView_AppKit.swift:601-618`; the ~16ms poll plus
+    /// set-on-change achieves the same no-flicker outcome). `RefCell` because
+    /// [`Tab::update_window_title`] takes `&self` from the tick loop.
+    last_title: RefCell<String>,
 }
 
 impl Tab {
@@ -1148,18 +1158,38 @@ impl Tab {
     }
 
     /// Reflect the *focused* pane's title (+ password marker) in the window
-    /// title.
+    /// title — with native tabs, the window title is also the tab's label.
+    ///
+    /// Title semantics mirror upstream's macOS surface view: the title is
+    /// whatever OSC 0/2 set; if none arrives within a 500ms grace period the
+    /// ghost emoji is shown (`SurfaceView_AppKit.swift:286-291` — with shell
+    /// integration the shell sets a real title almost immediately, so the
+    /// ghost only shows for bare shells). During the grace period the app
+    /// name holds the spot (a macOS window needs *some* title before first
+    /// draw). `setTitle` is only called when the computed title actually
+    /// changes (see [`Tab::last_title`]).
     fn update_window_title(&self, password: bool) {
         let base = self
             .focused_surface()
             .and_then(|s| s.engine().title())
-            .unwrap_or_else(|| "qwertty-term".to_string());
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| {
+                if self.created.elapsed() >= std::time::Duration::from_millis(500) {
+                    "👻".to_string()
+                } else {
+                    "qwertty-term".to_string()
+                }
+            });
         let title = if password {
             format!("{base} 🔒")
         } else {
             base
         };
+        if *self.last_title.borrow() == title {
+            return;
+        }
         self.window.setTitle(&NSString::from_str(&title));
+        *self.last_title.borrow_mut() = title;
     }
 }
 
@@ -1607,6 +1637,13 @@ impl Controller {
             .get(&tab)
             .and_then(|t| t.surfaces.get(&surface))
             .map(|s| s.view.clone())
+    }
+
+    /// A tab's current NSWindow title (smoke/test) — with native tabs this is
+    /// also the tab's label in the tab bar.
+    pub fn tab_window_title(&self, tab: TabId) -> Option<String> {
+        let state = self.0.borrow();
+        state.tabs.get(&tab).map(|t| t.window.title().to_string())
     }
 
     /// A specific surface's current selection text (smoke/test): the engine's
@@ -2486,6 +2523,8 @@ impl Controller {
             dividers: Vec::new(),
             _window_delegate: window_delegate,
             next_surface: 1,
+            created: std::time::Instant::now(),
+            last_title: RefCell::new(String::new()),
         };
         // Lay out the single pane to the container's (AppKit-sized) bounds.
         tab.relayout(controller_ptr, id, mtm);
@@ -3007,6 +3046,10 @@ pub struct DelegateIvars {
     /// through the real event path and assert the selection text. See
     /// [`AppDelegate::run_selection_smoke`].
     smoke_selection: bool,
+    /// Title smoke (`QWERTTY_TERM_SMOKE_TITLE`): feed OSC 2 titles into two
+    /// tabs and assert per-tab window/tab titles + the ghost-emoji fallback.
+    /// See [`AppDelegate::run_title_smoke`].
+    smoke_title: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -3051,6 +3094,7 @@ define_class!(
             let has_focus = self.ivars().smoke_focus;
             let has_search = self.ivars().smoke_search;
             let has_selection = self.ivars().smoke_selection;
+            let has_title = self.ivars().smoke_title;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -3064,6 +3108,8 @@ define_class!(
                 self.schedule_search_smoke();
             } else if has_selection {
                 self.schedule_selection_smoke();
+            } else if has_title {
+                self.schedule_title_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -3214,6 +3260,12 @@ define_class!(
         fn selection_smoke(&self, _timer: &AnyObject) {
             self.run_selection_smoke();
         }
+
+        /// Title smoke: feed OSC 2 titles per tab, assert, and exit 0/1.
+        #[unsafe(method(ghosttyTitleSmoke:))]
+        fn title_smoke(&self, _timer: &AnyObject) {
+            self.run_title_smoke();
+        }
     }
 );
 
@@ -3232,6 +3284,7 @@ impl AppDelegate {
         smoke_focus: bool,
         smoke_search: bool,
         smoke_selection: bool,
+        smoke_title: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -3247,6 +3300,7 @@ impl AppDelegate {
             smoke_search,
             search_state: RefCell::new(None),
             smoke_selection,
+            smoke_title,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -5039,6 +5093,104 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the title smoke: let the first shell settle, then run.
+    fn schedule_title_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyTitleSmoke:));
+    }
+
+    /// Tab-title smoke: per-tab live titles from OSC 0/2, the update-on-change
+    /// path, per-tab isolation, and the ghost-emoji fallback:
+    ///
+    /// 1. feed `OSC 2 ; TITLE-ALPHA BEL` into tab A's focused engine → its
+    ///    window title (= native tab label) reads `TITLE-ALPHA`;
+    /// 2. open tab B, feed `TITLE-BETA` → B reads `TITLE-BETA`, A still
+    ///    `TITLE-ALPHA` (per-tab isolation);
+    /// 3. change A's title again → A updates (set-on-change didn't wedge);
+    /// 4. clear B's title (`OSC 2 ; BEL`) and wait out the 500ms grace → B
+    ///    falls back to the ghost emoji (upstream
+    ///    `SurfaceView_AppKit.swift:286-291`), A untouched.
+    ///
+    /// Exits 0/1.
+    fn run_title_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = title_fail;
+
+        let Some(tab_a) = controller.active_tab() else {
+            fail("no active tab at title smoke start".into());
+        };
+        let Some(surface_a) = controller.active_focused_surface() else {
+            fail("no focused surface at title smoke start".into());
+        };
+        let title_of = |tab: TabId| controller.tab_window_title(tab).unwrap_or_default();
+
+        // 1. Live title from OSC 2 (BEL-terminated), polled by the pace tick.
+        controller.feed_surface_output(tab_a, surface_a, b"\x1b]2;TITLE-ALPHA\x07");
+        Self::spin(0.1);
+        if title_of(tab_a) != "TITLE-ALPHA" {
+            fail(format!(
+                "OSC 2 title did not reach tab A's window title (got {:?})",
+                title_of(tab_a)
+            ));
+        }
+
+        // 2. A second tab owns its own title.
+        let Some(tab_b) = controller.new_tab_in(tab_a) else {
+            fail("could not open a second tab".into());
+        };
+        let Some(surface_b) = controller.active_focused_surface() else {
+            fail("no focused surface in tab B".into());
+        };
+        controller.feed_surface_output(tab_b, surface_b, b"\x1b]2;TITLE-BETA\x07");
+        Self::spin(0.1);
+        if title_of(tab_b) != "TITLE-BETA" {
+            fail(format!(
+                "OSC 2 title did not reach tab B's window title (got {:?})",
+                title_of(tab_b)
+            ));
+        }
+        if title_of(tab_a) != "TITLE-ALPHA" {
+            fail(format!(
+                "tab B's title leaked into tab A (A now {:?})",
+                title_of(tab_a)
+            ));
+        }
+
+        // 3. A title *change* propagates (set-on-change caching can't wedge).
+        controller.feed_surface_output(tab_a, surface_a, b"\x1b]2;TITLE-ALPHA-2\x07");
+        Self::spin(0.1);
+        if title_of(tab_a) != "TITLE-ALPHA-2" {
+            fail(format!(
+                "changed OSC 2 title did not propagate to tab A (got {:?})",
+                title_of(tab_a)
+            ));
+        }
+
+        // 4. Clearing the title falls back to the ghost emoji once the 500ms
+        //    grace (from tab creation, long since elapsed for B) applies.
+        controller.feed_surface_output(tab_b, surface_b, b"\x1b]2;\x07");
+        Self::spin(0.65);
+        if title_of(tab_b) != "\u{1F47B}" {
+            fail(format!(
+                "cleared title should fall back to the ghost emoji (got {:?})",
+                title_of(tab_b)
+            ));
+        }
+        if title_of(tab_a) != "TITLE-ALPHA-2" {
+            fail(format!(
+                "fallback on tab B disturbed tab A (A now {:?})",
+                title_of(tab_a)
+            ));
+        }
+
+        println!(
+            "OK: title smoke — OSC 2 set each tab's window/tab title live \
+             (TITLE-ALPHA / TITLE-BETA, per-tab isolated), a title change \
+             propagated, and a cleared title fell back to the ghost emoji \
+             after the 500ms grace without disturbing the other tab."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -5173,6 +5325,12 @@ fn selection_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a title-smoke failure and exit non-zero.
+fn title_fail(msg: String) -> ! {
+    eprintln!("FAIL: title smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -5280,6 +5438,7 @@ pub fn run(
     smoke_focus: bool,
     smoke_search: bool,
     smoke_selection: bool,
+    smoke_title: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -5298,6 +5457,7 @@ pub fn run(
         smoke_focus,
         smoke_search,
         smoke_selection,
+        smoke_title,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
