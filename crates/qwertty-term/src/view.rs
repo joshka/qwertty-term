@@ -33,9 +33,8 @@ use crate::app::Controller;
 use crate::input::keymap::key_from_macos_keycode;
 use crate::input::preedit::Preedit;
 use crate::input::translate::RawKeyEvent;
-use crate::splitkeys;
 use crate::splits::SurfaceId;
-use crate::tabkeys::{self, TabMods};
+use crate::tabkeys::TabMods;
 use crate::tabs::TabId;
 
 /// Interior state for the terminal input view.
@@ -116,16 +115,15 @@ define_class!(
         ///    keeps `ctrl+tab` from ever sending `\t` / a CSI-u sequence to the
         ///    shell (real Ghostty consumes these chords).
         ///
-        /// Crucially, [`tabkeys::resolve`] only matches the *exact* tab chords,
-        /// so plain Tab, Shift+Tab, and Ctrl+I do not resolve here: we return
-        /// `false` and AppKit proceeds to `keyDown:` → the encoder unchanged.
+        /// Crucially, the keybind `Set` only matches the *exact* bound chords, so
+        /// plain Tab, Shift+Tab, and Ctrl+I do not resolve here: we return `false`
+        /// and AppKit proceeds to `keyDown:` → the encoder unchanged.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            // Search chords (cmd+f / cmd+g / cmd+shift+g / cmd+shift+f / escape)
-            // take precedence: they must fire whether the search field or the
-            // terminal is first responder (key equivalents reach the whole
-            // responder chain). Disjoint from the tab/split tables.
-            self.try_handle_search_key(event) || self.try_handle_tab_key(event)
+            // One unified keybind lookup for chord actions (search / split / tab)
+            // that must fire whether the search field or the terminal is first
+            // responder (key equivalents reach the whole responder chain).
+            self.try_handle_keybind_chord(event)
         }
 
         /// Accept first responder so we receive key events.
@@ -437,57 +435,19 @@ impl TerminalView {
     ///
     /// Uses the *physical* keycode (layout-independent) for the digit keys, so
     /// `cmd+1..9` work on non-US layouts — matching upstream's `physical:one..`.
-    fn try_handle_tab_key(&self, event: &NSEvent) -> bool {
+    fn try_handle_keybind_chord(&self, event: &NSEvent) -> bool {
         let key = key_from_macos_keycode(event.keyCode());
         let mods = tab_mods_from_flags(event.modifierFlags());
-
-        // Split chords take precedence (cmd+d, ctrl+alt+arrow, ctrl+super+[]).
-        // They are disjoint from the tab table (asserted in
-        // `splitkeys::tests::does_not_collide_with_tab_bindings`), so order only
-        // matters for clarity. A resolved split chord acts on *this* view's tab
-        // and never falls through to the encoder.
-        if let Some(action) = splitkeys::resolve(key, mods) {
-            let tab = self.ivars().tab;
-            self.with_controller(|c| c.handle_split_action(tab, action));
-            return true;
-        }
-
-        let Some(action) = tabkeys::resolve(key, mods) else {
-            return false;
-        };
-        self.with_controller(|c| c.handle_tab_action(action));
-        // Consume regardless of whether a tab switch happened (e.g. the 1-tab
-        // no-op case): a resolved chord must never fall through to the encoder.
-        true
-    }
-
-    /// If `event` is one of the built-in scrollback-search chords, run its
-    /// action against the controller and return `true` (consuming it). Otherwise
-    /// `false` so AppKit keeps dispatching. Called from `performKeyEquivalent:`.
-    ///
-    /// The bare `escape` chord only resolves *while the focused pane's search bar
-    /// is open* — otherwise it falls through so a plain Escape still reaches the
-    /// PTY encoder (e.g. vim). All other search chords carry Cmd, so they never
-    /// shadow ordinary keys.
-    fn try_handle_search_key(&self, event: &NSEvent) -> bool {
-        use qwertty_term_input::key::Key;
-        let key = key_from_macos_keycode(event.keyCode());
-        let mods = tab_mods_from_flags(event.modifierFlags());
-        let Some(action) = crate::searchkeys::resolve(key, mods) else {
-            return false;
-        };
-        // Gate a bare Escape on search being active for the focused pane.
-        if key == Key::Escape {
-            let active = self
-                .with_controller(|c| c.active_search_is_active())
-                .unwrap_or(false);
-            if !active {
-                return false;
-            }
-        }
         let tab = self.ivars().tab;
-        self.with_controller(|c| c.handle_search_action(tab, action));
-        true
+        // One lookup against the unified keybind `Set` (default keymap + user
+        // config), replacing the former separate search / split / tab tables. The
+        // `Set` holds at most one binding per trigger, so there's no cross-table
+        // precedence to preserve. A resolved tab/split/search chord is consumed;
+        // anything else (menu / byte actions) returns false and falls through to
+        // `keyDown:`. `end_search` self-gates on an open search bar so a plain
+        // Escape still reaches the PTY encoder.
+        self.with_controller(|c| c.handle_keybind_chord(tab, key, mods))
+            .unwrap_or(false)
     }
 
     /// If `event` matches a user `text:` keybind, send its bytes to this

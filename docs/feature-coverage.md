@@ -152,11 +152,13 @@ items are `[ ]` wholesale unless noted.
       **and** the full macOS `default_set()` (93 upstream-verified default binds)
       **and** `parse_and_put` (config-string application: `>`-sequences/leaders,
       `chain=`, `unbind`, with validate-before-mutate + empty-leader pruning). The
-      whole config→`Set` build path is done. **App-crate dispatch has begun (slice
-      b1):** the user `keybind` text seam is now backed by the `Set` (retiring the
-      bespoke `keybind.rs` parser). Remaining: collapse `tabkeys`/`splitkeys`/
-      `searchkeys` into the same `Set` + wire the remaining actions + runtime
-      sequence/chain dispatch.
+      whole config→`Set` build path is done. **App-crate dispatch (slices b1–b2):**
+      all four bespoke key tables are retired — the user `keybind` text seam (b1) and
+      the tab/split/search chords (b2) now resolve through one unified `Set`
+      (`default_set()` + user config) at the `keyDown:`/`performKeyEquivalent:` seam.
+      macOS split/search/tab chords are now upstream's exact defaults. Remaining: wire
+      the remaining action categories (font-size, scroll, clipboard, window, …) + the
+      runtime sequence/chain (leader-key) dispatch.
 - [ ] Full `Binding.zig` system runtime: leader/chains dispatch, key tables, `global`
       binds, `performable` fallthrough (model parsed; runtime `Set` pending)
 - [ ] Most keybind *actions*: `jump_to_prompt`, `write_scrollback_file`, `inspector`,
