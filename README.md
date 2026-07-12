@@ -1,5 +1,7 @@
 # qwertty-term
 
+[![CI](https://github.com/joshka/qwertty-term/actions/workflows/ci.yml/badge.svg)](https://github.com/joshka/qwertty-term/actions/workflows/ci.yml)
+
 A full Rust rewrite of [Ghostty](https://ghostty.org) — terminal emulator engine, font
 stack, Metal renderer, and native macOS app — ported subsystem-by-subsystem from the Zig
 source (pinned at `2da015cd6`) with differential testing against the original as the
