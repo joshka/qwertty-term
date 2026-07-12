@@ -57,5 +57,9 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", lib.display());
     println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=qwertty-term-vt");
+    // The staged archive is `libghostty-vt.a` (the Zig reference lib), so link
+    // it by that basename. (The `qwertty-term-vt` Rust crate is an ordinary
+    // rlib dependency, not a C archive — an earlier rename left this pointing
+    // at a nonexistent `libqwertty-term-vt.a`, which broke the reference lane.)
+    println!("cargo:rustc-link-lib=static=ghostty-vt");
 }

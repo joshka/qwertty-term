@@ -523,6 +523,44 @@ fn osc52_query_is_not_a_write_event() {
     assert_eq!(s.handler.take_clipboard(), None);
 }
 
+// OSC 8 hyperlink start/end wire through to Screen hyperlink attribution.
+// Regression for the previously-dropped `osc_dispatch` arm (#26): the Screen
+// implemented hyperlinks all along, but the stream handler ignored the parsed
+// command. Port of `stream_terminal.Handler.startHyperlink`/`endHyperlink`.
+#[test]
+fn osc8_hyperlink_start_end() {
+    let mut s = term(10, 10);
+    assert_eq!(s.handler.terminal.screen().cursor.hyperlink_id, 0);
+
+    // Start: the cursor now carries a nonzero hyperlink id.
+    s.feed(b"\x1b]8;;https://example.com\x1b\\");
+    let id = s.handler.terminal.screen().cursor.hyperlink_id;
+    assert_ne!(id, 0, "OSC 8 start should set the cursor hyperlink id");
+
+    // Printed cells inherit the active link.
+    s.feed(b"AB");
+
+    // End (`OSC 8 ; ; ST`): the cursor stops carrying a link.
+    s.feed(b"\x1b]8;;\x1b\\");
+    assert_eq!(
+        s.handler.terminal.screen().cursor.hyperlink_id,
+        0,
+        "OSC 8 end should clear the cursor hyperlink id"
+    );
+}
+
+// OSC 8 with an explicit `id=` param also attributes a link (the id lets
+// non-contiguous runs share one logical link; here we just confirm the wiring
+// accepts it and sets the cursor state).
+#[test]
+fn osc8_hyperlink_with_id() {
+    let mut s = term(10, 10);
+    s.feed(b"\x1b]8;id=foo;https://a.example\x1b\\");
+    assert_ne!(s.handler.terminal.screen().cursor.hyperlink_id, 0);
+    s.feed(b"\x1b]8;;\x1b\\");
+    assert_eq!(s.handler.terminal.screen().cursor.hyperlink_id, 0);
+}
+
 // The clipboard event queue only keeps the most recent write (a UI-facing
 // side effect, not a reply queue that must preserve every entry).
 #[test]
