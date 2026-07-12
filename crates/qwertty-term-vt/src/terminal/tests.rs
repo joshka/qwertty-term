@@ -1103,6 +1103,23 @@ fn grapheme_multicodepoint_2027() {
     assert_eq!(wide1, Wide::SpacerTail);
 }
 
+// Zig: "Terminal: enabling grapheme mode handles stored breaks" (b287f6d1a).
+// With mode 2027 off, a zero-width codepoint is attached to the prior cell
+// without applying grapheme boundary rules. Enabling the mode and printing
+// another codepoint walks the stored cluster through the grapheme state
+// machine; the walk must NOT assert no-break (the stored pair legitimately
+// contains one), or it panics in debug/test builds.
+#[test]
+fn grapheme_enabling_mode_handles_stored_breaks() {
+    let mut t = term(5, 1);
+    t.modes.set(Mode::GraphemeCluster, false);
+    t.print('a' as u32);
+    t.print(0x200B); // ZWSP: stored on the prior cell, no boundary applied.
+    t.modes.set(Mode::GraphemeCluster, true);
+    t.print(0x0301); // combining acute: must not panic on the stored break.
+    assert_eq!(t.plain_string(), "a\u{200B}\u{0301}");
+}
+
 // Zig: "Terminal: multicodepoint grapheme marks dirty on every codepoint".
 #[test]
 fn grapheme_marks_dirty_each_codepoint() {
@@ -7019,14 +7036,13 @@ fn print_slice_differential(
                 t2.modes.set(Mode::Wraparound, v);
             }
             15 => {
+                // Toggle mode 2027 live, without erasing first: grapheme
+                // clusters created while the mode was off used to trip a debug
+                // assert in print()'s cluster walk when the mode was toggled on;
+                // that's fixed now (b287f6d1a — the walk resets at stored
+                // breaks instead of asserting none), so this exercises the live
+                // mode change directly.
                 let v = rng.bool();
-                // Erase the display first: grapheme clusters created while
-                // mode 2027 was off can trip a pre-existing debug assert in
-                // print()'s cluster walk when the mode is toggled on
-                // (unrelated to print_slice; it reproduces with per-codepoint
-                // print alone).
-                t1.erase_display(EraseDisplay::Complete, false);
-                t2.erase_display(EraseDisplay::Complete, false);
                 t1.modes.set(Mode::GraphemeCluster, v);
                 t2.modes.set(Mode::GraphemeCluster, v);
             }
