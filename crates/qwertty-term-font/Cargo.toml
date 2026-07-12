@@ -17,8 +17,20 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 [lib]
 name = "qwertty_term_font"
 
+[features]
+# FreeType glyph rasterization (the non-CoreText face path; ADR 003 P1/P2). Off
+# by default; the Linux/software render path enables it. FreeType is
+# cross-platform, so this can also be enabled on macOS to test the FreeType face
+# against the CoreText one. Pulls in the C FreeType library (bundled build).
+freetype = ["dep:freetype-rs"]
+
 [dependencies]
 ttf-parser = "0.25"
+# FreeType face loading + glyph rasterization for the non-CoreText path (Linux;
+# ADR 003 P2). Optional + feature-gated (see `[features]`). `freetype-rs` wraps
+# the C FreeType library; we use its bundled build so no system FreeType is
+# required.
+freetype-rs = { version = "0.36", optional = true }
 # Pure-Rust HarfBuzz shaping port (decision 1: rustybuzz-first). 0.20 pins
 # ttf-parser 0.25 transitively, matching our own ttf-parser, so a rustybuzz
 # `Face` and a ttf-parser `Face` read the same font bytes without a version

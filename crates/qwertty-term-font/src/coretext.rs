@@ -46,59 +46,11 @@ use crate::metrics::{FaceMetrics, Metrics};
 // PUA icons additionally use the generated per-codepoint table in
 // `crate::nerd_font_constraints`.
 
-/// The pixel format of a rasterized [`Bitmap`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    /// 1 byte per pixel: coverage/alpha only. Produced for non-color
-    /// (outline) glyphs via a `kCGImageAlphaOnly` linear-gray context.
-    Alpha8,
-    /// 4 bytes per pixel: premultiplied little-endian BGRA in Display P3.
-    /// Produced for color glyphs (sbix/SVG emoji).
-    Bgra,
-}
-
-/// A rasterized glyph bitmap in CPU memory.
-///
-/// `bearing_x` is the distance from the left of the cell to the left of the ink
-/// box. `bearing_y` is the distance from the glyph's **baseline** to the **top**
-/// of the ink box (+Y up), i.e. `floor(rect.origin.y) + px_height`, since
-/// CoreText returns the ink rect relative to the baseline (the drawing origin).
-///
-/// This is NOT yet cell-relative: to obtain the cell-bottom-relative `offset_y`
-/// the shader expects, the caller adds `metrics.cell_baseline` (upstream folds
-/// that in inside `renderGlyph`, coretext.zig; the reduced `rasterize` has no
-/// metrics, so `Grid::render_face_glyph` applies it). Atlas upload is the
-/// caller's responsibility (F6/renderer).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bitmap {
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// Distance from the left of the cell to the left of the ink box.
-    pub bearing_x: i32,
-    /// Distance from the bottom of the cell to the top of the ink box.
-    pub bearing_y: i32,
-    /// Pixel format of `data`.
-    pub format: PixelFormat,
-    /// Tightly packed pixel data, `width * height * bytes_per_pixel` bytes.
-    pub data: Vec<u8>,
-}
-
-impl Bitmap {
-    /// Bytes per pixel implied by [`Bitmap::format`].
-    pub fn bytes_per_pixel(&self) -> u32 {
-        match self.format {
-            PixelFormat::Alpha8 => 1,
-            PixelFormat::Bgra => 4,
-        }
-    }
-
-    /// True if every pixel is zero (nothing was drawn).
-    pub fn is_blank(&self) -> bool {
-        self.data.iter().all(|&b| b == 0)
-    }
-}
+// `Bitmap`/`PixelFormat` are the platform-neutral rasterization output; they
+// live in `crate::raster` so the FreeType backend produces the same type. Kept
+// re-exported here (`coretext::Bitmap`/`coretext::PixelFormat`) for source
+// compatibility with existing consumers.
+pub use crate::raster::{Bitmap, PixelFormat};
 
 /// Errors from loading or rasterizing a CoreText face.
 #[derive(Debug, Clone, PartialEq, Eq)]

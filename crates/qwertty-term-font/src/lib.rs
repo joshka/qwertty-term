@@ -62,11 +62,20 @@ pub mod deferred;
 #[cfg(target_os = "macos")]
 pub mod discovery;
 pub mod embedded;
+/// FreeType glyph rasterization: [`freetype::Face`], the non-CoreText face
+/// backend (Linux/software render path, ADR 003 P2). Behind the `freetype`
+/// Cargo feature; FreeType is cross-platform, so this builds on macOS too (for
+/// testing the FreeType face against the CoreText one).
+#[cfg(feature = "freetype")]
+pub mod freetype;
 #[cfg(target_os = "macos")]
 pub mod grid;
 pub mod metrics;
 pub mod nerd_font_constraints;
 pub mod presentation;
+/// Platform-neutral rasterized-glyph output ([`raster::Bitmap`] /
+/// [`raster::PixelFormat`]), shared by every face backend.
+pub mod raster;
 #[cfg(target_os = "macos")]
 pub mod resolver;
 #[cfg(target_os = "macos")]
@@ -77,6 +86,7 @@ pub use atlas::Atlas;
 pub use backend::Backend;
 pub use metrics::{FaceMetrics, Metrics};
 pub use presentation::{Presentation, PresentationMode};
+pub use raster::{Bitmap, PixelFormat};
 
 #[cfg(target_os = "macos")]
 pub use collection::{Collection, FontIndex, Style};
