@@ -369,7 +369,7 @@ fn paint_cursor(
             painter.rect_stroke(
                 rect,
                 0.0,
-                Stroke::new(1.0, Color32::WHITE),
+                Stroke::new(1.0_f32, Color32::WHITE),
                 StrokeKind::Inside,
             );
         }
@@ -423,7 +423,7 @@ fn paint_text_decorations(
         let y = pos.y + metrics.height * 0.55;
         painter.line_segment(
             [Pos2::new(pos.x, y), Pos2::new(pos.x + width, y)],
-            Stroke::new(1.0, fg),
+            Stroke::new(1.0_f32, fg),
         );
     }
 }
@@ -446,18 +446,18 @@ fn paint_underline(
         SnapshotUnderline::Single => {
             painter.line_segment(
                 [Pos2::new(pos.x, base_y), Pos2::new(pos.x + width, base_y)],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
         }
         SnapshotUnderline::Double => {
             let top_y = base_y - 2.0;
             painter.line_segment(
                 [Pos2::new(pos.x, top_y), Pos2::new(pos.x + width, top_y)],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
             painter.line_segment(
                 [Pos2::new(pos.x, base_y), Pos2::new(pos.x + width, base_y)],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
         }
         SnapshotUnderline::Curly => {
@@ -473,7 +473,7 @@ fn paint_underline(
                 let y = base_y + if step % 2 == 0 { amplitude } else { -amplitude };
                 points.push(Pos2::new(x, y));
             }
-            painter.line(points, Stroke::new(1.0, color));
+            painter.line(points, Stroke::new(1.0_f32, color));
         }
         SnapshotUnderline::Dotted => {
             let dot = 2.0;
@@ -483,7 +483,7 @@ fn paint_underline(
                 let end = (x + dot).min(pos.x + width);
                 painter.line_segment(
                     [Pos2::new(x, base_y), Pos2::new(end, base_y)],
-                    Stroke::new(1.0, color),
+                    Stroke::new(1.0_f32, color),
                 );
                 x += dot + gap;
             }
@@ -496,7 +496,7 @@ fn paint_underline(
                 let end = (x + dash).min(pos.x + width);
                 painter.line_segment(
                     [Pos2::new(x, base_y), Pos2::new(end, base_y)],
-                    Stroke::new(1.0, color),
+                    Stroke::new(1.0_f32, color),
                 );
                 x += dash + gap;
             }
