@@ -8,8 +8,8 @@ can replicate Surface semantics — port engine-side pieces (T5 territory), Inbo
 stream-handler side of the same seams.
 
 Status: **session 2** — high-signal callbacks tabled (session 1) + the mouse/scroll input
-pipeline and `performBindingAction` inventory mined (session 2, gate-blocked docs work). `sf:`
-= Surface.zig pinned line.
+pipeline, `performBindingAction` inventory, and the key-input/clipboard-read seams mined
+(session 2, gate-blocked docs work). `sf:` = Surface.zig pinned line.
 
 ## Engine-adjacent findings
 
@@ -84,12 +84,38 @@ surface is otherwise satisfied by existing Screen/Terminal primitives.
   "dirty-bit presence unverified" is resolved — the seam is complete engine-side; preedit
   rendering itself is T2/T4.
 
+## Key-input & clipboard-read seams (session 2 cont, sf:2605-3281, 5794-6034)
+
+Mined the key-input entry and the OSC 52 read-reply path. The actual key *encoder*
+(`input/KeyEncoder.zig`, reads `flags.modify_other_keys_2` + `kitty_keyboard` state) is T4;
+Surface only gates on a few engine modes/flags — tabled here since two feed the T5 backlog.
+
+| Behavior                                                                                                                                                                | Upstream                        | Engine state read                                             | Ours today                | Owner                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **KAM gate:** `keyCallback` returns `.consumed` (swallows the key, no encode) when mode 2 (`disable_keyboard`, KAM) is set                                              | sf:2702                         | mode `disable_keyboard` (2, ANSI)                             | **exists** (modes.rs:117) | T5: #35 `vt-kam-allowed` is a *config-gating* toggle over this mode, NOT a missing primitive; T4 honors the gate in its key path |
+| Bracketed paste: `paste.Options.fromTerminal(&terminal)` reads mode 2004; paste framed with `\e[200~`…`\e[201~`, and unsafe-paste detection scans for a stray `\e[201~` | sf:5842-5883; `input/paste.zig` | mode `bracketed_paste` (2004)                                 | **exists** (modes.rs:163) | T4 (paste encode + protection); no engine gap                                                                                    |
+| Password-input concealment: `flags.password_input` toggled by a surface message; conceals input                                                                         | sf:1391-1394                    | `flags.password_input` (**exists**, terminal/mod.rs)          | done                      | T4 wiring                                                                                                                        |
+| `disable_keyboard`/kitty-keyboard disable on child exit (`kitty_keyboard.set(.set,.disabled)`)                                                                          | sf:1292                         | kitty_keyboard (exists)                                       | done                      | T4                                                                                                                               |
+| XTMODKEYS (`modify_other_keys_2`) consumption: read by `KeyEncoder`, not Surface directly                                                                               | `input/KeyEncoder.zig`          | `flags.modify_other_keys_2` (exists, but **never set** — #36) | flag present, unreachable | T5 #36 wires the `CSI > 4;2 m` setter; T4 owns the encoder                                                                       |
+
+**OSC 52 read reply — exact wire format** (refines the delta-audit "OSC 52 read seam"):
+`completeClipboardReadOSC52` (sf:5923) replies `\x1b]52;{kind};{base64}\x1b\\` where `kind` ∈
+`{c: standard, s: selection, p: primary}` and `base64` is standard-alphabet encoding of the
+clipboard bytes (empty clipboard still replies, with empty payload). Gated on `clipboard-read`
+config: `deny` → no request; `ask` → requires user confirm (`error.UnauthorizedPaste` until
+confirmed); `allow` → immediate. **Engine seam:** our `Handler::clipboard(kind, "?")` already
+recognizes the read request and returns without queuing (stream.rs:1875) — the app must own the
+OS-clipboard read + this base64 reply encode. Purely T4; the format is now pinned here so the
+implementer needn't re-derive it.
+
+- **KAM & bracketed-paste modes present.** Both `disable_keyboard` (2) and `bracketed_paste`
+  (2004) exist in `modes.rs` — so #35's `vt-kam-allowed` and any paste work are config/wiring,
+  not new engine state.
+
 ## Not yet mined (next sessions)
 
-| Range                         | Lines          | Expected yield                                          |
-| ----------------------------- | -------------- | ------------------------------------------------------- |
-| `handleMessage` detail        | 960-1713       | per-message app seam specs (partially skimmed)          |
-| `keyCallback` + encoding      | 2605-3281      | kitty keyboard encode paths, modify_other_keys use, IME |
-| `cursorPosCallback` detail    | 4512-4704      | drag selection, autoscroll (mouse-report path tabled)   |
-| `completeClipboardRequest`    | 5794-6034      | OSC 52 read-reply encoding detail (#33-adjacent)        |
-| `dumpText` / `getProcessInfo` | 1905-2034,6034 | test/dump helpers, process info seams                   |
+| Range                         | Lines          | Expected yield                                        |
+| ----------------------------- | -------------- | ----------------------------------------------------- |
+| `handleMessage` detail        | 960-1713       | per-message app seam specs (partially skimmed)        |
+| `cursorPosCallback` detail    | 4512-4704      | drag selection, autoscroll (mouse-report path tabled) |
+| `dumpText` / `getProcessInfo` | 1905-2034,6034 | test/dump helpers, process info seams                 |
