@@ -41,8 +41,8 @@ mirrored; equality-proven vs full redraw across 6 scenarios; 2x faster single-ro
 scrolled-back cursor now hidden), **Cmd+F search UI** (overlay + incremental PageListSearch,
 3.2ms/10k lines synchronous, upstream highlight colors, per-pane; one additive vt
 constructor), **vtebench lane** (`scripts/bench-vtebench.sh`, pinned v0.3.1;
-`docs/benchmarks/vtebench-baseline.md`: **qwertty-term faster in 9/10 suites vs Ghostty
-1.3.1**, dense_cells the one loss at 1.36x; pty-drain caveat documented), **MB2
+`docs/benchmarks/vtebench-baseline.md`: two-way vs 1.3.1 then superseded by the three-way
+below), **MB2
 frame-capture example** (public-APIs-only bytes→PNG, deterministic; 6-item API-polish list
 for MB5 in its report; MB1 unblocked — paste `work/betamax-thread-prompt.md` into a
 betamax session). Restart-audit also recovered 3 orphaned commits (font-shaping analysis

@@ -8,9 +8,10 @@ correctness oracle.
 Status: **daily-drivable on macOS.** Native AppKit app with tabs, splits (zoom, dimming,
 equalize), Cmd+F search, scrollback, IME, kitty + legacy keyboard protocols, mouse
 reporting, shell integration, themes, ligatures, Apple Color Emoji, and nerd-font glyph
-sizing at parity with upstream. First [vtebench](https://github.com/alacritty/vtebench)
-baselines: faster than Ghostty 1.3.1 in 9 of 10 suites on the same machine
-(`docs/benchmarks/`).
+sizing at parity with upstream. Performance is competitive but not yet optimized:
+[vtebench](https://github.com/alacritty/vtebench) puts it ahead of Ghostty 1.3.1 on most
+suites but behind current Ghostty `main` (whose recent perf work is substantially faster);
+no dedicated perf tuning has happened yet. See `docs/benchmarks/` for the honest numbers.
 
 ```sh
 cargo run -p qwertty-term --release          # the terminal

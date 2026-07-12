@@ -209,6 +209,7 @@ items are `[ ]` wholesale unless noted.
 ## Advanced / tooling
 
 - [x] Differential testing vs `libghostty-vt`, resize-interleaved fuzzing, Miri
-- [x] vtebench lane (faster than Ghostty 1.3.1 in 9/10 suites)
+- [x] vtebench lane (ahead of Ghostty 1.3.1 on most suites; behind Ghostty `main` — see
+      `docs/benchmarks/`; no dedicated perf tuning done yet, that's the T1 thread)
 - [ ] Inspector / debug overlay, `write_screen_file`/`write_scrollback_file` actions
 - [ ] `command-palette`, `resize-overlay`, glyph APC protocol, animation
