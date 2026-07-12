@@ -18,6 +18,7 @@ use freetype::face::LoadFlag;
 use freetype::{Library, RenderMode};
 
 use crate::metrics::FaceMetrics;
+use crate::presentation::{Presentation, PresentationMode};
 use crate::raster::{Bitmap, PixelFormat};
 
 /// Errors from loading or rasterizing a FreeType face.
@@ -133,6 +134,70 @@ impl Face {
         }
     }
 
+    /// The face's family name (e.g. `"JetBrains Mono"`), or empty if the font
+    /// carries no name table entry.
+    pub fn family_name(&self) -> String {
+        self.face.family_name().unwrap_or_default()
+    }
+
+    /// True if the face can contain color glyphs (`FT_HAS_COLOR`: CBDT/sbix/COLR).
+    pub fn has_color(&self) -> bool {
+        self.face.has_color()
+    }
+
+    /// The presentation this face advertises: [`Presentation::Emoji`] for a
+    /// color face, else [`Presentation::Text`] — the same rule the CoreText
+    /// backend uses (`coretext::Face::presentation`).
+    pub fn presentation(&self) -> Presentation {
+        if self.has_color() {
+            Presentation::Emoji
+        } else {
+            Presentation::Text
+        }
+    }
+
+    /// True if a specific glyph id is a color glyph. Whole-face approximation
+    /// (matches the CoreText backend): a >16-bit glyph id is never color;
+    /// otherwise a glyph is color iff the face carries color tables.
+    pub fn is_color_glyph(&self, glyph_id: u32) -> bool {
+        self.has_color() && u16::try_from(glyph_id).is_ok()
+    }
+
+    /// True if this face satisfies `cp` under presentation mode `p_mode`.
+    ///
+    /// Identical semantics to `coretext::Face::has_codepoint` (it depends only on
+    /// [`glyph_index`](Self::glyph_index) + [`is_color_glyph`](Self::is_color_glyph),
+    /// both backend-neutral): `Any` needs only a glyph; `Explicit(p)` (and
+    /// `Default(p)` for a `fallback` face) additionally requires the glyph's
+    /// color-ness to match `p`; a non-fallback face accepts `Default` with any
+    /// presentation.
+    pub fn has_codepoint(&self, cp: u32, p_mode: PresentationMode, fallback: bool) -> bool {
+        let effective = match p_mode {
+            PresentationMode::Any => None,
+            PresentationMode::Explicit(p) => Some(p),
+            PresentationMode::Default(p) => {
+                if fallback {
+                    Some(p)
+                } else {
+                    None
+                }
+            }
+        };
+
+        let Some(ch) = char::from_u32(cp) else {
+            return false;
+        };
+        let Some(gid) = self.glyph_index(ch) else {
+            return false;
+        };
+
+        match effective {
+            None => true,
+            Some(Presentation::Text) => !self.is_color_glyph(gid),
+            Some(Presentation::Emoji) => self.is_color_glyph(gid),
+        }
+    }
+
     /// Cell/decoration metrics for this face, derived by the portable
     /// [`crate::tables`] + [`crate::metrics`] path (shared with the CoreText
     /// backend) so the derivation is identical regardless of rasterizer.
@@ -217,6 +282,39 @@ mod tests {
             face.glyph_index('\u{4e00}').is_none(),
             "unsupported codepoint must resolve to None"
         );
+    }
+
+    #[test]
+    fn metadata_and_presentation() {
+        let face = Face::load_embedded(16.0).expect("load");
+        assert!(
+            face.family_name().to_lowercase().contains("jetbrains"),
+            "family: {}",
+            face.family_name()
+        );
+        // JetBrains Mono is a non-color text font.
+        assert!(!face.has_color(), "text font must not be color");
+        assert_eq!(face.presentation(), Presentation::Text);
+        let gid = face.glyph_index('H').unwrap();
+        assert!(!face.is_color_glyph(gid), "'H' is an outline glyph");
+    }
+
+    #[test]
+    fn has_codepoint_modes() {
+        let face = Face::load_embedded(16.0).expect("load");
+        let h = u32::from('H');
+        let cjk = 0x4e00u32;
+        // `Any`: just needs a glyph.
+        assert!(face.has_codepoint(h, PresentationMode::Any, false));
+        assert!(!face.has_codepoint(cjk, PresentationMode::Any, false));
+        // Explicit Text matches an outline glyph; Explicit Emoji does not (no
+        // color glyph in this face).
+        assert!(face.has_codepoint(h, PresentationMode::Explicit(Presentation::Text), false));
+        assert!(!face.has_codepoint(h, PresentationMode::Explicit(Presentation::Emoji), false));
+        // Default on a non-fallback (primary) face ignores presentation.
+        assert!(face.has_codepoint(h, PresentationMode::Default(Presentation::Emoji), false));
+        // Default on a fallback face is held to the explicit presentation.
+        assert!(!face.has_codepoint(h, PresentationMode::Default(Presentation::Emoji), true));
     }
 
     #[test]
