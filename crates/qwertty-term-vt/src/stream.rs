@@ -34,7 +34,10 @@
 //! fast paths are omitted because `Parser::next` already produces identical
 //! actions.
 
+use std::fmt::Write as _;
+
 use crate::apc;
+use crate::color::Rgb;
 use crate::csi::{EraseDisplay, EraseLine, TabClear};
 use crate::dcs;
 use crate::kitty;
@@ -378,7 +381,9 @@ pub trait Handler {
     fn start_hyperlink(&mut self, uri: &str, id: Option<&str>) {}
     /// OSC 8 hyperlink end (`ESC ] 8 ; ; ST`). Port of `endHyperlink`.
     fn end_hyperlink(&mut self) {}
-    fn color_operation(&mut self, requests: &osc::ColorList) {}
+    /// OSC 4/5/10-19/104/105/110-119 color set/reset/query. `terminator` is
+    /// the request's own terminator, echoed on any query reply.
+    fn color_operation(&mut self, requests: &osc::ColorList, terminator: osc::Terminator) {}
     fn kitty_color(&mut self, cmd: &osc::KittyColorProtocol) {}
     fn mouse_shape(&mut self, value: &str) {}
     /// OSC 52 clipboard get/set. `kind` is the clipboard-selection char
@@ -1497,7 +1502,10 @@ impl<H: Handler> Stream<H> {
             C::ChangeWindowIcon(_) => {}
             C::ReportPwd { value } => self.handler.report_pwd(&value),
             C::MouseShape { value } => self.handler.mouse_shape(&value),
-            C::ColorOperation { requests, .. } => self.handler.color_operation(&requests),
+            C::ColorOperation {
+                requests,
+                terminator,
+            } => self.handler.color_operation(&requests, terminator),
             C::KittyColorProtocol(k) => self.handler.kitty_color(&k),
             C::ClipboardContents { kind, data } => self.handler.clipboard(kind, &data),
             C::HyperlinkStart { id, uri } => self.handler.start_hyperlink(&uri, id.as_deref()),
@@ -1684,6 +1692,43 @@ impl TerminalHandler {
 
     fn write_pty(&mut self, bytes: &[u8]) {
         self.output.extend_from_slice(bytes);
+    }
+
+    /// Resolve the current color for an xterm OSC color query target, or `None`
+    /// if unsupported / unset. Palette entries always resolve; foreground and
+    /// background resolve to their current value if set; cursor falls back to
+    /// the foreground when no cursor color is set; every other dynamic and all
+    /// special targets are unsupported. Port of `Terminal.colorForXterm`
+    /// (14c829883).
+    fn color_for_xterm(&self, target: osc::ColorTarget) -> Option<Rgb> {
+        use osc::{ColorTarget, Dynamic};
+        match target {
+            ColorTarget::Palette(i) => Some(self.terminal.colors.palette.current[i as usize]),
+            ColorTarget::Dynamic(Dynamic::Foreground) => self.terminal.colors.foreground.get(),
+            ColorTarget::Dynamic(Dynamic::Background) => self.terminal.colors.background.get(),
+            ColorTarget::Dynamic(Dynamic::Cursor) => self
+                .terminal
+                .colors
+                .cursor
+                .get()
+                .or_else(|| self.terminal.colors.foreground.get()),
+            ColorTarget::Dynamic(_) | ColorTarget::Special(_) => None,
+        }
+    }
+
+    /// Resolve the current color for a kitty (OSC 21) color key, or `None` if
+    /// unsupported / unset. Only palette and the foreground/background/cursor
+    /// specials are terminal-backed. Port of `Terminal.colorForKitty`
+    /// (14c829883).
+    fn color_for_kitty(&self, key: osc::KittyColorKind) -> Option<Rgb> {
+        use osc::{KittyColorKind as Kind, KittyColorSpecial as Special};
+        match key {
+            Kind::Palette(p) => Some(self.terminal.colors.palette.current[p as usize]),
+            Kind::Special(Special::Foreground) => self.terminal.colors.foreground.get(),
+            Kind::Special(Special::Background) => self.terminal.colors.background.get(),
+            Kind::Special(Special::Cursor) => self.terminal.colors.cursor.get(),
+            Kind::Special(_) => None,
+        }
     }
 
     /// Port of `setMode`'s mode-specific side effects (the ones that affect
@@ -1973,8 +2018,11 @@ impl Handler for TerminalHandler {
     fn end_hyperlink(&mut self) {
         self.terminal.screen_mut().end_hyperlink();
     }
-    fn color_operation(&mut self, requests: &osc::ColorList) {
+    fn color_operation(&mut self, requests: &osc::ColorList, terminator: osc::Terminator) {
         use osc::{ColorRequest, ColorTarget, Dynamic};
+        // Query replies accumulate here and are written once at the end (one
+        // pty message, matching upstream).
+        let mut reply = String::new();
         for req in requests {
             match req {
                 ColorRequest::Set { target, color } => match target {
@@ -2007,14 +2055,92 @@ impl Handler for TerminalHandler {
                     self.terminal.flags.dirty.palette = true;
                     self.terminal.colors.palette.reset_all();
                 }
-                ColorRequest::Query { .. } | ColorRequest::ResetSpecial => {}
+                // Query: report the current color in the xterm 16-bit form.
+                // Port of `colorOperation`'s `.query` arm + `writeXtermColorReport`
+                // + `colorForXterm` (14c829883). Unsupported targets / unset
+                // dynamics resolve to `None` and are skipped.
+                ColorRequest::Query(target) => {
+                    let Some(color) = self.color_for_xterm(*target) else {
+                        continue;
+                    };
+                    match target {
+                        ColorTarget::Palette(i) => {
+                            let _ = write!(reply, "\x1b]4;{i};{}", color.encode_rgb16());
+                        }
+                        ColorTarget::Dynamic(dynamic) => {
+                            let _ =
+                                write!(reply, "\x1b]{};{}", *dynamic as u16, color.encode_rgb16());
+                        }
+                        ColorTarget::Special(_) => {}
+                    }
+                    reply.push_str(str::from_utf8(terminator.as_bytes()).unwrap_or("\x1b\\"));
+                }
+                ColorRequest::ResetSpecial => {}
             }
         }
+        if !reply.is_empty() {
+            self.write_pty(reply.as_bytes());
+        }
     }
-    fn kitty_color(&mut self, _cmd: &osc::KittyColorProtocol) {
-        // Kitty color-set effects mirror color_operation; queries emit
-        // replies. Left as a seam (not needed for the differential text
-        // comparison; the fixtures don't use OSC 21).
+    fn kitty_color(&mut self, cmd: &osc::KittyColorProtocol) {
+        // Port of `kittyColorOperation` (14c829883): set/reset mirror the OSC
+        // 4/10/11/12 effects; queries report the current color in the 8-bit
+        // `rgb:RR/GG/BB` form, all concatenated after a single `\x1b]21` prefix
+        // and closed with the request terminator.
+        use osc::{KittyColorKind as Kind, KittyColorRequest as Req, KittyColorSpecial as Special};
+        let mut reply = String::new();
+        for item in &cmd.list {
+            match item {
+                Req::Set { key, color } => match key {
+                    Kind::Palette(p) => {
+                        self.terminal.flags.dirty.palette = true;
+                        self.terminal.colors.palette.set(*p, *color);
+                    }
+                    Kind::Special(Special::Foreground) => {
+                        self.terminal.colors.foreground.set(*color)
+                    }
+                    Kind::Special(Special::Background) => {
+                        self.terminal.colors.background.set(*color)
+                    }
+                    Kind::Special(Special::Cursor) => self.terminal.colors.cursor.set(*color),
+                    Kind::Special(_) => {}
+                },
+                Req::Reset(key) => match key {
+                    Kind::Palette(p) => {
+                        self.terminal.flags.dirty.palette = true;
+                        self.terminal.colors.palette.reset(*p);
+                    }
+                    Kind::Special(Special::Foreground) => self.terminal.colors.foreground.reset(),
+                    Kind::Special(Special::Background) => self.terminal.colors.background.reset(),
+                    Kind::Special(Special::Cursor) => self.terminal.colors.cursor.reset(),
+                    Kind::Special(_) => {}
+                },
+                Req::Query(key) => {
+                    match self.color_for_kitty(*key) {
+                        Some(color) => {
+                            if reply.is_empty() {
+                                reply.push_str("\x1b]21");
+                            }
+                            let _ = write!(reply, ";{key}={}", color.encode_rgb8());
+                        }
+                        None => {
+                            // Terminal-backed key with no value → empty report;
+                            // a non-terminal-backed key is skipped entirely.
+                            if key.has_terminal_query_color() {
+                                if reply.is_empty() {
+                                    reply.push_str("\x1b]21");
+                                }
+                                let _ = write!(reply, ";{key}=");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !reply.is_empty() {
+            reply.push_str(str::from_utf8(cmd.terminator.as_bytes()).unwrap_or("\x1b\\"));
+            self.write_pty(reply.as_bytes());
+        }
     }
     fn mouse_shape(&mut self, _value: &str) {
         // Stored on flags in upstream; not interpreted by Terminal.

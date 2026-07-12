@@ -46,6 +46,25 @@ impl Rgb {
         Self { r, g, b }
     }
 
+    /// Encode as the 16-bit `rgb:RRRR/GGGG/BBBB` form used by xterm color
+    /// reports (OSC 4/10/11/12 query replies). Each 8-bit component is widened
+    /// to 16 bits by `× 257` (i.e. the byte is duplicated: `0x12` → `0x1212`).
+    /// Port of `color.zig` `RGB.encodeRgb16`.
+    pub fn encode_rgb16(self) -> String {
+        format!(
+            "rgb:{:04x}/{:04x}/{:04x}",
+            u16::from(self.r) * 257,
+            u16::from(self.g) * 257,
+            u16::from(self.b) * 257,
+        )
+    }
+
+    /// Encode as the 8-bit `rgb:RR/GG/BB` form used by the kitty color
+    /// protocol (OSC 21 query replies). Port of `color.zig` `RGB.encodeRgb8`.
+    pub fn encode_rgb8(self) -> String {
+        format!("rgb:{:02x}/{:02x}/{:02x}", self.r, self.g, self.b)
+    }
+
     /// Calculates the contrast ratio between two colors. The contrast ratio
     /// is a value between 1 and 21 where 1 is the lowest contrast and 21 is
     /// the highest contrast. Port of `color.zig` `RGB.contrast`.

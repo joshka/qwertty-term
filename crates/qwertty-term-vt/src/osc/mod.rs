@@ -52,7 +52,9 @@ pub use parsers::context_signal::{ContextAction, ContextSignal, ContextType, Exi
 pub use parsers::kitty_clipboard_protocol::{
     ClipboardLocation, ClipboardOperation, ClipboardStatus, KittyClipboardProtocol,
 };
-pub use parsers::kitty_color::{KittyColorProtocol, KittyColorRequest};
+pub use parsers::kitty_color::{
+    KittyColorKind, KittyColorProtocol, KittyColorRequest, KittyColorSpecial,
+};
 pub use parsers::kitty_dnd_protocol::{DndEventType, KittyDndProtocol};
 pub use parsers::kitty_text_sizing::{HAlign, KittyTextSizing, VAlign};
 pub use parsers::semantic_prompt::{
