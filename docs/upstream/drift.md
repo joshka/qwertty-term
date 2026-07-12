@@ -48,11 +48,15 @@ Data-structure / allocator correctness (owner T1):
 - `65f953e8e` — moving map entries via clobbering insert could exhaust headroom without rehash;
   no-clobber insert + rehash-on-exhaustion. (`hash_map.zig:425-490`)
 - `e44f5cb0f` — `RefCountedSet.lookupContext` had no zero-capacity guard → `table[hash & 0]` read
-  OOB. (`ref_counted_set.zig:499`)
+  OOB. (`ref_counted_set.zig:499`) → **DONE (T1 #59)** — confirmed latent in the port; guard +
+  `set_zero_capacity` test added.
 - `8307349ec` — `increaseCapacity` doubled a dimension to grow it; doubling zero stays zero →
-  breaks the growth contract. (`PageList.zig:3299`)
+  breaks the growth contract. (`PageList.zig:3299`) → **DONE (T1 #59)** — confirmed latent;
+  fixed + `grow_tests`.
 - `b953bb346` — `BitmapAllocator` sized chunk region from the wrong variable → over/under-reserve
-  → OOB alloc. (`bitmap_allocator.zig:222`)
+  → OOB alloc. (`bitmap_allocator.zig:222`) → **No work needed (T1)** — the port is already
+  correct (`page/bitmap.rs:66` sizes the slab as `aligned_chunk_count * CHUNK`, a deliberate
+  deviation from upstream's buggy `aligned_cap * chunk_size`).
 
 PageList / Pin bounds and integer overflow (owner T1):
 
