@@ -36,10 +36,16 @@ the seat.
 ## Launching a thread
 
 ```sh
-cd ~/local/ghostty-rs && jj workspace add work/<id> --name <id> --revision main
-cd work/<id> && claude --model <opus|sonnet>
+# from an EXISTING workspace checkout (never the repo root):
+cd ~/local/ghostty-rs/work/josh
+jj workspace add ../<id> --name <id> --revision main
+cd ../<id> && claude --model <opus|sonnet>
 # first message: Read docs/threads/<spec>.md and docs/threads/README.md, then begin.
 ```
+
+Threads may also be spawned as Claude Code background-task sessions (chips); the session's
+first action is then to create/enter its jj workspace exactly as above, regardless of the
+directory it wakes up in.
 
 The spec file is the thread's constitution. On session death/limit, relaunch the same way;
 the status file + jj describe + pushed branch are the durable state — a fresh session must
