@@ -1,4 +1,4 @@
-//! Extraction of [`FaceMetrics`](crate::metrics::FaceMetrics) from a parsed
+//! Extraction of [`FaceMetrics`] from a parsed
 //! font face, via `ttf-parser`.
 //!
 //! Ports the *derivation logic* of Ghostty's CoreText backend

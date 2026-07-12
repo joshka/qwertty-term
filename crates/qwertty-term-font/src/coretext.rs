@@ -359,7 +359,7 @@ impl Face {
     /// Return an independent copy of this face at `size_px` pixels.
     ///
     /// Re-copies the underlying CTFont (`copyWithAttributes(size, null, null)`,
-    /// the same call [`Face::from_ct_font_at_size`] uses). Preserves the
+    /// the same call `Face::from_ct_font_at_size` uses). Preserves the
     /// `source_bytes` (so a byte-backed face stays byte-backed for shaping) but
     /// resets synthetic flags. Used for the alias-to-regular and
     /// synthesize-on-a-fresh-copy paths of family style completion.
@@ -516,8 +516,9 @@ impl Face {
     }
 
     /// The presentation this face advertises via its symbolic traits: a face
-    /// with the color-glyph trait presents as [`Presentation::Emoji`], else
-    /// [`Presentation::Text`] (DeferredFace.zig:370-373, Collection.zig gate).
+    /// with the color-glyph trait presents as [`Presentation::Emoji`](crate::Presentation::Emoji),
+    /// else [`Presentation::Text`](crate::Presentation::Text)
+    /// (DeferredFace.zig:370-373, Collection.zig gate).
     pub fn presentation(&self) -> crate::presentation::Presentation {
         if self.has_color() {
             crate::presentation::Presentation::Emoji
@@ -530,8 +531,10 @@ impl Face {
     /// mirroring the *loaded-face* arm of upstream `Entry.hasCodepoint`
     /// (Collection.zig:816-831).
     ///
-    /// - [`PresentationMode::Any`]: the face merely has a glyph for `cp`.
-    /// - [`PresentationMode::Explicit`] / [`PresentationMode::Default`]: the
+    /// - [`PresentationMode::Any`](crate::PresentationMode::Any): the face
+    ///   merely has a glyph for `cp`.
+    /// - [`PresentationMode::Explicit`](crate::PresentationMode::Explicit) /
+    ///   [`PresentationMode::Default`](crate::PresentationMode::Default): the
     ///   face has a glyph AND its glyph's color-ness matches the requested
     ///   presentation (`Text ⇒ !is_color_glyph`, `Emoji ⇒ is_color_glyph`).
     ///
