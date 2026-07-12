@@ -31,20 +31,31 @@ use qwertty_term_input::key_mods::Mods;
 
 use crate::tabkeys::TabMods;
 
-/// Build the user keybind [`Set`] from `config.keybind` entries. Each entry is a
+/// Build the keybind [`Set`]: the ported upstream default keymap
+/// ([`default_set`](qwertty_term_input::binding::default_set), macOS's 93 binds)
+/// with the user's `config.keybind` entries layered on top. Each user entry is a
 /// full `"<trigger>=<action>"` string parsed by the ported `Binding.zig` system
-/// (`Set::parse_and_put`). An invalid entry logs a warning to stderr and is
-/// skipped, so a single bad line never takes the whole config down (house rule +
-/// ghostty's lenient policy). Later entries override earlier ones (last-wins),
-/// which the `Set` handles.
+/// (`Set::parse_and_put`); an invalid entry logs a warning and is skipped, so a
+/// single bad line never takes the whole config down (house rule + ghostty's
+/// lenient policy). A user entry re-declaring a default trigger overrides it
+/// (last-wins), which the `Set` handles.
 pub fn build_set(entries: &[String]) -> Set {
-    let mut set = Set::new();
+    let mut set = qwertty_term_input::binding::default_set();
     for entry in entries {
         if let Err(reason) = set.parse_and_put(entry) {
             eprintln!("qwertty-term: ignoring keybind '{entry}': {reason:?}");
         }
     }
     set
+}
+
+/// Resolve a physical key + modifier state to its bound [`Action`] (cloned), or
+/// `None` if unbound. Probes the physical trigger then the key's Unicode
+/// codepoint, mirroring the first two probes of [`Set::get_event`]. Used by the
+/// chord-dispatch path (`performKeyEquivalent:`); the byte-producing `text:`
+/// counterpart is [`resolve_text_bytes`].
+pub fn resolve_action(set: &Set, key: Key, mods: TabMods) -> Option<Action> {
+    lookup_action(set, key, to_mods(mods)).cloned()
 }
 
 /// Resolve a physical key + modifier state to the bytes a `text:` binding emits,
@@ -236,14 +247,6 @@ mod tests {
         // (returns None → falls through), matching pre-collapse behaviour.
         let set = build_set(&["shift+enter=new_tab".to_string()]);
         assert_eq!(resolve_text_bytes(&set, Key::Enter, shift()), None);
-    }
-
-    #[test]
-    fn does_not_collide_with_builtin_tab_or_split_bindings() {
-        // The common maintainer binding (shift+enter) is disjoint from both
-        // built-in tables, so it never shadows navigation.
-        assert_eq!(crate::tabkeys::resolve(Key::Enter, shift()), None);
-        assert_eq!(crate::splitkeys::resolve(Key::Enter, shift()), None);
     }
 
     #[test]

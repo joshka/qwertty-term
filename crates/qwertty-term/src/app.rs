@@ -2252,6 +2252,138 @@ impl Controller {
     /// [`Controller::set_active`], so the registry's active pointer resyncs
     /// through the same path a manual tab-bar click uses (no separate
     /// bookkeeping to drift).
+    /// Resolve a chord (physical key + mods) against the keybind [`Set`] and, if
+    /// it maps to a tab/split/search action this seam handles, perform it.
+    /// Returns `true` if the chord was consumed. This is the unified replacement
+    /// for the bespoke `tabkeys`/`splitkeys`/`searchkeys` resolve tables: the
+    /// lookup is the ported `Set` (`default_set()` + user config), the dispatch
+    /// is [`Self::perform_keybind_chord`]. Called from `performKeyEquivalent:`.
+    pub fn handle_keybind_chord(
+        &self,
+        tab: TabId,
+        key: qwertty_term_input::key::Key,
+        mods: crate::tabkeys::TabMods,
+    ) -> bool {
+        // Resolve under a short immutable borrow, then dispatch (the handlers
+        // take their own borrows).
+        let action = {
+            let state = self.0.borrow();
+            crate::keybind::resolve_action(&state.keybinds, key, mods)
+        };
+        match action {
+            Some(action) => self.perform_keybind_chord(tab, &action),
+            None => false,
+        }
+    }
+
+    /// Map a resolved keybind [`Action`](qwertty_term_input::binding::Action) onto
+    /// the existing tab/split/search handlers. Returns `true` if performed (and
+    /// should be consumed); `false` for actions handled elsewhere (menu, byte
+    /// actions, encoder) so `performKeyEquivalent:` falls through. A resolved
+    /// tab/split/search chord is consumed regardless of whether it changed state
+    /// (e.g. a tab switch with only one tab), matching the previous tables —
+    /// except `end_search`, which falls through unless a search is open so a
+    /// plain Escape still reaches the pty.
+    fn perform_keybind_chord(
+        &self,
+        tab: TabId,
+        action: &qwertty_term_input::binding::Action,
+    ) -> bool {
+        use crate::searchkeys::SearchAction;
+        use qwertty_term_input::binding::Action as A;
+        use qwertty_term_input::binding::action::{
+            NavigateSearch, SplitDirection, SplitFocusDirection, SplitResizeDirection,
+        };
+
+        let split_dir = |d: SplitDirection| match d {
+            // The bespoke tables had no "auto"; treat it as a right (vertical) split.
+            SplitDirection::Right | SplitDirection::Auto => Direction::Right,
+            SplitDirection::Down => Direction::Down,
+            SplitDirection::Left => Direction::Left,
+            SplitDirection::Up => Direction::Up,
+        };
+
+        match action {
+            A::PreviousTab => {
+                self.handle_tab_action(TabAction::PreviousTab);
+                true
+            }
+            A::NextTab => {
+                self.handle_tab_action(TabAction::NextTab);
+                true
+            }
+            A::LastTab => {
+                self.handle_tab_action(TabAction::LastTab);
+                true
+            }
+            A::GotoTab(n) => {
+                self.handle_tab_action(TabAction::GotoTab(*n));
+                true
+            }
+
+            A::NewSplit(d) => {
+                self.handle_split_action(tab, SplitAction::NewSplit(split_dir(*d)));
+                true
+            }
+            A::GotoSplit(d) => {
+                let sa = match d {
+                    SplitFocusDirection::Previous => {
+                        SplitAction::GotoAdjacent(Sequential::Previous)
+                    }
+                    SplitFocusDirection::Next => SplitAction::GotoAdjacent(Sequential::Next),
+                    SplitFocusDirection::Up => SplitAction::GotoSplit(Direction::Up),
+                    SplitFocusDirection::Down => SplitAction::GotoSplit(Direction::Down),
+                    SplitFocusDirection::Left => SplitAction::GotoSplit(Direction::Left),
+                    SplitFocusDirection::Right => SplitAction::GotoSplit(Direction::Right),
+                };
+                self.handle_split_action(tab, sa);
+                true
+            }
+            A::ResizeSplit(rs) => {
+                let dir = match rs.direction {
+                    SplitResizeDirection::Up => Direction::Up,
+                    SplitResizeDirection::Down => Direction::Down,
+                    SplitResizeDirection::Left => Direction::Left,
+                    SplitResizeDirection::Right => Direction::Right,
+                };
+                self.handle_split_action(tab, SplitAction::ResizeSplit(dir));
+                true
+            }
+            A::ToggleSplitZoom => {
+                self.handle_split_action(tab, SplitAction::ToggleZoom);
+                true
+            }
+            A::EqualizeSplits => {
+                self.handle_split_action(tab, SplitAction::EqualizeSplits);
+                true
+            }
+
+            A::StartSearch => {
+                self.handle_search_action(tab, SearchAction::Start);
+                true
+            }
+            A::NavigateSearch(NavigateSearch::Next) => {
+                self.handle_search_action(tab, SearchAction::Next);
+                true
+            }
+            A::NavigateSearch(NavigateSearch::Previous) => {
+                self.handle_search_action(tab, SearchAction::Previous);
+                true
+            }
+            // Gate on an active search so a plain Escape still reaches the pty;
+            // when no search is open this falls through to the `_` arm below.
+            A::EndSearch if self.active_search_is_active() => {
+                self.handle_search_action(tab, SearchAction::End);
+                true
+            }
+
+            // Everything else (menu actions, byte actions, inactive end_search,
+            // unhandled) falls through so the menu / keyDown-encoder path handles
+            // it.
+            _ => false,
+        }
+    }
+
     pub fn handle_tab_action(&self, action: TabAction) -> bool {
         // The window we're currently on (the OS key window of the active tab).
         let Some(window) = self.active_window() else {
