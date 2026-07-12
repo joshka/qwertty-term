@@ -158,3 +158,89 @@ fn kitty_image_offscreen_readback() {
         );
     }
 }
+
+/// R6 slice 2 end-to-end: an image scrolled partly above the viewport renders
+/// only its visible bottom rows (top clipped by the GPU), and the resolver
+/// reports the expected negative `grid_row`. Exercises the scrollback-offset
+/// threading through `capture` → resolve → draw.
+#[test]
+fn kitty_image_scrolled_clips_top() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping scrolled kitty-image test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 20u16;
+    let rows = 6u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    // A 4-cell-tall red image at home (screen rows 0..=3), then scroll it up.
+    let red = [255u8, 0, 0, 255].repeat(4);
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    stream.feed(b"\x1b[H");
+    stream.feed(&transmit_and_display_rgba(1, 2, 2, 6, 4, &red));
+    for _ in 0..10 {
+        stream.feed(b"scroll\r\n");
+    }
+    let term = stream.handler.terminal;
+
+    // Offset that puts the window top on the image's 3rd row (top_y = 2): the
+    // image's first two rows clip above, rows 2..=3 show at frame rows 0..=1.
+    let total = term.screen().pages.total_rows();
+    let scrollback_len = total - usize::from(rows);
+    let offset = scrollback_len - 2;
+
+    let snapshot = FullSnapshot::capture(&term, offset);
+    assert_eq!(snapshot.kitty_placements().len(), 1, "one placement");
+    // The resolver reports the clipped (negative) row.
+    assert_eq!(
+        snapshot.kitty_placements()[0].instance.grid_pos[1],
+        -2.0,
+        "top two rows are clipped above the window"
+    );
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    engine.update_frame(&snapshot, &mut grid, FrameOptions::default());
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+    let (sw, sh) = engine.screen_size();
+    let frame = Frame {
+        pixels,
+        width: sw,
+        height: sh,
+        cell_w: cw as usize,
+        cell_h: ch as usize,
+    };
+
+    // The visible bottom of the image (frame rows 0..=1) is red.
+    for &(col, row) in &[(0usize, 0usize), (3, 0), (5, 1), (0, 1)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            p.r > 180 && p.g < 70 && p.b < 70,
+            "cell ({col},{row}) should be visible image-red, got {p:?}"
+        );
+    }
+    // Below the clipped image (frame rows 2+) is scrollback text/background, not
+    // the image color.
+    for &(col, row) in &[(3usize, 2usize), (3, 3)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            !(p.r > 150 && p.g < 90 && p.b < 90),
+            "cell ({col},{row}) below the image should not be image-red, got {p:?}"
+        );
+    }
+}

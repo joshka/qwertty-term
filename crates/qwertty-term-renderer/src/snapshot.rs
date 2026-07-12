@@ -297,7 +297,7 @@ impl FullSnapshot {
     /// `Full`) and does not touch the terminal's dirty state. For incremental
     /// redraw use [`FullSnapshot::capture_tracking`].
     pub fn capture(terminal: &Terminal, scrollback_offset: usize) -> FullSnapshot {
-        let (kitty_placements, kitty_images) = resolve_kitty(terminal);
+        let (kitty_placements, kitty_images) = resolve_kitty(terminal, scrollback_offset);
         FullSnapshot {
             window: terminal.snapshot_window(scrollback_offset),
             kitty_placements,
@@ -319,7 +319,7 @@ impl FullSnapshot {
     /// dirty state mutates the terminal, exactly as upstream `RenderState`'s
     /// snapshot does under the render lock).
     pub fn capture_tracking(terminal: &mut Terminal, scrollback_offset: usize) -> FullSnapshot {
-        let (kitty_placements, kitty_images) = resolve_kitty(terminal);
+        let (kitty_placements, kitty_images) = resolve_kitty(terminal, scrollback_offset);
         FullSnapshot {
             window: terminal.snapshot_window_tracking(scrollback_offset),
             kitty_placements,
@@ -351,7 +351,10 @@ impl FullSnapshot {
 /// the pin-deref/viewport-mapping to `qwertty_term_vt::kitty::resolve_placements`
 /// (see its docs for why that lives in the vt crate) and converts the flat
 /// result into GPU-ready [`KittyPlacement`]s + Arc-shared RGBA [`KittyImage`]s.
-fn resolve_kitty(terminal: &Terminal) -> (Vec<KittyPlacement>, Vec<KittyImage>) {
+fn resolve_kitty(
+    terminal: &Terminal,
+    scrollback_offset: usize,
+) -> (Vec<KittyPlacement>, Vec<KittyImage>) {
     use qwertty_term_vt::kitty::{TerminalGeometry, image_rgba, resolve_placements};
 
     let screen = terminal.screen();
@@ -366,7 +369,7 @@ fn resolve_kitty(terminal: &Terminal) -> (Vec<KittyPlacement>, Vec<KittyImage>) 
         width_px: terminal.width_px,
         height_px: terminal.height_px,
     };
-    let resolved = resolve_placements(storage, &screen.pages, &geo);
+    let resolved = resolve_placements(storage, &screen.pages, &geo, scrollback_offset);
     if resolved.is_empty() {
         return (Vec::new(), Vec::new());
     }
