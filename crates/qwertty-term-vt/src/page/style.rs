@@ -502,6 +502,45 @@ mod tests {
         let _ = StyleSet::layout(16384);
     }
 
+    // Port of style.zig "Set zero capacity" (upstream e44f5cb0f). A
+    // zero-capacity set is a valid special case (`layout(0)`), produced in
+    // practice for pages with exact capacities where no cell is styled
+    // (`Page::exact_row_capacity`). Lookups must NOT probe the zero-size
+    // table: `table[0]` would index a zero-length slice (a bounds panic
+    // here; an OOB read in upstream Zig). The backing is filled with 0xFF to
+    // simulate the set being embedded in a larger structure (e.g. a Page)
+    // where other data — an all-ones grapheme bitmap upstream — follows it.
+    #[test]
+    fn set_zero_capacity() {
+        let layout = StyleSet::layout(0);
+        assert_eq!(layout.total_size, 0);
+
+        // Nonzero, 0xFF-filled buffer standing in for adjacent memory.
+        let mut backing = vec![0xFFu8; 64 + StyleSet::base_align()];
+        let off = backing.as_ptr().align_offset(StyleSet::base_align());
+        let base = unsafe { backing.as_mut_ptr().add(off) };
+        // SAFETY: base aligned; a zero-capacity layout needs no storage.
+        let mut set = unsafe { StyleSet::init(OffsetBuf::new(base), layout, StyleContext) };
+
+        let style = Style {
+            flags: Flags {
+                bold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Lookup must return None without touching the table (no panic/OOB).
+        assert_eq!(unsafe { set.lookup(base, &style) }, None);
+
+        // add() looks up first, then correctly reports OutOfMemory for a
+        // zero-capacity set (it can hold nothing).
+        assert!(matches!(
+            unsafe { set.add(base, style) },
+            Err(crate::page::ref_set::AddError::OutOfMemory)
+        ));
+    }
+
     // Port of style.zig "Style VT formatting *" tests (consolidated).
     #[test]
     fn vt_formatting() {
