@@ -1,155 +1,261 @@
 # Renderer P1: software backend + `Engine`→`GpuBackend` generalization (design)
 
-Design/scoping study for [#41](https://github.com/joshka/qwertty-term/issues/41) — the core
-of [ADR 003](../adr/003-linux-strategy.md)'s P1. Written by T7 (Linux) to make the
-**ownership/sequencing decision concrete** (ADR open-question 3) before any renderer-core
-edits. Commit-stamped survey of our tree at `main` (2026-07-12) + upstream `2da015cd6`.
+Execution-ready design/sizing for [#41](https://github.com/joshka/qwertty-term/issues/41) —
+the core of [ADR 003](../adr/003-linux-strategy.md)'s P1. Written by T7 (Linux) so the work
+is mechanical the moment T2 accepts the trait shape (ADR open-question 3). Survey of our tree
+at `main` (2026-07-12, full method-signature inventory) + upstream `2da015cd6`.
 
-**This is a proposal, not a merged decision.** `engine.rs`/`present.rs`/`gpu.rs` are T2
-(renderer) territory; the trait extension below is the renderer's core architecture. T7 is
-not editing them until T2 blesses the shape and the sequencing (see §6). Filed to T2's inbox.
+**This is a proposal, not a merged decision.** `gpu.rs`/`engine.rs`/`present.rs` are T2
+(renderer) territory; the trait extension is the renderer's core contract. T7 will not edit
+those files until T2 blesses the shape and sequencing (§7). Filed to T2's inbox.
 
 ## 1. Goal
 
 A CPU (software) render path so `qwertty-term-renderer` produces terminal frames on Linux
-with **no GPU and no window** — the headless artifact P1/P2 deliver and the thing
-betamax will consume. Concretely: `Engine::draw_frame` must be able to run against a
-`Software` backend that composites to an RGBA buffer, not only against `Metal`.
+with **no GPU and no window** — the headless artifact P1/P2 deliver and the thing betamax
+consumes. Concretely: `Engine::draw_frame` (and the readback in `Frame::to_rgba`) must run
+against a `Software` backend that composites to an RGBA buffer, not only `Metal`.
 
-## 2. The seam today — and the exact gap
+## 2. The seam today — the exact gap (from the signature inventory)
 
-`gpu.rs` defines `GpuBackend` (+ `GpuBuffer`, `GpuTexture`). Its own module doc is explicit
-about scope (`gpu.rs:21-27`): **"Chunk scope (R1): resource creation only. `Frame`,
-`RenderPass` and `Pipeline` are declared as associated types so the trait shape is complete
-… but no methods reference them yet."**
+`GpuBackend` (`gpu.rs:35-103`) abstracts **resource creation only** (its own docs,
+`gpu.rs:21-27`). The associated types `Target`/`Frame`/`RenderPass`/`Pipeline` exist
+(`gpu.rs:45-57`) but **no trait method references them**, so the entire frame/pipeline/
+pass/draw/present path is hard-wired to concrete `Metal`.
 
-So the trait covers **resource creation** — `new_target`, `new_buffer[_with_data]`,
-`new_texture`, `new_sampler`, `max_texture_size` (`gpu.rs:74-102`) — and `Engine` uses those
-generically (it already imports `GpuBackend, GpuBuffer, GpuTexture`, `engine.rs:26`). But the
-**frame / pipeline / render-pass / draw / present** surface is *not* on the trait. `Engine`
-reaches those through **concrete `Metal` inherent methods**:
+**Already generic (a Software backend reuses as-is):** `new_target`/`new_buffer[_with_data]`/
+`new_texture`/`new_sampler`/`max_texture_size` (`gpu.rs:74-102`); `GpuBuffer`
+(`len`/`sync`/`sync_from_slices`) and `GpuTexture` (`width`/`height`/`replace_region`);
+`SwapChain<B>`/`FrameSlot<B>`/`FrameGuard<B>` (`swap_chain.rs`, fully generic); the
+backend-agnostic `shaders::PipelineDescription` table (`shaders/mod.rs:117-221`).
 
-| What Engine does                                                                                                       | Where                                       | On the trait?          |
-| ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------- |
-| `backend: Metal` field, `swap_chain: SwapChain<Metal>`                                                                 | `engine.rs:94,96`                           | ❌ concrete            |
-| `Metal::new()` / `with_backend(backend: Metal)` ctors                                                                  | `engine.rs:167,177,183,191`                 | ❌ concrete            |
-| `backend.begin_frame(completion) -> Frame`                                                                             | `engine.rs:1198`                            | ❌ inherent on `Metal` |
-| `frame.render_pass(&[Attachment{…}]) -> RenderPass`                                                                    | `engine.rs:1200`                            | ❌ inherent on `Frame` |
-| pipeline-from-shader-source (`library_from_source`, `PipelineOptions`, raw `objc2_metal::MTLLibrary`/`MTLPixelFormat`) | `engine.rs:1481-1555`                       | ❌ raw Metal           |
-| `pass` draws / `Step` / `Primitive` / `Draw`                                                                           | `engine.rs:1478-1555`, `encode_image_steps` | ❌ concrete            |
-| atlas texture creation, `Attachment`, `Buffer<T>`, `Pipeline` types                                                    | `engine.rs:27-31` imports                   | ❌ concrete            |
-| present + readback via `IOSurfaceLayer`                                                                                | `present.rs:28,44,63`                       | ❌ Metal/IOSurface     |
+**Hard-wired to `Metal` (the extension surface), with the crux in bold:**
 
-Upstream models exactly this surface as its comptime `GraphicsAPI` interface
-(`generic.zig`, `2da015cd6`): `GraphicsAPI → Target → Frame → RenderPass → Step → Pipeline`,
-with methods `initShaders`, `initTarget`, `drawFrameStart/End`, `beginFrame`, `present`,
-`presentLastTarget`, `initAtlasTexture`, `surfaceSize` (surveyed in
-`docs/analysis/` OpenGL study). Our `gpu.rs` already names the same associated types
-(`Target/Frame/RenderPass/Pipeline/Sampler`) — they just carry no methods yet.
+| Cluster          | Concrete API (file:line)                                                                                                                                                                                                                                              | What the trait needs                                                                                                            |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Backend ctor     | `Metal::new` (`metal/mod.rs:106`), called `engine.rs:208,218`                                                                                                                                                                                                         | a fallible `Backend::new()` seam (or backend-supplied constructor)                                                              |
+| Frame start      | `Metal::begin_frame(FrameCompletion) -> Frame` (`metal/mod.rs:214`)                                                                                                                                                                                                   | `GpuBackend::begin_frame`                                                                                                       |
+| Pipeline build   | `Metal::new_pipeline(&PipelineOptions)` (`:221`) + `library_from_source(&MTLDevice, &str)` (`pipeline.rs:209`) + `device()` (`:161`) + `target_pixel_format()` (`:203`) — **`PipelineOptions` leaks `MTLLibrary`; the whole path leaks `MTLDevice`/`MTLPixelFormat`** | `GpuBackend::build_pipeline(&PipelineDescription, source)` that hides library/format                                            |
+| Frame            | `Frame::render_pass(&[Attachment]) -> RenderPass` (`frame.rs:88`), `Frame::complete(sync)` (`:101`)                                                                                                                                                                   | `GpuFrame` trait                                                                                                                |
+| Render pass      | `RenderPass::step(&Step)` (`render_pass.rs:147`), `RenderPass::complete()` (`:225`)                                                                                                                                                                                   | `GpuRenderPass` trait                                                                                                           |
+| **Draw binding** | **`Step<'a>` (`render_pass.rs:56-71`) holds raw `&MTLRenderPipelineState`, `&MTLBuffer`×N, `&MTLTexture`×N, `&MTLSamplerState`×N**; `Attachment` holds `&MTLTexture`; `Draw`/`Primitive` are already plain data                                                       | **rebind `Step` through the trait's own `Pipeline`/`Buffer`/`Texture`/`Sampler` associated types — this is the whole ballgame** |
+| Target use       | `Target::texture()`→`&MTLTexture` (`target.rs:98`), `surface()`→`&IOSurfaceRef` (`:93`), `read_pixels()->Vec<u8>` BGRA (`:113`), `width/height`                                                                                                                       | `GpuTarget` trait: draw-dest handle + `read_pixels`                                                                             |
+| Presentation     | `IOSurfaceLayer` + `set_surface_sync` (`layer.rs:177`), `present.rs` `draw_and_present*`                                                                                                                                                                              | **stays macOS/Metal-only** — headless needs no window; see §3.4                                                                 |
+| `Engine` fields  | `backend: Metal`, `swap_chain: SwapChain<Metal>`, four `Pipeline`, `Vec<Buffer<Image>>`, `HashMap<u32, ImageEntry{texture: Texture}>` (`engine.rs:135-199`); `present_parts`/`build_pipeline`/`encode_image_steps` all name `Metal`                                   | make `Engine<B: GpuBackend>`                                                                                                    |
 
-**Therefore #41 is a trait-extension, not a find-and-replace.** You cannot make `Engine`
-generic over `B: GpuBackend` until the trait grows the frame/pipeline/pass/draw/present
-methods that `Engine` currently calls on concrete `Metal`.
+`Draw` (`render_pass.rs:77`, `{primitive, vertex_count, instance_count}`) and `Primitive`
+(`frame.rs:159`, `{Triangle, TriangleStrip}`) are already backend-neutral plain data — keep
+them. Upstream models exactly this as `GraphicsAPI → Target → Frame → RenderPass → Step →
+Pipeline` (`generic.zig`), and its `RenderPass.step` binds the backend's own buffer/texture
+types — i.e. the fix below is what upstream already does.
 
-## 3. Proposed design
+## 3. Recommended design
 
-Two coordinated moves:
+### 3.1 Rebind `Step` through the trait's associated types (the crux)
 
-### 3a. Extend `GpuBackend` to cover the draw surface
+The trait *already declares* `Pipeline`, `Buffer<T>`, `Texture`, `Sampler`. Make `Step`
+generic and reference **those** instead of raw `objc2_metal`:
 
-Add the missing methods, mirroring the concrete `Metal` inherent methods `Engine` already
-calls (so the Metal impl is mostly "move existing code behind a trait method"), and named
-after upstream's `GraphicsAPI` surface. New methods (associated traits on `Frame`/
-`RenderPass` where the receiver isn't the backend):
+```rust
+// gpu.rs — new
+pub struct Draw { pub primitive: Primitive, pub vertex_count: usize, pub instance_count: usize }
+pub enum Primitive { Triangle, TriangleStrip }
 
-- `GpuBackend::build_pipeline(desc, source) -> Self::Pipeline` — folds `library_from_source`
-  and `PipelineOptions` (`engine.rs:1481-1555`).
-- `GpuBackend::begin_frame(completion) -> Self::Frame` (`engine.rs:1198`);
-  `new_atlas_texture(...)`; a present/readback entry (`draw_frame` end + `present.rs`).
-- `GpuFrame` (new trait on `Self::Frame`): `render_pass(attachments) -> Self::RenderPass`
-  (`engine.rs:1200`); `complete(sync)`; readback (`to_rgba`).
-- `GpuRenderPass` (new trait on `Self::RenderPass`): `draw(pipeline, buffers, primitive,
-  step/instances)` — the `Step`/`Draw`/`Primitive` surface (`encode_image_steps`,
-  `engine.rs:1478`).
+pub struct Step<'a, B: GpuBackend + ?Sized> {
+    pub pipeline: &'a B::Pipeline,
+    pub vertex:   Option<&'a B::BufferHandle>,   // untyped bindable handle (see 3.2)
+    pub uniforms: Option<&'a B::BufferHandle>,
+    pub extras:   &'a [Option<&'a B::BufferHandle>],
+    pub textures: &'a [Option<&'a B::Texture>],
+    pub samplers: &'a [Option<&'a B::Sampler>],
+    pub draw:     Draw,
+}
+pub struct Attachment<'a, B: GpuBackend + ?Sized> {
+    pub texture: &'a B::Target,          // render dest is a Target, not a Texture
+    pub clear_color: Option<[f64; 4]>,
+}
 
-Keep `wire` structs frozen — the software backend consumes the same `Uniforms`/`CellText`/
-`CellBg`/`Image` and interprets them on the CPU.
+pub trait GpuFrame {
+    type Backend: GpuBackend;
+    type Error: Error + Send + Sync + 'static;
+    fn render_pass(&self, attachments: &[Attachment<'_, Self::Backend>])
+        -> Result<<Self::Backend as GpuBackend>::RenderPass, Self::Error>;
+    fn complete(&mut self, sync: bool);
+}
+pub trait GpuRenderPass {
+    type Backend: GpuBackend;
+    fn step(&self, step: &Step<'_, Self::Backend>);
+    fn complete(self);
+}
+// GpuBackend — new methods
+fn new() -> Result<Self, Self::Error>;
+fn begin_frame(&self, completion: FrameCompletion) -> Result<Self::Frame, Self::Error>;
+fn build_pipeline(&self, desc: &shaders::PipelineDescription, source: ShaderSource<'_>)
+    -> Result<Self::Pipeline, Self::Error>;
+// new bounds: type Frame: GpuFrame<Backend=Self>; type RenderPass: GpuRenderPass<Backend=Self>;
+//             type Target: GpuTarget; and a new `type BufferHandle;`
+```
 
-### 3b. Implement `Software` backend (new module, no collision)
+`FrameCompletion = Box<dyn Fn(Health, bool) + Send + 'static>` (already `frame.rs:56`; move
+`Health` to `gpu.rs`). `ShaderSource<'a>` is backend-chosen: Metal wraps the MSL `&str`
+(`shaders::SOURCE`) and compiles it in `build_pipeline`; Software takes `()` and keys the
+pipeline off `desc.name`. This deletes `PipelineOptions`/`library_from_source`/`device()`/
+`target_pixel_format()` from the *trait* surface — they become Metal-internal to its
+`build_pipeline` impl.
 
-A `software` module implementing the full trait against a CPU RGBA framebuffer, using
-`tiny-skia` (already a workspace dep via `qwertty-term-sprite` — **no new dependency**):
+### 3.2 The one real decision for T2: buffer binding handle
 
-- `Target` = a `tiny-skia::Pixmap` (or raw `Vec<u8>` BGRA to match Metal's readback order).
-- `Buffer<T>`/`Texture`/`Sampler` = plain `Vec`-backed structs (trivial).
-- `build_pipeline` = a no-op returning a tagged enum (`BgColor`/`CellBg`/`CellText`/`Image`)
-  — software "pipelines" are just which CPU rasterizer to run, keyed by
-  `PipelineDescription::name`.
-- `render_pass.draw` = the actual raster: `bg_color`/`cell_bg` fill the target from
-  `Uniforms`; `cell_text` iterates the per-instance `CellText` buffer and alpha-blits each
-  glyph from the atlas texture (grayscale/color) at `grid_pos`, applying the same
-  premultiplied-over blend upstream's shader does; `image` blits kitty RGBA.
-- Reuse the color math already ported and unit-tested in
-  `shaders/color_math.rs` (linearize/unlinearize/luminance/contrast) so software output
-  matches the MSL's blending, not an ad-hoc approximation.
+`Step` binds buffers **untyped** (Metal binds `MTLBuffer` regardless of `T`). Our
+`GpuBuffer<T>` is typed. Two options — recommend **A**:
 
-The `Software` backend is **new code** — it does not touch `engine.rs`. Only step 3a (trait)
-and the `Engine` field/ctor genericization touch shared renderer files.
+- **A. `type BufferHandle` + `GpuBuffer::handle(&self) -> &B::BufferHandle`.** Metal:
+  `BufferHandle = ProtocolObject<dyn MTLBuffer>` (returns what `buffer()` returns today,
+  `buffer.rs:110`). Software: `BufferHandle = SoftBuffer` (a `Rc<RefCell<Vec<u8>>>` view or an
+  arena id). Minimal churn: call sites change `slot.vertex.buffer()` → `slot.vertex.handle()`.
+- **B.** Make `Step` bind `&dyn Any` / an enum. Rejected: loses type-checking, uglier.
 
-## 4. Evidence plan
+`GpuTexture` already exposes `width/height/replace_region`; add `type TextureHandle`? Not
+needed if `Step.textures` binds `&B::Texture` directly and the Metal impl's `step()` calls
+`.texture()` internally. Same for `Sampler`. So **only buffers need the extra handle type**
+(they're bound untyped); textures/samplers/pipelines bind by their associated type directly.
 
-- A Linux offscreen readback test: render a known snapshot through `Software` and assert the
-  **cell grid** matches what the macOS `Metal` path produces for the same input (mirror the
-  existing macOS offscreen-smoke assertions; geometry/coverage, not pixel-exact vs Metal).
-- Run the backend-agnostic acceptance tests (`dirty_equality` scenarios, ink placement) on
-  Linux via `Software` — the [#42](https://github.com/joshka/qwertty-term/issues/42) un-gate.
-- macOS `Metal` path unchanged; full renderer suite still green.
+### 3.3 `GpuTarget` (draw dest + readback)
 
-## 5. Sizing
+```rust
+pub trait GpuTarget {
+    fn width(&self) -> usize;
+    fn height(&self) -> usize;
+    fn read_pixels(&self) -> Vec<u8>;   // BGRA, tight rows — matches Target::read_pixels
+}
+```
 
-| Piece                                                           | Est.                             | Touches                                 |
-| --------------------------------------------------------------- | -------------------------------- | --------------------------------------- |
-| Trait extension (`gpu.rs` methods + `GpuFrame`/`GpuRenderPass`) | ~150–250 LoC                     | T2 core (`gpu.rs`)                      |
-| Metal impl moved behind the new methods                         | ~200–400 LoC (mostly relocation) | T2 core (`metal/`, `engine.rs` helpers) |
-| `Engine` genericized over `B: GpuBackend`                       | ~100–200 LoC diff                | T2 core (`engine.rs`, `present.rs`)     |
-| `Software` backend (new module)                                 | ~500–800 LoC                     | **new file** (low collision)            |
-| Linux readback test + un-gating                                 | ~150 LoC                         | tests                                   |
+Metal maps to `Target::{width,height,read_pixels}` (`target.rs:84-113`); `surface()` stays a
+Metal-inherent extra used only by presentation (§3.4), not on the trait. Software: the Target
+*is* the `Vec<u8>` framebuffer; `read_pixels` clones it (already BGRA).
 
-The genuinely contentious surface is the trait + Metal relocation + `Engine` genericization
-(all T2 core); the software backend itself is additive.
+### 3.4 Presentation stays out of the trait
 
-## 6. Ownership & sequencing recommendation
+`IOSurfaceLayer`/`set_surface_sync`/`present.rs::draw_and_present*` are macOS-only and
+**headless needs none of it** — the P1 artifact reads pixels back, it doesn't present to a
+window. So: leave `present.rs` exactly as-is (`#![cfg(target_os = "macos")]`), keep its
+`Engine<Metal>`-specialized `impl`, and make only `draw_frame`/`update_frame`/`sync_atlas`/
+readback generic. The Software backend never touches presentation. (A Linux windowed present
+is P4/GTK, a separate seam.)
 
-The refactor rewrites the renderer's central abstraction and edits `engine.rs` (1426 LoC) —
-which **T2's next slice also touches** (R6 slice 2: scroll/pin tracking + *viewport clip* is
-renderer-side). A large generalization landing concurrently with T2's feature work invites
-exactly the contention the file-claim protocol warns about. T2 currently holds **no claim**
-on these files and has **no open PR** on them, but that is a momentary window, not a
-guarantee.
+### 3.5 `Software` backend module (new, non-colliding)
 
-**Recommended split (for T2 to accept/counter):**
+New `renderer/src/software/` implementing the full extended trait against a CPU `Vec<u8>`
+BGRA framebuffer, reusing `tiny-skia` only if a fill/blit primitive helps (already a
+workspace dep via `qwertty-term-sprite`; no new dep). Per-pipeline CPU raster, keyed by
+`PipelineDescription::name`, consuming the frozen wire structs — see §4. Associated types:
+`Target = SoftTarget(Vec<u8>, w, h)`; `Buffer<T> = SoftBuffer(Vec<T>)` with a byte-view
+`BufferHandle`; `Texture = SoftTexture{fmt, w, h, Vec<u8>}`; `Sampler = ()`;
+`Pipeline = SoftPipeline(enum {BgColor, CellBg, CellText, Image})`; `Frame`/`RenderPass`
+accumulate steps then execute on `complete`.
 
-1. **T7 authors the whole change** (#41) — trait extension + Metal-behind-trait + `Engine`
-   genericization + `Software` backend — as one cohesive PR. It is the Linux thread's
-   deliverable and the software backend is the forcing function; splitting the trait work
-   from its first non-Metal consumer would land an unused abstraction.
-2. **T2 owns the trait *shape*** — reviews/approves the `GpuBackend` extension before T7
-   builds on it (it's T2's core contract; T2 also lives with it for OpenGL later).
-3. **Sequence after T2's R6 slice 2 merges** (or T7 rebases onto it), so the `engine.rs`
-   viewport-clip work and this genericization don't collide mid-flight. T7 does the
-   non-colliding prep first: the `Software` backend module + the trait-extension design in
-   `gpu.rs` behind review, while slice 2 is in flight.
+## 4. Software rasterization spec (per pipeline, exact)
 
-Alternative if T2 prefers to own its core: **T2 does 3a (trait + Metal)**, T7 does 3b
-(`Software`) + the `Engine` genericization on top. Cleaner territory boundary, one more
-handoff.
+Reference: `shaders/ghostty.metal` (function lines below) + the **already-ported, unit-tested
+color math** in `shaders/color_math.rs` (`linearize`/`unlinearize`/`luminance`/
+`contrast_ratio`/`contrasted_color`) — reuse it verbatim so software output matches the MSL,
+not an approximation. Uniforms/instance layouts are frozen in `wire.rs`.
 
-Either way the decision is a two-thread coordination (T7↔T2), surfaced here + in T2's inbox;
-Josh only needs to weigh in if T7 and T2 disagree.
+- **`bg_color`** (`ghostty.metal:245`): fill the whole target with `Uniforms.bg_color`
+  (`wire.rs:136`). Honor `bools.use_linear_blending`/`use_display_p3` exactly as the MSL
+  `load_color` helper does (`ghostty.metal:147-195`).
+- **`cell_bg`** (`ghostty.metal:261`): per-pixel, compute the cell `(col,row)` from
+  `Uniforms.cell_size`/`grid_padding`; blend `CellBg[row*cols+col]` (`wire.rs:207`,
+  `[u8;4]`) premultiplied-over the target. Padding pixels use `padding_extend`
+  (`wire.rs:129`, LSB left/right/up/down) to pick the nearest edge cell's color.
+- **`cell_text`** (vtx `ghostty.metal:366`, frag `:488`): for each `CellText` instance
+  (`wire.rs:170`): source rect = `glyph_pos..glyph_pos+glyph_size` in the atlas
+  (`atlas` field picks grayscale vs color, `wire.rs:144`); dest top-left =
+  `grid_pos*cell_size + (bearings.x, cell_baseline-bearings.y)` (bearings `wire.rs:176` are
+  i16 px). Grayscale glyph: coverage α from the atlas × `contrasted_color(min_contrast,
+  color, cell_bg_at_that_cell)` (`ghostty.metal:465`), premultiplied-over, in linear space
+  when `use_linear_blending`. Color glyph (emoji): sample BGRA directly, premultiplied-over
+  (`ghostty.metal:513`). `bools.is_cursor_glyph`/`no_min_contrast` (`wire.rs:157`) gate the
+  contrast step.
+- **`image`** (kitty, vtx `ghostty.metal:596`, frag `:640`): for each `Image` instance
+  (`wire.rs:213`), blit `source_rect` of the image texture to `grid_pos*cell_size +
+  cell_offset`, scaled to `dest_size`, premultiplied-over. R6-slice-1 scope; can land last.
 
-## 7. Open questions for T2
+Blend/color invariants come straight from `color_math.rs`; the atlas textures are the same
+grayscale+color `GpuTexture`s the engine already syncs (`engine.rs:1346,1358`).
 
-1. Accept the trait-extension shape in §3a (names/method split), or counter?
-2. Ownership: T7-authors-all (recommended) vs T2-owns-trait+Metal / T7-owns-software?
-3. Sequencing vs R6 slice 2's `engine.rs` viewport-clip edits — after, or coordinate a
-   shared rebase point?
+## 5. Mechanical migration checklist (`engine.rs`/`present.rs` — T2/authored-by-T7)
+
+Each concrete site → generic form. Line numbers from the 2026-07-12 inventory.
+
+1. `Engine` struct (`engine.rs:135-199`) → `Engine<B: GpuBackend>`; fields:
+   `backend: B`, `swap_chain: SwapChain<B>`, four `B::Pipeline`, `Vec<B::Buffer<Image>>`,
+   `ImageEntry{ texture: B::Texture }`.
+2. Ctors (`engine.rs:208,218`): replace `Metal::new()` with `B::new()`; keep the
+   `with_backend(backend: B, …)` variants (already take a backend by value).
+3. `build_pipeline` (`engine.rs:1551-1594`) + `map_vertex_format`: collapse into
+   `B::build_pipeline(desc, ShaderSource::…)`; delete the `library_from_source`/`device()`/
+   `target_pixel_format()`/`PipelineOptions` plumbing (moves into Metal's impl).
+4. `draw_frame` (`engine.rs:1239-1303`): `backend.begin_frame` → `B::begin_frame`;
+   `frame.render_pass(&[Attachment{ texture: slot.target… }])` (now `Attachment<B>`);
+   `pass.step(&Step{ pipeline.state()→&B::Pipeline, …buffer()→…handle(), …texture()→&B::Texture })`;
+   `slot.target.texture()` dest → `Attachment.texture: &B::Target`; `slot.target.read_pixels()`
+   (`engine.rs:1303`) via `GpuTarget`.
+5. `encode_image_steps` (`engine.rs:1519-1534`): params `pass: &B::RenderPass`,
+   `pipeline: &B::Pipeline`, `uniforms: &B::BufferHandle`, `images: &HashMap<u32, ImageEntry<B>>`,
+   `image_instances: &[B::Buffer<Image>]`.
+6. `present_parts` (`engine.rs:1441-1453`) + all of `present.rs`: **do not genericize** —
+   they stay in the `#[cfg(target_os="macos")] impl Engine<Metal>` block (§3.4). Move
+   `present_parts` and the `present` module under that specialized impl.
+7. `Frame` readback type (`engine.rs:1477-1512`, the `{width,height,bgra}` struct — distinct
+   from `metal::Frame`) is already backend-neutral; keep. `to_rgba` (`:1505`) unchanged.
+
+## 6. Sizing (tightened, per file)
+
+| Piece                                                                                                                                                        | File(s)                                                   | Est. LoC                                          | Notes                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------- |
+| Trait extension (`Step<B>`/`Attachment<B>`/`Draw`/`Primitive`, `GpuFrame`/`GpuRenderPass`/`GpuTarget`, `BufferHandle`, `begin_frame`/`build_pipeline`/`new`) | `gpu.rs`                                                  | ~180–240                                          | additive; T2 reviews the shape                                             |
+| Metal moved behind the new methods                                                                                                                           | `metal/{mod,frame,render_pass,pipeline,target,buffer}.rs` | ~250–400 (mostly relocation, near-zero new logic) | `Step`/`Attachment` become `<Metal>`; `handle()`/`GpuTarget` thin wrappers |
+| `Engine<B>` genericization                                                                                                                                   | `engine.rs`                                               | ~150–220 diff                                     | §5 items 1–5,7                                                             |
+| Keep present.rs Metal-specialized                                                                                                                            | `engine.rs`, `present.rs`                                 | ~30                                               | move `present_parts` into the macOS impl                                   |
+| **Software backend**                                                                                                                                         | `software/*` (new)                                        | ~550–800                                          | §3.5 + §4; additive, low collision                                         |
+| Linux readback test + `#42` un-gates                                                                                                                         | `tests/`                                                  | ~150                                              | §8                                                                         |
+
+Contentious surface = trait + Metal-relocation + `Engine<B>` (all T2 core). The Software
+backend and its tests are additive.
+
+## 7. Ownership & sequencing (unchanged recommendation, now concrete)
+
+`engine.rs` (1426 LoC) is also touched by T2's **R6 slice 2** (viewport clip; PR #64 open as
+of 2026-07-12). Landing this genericization concurrently invites the contention the file-claim
+protocol warns about. Recommended split (T2 to accept/counter):
+
+1. **PR-1 — trait extension + Metal behind it** (`gpu.rs` + `metal/*`). No behavior change;
+   the Metal path still works. **T2 reviews/owns the trait shape.** This is the reviewable
+   contract change; everything downstream is mechanical.
+2. **PR-2 — `Software` backend** (new `software/*` + Linux readback test). Additive, no
+   `engine.rs` edits beyond what PR-3 needs; can be built against PR-1's trait.
+3. **PR-3 — `Engine<B>` genericization** (`engine.rs`, `present_parts` into the macOS impl).
+   **Sequence after T2's R6 slice-2 (#64) merges** (or a shared rebase point).
+
+T7 authors all three; T2 owns the PR-1 trait shape. Alternative if T2 prefers: T2 does PR-1,
+T7 does PR-2+PR-3.
+
+## 8. Verification plan
+
+- **PR-1**: `cargo test -p qwertty-term-renderer` on macOS stays fully green (pure
+  refactor); `--all-targets --target x86_64-unknown-linux-gnu` still compiles.
+- **PR-2**: a Linux (and macOS) readback test drives a known snapshot through `Software` and
+  asserts the **cell grid** matches the `Metal` path's for the same input (geometry/coverage;
+  not pixel-exact vs Metal). Software backend has no GPU/display → runs on any CI runner.
+- **PR-3**: the backend-agnostic acceptance suite (`dirty_equality` scenarios, ink placement)
+  runs on Linux via `Software` — the [#42](https://github.com/joshka/qwertty-term/issues/42)
+  un-gate. macOS Metal path unchanged and green throughout.
+
+## 9. Open questions for T2 (the go/no-go)
+
+1. Accept the **`Step<B>` associated-type rebinding** (§3.1) and the **`BufferHandle`** choice
+   (§3.2 option A)? This is the one load-bearing API decision.
+2. Accept **presentation stays Metal-specialized** (§3.4) — `Engine<B>` generic only for
+   draw/update/readback, `present.rs` unchanged?
+3. Ownership: T7-authors-all with T2 owning PR-1's shape (recommended), or T2 owns PR-1?
+4. Sequencing vs R6 slice-2 (#64): after it merges, or a coordinated rebase point?
