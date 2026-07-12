@@ -140,6 +140,23 @@ impl Engine {
         Engine::with_backend(backend, cell_width, cell_height)
     }
 
+    /// Build the engine over a fresh Metal context with cell geometry read
+    /// from `grid`'s own metrics — the grid that will shape and rasterize
+    /// every frame is the single source of truth for cell size, so the two
+    /// can never disagree. Prefer this over [`Engine::new`] when a font
+    /// `Grid` already exists (an embedder always has one).
+    pub fn for_grid(grid: &Grid) -> Result<Engine, MetalError> {
+        let backend = Metal::new()?;
+        Engine::with_backend_for_grid(backend, grid)
+    }
+
+    /// [`Engine::for_grid`] over an existing Metal context (shared backends,
+    /// graceful no-device skip paths).
+    pub fn with_backend_for_grid(backend: Metal, grid: &Grid) -> Result<Engine, MetalError> {
+        let metrics = grid.metrics();
+        Engine::with_backend(backend, metrics.cell_width, metrics.cell_height)
+    }
+
     /// Build the engine over an existing Metal context. Used by tests that
     /// share a backend or need to skip gracefully when no device is present.
     pub fn with_backend(
@@ -970,6 +987,29 @@ impl Engine {
         }
     }
 
+    /// Render one complete offscreen frame: [`Engine::update_frame`] +
+    /// [`Engine::sync_atlas`] + [`Engine::draw_frame`] in the only order that
+    /// works, returning the readback as a [`Frame`] (dimensions + pixels
+    /// together). The one-call embedder path; the three underlying steps stay
+    /// public for hosts that need to interleave them (e.g. a window host that
+    /// presents instead of reading back).
+    pub fn render<S: RenderSnapshot>(
+        &mut self,
+        snapshot: &S,
+        grid: &mut Grid,
+        opts: FrameOptions,
+    ) -> Result<Frame, MetalError> {
+        self.update_frame(snapshot, grid, opts);
+        self.sync_atlas(grid)?;
+        let bgra = self.draw_frame()?;
+        let (width, height) = self.screen_size();
+        Ok(Frame {
+            width,
+            height,
+            bgra,
+        })
+    }
+
     /// Draw the current [`Contents`] into a fresh frame against the swap chain
     /// and present (readback-ready). Port of `drawFrame`'s cell-drawing
     /// structure (bg_color → cell_bg → cell_text), sync mode.
@@ -1228,6 +1268,52 @@ impl Engine {
             &self.cell_bg_pipeline,
             &self.cell_text_pipeline,
         )
+    }
+}
+
+/// A rendered frame read back from the offscreen target, as returned by
+/// [`Engine::render`]: pixel dimensions and pixels travel together, and the
+/// pixel format is stated by the accessor you call instead of assumed.
+///
+/// The readback is stored as it comes off the GPU — BGRA8, row-major, tightly
+/// packed (row padding already stripped) — so [`Frame::bgra`] is free and
+/// [`Frame::to_rgba`] pays one swizzled copy (the layout PNG encoders and
+/// `image`-crate buffers expect).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    width: usize,
+    height: usize,
+    bgra: Vec<u8>,
+}
+
+impl Frame {
+    /// Width in pixels.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Height in pixels.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// The raw readback pixels: BGRA8, row-major, tightly packed.
+    pub fn bgra(&self) -> &[u8] {
+        &self.bgra
+    }
+
+    /// Consume the frame, taking the raw BGRA8 buffer without a copy.
+    pub fn into_bgra(self) -> Vec<u8> {
+        self.bgra
+    }
+
+    /// The pixels swizzled to RGBA8 (one copy), row-major, tightly packed.
+    pub fn to_rgba(&self) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(self.bgra.len());
+        for px in self.bgra.chunks_exact(4) {
+            rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+        rgba
     }
 }
 
