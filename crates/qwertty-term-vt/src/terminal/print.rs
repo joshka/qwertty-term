@@ -490,16 +490,20 @@ impl Terminal {
                     let page = self.screen().cursor_page();
                     if let Some(cps) = (*page).lookup_grapheme(prev_cell) {
                         for &cp2 in &*cps {
-                            // The grapheme_break call advances `state` (and
-                            // previous_codepoint) through prev's cluster; this
-                            // side effect is load-bearing and must run in every
-                            // build profile. Bind the result first, then assert
-                            // separately so `debug_assert!` compiling out in
-                            // release does not skip the state advance (Zig's
-                            // `assert(!graphemeBreak(...))` — the call's effect on
-                            // `&state` is required, not just the assertion).
-                            let did_break = grapheme_break(previous_codepoint, cp2, &mut state);
-                            debug_assert!(!did_break);
+                            // Feed every stored codepoint through the grapheme
+                            // state machine so it resets its context at existing
+                            // boundaries before we test `c`. The call's effect on
+                            // `&state` (and advancing `previous_codepoint`) is
+                            // load-bearing. We must NOT assert no-break here: with
+                            // mode 2027 disabled, zero-width codepoints are
+                            // attached WITHOUT applying grapheme boundary rules,
+                            // so enabling the mode later leaves cells that
+                            // legitimately contain one or more breaks. The old
+                            // `debug_assert!(!did_break)` panicked on that valid
+                            // sequence in debug/test builds. Port of upstream
+                            // b287f6d1a (`assert(!graphemeBreak(...))` ->
+                            // `_ = graphemeBreak(...)`).
+                            let _ = grapheme_break(previous_codepoint, cp2, &mut state);
                             previous_codepoint = cp2;
                         }
                     }
