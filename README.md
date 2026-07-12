@@ -33,7 +33,7 @@ cargo test --workspace                      # ~1500 engine tests + differential 
 - `qwertty-term-termio` — rustix PTY + upstream's two-stage read pipeline (no async runtime;
   see `docs/adr/002`).
 - Embeddable by construction: `examples/frame-capture` renders deterministic PNGs from
-  bytes through public APIs only.
+  bytes through public APIs only. See `docs/embedding.md` for the embedding guide.
 
 Docs: `docs/rewrite-prompt.md` (mission/constitution), `docs/roadmap.md` (work breakdown),
 `docs/analysis/` (~30 commit-stamped subsystem analyses), `docs/adr/` (decisions).
