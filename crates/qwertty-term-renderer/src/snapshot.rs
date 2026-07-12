@@ -143,17 +143,43 @@ impl Preedit {
     }
 }
 
-/// A single kitty graphics placement visible this frame. Placeholder: the
-/// `kitty::Placement`/`ImageStorage` model already exists in `qwertty-term-vt`
-/// but isn't threaded through `Snapshot`/`SnapshotWindow` yet (see
-/// `docs/analysis/renderer-r0.md`). No implementation constructs this today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A single kitty graphics placement visible this frame: an image id + z-index
+/// plus the GPU-ready [`crate::wire::Image`] quad instance (viewport-relative
+/// grid position, per-cell pixel offset, source rect, destination size). The
+/// heavy resolution — dereferencing tracked pins, mapping to the viewport,
+/// virtual-placeholder iteration — happens in `qwertty-term-vt`
+/// ([`qwertty_term_vt::kitty::resolve_placements`]); this is the flat, Pin-free
+/// result. R6 slice 1 populates it via [`FullSnapshot::capture`]; the live-app
+/// `from_window` path stays empty until the data is threaded through
+/// `SnapshotWindow` (a later slice — see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KittyPlacement {
-    /// Grid column/row of the placement's top-left cell.
-    pub col: usize,
-    pub row: usize,
-    pub columns: u32,
-    pub rows: u32,
+    /// Which [`KittyImage`] this draws (matched by [`KittyImage::id`]).
+    pub image_id: u32,
+    /// Z-index: `< 0` below text, `>= 0` above (bucketing is R6 slice 4; slice
+    /// 1 draws every placement above text).
+    pub z: i32,
+    /// The GPU instance for this placement's quad.
+    pub instance: crate::wire::Image,
+}
+
+/// One kitty image referenced by a visible [`KittyPlacement`] this frame: its
+/// decoded RGBA pixels plus the identity/`generation` the renderer keys its GPU
+/// texture cache on (re-uploading only when `generation` changes, matching
+/// upstream's staleness protocol). Pixels are shared via `Arc` so threading the
+/// snapshot across the render boundary doesn't re-copy image bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KittyImage {
+    /// Image id (matches [`KittyPlacement::image_id`]).
+    pub id: u32,
+    /// Content-mutation stamp; a change means the pixels changed and the GPU
+    /// texture must be re-uploaded.
+    pub generation: u64,
+    /// Image dimensions in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Decoded, tightly-packed RGBA pixels (`width * height * 4` bytes).
+    pub rgba: std::sync::Arc<[u8]>,
 }
 
 /// Everything a renderer needs to draw one frame, decoupled from
@@ -227,10 +253,18 @@ pub trait RenderSnapshot {
     /// exists.
     fn preedit(&self) -> Option<&Preedit>;
 
-    /// Kitty graphics placements visible this frame. Placeholder: returns
-    /// an empty slice until placement windowing is wired (see module
-    /// docs).
-    fn kitty_placements(&self) -> &[KittyPlacement];
+    /// Kitty graphics placements visible this frame, already resolved to
+    /// GPU-ready quad instances (R6 slice 1). Defaults to empty for impls that
+    /// don't carry image data yet.
+    fn kitty_placements(&self) -> &[KittyPlacement] {
+        &[]
+    }
+
+    /// The kitty images referenced by [`RenderSnapshot::kitty_placements`] this
+    /// frame (RGBA pixels + generation). Defaults to empty.
+    fn kitty_images(&self) -> &[KittyImage] {
+        &[]
+    }
 }
 
 /// A full-copy [`RenderSnapshot`] implementation backed by
@@ -245,9 +279,13 @@ pub trait RenderSnapshot {
 /// - [`FullSnapshot::capture_tracking`] (incremental): reads and clears the
 ///   terminal's dirty state so `dirty_signals()` reports the real per-row and
 ///   global dirtiness — for the per-frame render path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FullSnapshot {
     window: qwertty_term_vt::snapshot::SnapshotWindow,
+    /// Kitty image placements + images resolved at capture time (R6 slice 1),
+    /// empty on the `from_window` path (see [`KittyPlacement`] docs).
+    kitty_placements: Vec<KittyPlacement>,
+    kitty_images: Vec<KittyImage>,
 }
 
 impl FullSnapshot {
@@ -259,8 +297,11 @@ impl FullSnapshot {
     /// `Full`) and does not touch the terminal's dirty state. For incremental
     /// redraw use [`FullSnapshot::capture_tracking`].
     pub fn capture(terminal: &Terminal, scrollback_offset: usize) -> FullSnapshot {
+        let (kitty_placements, kitty_images) = resolve_kitty(terminal);
         FullSnapshot {
             window: terminal.snapshot_window(scrollback_offset),
+            kitty_placements,
+            kitty_images,
         }
     }
 
@@ -278,8 +319,11 @@ impl FullSnapshot {
     /// dirty state mutates the terminal, exactly as upstream `RenderState`'s
     /// snapshot does under the render lock).
     pub fn capture_tracking(terminal: &mut Terminal, scrollback_offset: usize) -> FullSnapshot {
+        let (kitty_placements, kitty_images) = resolve_kitty(terminal);
         FullSnapshot {
             window: terminal.snapshot_window_tracking(scrollback_offset),
+            kitty_placements,
+            kitty_images,
         }
     }
 
@@ -288,9 +332,77 @@ impl FullSnapshot {
     /// snapshot itself (releasing the lock before rendering), then wraps it here
     /// — avoiding a second `snapshot_window` call and a longer lock hold.
     /// Equivalent to [`FullSnapshot::capture`] once the window is captured.
+    ///
+    /// Carries no kitty image data: the resolver needs `&Terminal` (to walk the
+    /// pin-anchored placements), which this path deliberately doesn't hold. The
+    /// live-app path gets images once the resolved data is threaded through
+    /// `SnapshotWindow` itself (a later R6 slice).
     pub fn from_window(window: qwertty_term_vt::snapshot::SnapshotWindow) -> FullSnapshot {
-        FullSnapshot { window }
+        FullSnapshot {
+            window,
+            kitty_placements: Vec::new(),
+            kitty_images: Vec::new(),
+        }
     }
+}
+
+/// Resolve the visible kitty placements + their images from a live terminal
+/// (the `capture` path holds `&Terminal` under the caller's lock). Delegates
+/// the pin-deref/viewport-mapping to `qwertty_term_vt::kitty::resolve_placements`
+/// (see its docs for why that lives in the vt crate) and converts the flat
+/// result into GPU-ready [`KittyPlacement`]s + Arc-shared RGBA [`KittyImage`]s.
+fn resolve_kitty(terminal: &Terminal) -> (Vec<KittyPlacement>, Vec<KittyImage>) {
+    use qwertty_term_vt::kitty::{TerminalGeometry, image_rgba, resolve_placements};
+
+    let screen = terminal.screen();
+    let storage = &screen.kitty_images;
+    if !storage.enabled() || storage.placements.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let geo = TerminalGeometry {
+        cols: terminal.cols,
+        rows: terminal.rows,
+        width_px: terminal.width_px,
+        height_px: terminal.height_px,
+    };
+    let resolved = resolve_placements(storage, &screen.pages, &geo);
+    if resolved.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut placements = Vec::with_capacity(resolved.len());
+    let mut images: Vec<KittyImage> = Vec::new();
+    for r in &resolved {
+        placements.push(KittyPlacement {
+            image_id: r.image_id,
+            z: r.z,
+            instance: crate::wire::Image {
+                grid_pos: [r.grid_col as f32, r.grid_row as f32],
+                cell_offset: [r.cell_offset_x as f32, r.cell_offset_y as f32],
+                source_rect: [
+                    r.source_x as f32,
+                    r.source_y as f32,
+                    r.source_width as f32,
+                    r.source_height as f32,
+                ],
+                dest_size: [r.dest_width as f32, r.dest_height as f32],
+            },
+        });
+
+        if !images.iter().any(|i| i.id == r.image_id)
+            && let Some(img) = storage.image_by_id(r.image_id)
+        {
+            images.push(KittyImage {
+                id: img.id,
+                generation: img.generation,
+                width: img.width,
+                height: img.height,
+                rgba: std::sync::Arc::from(image_rgba(img).into_owned()),
+            });
+        }
+    }
+    (placements, images)
 }
 
 impl RenderSnapshot for FullSnapshot {
@@ -361,8 +473,11 @@ impl RenderSnapshot for FullSnapshot {
     }
 
     fn kitty_placements(&self) -> &[KittyPlacement] {
-        // No producer wired yet; see module docs.
-        &[]
+        &self.kitty_placements
+    }
+
+    fn kitty_images(&self) -> &[KittyImage] {
+        &self.kitty_images
     }
 }
 

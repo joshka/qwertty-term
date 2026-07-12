@@ -211,3 +211,91 @@ fn dirty_tracking_equals_full_redraw() {
         failures.join("\n")
     );
 }
+
+/// Kitty-image equality property (R6 slice 1) across the image transitions that
+/// touch the engine's *persistent* image state — the non-evicting texture cache
+/// (`images`) and the grown-not-shrunk instance-buffer pool (`image_instances`).
+///
+/// A single stateful "dirty" engine is walked through a sequence — no image →
+/// add → re-transmit same id with new content → delete — and at each step its
+/// output is compared byte-for-byte against a *fresh* engine rendering that same
+/// terminal state from scratch. If the dirty engine ever let a stale texture, a
+/// missed generation-bump re-upload, or a leftover instance buffer bleed into a
+/// frame, the two diverge. This locks the invariant that the draw loop is bounded
+/// by `pending_placements` (stale map/pool entries are invisible), which today
+/// holds only by construction.
+///
+/// Native-size images (no `c`/`r` scaling), so no terminal pixel geometry needed.
+#[test]
+fn dirty_tracking_equals_full_redraw_with_image() {
+    use base64::Engine as _;
+
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e})");
+            return;
+        }
+    };
+    let (mut grid, cw, ch) = make_grid();
+    let opts = FrameOptions::default();
+
+    // Two distinct 6×6 solid images (blue, then green) transmitted as id=1.
+    let blue = [0u8, 0, 255, 255].repeat(36); // 6x6 RGBA
+    let green = [0u8, 255, 0, 255].repeat(36); // 6x6 RGBA
+    let display = |rgba: &[u8]| -> Vec<u8> {
+        let payload = base64::engine::general_purpose::STANDARD.encode(rgba);
+        format!("\x1b[H\x1b_Ga=T,f=32,s=6,v=6,i=1;{payload}\x1b\\").into_bytes()
+    };
+
+    let mut dirty = Engine::with_backend(backend, cw, ch).expect("dirty engine");
+
+    // Render `term`'s state on the stateful `dirty` engine (carrying all prior
+    // frames' image state) and on a fresh engine, and assert identical pixels.
+    let step = |dirty: &mut Engine, term: &mut Terminal, grid: &mut Grid, label: &str| {
+        let snap = FullSnapshot::capture_tracking(term, 0);
+        dirty.update_frame(&snap, grid, opts);
+        dirty.sync_atlas(grid).expect("sync dirty");
+        let dirty_px = dirty.draw_frame().expect("draw dirty");
+
+        let ref_backend = Metal::new().expect("ref backend");
+        let mut fresh = Engine::with_backend(ref_backend, cw, ch).expect("fresh engine");
+        let ref_snap = FullSnapshot::capture(term, 0);
+        fresh.update_frame(&ref_snap, grid, opts);
+        fresh.sync_atlas(grid).expect("sync fresh");
+        let fresh_px = fresh.draw_frame().expect("draw fresh");
+
+        let n = dirty_px.len().min(fresh_px.len());
+        let diffs = (0..n).filter(|&i| dirty_px[i] != fresh_px[i]).count();
+        assert_eq!(
+            dirty_px, fresh_px,
+            "kitty-image '{label}': dirty != fresh ({diffs} byte diffs of {n})"
+        );
+    };
+
+    // 1. Plain text, no image.
+    let mut term = feed(
+        Terminal::new(Options {
+            cols: 16,
+            rows: 5,
+            ..Default::default()
+        }),
+        b"before image\r\nsecond",
+    );
+    step(&mut dirty, &mut term, &mut grid, "no image");
+
+    // 2. Add image id=1 (blue). Dirty engine uploads a new texture.
+    term = feed(term, &display(&blue));
+    step(&mut dirty, &mut term, &mut grid, "add image");
+
+    // 3. Re-transmit id=1 with new content (green). Generation bumps → the dirty
+    //    engine must re-upload; the fresh engine only ever sees green.
+    term = feed(term, &display(&green));
+    step(&mut dirty, &mut term, &mut grid, "re-generation");
+
+    // 4. Delete the image. The dirty engine keeps a now-stale texture + instance
+    //    buffer; the fresh engine never had one. Equal output proves stale
+    //    entries are never drawn.
+    term = feed(term, b"\x1b_Ga=d,d=A\x1b\\");
+    step(&mut dirty, &mut term, &mut grid, "delete image");
+}

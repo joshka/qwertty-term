@@ -67,3 +67,5 @@ qwertty-term-sprite = { version = "0.1.0", path = "../qwertty-term-sprite" }
 # The acceptance test (R4) drives a real qwertty-term-vt Terminal through a Stream to
 # produce the snapshot the engine renders.
 qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
+# Base64-encodes kitty graphics APC payloads for the image-rendering test (R6).
+base64 = "0.22"

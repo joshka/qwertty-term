@@ -17,7 +17,7 @@
 //! wire struct. If wire.rs's layout ever moves (it shouldn't — it's frozen),
 //! this test catches the drift here rather than as a silent GPU garbling.
 
-use crate::wire::CellText;
+use crate::wire::{CellText, Image};
 
 #[cfg(test)]
 mod color_math;
@@ -47,6 +47,11 @@ pub enum VertexFormat {
     UInt2,
     /// `MTLVertexFormatUChar` — one `u8` lane.
     UChar,
+    /// `MTLVertexFormatFloat2` — two `f32` lanes (kitty `Image` grid_pos/
+    /// cell_offset/dest_size).
+    Float2,
+    /// `MTLVertexFormatFloat4` — four `f32` lanes (kitty `Image` source_rect).
+    Float4,
 }
 
 /// One entry in a pipeline's vertex descriptor: which shader attribute index
@@ -172,9 +177,43 @@ pub const CELL_TEXT_ATTRIBUTES: &[VertexAttribute] = &[
     },
 ];
 
-/// The first-pixels subset of upstream's `pipeline_descs` table: `bg_color`,
-/// `cell_bg`, `cell_text` (in upstream array order). `image`/`bg_image` are
-/// skipped — see the module doc and `docs/analysis/renderer-r3.md`.
+/// `Image`'s vertex attribute layout (`autoAttribute(Image, ...)` upstream),
+/// one entry per struct field in declaration order (attribute index == field
+/// position), each offset cross-referenced against the frozen [`Image`] layout
+/// in `wire.rs` by the test below.
+///
+/// | attribute | field       | format | offset (wire.rs) |
+/// | --------- | ----------- | ------ | ----------------- |
+/// | 0         | grid_pos    | Float2 | 0                  |
+/// | 1         | cell_offset | Float2 | 8                  |
+/// | 2         | source_rect | Float4 | 16                 |
+/// | 3         | dest_size   | Float2 | 32                 |
+pub const IMAGE_ATTRIBUTES: &[VertexAttribute] = &[
+    VertexAttribute {
+        index: 0,
+        format: VertexFormat::Float2,
+        offset: 0,
+    },
+    VertexAttribute {
+        index: 1,
+        format: VertexFormat::Float2,
+        offset: 8,
+    },
+    VertexAttribute {
+        index: 2,
+        format: VertexFormat::Float4,
+        offset: 16,
+    },
+    VertexAttribute {
+        index: 3,
+        format: VertexFormat::Float2,
+        offset: 32,
+    },
+];
+
+/// The first-pixels subset of upstream's `pipeline_descs` table plus the R6
+/// `image` pipeline: `bg_color`, `cell_bg`, `cell_text`, `image`. `bg_image` is
+/// still skipped — see the module doc and `docs/analysis/renderer-r3.md`.
 pub const PIPELINE_DESCRIPTIONS: &[PipelineDescription] = &[
     // Upstream: `.{ "bg_color", .{ .vertex_fn = "full_screen_vertex",
     // .fragment_fn = "bg_color_fragment", .blending_enabled = false } }`.
@@ -210,6 +249,19 @@ pub const PIPELINE_DESCRIPTIONS: &[PipelineDescription] = &[
         step_fn: StepFunction::PerInstance,
         blending: Blending::PREMULTIPLIED_OVER,
     },
+    // Upstream: `.{ "image", .{ .vertex_attributes = Image,
+    // .vertex_fn = "image_vertex", .fragment_fn = "image_fragment",
+    // .step_fn = .per_instance, .blending_enabled = true } }`. One `Image`
+    // instance per placement (drawn as a 4-vertex triangle-strip quad).
+    PipelineDescription {
+        name: "image",
+        vertex_fn: "image_vertex",
+        fragment_fn: "image_fragment",
+        vertex_attributes: Some(IMAGE_ATTRIBUTES),
+        stride: size_of::<Image>(),
+        step_fn: StepFunction::PerInstance,
+        blending: Blending::PREMULTIPLIED_OVER,
+    },
 ];
 
 /// The 5 shader function names that must resolve out of the compiled
@@ -225,6 +277,8 @@ pub const PORTED_FUNCTION_NAMES: &[&str] = &[
     "cell_bg_fragment",
     "cell_text_vertex",
     "cell_text_fragment",
+    "image_vertex",
+    "image_fragment",
 ];
 
 #[cfg(test)]
@@ -245,16 +299,11 @@ mod tests {
     }
 
     #[test]
-    fn source_skips_image_and_bg_image_pipelines() {
-        // Chunk R3 scope explicitly excludes the image/bg_image pairs
-        // (deferred to R6); assert they didn't sneak in via a careless
-        // copy-paste of the full upstream file.
-        for name in [
-            "image_vertex",
-            "image_fragment",
-            "bg_image_vertex",
-            "bg_image_fragment",
-        ] {
+    fn source_skips_bg_image_pipeline() {
+        // `bg_image` (a distinct backlog item) is still deferred; assert its
+        // shader pair didn't sneak in via a careless copy-paste of the full
+        // upstream file. The `image` pair *is* now ported (R6 slice 1).
+        for name in ["bg_image_vertex", "bg_image_fragment"] {
             assert!(
                 !SOURCE.contains(name),
                 "embedded MSL source unexpectedly contains skipped function `{name}`"
@@ -263,9 +312,46 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_descriptions_cover_first_pixels_subset() {
+    fn pipeline_descriptions_cover_ported_subset() {
         let names: Vec<&str> = PIPELINE_DESCRIPTIONS.iter().map(|p| p.name).collect();
-        assert_eq!(names, ["bg_color", "cell_bg", "cell_text"]);
+        assert_eq!(names, ["bg_color", "cell_bg", "cell_text", "image"]);
+    }
+
+    #[test]
+    fn image_uses_per_instance_image_layout() {
+        let desc = PIPELINE_DESCRIPTIONS
+            .iter()
+            .find(|p| p.name == "image")
+            .unwrap();
+        assert_eq!(desc.vertex_fn, "image_vertex");
+        assert_eq!(desc.fragment_fn, "image_fragment");
+        assert_eq!(desc.step_fn, StepFunction::PerInstance);
+        assert_eq!(desc.blending, Blending::PREMULTIPLIED_OVER);
+        assert_eq!(desc.vertex_attributes, Some(IMAGE_ATTRIBUTES));
+        assert_eq!(desc.stride, size_of::<Image>());
+    }
+
+    /// Every [`IMAGE_ATTRIBUTES`] offset must equal the corresponding
+    /// `offset_of!` on the frozen `wire::Image` — the same layout-pinning
+    /// guard the cell_text path has, so image-quad garbling can't slip in via
+    /// a wire.rs layout drift.
+    #[test]
+    fn image_layout_pins_match_wire_offsets() {
+        let expected: [(u32, usize); 4] = [
+            (0, offset_of!(Image, grid_pos)),
+            (1, offset_of!(Image, cell_offset)),
+            (2, offset_of!(Image, source_rect)),
+            (3, offset_of!(Image, dest_size)),
+        ];
+        assert_eq!(IMAGE_ATTRIBUTES.len(), expected.len());
+        for (attr, (expected_index, expected_offset)) in IMAGE_ATTRIBUTES.iter().zip(expected) {
+            assert_eq!(attr.index, expected_index);
+            assert_eq!(
+                attr.offset, expected_offset,
+                "attribute {expected_index} offset mismatch vs wire::Image"
+            );
+        }
+        assert_eq!(size_of::<Image>(), 40);
     }
 
     #[test]

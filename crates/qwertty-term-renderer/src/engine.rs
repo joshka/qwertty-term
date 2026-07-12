@@ -25,13 +25,15 @@ use crate::cells::{self, Contents, Key};
 use crate::cursor::{self, Style as CursorStyle};
 use crate::gpu::{GpuBackend, GpuBuffer, GpuTexture};
 use crate::metal::{
-    Attachment, Draw, Metal, MetalError, Pipeline, PipelineOptions, Primitive, Step,
-    VertexAttribute, VertexFormat, VertexLayout, VertexStep, library_from_source,
+    Attachment, Buffer, Draw, Metal, MetalError, Pipeline, PipelineOptions, Primitive, RenderPass,
+    Step, Texture, VertexAttribute, VertexFormat, VertexLayout, VertexStep, library_from_source,
 };
 use crate::shaders;
-use crate::snapshot::RenderSnapshot;
+use crate::snapshot::{KittyImage, KittyPlacement, RenderSnapshot};
 use crate::swap_chain::{SwapChain, SwapChainMode};
-use crate::wire::{Atlas, CellText, CellTextBools, Mat, PaddingExtend, UniformBools, Uniforms};
+use crate::wire::{
+    Atlas, CellText, CellTextBools, Image, Mat, PaddingExtend, UniformBools, Uniforms,
+};
 
 /// Renderer-local per-frame options the terminal snapshot can't supply itself
 /// (mirrors what `updateFrame` reads off `renderer.State` / config).
@@ -103,6 +105,8 @@ pub struct Engine {
     cell_bg_pipeline: Pipeline,
     /// `cell_text`: instanced glyph quads.
     cell_text_pipeline: Pipeline,
+    /// `image`: kitty graphics image quads (R6 slice 1).
+    image_pipeline: Pipeline,
     /// Cell metrics (from the font grid), cached for geometry.
     cell_width: u32,
     cell_height: u32,
@@ -127,6 +131,30 @@ pub struct Engine {
     /// viewport move, resize) the way upstream's `RenderState` compares against
     /// its own `self.screen`/`self.viewport_pin`/`self.rows`/`self.cols`.
     prev_frame_key: Option<crate::snapshot::FrameKey>,
+    /// GPU textures for transmitted kitty images, keyed by image id. Content
+    /// (not per-slot): textures are read-only after upload. Re-uploaded only
+    /// when an id's `generation` changes (upstream's staleness protocol). R6
+    /// slice 3 adds eviction; slice 1 keeps referenced images cached.
+    images: HashMap<u32, ImageEntry>,
+    /// Per-placement instance buffers (one `Image` quad each), grown on demand
+    /// and reused across frames. Engine-level (not per-slot): correct under the
+    /// day-one `Sync` swap-chain mode (one live frame); moves per-slot when
+    /// async pacing lands.
+    image_instances: Vec<Buffer<Image>>,
+    /// Resolved kitty placements for the current frame (set by `update_frame`,
+    /// drawn by `draw_frame`/present). Drawn in resolve order; z-bucketing is
+    /// R6 slice 4.
+    pending_placements: Vec<KittyPlacement>,
+    /// Kitty images referenced this frame (set by `update_frame`); uploaded to
+    /// `images` in `prepare_image_frame`.
+    pending_images: Vec<KittyImage>,
+}
+
+/// A GPU-resident kitty image: its texture plus the `generation` it was
+/// uploaded at, so a re-upload is skipped while the content is unchanged.
+pub(crate) struct ImageEntry {
+    generation: u64,
+    texture: Texture,
 }
 
 impl Engine {
@@ -175,6 +203,7 @@ impl Engine {
         let bg_color_pipeline = build_pipeline(&backend, &library, pixel_format, "bg_color")?;
         let cell_bg_pipeline = build_pipeline(&backend, &library, pixel_format, "cell_bg")?;
         let cell_text_pipeline = build_pipeline(&backend, &library, pixel_format, "cell_text")?;
+        let image_pipeline = build_pipeline(&backend, &library, pixel_format, "image")?;
 
         Ok(Engine {
             backend,
@@ -184,6 +213,7 @@ impl Engine {
             bg_color_pipeline,
             cell_bg_pipeline,
             cell_text_pipeline,
+            image_pipeline,
             cell_width,
             cell_height,
             grayscale_modified: vec![0; slot_count],
@@ -192,6 +222,10 @@ impl Engine {
             screen_height: 0,
             run_cache: RunCache::new(),
             prev_frame_key: None,
+            images: HashMap::new(),
+            image_instances: Vec::new(),
+            pending_placements: Vec::new(),
+            pending_images: Vec::new(),
         })
     }
 
@@ -320,6 +354,17 @@ impl Engine {
             default_fg,
             default_bg,
         );
+
+        // Stash this frame's resolved kitty placements + images for the draw
+        // pass (upstream `kittyUpdate` runs during frame prep, then `draw`
+        // walks the placement list). The GPU upload happens in
+        // `prepare_image_frame` (it needs the backend).
+        self.pending_placements.clear();
+        self.pending_placements
+            .extend_from_slice(snapshot.kitty_placements());
+        self.pending_images.clear();
+        self.pending_images
+            .extend_from_slice(snapshot.kitty_images());
     }
 
     /// Build the frame uniforms (port of `updateScreenSizeUniforms` + the
@@ -1010,9 +1055,87 @@ impl Engine {
         })
     }
 
+    /// Upload/refresh GPU textures for this frame's kitty images and sync the
+    /// per-placement instance buffers. Runs before the draw pass in both the
+    /// offscreen (`draw_frame`) and on-screen (`draw_and_present_inner`) paths,
+    /// since it needs the backend to create textures/buffers. Port of the
+    /// `images.upload` pump + per-image vertex-buffer fill in upstream
+    /// `image.zig` (`upload`/`draw`). Texture re-upload is skipped while an
+    /// image's `generation` (and dimensions) are unchanged.
+    ///
+    /// **Sync-mode invariant:** unlike the per-slot uniforms/cells/atlas
+    /// buffers, the image texture cache (`images`) and instance-buffer pool
+    /// (`image_instances`) are *engine-level*, shared across slots. That is
+    /// correct only because `Sync` mode keeps exactly one frame in flight and
+    /// each draw waits for completion (`frame.complete(true)`) before the next
+    /// reuses them. Under `Async` pacing a next frame could overwrite an
+    /// instance buffer — or `insert` could drop an `ImageEntry` texture — while
+    /// the GPU still reads it (tearing / use-after-free). Guard it so enabling
+    /// async can't make this path silently unsafe; moving image state per-slot
+    /// is the fix when async lands.
+    pub(crate) fn prepare_image_frame(&mut self) -> Result<(), MetalError> {
+        debug_assert_eq!(
+            self.swap_chain.mode(),
+            SwapChainMode::Sync,
+            "engine-level kitty image buffers are only safe in Sync mode; \
+             move `images`/`image_instances` per-slot before enabling Async",
+        );
+        let Engine {
+            backend,
+            images,
+            image_instances,
+            pending_images,
+            pending_placements,
+            ..
+        } = self;
+
+        for img in pending_images.iter() {
+            let (w, h) = (img.width as usize, img.height as usize);
+            let stale = match images.get(&img.id) {
+                Some(entry) => {
+                    entry.generation != img.generation
+                        || entry.texture.width() != w
+                        || entry.texture.height() != h
+                }
+                None => true,
+            };
+            if stale {
+                let texture = backend.new_texture(
+                    crate::gpu::TextureOptions {
+                        // `*_srgb` so the GPU linearizes on sample; the image
+                        // fragment shader unlinearizes back when not using
+                        // linear blending (matches upstream
+                        // `imageTextureOptions(.rgba, srgb = true)`).
+                        format: crate::gpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: crate::gpu::TextureUsage::SHADER_READ,
+                    },
+                    w,
+                    h,
+                    Some(&img.rgba),
+                )?;
+                images.insert(
+                    img.id,
+                    ImageEntry {
+                        generation: img.generation,
+                        texture,
+                    },
+                );
+            }
+        }
+
+        // Grow the instance-buffer pool to cover every placement, then fill one
+        // `Image` instance per placement (a 4-vertex quad drawn per placement).
+        while image_instances.len() < pending_placements.len() {
+            image_instances.push(backend.new_buffer::<Image>(1)?);
+        }
+        for (i, placement) in pending_placements.iter().enumerate() {
+            image_instances[i].sync(&[placement.instance])?;
+        }
+        Ok(())
+    }
     /// Draw the current [`Contents`] into a fresh frame against the swap chain
     /// and present (readback-ready). Port of `drawFrame`'s cell-drawing
-    /// structure (bg_color → cell_bg → cell_text), sync mode.
+    /// structure (bg_color → cell_bg → cell_text → image), sync mode.
     ///
     /// Returns the drawn slot's readback pixels (BGRA, row-padding stripped) so
     /// the caller (offscreen tests / a future window host reading the surface)
@@ -1022,6 +1145,10 @@ impl Engine {
         if self.screen_width == 0 || self.screen_height == 0 {
             return Ok(Vec::new());
         }
+
+        // Upload kitty image textures + sync placement instance buffers before
+        // taking the disjoint field borrows below (this needs `&mut self`).
+        self.prepare_image_frame()?;
 
         // Copy/gather the CPU-side data to hand to the GPU. This ends the borrow
         // of `self.contents` / `self.uniforms` before we take disjoint borrows
@@ -1037,15 +1164,19 @@ impl Engine {
         let (sw, sh) = (self.screen_width, self.screen_height);
 
         // Disjoint borrows: the swap chain (for the slot), the backend (for the
-        // frame + resizes), and the three pipelines. Splitting `self` into field
-        // references up front lets us hold the slot guard across backend calls
-        // without a self-aliasing conflict.
+        // frame + resizes), the pipelines, and the kitty image state. Splitting
+        // `self` into field references up front lets us hold the slot guard
+        // across backend calls without a self-aliasing conflict.
         let Engine {
             backend,
             swap_chain,
             bg_color_pipeline,
             cell_bg_pipeline,
             cell_text_pipeline,
+            image_pipeline,
+            images,
+            image_instances,
+            pending_placements,
             ..
         } = self;
 
@@ -1111,6 +1242,18 @@ impl Engine {
                     instance_count: fg_count,
                 },
             });
+
+            // 4. Kitty images (one quad per placement, above text). R6 slice 1
+            //    draws every placement here; z-order buckets (below-bg /
+            //    below-text / above-text) are slice 4.
+            encode_image_steps(
+                &pass,
+                image_pipeline,
+                slot.uniforms.buffer(),
+                images,
+                image_instances,
+                pending_placements,
+            );
 
             pass.complete();
         }
@@ -1249,9 +1392,11 @@ impl Engine {
     }
 
     /// Disjoint field borrows for the presentation draw: the backend, the swap
-    /// chain, and the three pipelines. Mirrors the destructuring in
-    /// `draw_frame` so the presentation path can hold the slot guard across
+    /// chain, the four pipelines, and the kitty image state (texture cache +
+    /// instance buffers + this frame's placements). Mirrors the destructuring
+    /// in `draw_frame` so the presentation path can hold the slot guard across
     /// backend calls without a self-aliasing conflict.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn present_parts(
         &mut self,
     ) -> (
@@ -1260,6 +1405,10 @@ impl Engine {
         &Pipeline,
         &Pipeline,
         &Pipeline,
+        &Pipeline,
+        &HashMap<u32, ImageEntry>,
+        &[Buffer<Image>],
+        &[KittyPlacement],
     ) {
         (
             &self.backend,
@@ -1267,6 +1416,10 @@ impl Engine {
             &self.bg_color_pipeline,
             &self.cell_bg_pipeline,
             &self.cell_text_pipeline,
+            &self.image_pipeline,
+            &self.images,
+            &self.image_instances,
+            &self.pending_placements,
         )
     }
 }
@@ -1317,7 +1470,43 @@ impl Frame {
     }
 }
 
-/// Build one of the three first-pixels pipelines by name from the R3 table.
+/// Encode one image draw step per kitty placement, in the given render pass.
+/// Each placement is a 4-vertex triangle-strip quad reading its own `Image`
+/// instance buffer and binding its image's texture (port of upstream
+/// `image.zig`'s per-image `pass.step`). Placements whose image isn't uploaded
+/// yet, or that lack an instance buffer, are skipped.
+pub(crate) fn encode_image_steps(
+    pass: &RenderPass,
+    pipeline: &Pipeline,
+    uniforms: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>,
+    images: &HashMap<u32, ImageEntry>,
+    image_instances: &[Buffer<Image>],
+    placements: &[KittyPlacement],
+) {
+    for (i, placement) in placements.iter().enumerate() {
+        let Some(entry) = images.get(&placement.image_id) else {
+            continue;
+        };
+        let Some(instance) = image_instances.get(i) else {
+            continue;
+        };
+        pass.step(&Step {
+            pipeline_state: pipeline.state(),
+            vertex: Some(instance.buffer()),
+            uniforms: Some(uniforms),
+            extras: &[],
+            textures: &[Some(entry.texture.texture())],
+            samplers: &[],
+            draw: Draw {
+                primitive: Primitive::TriangleStrip,
+                vertex_count: 4,
+                instance_count: 1,
+            },
+        });
+    }
+}
+
+/// Build one of the four ported pipelines by name from the R3/R6 table.
 fn build_pipeline(
     backend: &Metal,
     library: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLLibrary>,
@@ -1371,6 +1560,8 @@ fn map_vertex_format(f: shaders::VertexFormat) -> VertexFormat {
         shaders::VertexFormat::Short2 => VertexFormat::Short2,
         shaders::VertexFormat::UInt2 => VertexFormat::UInt2,
         shaders::VertexFormat::UChar => VertexFormat::UChar,
+        shaders::VertexFormat::Float2 => VertexFormat::Float2,
+        shaders::VertexFormat::Float4 => VertexFormat::Float4,
     }
 }
 
