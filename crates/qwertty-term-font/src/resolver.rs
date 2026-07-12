@@ -14,6 +14,7 @@
 //! and fallback size-adjustment (`ic_width` rescale).
 
 use crate::collection::{Collection, FontIndex, Style};
+#[cfg(all(target_os = "macos", not(feature = "freetype")))]
 use crate::discovery::{self, Descriptor};
 use crate::presentation::{Presentation, PresentationMode};
 
@@ -28,7 +29,12 @@ pub struct CodepointResolver {
     /// behaves like the F5-reduced cut (sprite + primary, else notdef).
     discover: bool,
     /// The pixel size at which discovered fallback faces are loaded (the render
-    /// size the collection was built for).
+    /// size the collection was built for). Only read by the macOS discovery
+    /// path; set on every platform for API uniformity.
+    #[cfg_attr(
+        not(all(target_os = "macos", not(feature = "freetype"))),
+        allow(dead_code)
+    )]
     size_px: f64,
 }
 
@@ -200,6 +206,11 @@ impl CodepointResolver {
     /// search for a fallback face that has `cp`, add it to the collection as a
     /// fallback face, and return its index. Infallible (a discovery/load error
     /// is swallowed and yields `None`).
+    ///
+    /// macOS only (CoreText discovery). On other platforms there is no system
+    /// font discovery yet, so resolution stops at the collection's own faces
+    /// (embedded + synthetic); the non-macOS stub below returns `None`.
+    #[cfg(all(target_os = "macos", not(feature = "freetype")))]
     fn discover_fallback(
         &mut self,
         cp: u32,
@@ -233,9 +244,20 @@ impl CodepointResolver {
         }
         None
     }
+
+    /// Non-macOS: no system font discovery yet, so step 6 finds nothing.
+    #[cfg(not(all(target_os = "macos", not(feature = "freetype"))))]
+    fn discover_fallback(
+        &mut self,
+        _cp: u32,
+        _style: Style,
+        _p_mode: PresentationMode,
+    ) -> Option<FontIndex> {
+        None
+    }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "macos", not(feature = "freetype")))]
 mod tests {
     use super::*;
     use crate::coretext::Face;

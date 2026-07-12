@@ -13,7 +13,7 @@
 //! Skips gracefully (prints `SKIP:`) when FiraCode Nerd Font Mono is not
 //! installed, matching the discovery-test convention.
 
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", not(feature = "freetype")))]
 
 use qwertty_term_font::coretext::Face;
 use qwertty_term_font::{Collection, Metrics, Style};

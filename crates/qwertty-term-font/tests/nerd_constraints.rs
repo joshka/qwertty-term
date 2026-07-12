@@ -22,7 +22,7 @@
 //! FiraCode Nerd Font Mono (the maintainer's configured, nerd-patched family)
 //! carries these PUA glyphs in its own cmap, so the constraint applies to a
 //! nerd-patched *primary*. Skips if it isn't installed.
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", not(feature = "freetype")))]
 
 use qwertty_term_font::coretext::Face;
 use qwertty_term_font::grid::Grid;

@@ -21,9 +21,9 @@ use std::collections::HashMap;
 
 use crate::atlas::{Atlas, Format, Region};
 use crate::collection::{FontIndex, Style};
-use crate::coretext::PixelFormat;
 use crate::metrics::Metrics;
 use crate::presentation::Presentation;
+use crate::raster::PixelFormat;
 use crate::resolver::CodepointResolver;
 
 /// Which atlas a cached glyph lives in — the renderer's texture selector.
@@ -79,7 +79,7 @@ pub enum Error {
     /// The atlas is full and could not be grown to fit the glyph.
     AtlasFull,
     /// The face could not rasterize the glyph.
-    Rasterize(crate::coretext::Error),
+    Rasterize(crate::FaceError),
     /// The codepoint was routed to the sprite subsystem but it declined to
     /// render it (should not happen for a codepoint that `has_codepoint`).
     SpriteMissing,
@@ -500,7 +500,7 @@ fn sprite_metrics_from(m: &Metrics) -> qwertty_term_sprite::Metrics {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "macos", not(feature = "freetype")))]
 mod tests {
     use super::*;
     use crate::coretext::Face;

@@ -16,7 +16,7 @@
 //! embedded face on a miss, which wouldn't exercise the named path).
 //!
 //! macOS only.
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", not(feature = "freetype")))]
 
 use qwertty_term_font::Shaper;
 use qwertty_term_font::coretext::Face;

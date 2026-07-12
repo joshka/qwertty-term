@@ -7,7 +7,7 @@
 //! Score determinism and fuzzy-name discovery.
 //!
 //! macOS only (CoreText discovery + rasterization).
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", not(feature = "freetype")))]
 
 use qwertty_term_font::coretext::{Face, PixelFormat};
 use qwertty_term_font::grid::AtlasKind;
