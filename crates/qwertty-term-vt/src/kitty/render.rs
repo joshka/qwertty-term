@@ -20,6 +20,7 @@
 //! culled). The three z-order buckets remain R6 slice 4.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use crate::kitty::TerminalGeometry;
 use crate::kitty::command::Format;
@@ -186,6 +187,64 @@ pub fn resolve_placements(
     }
 
     out
+}
+
+/// One image the terminal holds, resolved for a renderer: identity +
+/// `generation` (the re-upload key) + decoded, `Arc`-shared RGBA pixels. Carried
+/// through the snapshot boundary so the live-app render path can draw images
+/// without a live `&Terminal` (R6 slice 5).
+///
+/// The RGBA is copied once (from the stored format) when the window is captured;
+/// making [`Image`]'s stored data an `Arc<[u8]>` to share it copy-free is a
+/// follow-up optimization (#19).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotKittyImage {
+    pub id: u32,
+    pub generation: u64,
+    pub width: u32,
+    pub height: u32,
+    /// Decoded, tightly-packed RGBA (`width * height * 4` bytes).
+    pub rgba: Arc<[u8]>,
+}
+
+/// Resolve everything a renderer needs to draw kitty images for the window
+/// `scrollback_offset` rows up from the bottom: the visible placements
+/// ([`resolve_placements`]), the decoded RGBA of every image the terminal holds,
+/// and the live-image-id set for GPU texture eviction (R6 slices 1–3, threaded
+/// through the snapshot in slice 5). Returns empty vecs when kitty storage is
+/// disabled. Images are keyed by id; only images with a resolved placement need
+/// drawing, but all live images are returned so their textures aren't evicted.
+#[must_use]
+pub fn resolve_window(
+    storage: &ImageStorage,
+    pages: &PageList,
+    geo: &TerminalGeometry,
+    scrollback_offset: usize,
+) -> (Vec<RenderImagePlacement>, Vec<SnapshotKittyImage>, Vec<u32>) {
+    if !storage.enabled() {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    let live_ids: Vec<u32> = storage.images.keys().copied().collect();
+    let placements = resolve_placements(storage, pages, geo, scrollback_offset);
+
+    // Decode only the images actually referenced by a visible placement — the
+    // ones whose textures the renderer will upload this frame.
+    let mut images: Vec<SnapshotKittyImage> = Vec::new();
+    for p in &placements {
+        if images.iter().any(|i| i.id == p.image_id) {
+            continue;
+        }
+        if let Some(img) = storage.image_by_id(p.image_id) {
+            images.push(SnapshotKittyImage {
+                id: img.id,
+                generation: img.generation,
+                width: img.width,
+                height: img.height,
+                rgba: Arc::from(image_rgba(img).into_owned()),
+            });
+        }
+    }
+    (placements, images, live_ids)
 }
 
 /// The image's pixels as tightly-packed RGBA (`width * height * 4` bytes),
