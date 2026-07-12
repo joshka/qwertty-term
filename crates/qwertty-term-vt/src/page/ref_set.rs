@@ -487,6 +487,17 @@ where
     ///
     /// Same base contract as [`RefCountedSet::add`].
     pub unsafe fn lookup(&self, base: *mut u8, value: &T) -> Option<Id> {
+        // A zero-capacity set (a valid special case of `layout(0)`, produced
+        // for pages with no styled/hyperlinked cells — see
+        // `Page::exact_row_capacity`) contains nothing and has a zero-size
+        // table, so it can't be probed: `table[0]` would index a zero-length
+        // slice (a bounds panic here; an OOB read in upstream Zig). Return
+        // `None` without touching the table. `add` looks up before inserting
+        // and then correctly returns `OutOfMemory` for a zero-capacity set.
+        // Port of upstream `e44f5cb0f`.
+        if self.layout.table_cap == 0 {
+            return None;
+        }
         // SAFETY: per caller contract.
         unsafe {
             let table = self.table_slice(base);

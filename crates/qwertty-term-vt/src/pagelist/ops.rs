@@ -229,11 +229,29 @@ impl PageList {
         unsafe {
             let mut cap = (*node).data.capacity;
             if let Some(adj) = adjustment {
+                // A dimension can be zero for pages with exact capacities
+                // (see `compact` / `Page::exact_row_capacity`): a compacted
+                // plain-text page has zero styles/grapheme/string/hyperlink
+                // capacity. Growth from zero jumps to the standard default
+                // for the dimension rather than doubling — `0 * 2 == 0`
+                // "succeeds" without growing, breaking the guarantee that we
+                // increase by at least one unit and turning caller retry
+                // loops into infinite loops (single-retry callers silently
+                // drop data). The default is what every standard page starts
+                // with, so retrying callers get enough room. Port of
+                // upstream `8307349ec`.
+                let default = Capacity::new(0, 0);
                 let ok = match adj {
-                    IncreaseCapacity::Styles => double_u16(&mut cap.styles),
-                    IncreaseCapacity::HyperlinkBytes => double_u16(&mut cap.hyperlink_bytes),
-                    IncreaseCapacity::GraphemeBytes => double_u32(&mut cap.grapheme_bytes),
-                    IncreaseCapacity::StringBytes => double_u32(&mut cap.string_bytes),
+                    IncreaseCapacity::Styles => grow_u16(&mut cap.styles, default.styles),
+                    IncreaseCapacity::HyperlinkBytes => {
+                        grow_u16(&mut cap.hyperlink_bytes, default.hyperlink_bytes)
+                    }
+                    IncreaseCapacity::GraphemeBytes => {
+                        grow_u32(&mut cap.grapheme_bytes, default.grapheme_bytes)
+                    }
+                    IncreaseCapacity::StringBytes => {
+                        grow_u32(&mut cap.string_bytes, default.string_bytes)
+                    }
                 };
                 if !ok {
                     return Err(());
@@ -798,10 +816,16 @@ impl PromptIterator {
     }
 }
 
-/// Double a u16 capacity dimension, clamping at max. Returns false if already maxed.
-/// Port of the checked-multiply-then-clamp logic in `increaseCapacity`.
-fn double_u16(field: &mut u16) -> bool {
+/// Grow a u16 capacity dimension: from zero, jump to `default` (doubling zero
+/// stays zero — see `8307349ec` note at the call site); otherwise double,
+/// clamping at max. Returns false only if already maxed. Port of the growth
+/// logic in `increaseCapacity`.
+fn grow_u16(field: &mut u16, default: u16) -> bool {
     let old = *field;
+    if old == 0 {
+        *field = default;
+        return true;
+    }
     let new = match old.checked_mul(2) {
         Some(v) => v,
         None => {
@@ -816,9 +840,14 @@ fn double_u16(field: &mut u16) -> bool {
     true
 }
 
-/// Double a u32 capacity dimension, clamping at max. Returns false if already maxed.
-fn double_u32(field: &mut u32) -> bool {
+/// Grow a u32 capacity dimension. Zero → `default`, else double-and-clamp.
+/// See [`grow_u16`].
+fn grow_u32(field: &mut u32, default: u32) -> bool {
     let old = *field;
+    if old == 0 {
+        *field = default;
+        return true;
+    }
     let new = match old.checked_mul(2) {
         Some(v) => v,
         None => {
@@ -831,4 +860,64 @@ fn double_u32(field: &mut u32) -> bool {
     };
     *field = new;
     true
+}
+
+#[cfg(test)]
+mod grow_tests {
+    use super::{grow_u16, grow_u32};
+    use crate::page::Capacity;
+
+    // Regression for upstream 8307349ec: growth from a zero dimension must
+    // jump to the standard default, not double (0*2 == 0 "succeeds" without
+    // growing → caller retry loops spin forever / drop data). The defaults
+    // are exactly `Capacity::new(0, 0)`'s field values.
+    #[test]
+    fn grow_from_zero_jumps_to_default() {
+        let d = Capacity::new(0, 0);
+
+        let mut styles: u16 = 0;
+        assert!(grow_u16(&mut styles, d.styles));
+        assert_eq!(styles, d.styles);
+        assert!(styles > 0);
+
+        let mut hyperlink: u16 = 0;
+        assert!(grow_u16(&mut hyperlink, d.hyperlink_bytes));
+        assert_eq!(hyperlink, d.hyperlink_bytes);
+        assert!(hyperlink > 0);
+
+        let mut grapheme: u32 = 0;
+        assert!(grow_u32(&mut grapheme, d.grapheme_bytes));
+        assert_eq!(grapheme, d.grapheme_bytes);
+        assert!(grapheme > 0);
+
+        let mut string: u32 = 0;
+        assert!(grow_u32(&mut string, d.string_bytes));
+        assert_eq!(string, d.string_bytes);
+        assert!(string > 0);
+    }
+
+    // Non-zero dimensions still double, and clamp at max (returning false only
+    // when already maxed) — the growth contract preserved from before the fix.
+    #[test]
+    fn grow_from_nonzero_doubles_and_clamps() {
+        let mut v: u16 = 16;
+        assert!(grow_u16(&mut v, 999));
+        assert_eq!(v, 32);
+
+        // Clamp: doubling would overflow u16 but we're below MAX → jump to MAX.
+        let mut near: u16 = 40000;
+        assert!(grow_u16(&mut near, 999));
+        assert_eq!(near, u16::MAX);
+
+        // Already at MAX → no growth possible.
+        let mut maxed: u16 = u16::MAX;
+        assert!(!grow_u16(&mut maxed, 999));
+        assert_eq!(maxed, u16::MAX);
+
+        let mut w: u32 = 100;
+        assert!(grow_u32(&mut w, 999));
+        assert_eq!(w, 200);
+        let mut maxed32: u32 = u32::MAX;
+        assert!(!grow_u32(&mut maxed32, 999));
+    }
 }
