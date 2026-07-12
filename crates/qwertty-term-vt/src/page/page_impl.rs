@@ -25,7 +25,7 @@ use std::alloc::{Layout as AllocLayout, alloc_zeroed, dealloc};
 use super::bitmap::BitmapAllocator;
 use super::hyperlink::{self, EntryId, HyperlinkContext, HyperlinkSet, PageEntry};
 use super::offset_map::OffsetHashMap;
-use super::ref_set::AddError;
+use super::ref_set::{AddError, SetId};
 use super::size::{
     CellCountInt, GraphemeBytesInt, HyperlinkCountInt, Offset, OffsetBuf, OffsetInt, OffsetSlice,
     StringBytesInt, StyleCountInt, get_offset,
@@ -1223,11 +1223,28 @@ impl Page {
             }
 
             if (*row).styled() {
-                for i in left..end {
-                    let cell = cells_base.add(i);
-                    if (*cell).has_styling() {
-                        self.styles.release(mem, (*cell).style_id());
+                // Styled cells overwhelmingly come in runs sharing the same
+                // style (a colored status bar, a highlighted region, a full
+                // row painted in one color), so group consecutive cells with
+                // the same style id and release each run with a single
+                // ref-count update instead of per cell. The release_multiple
+                // ref_count >= n contract holds by construction: every cell
+                // in the run held a reference. Port of upstream Screen.zig
+                // clearCells (8d663a76e).
+                let mut i = left;
+                while i < end {
+                    let id = (*cells_base.add(i)).style_id();
+                    if id == style::DEFAULT_ID {
+                        i += 1;
+                        continue;
                     }
+                    let mut j = i + 1;
+                    while j < end && (*cells_base.add(j)).style_id() == id {
+                        j += 1;
+                    }
+                    self.styles
+                        .release_multiple(mem, id, SetId::from_usize(j - i));
+                    i = j;
                 }
                 if full_row {
                     (*row).set_styled(false);
