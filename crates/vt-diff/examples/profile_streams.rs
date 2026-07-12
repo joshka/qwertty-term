@@ -6,7 +6,7 @@
 //!   cargo build -p vt-diff --release --example profile_streams
 //!   samply record ./target/release/examples/profile_streams <stream> <iters>
 //!
-//! `<stream>` is one of: ascii sgr utf8 cursor dense scrolling scroll-region all
+//! `<stream>` is one of: ascii sgr utf8 cursor dense erase scrolling scroll-region all
 //! `<iters>` repeats the payload feed that many times (default sized for ~seconds).
 
 use std::time::Instant;
@@ -83,6 +83,30 @@ fn dense_cells_stream() -> Vec<u8> {
     v
 }
 
+/// Upstream's "styled paint + ED 2" pattern (8d663a76e): paint a full screen
+/// of styled rows, erase it with ED 2, repeat. Exercises the clear_cells
+/// style-ref release path the way full-screen TUIs do on clear/redraw.
+fn erase_stream() -> Vec<u8> {
+    let mut v = Vec::with_capacity(STREAM_MIB * 1024 * 1024 + 4096);
+    let mut color: u32 = 0;
+    'outer: loop {
+        v.extend_from_slice(b"\x1b[H");
+        for _line in 1..=ROWS as u32 {
+            // One style per row, full row of text: styled cells arrive in
+            // long same-style runs, the common TUI shape.
+            v.extend_from_slice(format!("\x1b[38;5;{}m", color % 156 + 100).as_bytes());
+            v.extend(std::iter::repeat_n(b'x', COLS as usize));
+            v.extend_from_slice(b"\r\n");
+            color += 1;
+            if v.len() >= STREAM_MIB * 1024 * 1024 {
+                break 'outer;
+            }
+        }
+        v.extend_from_slice(b"\x1b[2J");
+    }
+    v
+}
+
 fn scrolling_stream() -> Vec<u8> {
     b"y\n"
         .iter()
@@ -129,6 +153,7 @@ fn main() {
         ("utf8", utf8_stream()),
         ("cursor", cursor_stream()),
         ("dense", dense_cells_stream()),
+        ("erase", erase_stream()),
         ("scrolling", scrolling_stream()),
         ("scroll-region", scroll_region_stream()),
     ];
