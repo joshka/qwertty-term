@@ -139,10 +139,16 @@ items are `[ ]` wholesale unless noted.
 - [x] Bracketed paste, `macos-option-as-alt`
 - [x] `keybind = text:` subset (custom byte sequences, e.g. shift+enter)
 - [~] Font-size binds (increase/decrease/set) — actions exist, not all wired to config
-- [ ] Full `Binding.zig` system: leader/chains, key tables, `global` binds, `performable`
+- [~] `Binding.zig` port slice (a): trigger/action/flags model + parse layer in
+      `qwertty-term-input::binding` (10-rule `Trigger::parse`, 85-action enum +
+      `Action::parse`, flag prefixes, `=`-splitter, chain + sequence parsing, compat
+      table). Next: `Set` storage/lookup + default keymap, then dispatch integration.
+- [ ] Full `Binding.zig` system runtime: leader/chains dispatch, key tables, `global`
+      binds, `performable` fallthrough (model parsed; runtime `Set` pending)
 - [ ] Most keybind *actions*: `jump_to_prompt`, `write_scrollback_file`, `inspector`,
       `scroll_page_*`, `adjust_selection`, `navigate_search` binds, `crash`, config-reload
-- [ ] `key-remap`, `keybind` config parsing beyond the `text:` subset
+- [ ] `key-remap`, `keybind` config parsing beyond the `text:` subset (parse model
+      landed; app-crate dispatch wiring gated on T4)
 
 ## Mouse
 
