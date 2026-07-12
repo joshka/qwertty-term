@@ -7,8 +7,9 @@ can replicate Surface semantics — port engine-side pieces (T5 territory), Inbo
 (T3/T4). Companion to [stream-handler-delta.md](stream-handler-delta.md), which covers the
 stream-handler side of the same seams.
 
-Status: **initial pass** — the high-signal callbacks are tabled; the ranges under
-"Not yet mined" remain for later sessions. `sf:` = Surface.zig pinned line.
+Status: **session 2** — high-signal callbacks tabled (session 1) + the mouse/scroll input
+pipeline and `performBindingAction` inventory mined (session 2, gate-blocked docs work). `sf:`
+= Surface.zig pinned line.
 
 ## Engine-adjacent findings
 
@@ -39,14 +40,56 @@ Status: **initial pass** — the high-signal callbacks are tabled; the ranges un
 - `colorSchemeCallback` (sf:4705) keeps a `config_conditional_state.theme` for conditional
   config — T3 adjacency.
 
+## Mouse / scroll input pipeline (session 2 mining, sf:3422-4704)
+
+The whole mouse-input path is app/input-layer (T4), but it reads a small, precise set of
+**engine** state — this pins exactly what #33 (mouse state flags) must expose and no more.
+
+| Behavior                                                                                                                                                                                                                                       | Upstream                               | Engine state read                                                                               | Ours today                                                                                           | Owner                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Mouse report encoding: `mouseReport` builds `mouse_encode.Options.fromTerminal(&terminal, size)` which reads **only** `flags.mouse_event` + `flags.mouse_format` (+ renderer size); the encoder (`input/mouse_encode.zig`) is pure input-layer | sf:3645-3707; `mouse_encode.zig:41-49` | `flags.mouse_event`, `flags.mouse_format` (that is the entire engine seam for mouse reports)    | missing (terminal/mod.rs:142 TODO)                                                                   | T5 engine (2 flags); T4 owns `mouse_encode` port |
+| Mouse-report gate: `mouseCaptured` / `isMouseReporting` = `flags.mouse_event != .none`                                                                                                                                                         | sf:3741-3748,3654                      | `flags.mouse_event`                                                                             | missing                                                                                              | T5 flag; T4 gate                                 |
+| Shift-capture resolution: `mouseShiftCapture` folds config (`never`/`always`/`false`/`true`) over `flags.mouse_shift_capture` tri-state                                                                                                        | sf:3711-3739                           | `flags.mouse_shift_capture` (**exists**, terminal/mod.rs:126 `MouseShiftCapture`)               | done                                                                                                 | T4 consumes; config via T3                       |
+| Faux-scroll → cursor keys: on alt screen, `mouse_event == .none`, **and mode 1007 (`mouse_alternate_scroll`)** enabled, wheel emits `\x1bOA/B` (cursor-keys app mode) or `\x1b[A/B` per DECCKM                                                 | sf:3531-3560                           | `screens.active_key == .alternate`, `flags.mouse_event`, mode 1007, mode `cursor_keys` (DECCKM) | mode 1007 **exists** (modes.rs:153, default on); DECCKM exists; `mouse_event` missing (the only gap) | T4 wiring; T5 the one flag                       |
+| Scroll clears selection when mouse-reporting active                                                                                                                                                                                            | sf:3521-3526                           | `flags.mouse_event` + selection API (exists)                                                    | blocked on flag                                                                                      | T4                                               |
+
+**Net for #33:** the engine work is exactly two `Flags` fields — `mouse_event: MouseEvent`
+(none/x10/normal/button/any) and `mouse_format: MouseFormat` (x10/utf8/sgr/urxvt/sgr_pixels) —
+plus their mode side-effects (modes 9/1000/1002/1003 and 1005/1006/1015/1016) and OSC 22 for
+`mouse_shape`. Everything downstream (`mouse_encode`, click-count, drag, autoscroll) is T4 and
+reads only these. No larger engine surface is implied by the callbacks.
+
+## performBindingAction inventory (sf:4775-5793) — engine primitives that keybinds consume
+
+Skimmed for the engine primitives keybind actions call (full binding→action map is T3
+territory). Engine-adjacent ones relevant to the T5 backlog:
+
+- **Scroll actions** (`scroll_to_top`/`scroll_to_bottom`/`scroll_page_up|down`/
+  `scroll_page_fractional`/`scroll_page_lines`): all resolve to `Screen`/viewport scroll
+  primitives we already have (`scroll_viewport`). T3 wiring, no engine gap.
+- **`jump_to_prompt`** (prev/next N): scans OSC 133 prompt zones over the screen and scrolls
+  the viewport to the target prompt row — the missing `prompt`-zone navigation query flagged in
+  the engine-findings table above. T5 engine primitive; T3 binds it. Pairs with `promptClickMove`.
+- **`write_scrollback_file`** / **`select_all`** / clipboard actions: read existing Screen/
+  selection APIs; T4/T3.
+- **`reset`** (RIS-equivalent binding) → `terminal.fullReset` (exists).
+
+No new engine gaps beyond `jump_to_prompt`/`promptClickMove` (already tabled). The binding
+surface is otherwise satisfied by existing Screen/Terminal primitives.
+
+## Corrections to the initial pass
+
+- **Preedit dirty bit: verified present.** `flags.dirty.preedit` exists
+  (terminal/mod.rs:122, `Dirty { … preedit: bool … }`). The engine-findings row's
+  "dirty-bit presence unverified" is resolved — the seam is complete engine-side; preedit
+  rendering itself is T2/T4.
+
 ## Not yet mined (next sessions)
 
 | Range                         | Lines          | Expected yield                                          |
 | ----------------------------- | -------------- | ------------------------------------------------------- |
 | `handleMessage` detail        | 960-1713       | per-message app seam specs (partially skimmed)          |
 | `keyCallback` + encoding      | 2605-3281      | kitty keyboard encode paths, modify_other_keys use, IME |
-| `scrollCallback`              | 3392-3602      | scroll units, mouse wheel reports, faux-scroll detail   |
-| `mouseButtonCallback`         | 3741-4447      | report encoding, click-count selection, link click      |
-| `cursorPosCallback`           | 4512-4704      | motion reports, drag selection, autoscroll              |
-| `performBindingAction`        | 4775-5793      | full binding→engine-primitive inventory (T3 overlap)    |
+| `cursorPosCallback` detail    | 4512-4704      | drag selection, autoscroll (mouse-report path tabled)   |
+| `completeClipboardRequest`    | 5794-6034      | OSC 52 read-reply encoding detail (#33-adjacent)        |
 | `dumpText` / `getProcessInfo` | 1905-2034,6034 | test/dump helpers, process info seams                   |
