@@ -27,6 +27,7 @@
 //!   path in full; the legacy (non-kitty) encoder is a narrow placeholder seam, ported in a
 //!   later chunk (see that module's doc comment).
 
+pub mod binding;
 pub mod function_keys;
 pub mod key;
 pub mod key_encode;

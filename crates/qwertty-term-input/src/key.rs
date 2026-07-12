@@ -862,6 +862,16 @@ impl Key {
     /// like `"F1"` -> `f1`, `"Enter"` -> `enter`), then falls back to
     /// converting `FooBar` to `foo_bar` (uppercase letters/digits other
     /// than the first character start a new `_`-separated segment).
+    /// Look up a `Key` by its exact Ghostty `snake_case` tag name
+    /// (e.g. `"key_a"`, `"arrow_up"`, `"quote"`). This is the lookup used by
+    /// keybind trigger parsing for the "Ghostty key enum name" grammar rule,
+    /// which — unlike [`from_w3c`](Key::from_w3c) — matches the tag names
+    /// verbatim with no CamelCase transform. `"unidentified"` is matched like
+    /// any other tag (callers exclude it before calling if required).
+    pub fn from_name(name: &str) -> Option<Key> {
+        key_from_tag_name(name)
+    }
+
     pub fn from_w3c(code: &str) -> Option<Key> {
         if code.len() > 128 {
             return None;
