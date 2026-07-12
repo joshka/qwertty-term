@@ -14,6 +14,15 @@
   `issue-3-osc21-query-reply.md`, `issue-4-color-operation-leak.md` in this directory.
   Drafts only — nothing filed.
 
+## Re-verification 2026-07-12 (T8) vs current main `a3ac713b7` (drift pass 2) — unchanged
+
+Upstream advanced only 2 commits since the 2026-07-11 re-check (`a887df42c..a3ac713b7`),
+neither touching `highlight.zig`, `osc.zig`, or `terminal.h`. Spot-checked Finding 1 directly at
+`a3ac713b7`: `highlight.zig` `Flattened.init` still has all three bugs
+(`std.MultiArrayList(PageChunk)` :146, `.serial = chunk.node.serial` :151, `.end_x = end.x` :158).
+**All four dispositions below stand:** Finding 1 fileable (pending Josh), Finding 2 duplicate,
+Findings 3 & 4 resolved upstream (now port work). No new fileable findings.
+
 ## Re-verification 2026-07-11 (T8) vs current main `a887df42c` — dispositions changed
 
 Re-checked all four findings against upstream main `a887df42c` (fetched 2026-07-11, 102 commits
