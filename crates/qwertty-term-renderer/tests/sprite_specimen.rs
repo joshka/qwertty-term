@@ -126,10 +126,10 @@ fn sprite_specimen_offscreen_readback() {
         "\u{1FB00}\u{1FB01}\u{1FB3B}\u{1FB44} \u{1FB95}\u{1FB98}\u{1FB99} legacy\r\n".as_bytes(),
     );
     stream.feed("\u{2571}\u{2572}\u{2573} \u{2504}\u{2508}\u{254C} dash/diag".as_bytes());
-    // Park the cursor at a fixed cell (0-indexed row 2, col 3; CUP is
-    // 1-indexed) so the rendered cursor overlay is deterministic instead of
-    // trailing the last feed.
-    stream.feed(b"\x1b[3;4H");
+    // The cursor stays where the last feed left it (row 6, past the scanned
+    // columns). Don't park it inside the specimen area: the block cursor is
+    // drawn by default and would satisfy a row's ink assertion on its own,
+    // masking a broken sprite family.
     let term = stream.handler.terminal;
 
     let snapshot = FullSnapshot::capture(&term, 0);
