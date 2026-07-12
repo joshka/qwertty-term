@@ -1561,6 +1561,14 @@ pub struct TerminalHandler {
     /// base64-encoded) bytes — decoding is a host/embedder decision (e.g.
     /// `Surface.clipboardWrite` in Zig), not a terminal-core one.
     pending_clipboard: Option<(u8, String)>,
+    /// Set when a BEL (`0x07`) has been received since the last
+    /// [`TerminalHandler::take_bell`] drain. A latched flag (not a count):
+    /// the apprt only needs to know a bell happened this frame to fire its
+    /// `bell-features`, so a rapid burst coalesces to one — matching the
+    /// "latest-wins UI side effect" policy of `pending_clipboard`. Upstream
+    /// surfaces the bell via the apprt `ring_bell` action; the app drains this
+    /// on its pace tick. The `bell()` handler was previously a no-op.
+    pending_bell: bool,
     /// The APC sub-protocol handler (kitty graphics / glyph). Port of
     /// `stream_terminal.Handler.apc_handler`. The stream's `apc_start`/
     /// `apc_put`/`apc_end` events drive it; on `end` a completed
@@ -1607,6 +1615,7 @@ impl TerminalHandler {
             terminal,
             output: Vec::new(),
             pending_clipboard: None,
+            pending_bell: false,
             apc_handler: apc::Handler::new(),
         }
     }
@@ -1625,6 +1634,14 @@ impl TerminalHandler {
     /// text and query replies are unaffected).
     pub fn take_clipboard(&mut self) -> Option<(u8, String)> {
         self.pending_clipboard.take()
+    }
+
+    /// Take (and clear) the pending-bell flag: `true` if a BEL was received
+    /// since the last drain. The apprt polls this each frame to fire its
+    /// configured `bell-features` (audible/attention/title). See
+    /// [`TerminalHandler::pending_bell`].
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.pending_bell)
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
@@ -1694,7 +1711,12 @@ impl Handler for TerminalHandler {
     fn reverse_index(&mut self) {
         self.terminal.reverse_index();
     }
-    fn bell(&mut self) {}
+    fn bell(&mut self) {
+        // Latch a bell for the apprt to drain via `take_bell` and fire its
+        // configured `bell-features` (audible/attention/title). No
+        // terminal-state effect.
+        self.pending_bell = true;
+    }
     fn enquiry(&mut self) {}
 
     fn cursor_up(&mut self, count: u16) {

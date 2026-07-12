@@ -468,6 +468,25 @@ fn osc12_cursor() {
     assert_eq!((cur.r, cur.g, cur.b), (0x00, 0x00, 0xff));
 }
 
+// BEL (0x07) latches a drainable pending-bell flag for the apprt to fire its
+// `bell-features`. A no-op on terminal state; coalesces a burst to one.
+#[test]
+fn bel_latches_a_drainable_bell() {
+    let mut s = term(10, 10);
+    assert!(!s.handler.take_bell(), "no bell before any BEL");
+    s.feed(b"\x07");
+    assert!(s.handler.take_bell(), "BEL latches a bell");
+    // Drained; stays false until another BEL arrives.
+    assert!(!s.handler.take_bell(), "bell is cleared on take");
+    // A burst coalesces to a single latched bell.
+    s.feed(b"\x07\x07\x07");
+    assert!(s.handler.take_bell());
+    assert!(!s.handler.take_bell());
+    // A BEL that terminates an OSC string is a string terminator, not a bell.
+    s.feed(b"\x1b]0;title\x07");
+    assert!(!s.handler.take_bell(), "OSC-terminating BEL is not a bell");
+}
+
 // OSC 52 clipboard write: surfaced as a drainable event, raw (still
 // base64-encoded) per upstream's `clipboardContents` policy (decode is an
 // apprt/embedder decision, not a terminal-core one).

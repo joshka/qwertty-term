@@ -87,6 +87,13 @@ pub struct Config {
     /// `quick-terminal-autohide`, `Config.zig:2730`, default `true` on macOS).
     #[serde(rename = "quick-terminal-autohide")]
     pub quick_terminal_autohide: bool,
+    /// Which bell features fire on a terminal BEL, as a comma-separated flag
+    /// list (`system`/`audio`/`attention`/`title`/`border`, each optionally
+    /// `no-`-prefixed; `true`/`false` for all/none). Upstream `bell-features`
+    /// (`Config.zig:3121`), default `attention` + `title`. Parsed by
+    /// [`Config::bell_features`].
+    #[serde(rename = "bell-features")]
+    pub bell_features: Option<String>,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -112,6 +119,7 @@ impl Default for Config {
             quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
             // macOS default is `true` (upstream `Config.zig:2730`).
             quick_terminal_autohide: true,
+            bell_features: None,
         }
     }
 }
@@ -151,6 +159,15 @@ impl Config {
         self.quick_terminal_size
             .as_deref()
             .map(crate::quickterm::Size::parse)
+            .unwrap_or_default()
+    }
+
+    /// The parsed `bell-features` (upstream defaults `attention` + `title`
+    /// when unset).
+    pub fn bell_features(&self) -> crate::bell::BellFeatures {
+        self.bell_features
+            .as_deref()
+            .map(crate::bell::BellFeatures::parse)
             .unwrap_or_default()
     }
 }
@@ -224,6 +241,11 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # quick-terminal-size = "25%"
 # quick-terminal-animation-duration = 0.2
 # quick-terminal-autohide = true
+
+# Which bell features fire on a terminal BEL: a comma-separated list of
+# system / audio / attention / title / border, each optionally "no-"-prefixed
+# to disable (or "true"/"false" for all/none). Default: attention + title.
+# bell-features = "system, attention, title"
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -314,6 +336,16 @@ mod tests {
         );
         assert_eq!(config.quick_terminal_animation_duration, 0.2);
         assert!(config.quick_terminal_autohide);
+        // Bell: upstream default is attention + title.
+        assert_eq!(config.bell_features(), crate::bell::BellFeatures::default());
+        assert!(config.bell_features().attention && config.bell_features().title);
+    }
+
+    #[test]
+    fn parses_bell_features_over_defaults() {
+        let config = parse("bell-features = \"system, no-title\"\n").unwrap();
+        let f = config.bell_features();
+        assert!(f.system && f.attention && !f.title);
     }
 
     #[test]

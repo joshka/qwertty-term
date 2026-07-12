@@ -10,6 +10,7 @@
 //! Architecture and the AppKit object graph are documented in
 //! `docs/analysis/renderer-r5.md`.
 
+pub mod bell;
 pub mod config;
 pub mod engine;
 pub mod font_size;

@@ -91,6 +91,13 @@ impl Engine {
         self.stream.handler.take_clipboard()
     }
 
+    /// Drain the pending-bell flag: `true` if a BEL was received since the
+    /// last drain. The app polls this each pace tick to fire its configured
+    /// `bell-features` (see `crate::bell`).
+    pub fn take_bell(&mut self) -> bool {
+        self.stream.handler.take_bell()
+    }
+
     /// Resize the grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.terminal_mut().resize(clamp_dim(cols), clamp_dim(rows));

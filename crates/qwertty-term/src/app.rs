@@ -346,6 +346,15 @@ fn lock_or_recover(engine: &Mutex<Engine>) -> (std::sync::MutexGuard<'_, Engine>
     }
 }
 
+/// What one [`Surface::pump`] observed this tick: whether the shell exited,
+/// the latest password-input mode change (if any), and whether a BEL rang.
+#[derive(Default)]
+struct PumpResult {
+    exited: bool,
+    password: Option<bool>,
+    bell: bool,
+}
+
 impl Surface {
     /// Lock the shared engine, degrading a *poisoned* lock to a dead surface
     /// instead of panicking the whole app.
@@ -438,18 +447,22 @@ impl Surface {
     /// exited (so the caller closes this surface). `title_sink` receives the
     /// title/password state so the tab can reflect the *focused* pane's title in
     /// the window title.
-    fn pump(&mut self) -> (bool, Option<bool>) {
+    fn pump(&mut self) -> PumpResult {
         // A poison-dead surface has (or is about to have) its io shut down; skip
         // all io servicing for it. It is neither "exited" (which would close it)
         // nor generating password events — it just shows its crash banner.
         if self.is_dead() {
-            return (false, None);
+            return PumpResult::default();
         }
-        // `take_output` locks the engine; if the parse thread poisoned the lock,
-        // `engine()` recovers it and flips `dead`, so re-check before touching io.
-        let out = self.engine().take_output();
+        // `take_output`/`take_bell` lock the engine; if the parse thread poisoned
+        // the lock, `engine()` recovers it and flips `dead`, so re-check before
+        // touching io. Drain both under one lock.
+        let (out, bell) = {
+            let mut engine = self.engine();
+            (engine.take_output(), engine.take_bell())
+        };
         if self.is_dead() {
-            return (false, None);
+            return PumpResult::default();
         }
         if !out.is_empty() {
             self.io.write(&out);
@@ -469,7 +482,11 @@ impl Surface {
                 }
             }
         }
-        (exited, password)
+        PumpResult {
+            exited,
+            password,
+            bell,
+        }
     }
 
     /// Bring a poison-dead surface to rest exactly once: shut its io down (the
@@ -1078,6 +1095,11 @@ struct Tab {
     /// set-on-change achieves the same no-flicker outcome). `RefCell` because
     /// [`Tab::update_window_title`] takes `&self` from the tick loop.
     last_title: RefCell<String>,
+    /// Whether a bell is currently indicated on this tab's title (a pane rang
+    /// since the tab was last focused). Drives the 🔔 title prefix (upstream
+    /// `bell-features = title`); cleared when the tab becomes key. `Cell` for
+    /// the `&self` tick/title accessors.
+    bell_ringing: Cell<bool>,
 }
 
 impl Tab {
@@ -1181,6 +1203,13 @@ impl Tab {
                     "qwertty-term".to_string()
                 }
             });
+        // Bell indicator prefix (upstream `bell-features = title`); cleared
+        // when the tab is next focused. Password lock is a suffix as before.
+        let base = if self.bell_ringing.get() {
+            format!("🔔 {base}")
+        } else {
+            base
+        };
         let title = if password {
             format!("{base} 🔒")
         } else {
@@ -1191,6 +1220,12 @@ impl Tab {
         }
         self.window.setTitle(&NSString::from_str(&title));
         *self.last_title.borrow_mut() = title;
+    }
+
+    /// Clear this tab's bell title indicator (called when the tab becomes key /
+    /// focused — upstream clears the bell once the user looks at the surface).
+    fn clear_bell(&self) {
+        self.bell_ringing.set(false);
     }
 }
 
@@ -1246,6 +1281,8 @@ pub struct ControllerState {
     /// Quick-terminal config, resolved once at startup (position/size/
     /// animation-duration/autohide).
     quick_terminal_config: QuickTerminalConfig,
+    /// Which `bell-features` fire on a terminal BEL (see [`crate::bell`]).
+    bell_features: crate::bell::BellFeatures,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1327,6 +1364,7 @@ impl Controller {
                 animation_duration: config.quick_terminal_animation_duration,
                 autohide: config.quick_terminal_autohide,
             },
+            bell_features: config.bell_features(),
         })))
     }
 
@@ -1472,6 +1510,7 @@ impl Controller {
             next_surface: 1,
             created: std::time::Instant::now(),
             last_title: RefCell::new(String::new()),
+            bell_ringing: Cell::new(false),
         };
 
         // Size the window to the configured dropdown size on the target screen,
@@ -1892,6 +1931,11 @@ impl Controller {
         let Some(t) = state.tabs.get_mut(&tab) else {
             return;
         };
+        // The user is now looking at this tab: clear any bell indicator
+        // (upstream clears the bell on surface focus).
+        if focused {
+            t.clear_bell();
+        }
         let focused_id = t.tree.focused();
         if let Some(s) = t.surfaces.get_mut(&focused_id) {
             s.set_focus(focused);
@@ -1952,6 +1996,23 @@ impl Controller {
     pub fn tab_window_title(&self, tab: TabId) -> Option<String> {
         let state = self.0.borrow();
         state.tabs.get(&tab).map(|t| t.window.title().to_string())
+    }
+
+    /// Whether a tab currently shows the bell title indicator (smoke/test).
+    pub fn tab_bell_ringing(&self, tab: TabId) -> bool {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .map(|t| t.bell_ringing.get())
+            .unwrap_or(false)
+    }
+
+    /// Force one pace tick (smoke/test): pump + render every pane, firing the
+    /// bell drain/effects. Lets a smoke drive the bell path deterministically
+    /// without waiting on the real timer.
+    pub fn tick_once(&self) {
+        self.tick();
     }
 
     /// A specific surface's current selection text (smoke/test): the engine's
@@ -2620,9 +2681,13 @@ impl Controller {
     pub fn tick(&self) {
         // Collect (tab, surface) pairs whose shell exited, plus per-tab focused
         // title/password state, under one borrow. Render every pane.
-        let exited: Vec<(TabId, SurfaceId)> = {
+        let bell_features = self.0.borrow().bell_features;
+        let (exited, bell_rang): (Vec<(TabId, SurfaceId)>, bool) = {
             let mut state = self.0.borrow_mut();
             let mut dead = Vec::new();
+            // Whether any pane rang this tick — drives the once-per-tick
+            // audible/attention effects below (the title indicator is per-tab).
+            let mut any_bell = false;
             for (tid, tab) in state.tabs.iter_mut() {
                 let focused = tab.tree.focused();
                 // Whether this tab has more than one pane — the gate for
@@ -2632,8 +2697,8 @@ impl Controller {
                 let is_split = tab.tree.len() > 1;
                 let mut password_focused = false;
                 for (sid, surface) in tab.surfaces.iter_mut() {
-                    let (surface_exited, password) = surface.pump();
-                    if surface_exited {
+                    let result = surface.pump();
+                    if result.exited {
                         dead.push((*tid, *sid));
                     } else {
                         // Poison-dead surface: settle it (shut io down + paint the
@@ -2651,16 +2716,43 @@ impl Controller {
                         surface.selection_autoscroll_tick();
                         surface.render(*sid == focused, is_split);
                     }
+                    // A BEL from any pane marks this tab's title (until the tab
+                    // is next focused) and triggers the once-per-tick audible/
+                    // attention effects.
+                    if result.bell && bell_features.any_active() {
+                        if bell_features.title {
+                            tab.bell_ringing.set(true);
+                        }
+                        any_bell = true;
+                    }
                     if *sid == focused
-                        && let Some(active) = password
+                        && let Some(active) = result.password
                     {
                         password_focused = active;
                     }
                 }
                 tab.update_window_title(password_focused);
             }
-            dead
+            (dead, any_bell)
         };
+        // Fire the once-per-tick audible/attention bell effects with no
+        // controller borrow held (these are AppKit calls). The per-tab title
+        // indicator was already set inside the borrow above.
+        if bell_rang {
+            if bell_features.system {
+                // System alert sound (respects the user's alert-volume; a
+                // no-op when the system alert sound is muted).
+                objc2_app_kit::NSBeep();
+            }
+            if bell_features.attention {
+                // Bounce the Dock icon until the app is activated (macOS
+                // ignores this while the app is already active/frontmost).
+                let mtm = self.0.borrow().mtm;
+                NSApplication::sharedApplication(mtm).requestUserAttention(
+                    objc2_app_kit::NSRequestUserAttentionType::InformationalRequest,
+                );
+            }
+        }
         for (tab, surface) in exited {
             self.close_surface(tab, surface);
         }
@@ -2836,6 +2928,7 @@ impl Controller {
             next_surface: 1,
             created: std::time::Instant::now(),
             last_title: RefCell::new(String::new()),
+            bell_ringing: Cell::new(false),
         };
         // Lay out the single pane to the container's (AppKit-sized) bounds.
         tab.relayout(controller_ptr, id, mtm);
@@ -3535,6 +3628,10 @@ pub struct DelegateIvars {
     /// dropdown in/out and assert visibility, geometry, and a live shell. See
     /// [`AppDelegate::run_quickterm_smoke`].
     smoke_quickterm: bool,
+    /// Bell smoke (`QWERTTY_TERM_SMOKE_BELL`): feed a BEL and assert the tab's
+    /// 🔔 title indicator appears then clears on refocus. See
+    /// [`AppDelegate::run_bell_smoke`].
+    smoke_bell: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -3581,6 +3678,7 @@ define_class!(
             let has_selection = self.ivars().smoke_selection;
             let has_title = self.ivars().smoke_title;
             let has_quickterm = self.ivars().smoke_quickterm;
+            let has_bell = self.ivars().smoke_bell;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -3598,6 +3696,8 @@ define_class!(
                 self.schedule_title_smoke();
             } else if has_quickterm {
                 self.schedule_quickterm_smoke();
+            } else if has_bell {
+                self.schedule_bell_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -3760,6 +3860,12 @@ define_class!(
         fn quickterm_smoke(&self, _timer: &AnyObject) {
             self.run_quickterm_smoke();
         }
+
+        /// Bell smoke: feed a BEL, assert the title indicator, exit 0/1.
+        #[unsafe(method(ghosttyBellSmoke:))]
+        fn bell_smoke(&self, _timer: &AnyObject) {
+            self.run_bell_smoke();
+        }
     }
 );
 
@@ -3780,6 +3886,7 @@ impl AppDelegate {
         smoke_selection: bool,
         smoke_title: bool,
         smoke_quickterm: bool,
+        smoke_bell: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -3797,6 +3904,7 @@ impl AppDelegate {
             smoke_selection,
             smoke_title,
             smoke_quickterm,
+            smoke_bell,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -5785,6 +5893,68 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the bell smoke: let the first window settle, then run.
+    fn schedule_bell_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyBellSmoke:));
+    }
+
+    /// Bell smoke: feed a BEL into the focused pane's engine and assert the
+    /// tab's title shows the 🔔 indicator (default `bell-features` includes
+    /// `title`), then that refocusing the window clears it. Exits 0/1.
+    fn run_bell_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = bell_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at bell smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at bell smoke start".into());
+        };
+
+        // No bell yet.
+        if controller.tab_bell_ringing(tab) {
+            fail("bell indicator was set before any BEL".into());
+        }
+
+        // Feed a BEL straight into the engine, then tick so the pump drains it
+        // and marks the tab. Drive the tick directly (deterministic) plus a
+        // short spin so the title `setTitle` lands.
+        controller.feed_surface_output(tab, surface, b"\x07");
+        controller.tick_once();
+        Self::spin(0.1);
+
+        if !controller.tab_bell_ringing(tab) {
+            fail("a BEL did not set the tab bell indicator".into());
+        }
+        let title = controller.tab_window_title(tab).unwrap_or_default();
+        if !title.starts_with("🔔") {
+            fail(format!(
+                "bell did not add the 🔔 title indicator (title {title:?})"
+            ));
+        }
+
+        // Refocusing the window (windowDidBecomeKey) clears the bell.
+        controller.tab_window_focus(tab, true);
+        controller.tick_once();
+        Self::spin(0.1);
+        if controller.tab_bell_ringing(tab) {
+            fail("refocusing the window did not clear the bell indicator".into());
+        }
+        let title = controller.tab_window_title(tab).unwrap_or_default();
+        if title.starts_with("🔔") {
+            fail(format!(
+                "bell 🔔 title indicator persisted after refocus (title {title:?})"
+            ));
+        }
+
+        println!(
+            "OK: bell smoke — a BEL set the tab's 🔔 title indicator (default \
+             bell-features attention+title), and refocusing the window cleared it."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -5931,6 +6101,12 @@ fn quickterm_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a bell-smoke failure and exit non-zero.
+fn bell_fail(msg: String) -> ! {
+    eprintln!("FAIL: bell smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -6040,6 +6216,7 @@ pub fn run(
     smoke_selection: bool,
     smoke_title: bool,
     smoke_quickterm: bool,
+    smoke_bell: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -6060,6 +6237,7 @@ pub fn run(
         smoke_selection,
         smoke_title,
         smoke_quickterm,
+        smoke_bell,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
