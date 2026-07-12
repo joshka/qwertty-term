@@ -264,6 +264,13 @@ impl FullSnapshot {
         }
     }
 
+    /// Capture the live active area: [`FullSnapshot::capture`] with a
+    /// scrollback offset of 0. The common embedder shape — feed bytes,
+    /// capture live, render — without the magic-zero argument.
+    pub fn capture_live(terminal: &Terminal) -> FullSnapshot {
+        FullSnapshot::capture(terminal, 0)
+    }
+
     /// Capture a snapshot on the incremental-redraw path: reads and *clears*
     /// the terminal's per-row/page/global dirty state, so the window carries
     /// the real per-row dirty bits and global signals. Thin wrapper over

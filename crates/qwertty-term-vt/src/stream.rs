@@ -1527,6 +1527,37 @@ pub struct TerminalHandler {
     apc_handler: apc::Handler,
 }
 
+/// Convenience accessors for the common `Stream<TerminalHandler>` pairing, so
+/// embedders read the terminal as `stream.terminal()` instead of reaching
+/// through `stream.handler.terminal`.
+impl Stream<TerminalHandler> {
+    /// The [`Terminal`] this stream drives.
+    ///
+    /// ```
+    /// use qwertty_term_vt::stream::{Stream, TerminalHandler};
+    /// use qwertty_term_vt::terminal::{Options, Terminal};
+    ///
+    /// let terminal = Terminal::new(Options { cols: 10, rows: 2, ..Default::default() });
+    /// let mut stream = Stream::new(TerminalHandler::new(terminal));
+    /// stream.feed(b"hello");
+    /// assert_eq!(stream.terminal().plain_string(), "hello");
+    /// ```
+    pub fn terminal(&self) -> &Terminal {
+        &self.handler.terminal
+    }
+
+    /// Mutable access to the [`Terminal`] this stream drives (resize, dirty
+    /// tracking, snapshotting paths that need `&mut`).
+    pub fn terminal_mut(&mut self) -> &mut Terminal {
+        &mut self.handler.terminal
+    }
+
+    /// Consume the stream and take ownership of its [`Terminal`].
+    pub fn into_terminal(self) -> Terminal {
+        self.handler.terminal
+    }
+}
+
 impl TerminalHandler {
     pub fn new(terminal: Terminal) -> Self {
         Self {

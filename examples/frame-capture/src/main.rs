@@ -30,7 +30,7 @@ mod macos {
 
     use qwertty_term_font::coretext::Face;
     use qwertty_term_font::{CodepointResolver, Collection, Grid, Metrics};
-    use qwertty_term_renderer::engine::{Engine, FrameOptions};
+    use qwertty_term_renderer::engine::{Engine, Frame, FrameOptions};
     use qwertty_term_renderer::metal::Metal;
     use qwertty_term_renderer::snapshot::FullSnapshot;
     use qwertty_term_vt::stream::{Stream, TerminalHandler};
@@ -268,17 +268,17 @@ OPTIONS:
         //     input yields byte-identical pixels on any machine. ---
         let face = match &args.font_family {
             None => {
-                Face::load_embedded(args.font_size).map_err(|e| format!("embedded font: {e:?}"))?
+                Face::load_embedded(args.font_size).map_err(|e| format!("embedded font: {e}"))?
             }
             Some(name) => Face::load_by_name(name, args.font_size)
-                .map_err(|e| format!("font family {name:?}: {e:?}"))?,
+                .map_err(|e| format!("font family {name:?}: {e}"))?,
         };
         let metrics = Metrics::calc(face.face_metrics());
-        let (cell_w, cell_h) = (metrics.cell_width, metrics.cell_height);
         let resolver = CodepointResolver::new(Collection::new(face));
-        let mut grid = Grid::new(resolver, metrics).map_err(|e| format!("font grid: {e:?}"))?;
+        let mut grid = Grid::new(resolver, metrics).map_err(|e| format!("font grid: {e}"))?;
 
-        // --- Terminal + engine. ---
+        // --- Terminal + engine. The engine reads its cell geometry from the
+        //     grid, so the two can't disagree. ---
         let terminal = Terminal::new(Options {
             cols: args.cols,
             rows: args.rows,
@@ -286,7 +286,7 @@ OPTIONS:
         });
         let mut stream = Stream::new(TerminalHandler::new(terminal));
         let mut engine =
-            Engine::with_backend(backend, cell_w, cell_h).map_err(|e| format!("engine: {e}"))?;
+            Engine::with_backend_for_grid(backend, &grid).map_err(|e| format!("engine: {e}"))?;
 
         std::fs::create_dir_all(&args.out_dir)
             .map_err(|e| format!("{}: {e}", args.out_dir.display()))?;
@@ -311,43 +311,49 @@ OPTIONS:
                 Some(path) => path.clone(),
                 None => args.out_dir.join(format!("frame-{i:04}.png")),
             };
-            render_frame(&mut engine, &stream.handler.terminal, &mut grid, &path)?;
+            render_frame(&mut engine, stream.terminal(), &mut grid, &path)?;
         }
         Ok(())
     }
 
-    /// Snapshot the terminal, draw one offscreen frame, read it back, and
-    /// write it as a PNG. This function is the whole embeddability story.
+    /// Snapshot the terminal, render one offscreen frame, and write it as a
+    /// PNG. This function is the whole embeddability story: capture the live
+    /// screen, one `render` call, encode the pixels.
     fn render_frame(
         engine: &mut Engine,
         terminal: &Terminal,
         grid: &mut Grid,
         path: &Path,
     ) -> Result<(), String> {
-        let snapshot = FullSnapshot::capture(terminal, 0);
-        engine.update_frame(&snapshot, grid, FrameOptions::default());
-        engine.sync_atlas(grid).map_err(|e| format!("atlas: {e}"))?;
-        let bgra = engine.draw_frame().map_err(|e| format!("draw: {e}"))?;
-        let (width, height) = engine.screen_size();
-        write_png(path, width, height, &bgra)?;
-        println!("wrote {} ({width}x{height} px)", path.display());
+        let snapshot = FullSnapshot::capture_live(terminal);
+        let frame = engine
+            .render(&snapshot, grid, FrameOptions::default())
+            .map_err(|e| format!("render: {e}"))?;
+        write_png(path, &frame)?;
+        println!(
+            "wrote {} ({}x{} px)",
+            path.display(),
+            frame.width(),
+            frame.height()
+        );
         Ok(())
     }
 
-    /// Write a BGRA readback buffer as an RGBA PNG.
-    fn write_png(path: &Path, width: usize, height: usize, bgra: &[u8]) -> Result<(), String> {
-        let mut rgba = Vec::with_capacity(bgra.len());
-        for px in bgra.chunks_exact(4) {
-            rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        }
+    /// Write a rendered frame as an RGBA PNG.
+    fn write_png(path: &Path, frame: &Frame) -> Result<(), String> {
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
         let file = std::fs::File::create(path).map_err(|e| err(&e))?;
-        let mut encoder =
-            png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
+        let mut encoder = png::Encoder::new(
+            std::io::BufWriter::new(file),
+            frame.width() as u32,
+            frame.height() as u32,
+        );
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().map_err(|e| err(&e))?;
-        writer.write_image_data(&rgba).map_err(|e| err(&e))?;
+        writer
+            .write_image_data(&frame.to_rgba())
+            .map_err(|e| err(&e))?;
         writer.finish().map_err(|e| err(&e))?;
         Ok(())
     }
