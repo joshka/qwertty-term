@@ -2067,6 +2067,62 @@ fn select_word_whitespace_across_soft_wrap() {
     assert_eq!(sel_screen_pt(&s, sel.end()), (2, 1));
 }
 
+// ---- selectWordBetween ---------------------------------------------------
+
+// Upstream has no test block for `selectWordBetween` (Screen.zig marks it
+// "TODO: test this"); these cover the double-click-drag contract it exists
+// for: the nearest word to `start` walking toward `end`, in both directions,
+// bounded by `end`.
+#[test]
+fn select_word_between() {
+    let mut s = init(10, 5, 0);
+    s.test_write_string("ABC  DEF\n\nXYZ");
+
+    // Start on a word: returns that word immediately.
+    let sel = s
+        .select_word_between(
+            sel_pin(&s, Point::active(1, 0)),
+            sel_pin(&s, Point::active(9, 0)),
+            WORD_BOUNDARY,
+        )
+        .unwrap();
+    assert_eq!(sel_screen_pt(&s, sel.start()), (0, 0));
+    assert_eq!(sel_screen_pt(&s, sel.end()), (2, 0));
+
+    // Walking backward (start after end) from an unwritten cell: the nearest
+    // word toward the target is "DEF".
+    let sel = s
+        .select_word_between(
+            sel_pin(&s, Point::active(9, 0)),
+            sel_pin(&s, Point::active(0, 0)),
+            WORD_BOUNDARY,
+        )
+        .unwrap();
+    assert_eq!(sel_screen_pt(&s, sel.start()), (5, 0));
+    assert_eq!(sel_screen_pt(&s, sel.end()), (7, 0));
+
+    // Walking forward from the empty row 1 toward row 2 finds "XYZ".
+    let sel = s
+        .select_word_between(
+            sel_pin(&s, Point::active(0, 1)),
+            sel_pin(&s, Point::active(2, 2)),
+            WORD_BOUNDARY,
+        )
+        .unwrap();
+    assert_eq!(sel_screen_pt(&s, sel.start()), (0, 2));
+    assert_eq!(sel_screen_pt(&s, sel.end()), (2, 2));
+
+    // Bounded by `end`: no word between two unwritten cells on the empty row.
+    assert!(
+        s.select_word_between(
+            sel_pin(&s, Point::active(0, 1)),
+            sel_pin(&s, Point::active(9, 1)),
+            WORD_BOUNDARY,
+        )
+        .is_none()
+    );
+}
+
 // Port of `test "Screen: selectWord with character boundary"`.
 #[test]
 fn select_word_with_character_boundary() {

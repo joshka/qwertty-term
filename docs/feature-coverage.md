@@ -154,7 +154,9 @@ items are `[ ]` wholesale unless noted.
 
 - [x] `copy-on-select`, OSC 52 read/write, selection string extraction
 - [x] Double-click-drag select (basic); per-pane selection
-- [ ] Double-click *word* / triple-click *line* gestures
+- [x] Double-click *word* / triple-click *line* gestures (+ shift-click extend,
+      ctrl/cmd-triple-click output select, option rectangle select, drag-past-
+      edge viewport autoscroll — `SelectionGesture.zig` port, selection smoke)
 - [ ] `selection-word-chars`, `clipboard-paste-protection`/`-bracketed-safe`
 - [ ] `clipboard-trim-trailing-spaces`, `selection-clear-on-typing`/`-on-copy`
 - [ ] `clipboard-read`/`clipboard-write` permission gates

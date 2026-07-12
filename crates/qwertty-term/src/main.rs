@@ -49,6 +49,13 @@
 //!   overlay), set the needle, assert the match counter reads 3, navigate
 //!   next/next/prev asserting the viewport offset lands on each match's row, and
 //!   assert Escape closes the bar and restores PTY input, then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_SELECTION=1` — run the selection-gestures smoke: feed
+//!   deterministic screen content, then drive synthetic mouse NSEvents through
+//!   the real window event path asserting double-click selects a word (with
+//!   the upstream boundary set), triple-click selects the line, a fresh single
+//!   click clears, press-drag-release selects by cell, shift-click extends,
+//!   and a drag parked past the top edge autoscrolls the viewport into
+//!   scrollback while extending the selection, then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -139,6 +146,9 @@ fn run_window() {
     // Search smoke: fill scrollback with markers, Cmd+F, type the needle, assert
     // the counter, navigate, and assert Escape restores PTY input (see app::run).
     let smoke_search = std::env::var_os("QWERTTY_TERM_SMOKE_SEARCH").is_some();
+    // Selection smoke: drive synthetic mouse gestures (double/triple click,
+    // drag, shift-extend, edge autoscroll) and assert the selection text.
+    let smoke_selection = std::env::var_os("QWERTTY_TERM_SMOKE_SELECTION").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -149,6 +159,7 @@ fn run_window() {
         smoke_keybind,
         smoke_focus,
         smoke_search,
+        smoke_selection,
     );
 }
 

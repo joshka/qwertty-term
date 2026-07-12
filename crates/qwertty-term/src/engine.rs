@@ -222,6 +222,169 @@ impl Engine {
         Some(self.terminal().screen().selection_string(sel, true))
     }
 
+    // -- selection gestures (absolute-screen space) ------------------------
+    //
+    // The selection-gesture state machine (`crate::gesture`, port of upstream
+    // `SelectionGesture.zig`) works in *absolute screen* coordinates — the
+    // `Tag::Screen` space covering scrollback + active area, the same space
+    // [`Engine::screen_range`] and the tint pass use. These accessors are the
+    // engine boundary: they resolve screen points to pins, call the ported
+    // `Screen` selection primitives, and hand back pin-free geometry.
+
+    /// Map a cell coordinate in the *rendered window* (`row` 0 = the top row
+    /// the frame at `scrollback_offset` shows) to an absolute screen
+    /// coordinate. Uses the same windowing math as `snapshot_window`: the
+    /// window is exactly `rows` rows ending `offset` rows up from the bottom
+    /// (offset clamped to history), top-padded with blank rows when less than
+    /// a full grid has been written. `None` for cells outside the grid or on
+    /// a blank pad row (nothing is written there to select).
+    ///
+    /// This is the mapping [`Engine::pin_at`] lacks: `pin_at` resolves
+    /// against the pagelist's own viewport (pinned to the active area — the
+    /// app never scrolls it), so it is only correct at offset 0.
+    pub fn window_to_screen_point(
+        &self,
+        col: usize,
+        row: usize,
+        scrollback_offset: usize,
+    ) -> Option<(usize, usize)> {
+        let (cols, rows) = (self.cols(), self.rows());
+        if col >= cols || row >= rows {
+            return None;
+        }
+        let total = self.terminal().screen().pages.total_rows();
+        let scrollback_len = total.saturating_sub(rows);
+        let offset = scrollback_offset.min(scrollback_len);
+        // `offset <= scrollback_len <= total`, so this cannot underflow.
+        let window_len = rows.min(total - offset);
+        let pad = rows - window_len;
+        if row < pad {
+            return None;
+        }
+        let window_top = total.saturating_sub(offset + rows);
+        Some((col, window_top + (row - pad)))
+    }
+
+    /// Resolve an absolute screen coordinate to a [`Pin`], or `None` if it
+    /// lies beyond the written screen space.
+    pub fn pin_at_screen(&self, x: usize, y: usize) -> Option<Pin> {
+        let point = Point::screen(x as qwertty_term_vt::page::size::CellCountInt, y as u32);
+        self.terminal().screen().pages.pin(point)
+    }
+
+    /// Whether an absolute screen coordinate resolves to a written cell
+    /// location (used by the gesture's threshold math for pin-wrap bounds).
+    pub fn screen_cell_exists(&self, x: usize, y: usize) -> bool {
+        self.pin_at_screen(x, y).is_some()
+    }
+
+    /// Set the selection from a pair of absolute screen points in anchor →
+    /// active order. Returns `false` (selection untouched) if either point
+    /// doesn't resolve to a written cell.
+    pub fn select_screen_points(
+        &mut self,
+        a: (usize, usize),
+        b: (usize, usize),
+        rectangle: bool,
+    ) -> bool {
+        let (Some(start), Some(end)) = (self.pin_at_screen(a.0, a.1), self.pin_at_screen(b.0, b.1))
+        else {
+            return false;
+        };
+        self.select(start, end, rectangle);
+        true
+    }
+
+    /// A selection's `(start, end)` endpoints as absolute screen points, in
+    /// the selection's own start→end order (callers that need top-left /
+    /// bottom-right ordering use [`Engine::screen_range`] instead).
+    fn selection_endpoints(&self, sel: &Selection) -> Option<((usize, usize), (usize, usize))> {
+        let pages = &self.terminal().screen().pages;
+        let s = pages
+            .point_from_pin(qwertty_term_vt::point::Tag::Screen, sel.start())?
+            .coord();
+        let e = pages
+            .point_from_pin(qwertty_term_vt::point::Tag::Screen, sel.end())?
+            .coord();
+        Some(((s.x as usize, s.y as usize), (e.x as usize, e.y as usize)))
+    }
+
+    /// The word under the screen point (upstream `selectWord` semantics: a
+    /// run of exclusively-boundary or exclusively-non-boundary cells, across
+    /// soft-wraps), as `(start, end)` screen points. `None` on an unwritten
+    /// cell.
+    pub fn select_word_bounds(
+        &self,
+        x: usize,
+        y: usize,
+        boundary_codepoints: &[u32],
+    ) -> Option<((usize, usize), (usize, usize))> {
+        let pin = self.pin_at_screen(x, y)?;
+        let sel = self
+            .terminal()
+            .screen()
+            .select_word(pin, boundary_codepoints)?;
+        self.selection_endpoints(&sel)
+    }
+
+    /// The soft-wrapped line under the screen point (upstream `selectLine`
+    /// semantics, semantic-prompt boundaries respected), as `(start, end)`
+    /// screen points. `trim_whitespace` selects the default whitespace-trim
+    /// behavior; `false` keeps blank ends (the triple-click-drag fallback for
+    /// an all-blank line, upstream `dragSelectionLine`'s `.whitespace = null`
+    /// retry).
+    pub fn select_line_bounds(
+        &self,
+        x: usize,
+        y: usize,
+        trim_whitespace: bool,
+    ) -> Option<((usize, usize), (usize, usize))> {
+        use qwertty_term_vt::screen::SelectLine;
+        let pin = self.pin_at_screen(x, y)?;
+        let opts = if trim_whitespace {
+            SelectLine::new(pin)
+        } else {
+            SelectLine {
+                pin,
+                whitespace: None,
+                semantic_prompt_boundary: true,
+            }
+        };
+        let sel = self.terminal().screen().select_line(opts)?;
+        self.selection_endpoints(&sel)
+    }
+
+    /// The shell-integration command output under the screen point (upstream
+    /// `selectOutput`), as `(start, end)` screen points. `None` if the point
+    /// is not on output.
+    pub fn select_output_bounds(
+        &self,
+        x: usize,
+        y: usize,
+    ) -> Option<((usize, usize), (usize, usize))> {
+        let pin = self.pin_at_screen(x, y)?;
+        let sel = self.terminal().screen().select_output(pin)?;
+        self.selection_endpoints(&sel)
+    }
+
+    /// The nearest word to `from` walking toward `to` (inclusive), as
+    /// `(start, end)` screen points — upstream `selectWordBetween`, the
+    /// word-granular drag primitive.
+    pub fn select_word_between_bounds(
+        &self,
+        from: (usize, usize),
+        to: (usize, usize),
+        boundary_codepoints: &[u32],
+    ) -> Option<((usize, usize), (usize, usize))> {
+        let start = self.pin_at_screen(from.0, from.1)?;
+        let end = self.pin_at_screen(to.0, to.1)?;
+        let sel = self
+            .terminal()
+            .screen()
+            .select_word_between(start, end, boundary_codepoints)?;
+        self.selection_endpoints(&sel)
+    }
+
     // -- search ----------------------------------------------------------
 
     /// Run a literal case-insensitive-ASCII substring search over the *entire*
@@ -646,6 +809,81 @@ mod tests {
             elapsed.as_secs_f64() * 1000.0
         );
         assert!(matches.len() >= 270, "expected ~271 needle lines");
+    }
+
+    // ---- selection-gesture accessors (absolute-screen space) ------------
+
+    /// Boundary set for the tests: the ported upstream default.
+    const BOUNDARY: &[u32] = &qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES;
+
+    #[test]
+    fn window_to_screen_point_maps_offsets() {
+        let mut engine = Engine::new(5, 3);
+        // 5 lines → total 5 rows, scrollback_len 2.
+        engine.write(b"aaa\r\nbbb\r\nccc\r\nddd\r\neee");
+        assert_eq!(engine.scrollback_len(), 2);
+        // Offset 0: the visible window is rows ccc/ddd/eee (screen rows 2..4).
+        assert_eq!(engine.window_to_screen_point(0, 0, 0), Some((0, 2)));
+        assert_eq!(engine.window_to_screen_point(4, 2, 0), Some((4, 4)));
+        // Offset 2 (top of history): visible aaa/bbb/ccc (screen rows 0..2).
+        assert_eq!(engine.window_to_screen_point(0, 0, 2), Some((0, 0)));
+        assert_eq!(engine.window_to_screen_point(0, 2, 2), Some((0, 2)));
+        // Offset beyond history clamps (same as the snapshot).
+        assert_eq!(engine.window_to_screen_point(0, 0, 99), Some((0, 0)));
+        // Out of grid → None.
+        assert_eq!(engine.window_to_screen_point(5, 0, 0), None);
+        assert_eq!(engine.window_to_screen_point(0, 3, 0), None);
+    }
+
+    #[test]
+    fn select_screen_points_round_trips_when_scrolled() {
+        let mut engine = Engine::new(5, 3);
+        engine.write(b"aaa\r\nbbb\r\nccc\r\nddd\r\neee");
+        // Scrolled to the top (offset 2), select the visible top row ("aaa"):
+        // window (0,0)..(2,0) maps to screen (0,0)..(2,0).
+        let a = engine.window_to_screen_point(0, 0, 2).unwrap();
+        let b = engine.window_to_screen_point(2, 0, 2).unwrap();
+        assert!(engine.select_screen_points(a, b, false));
+        assert_eq!(engine.selection_string().as_deref(), Some("aaa"));
+    }
+
+    #[test]
+    fn select_word_bounds_finds_word_and_rejects_empty() {
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"hello beta-gamma");
+        // Word under (7,0): "beta-gamma" — '-' is not a boundary codepoint.
+        assert_eq!(
+            engine.select_word_bounds(7, 0, BOUNDARY),
+            Some(((6, 0), (15, 0)))
+        );
+        // Unwritten cell → None.
+        assert_eq!(engine.select_word_bounds(19, 2, BOUNDARY), None);
+    }
+
+    #[test]
+    fn select_line_bounds_trims_and_falls_back() {
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"  hi there  \r\n");
+        // Trimmed: leading/trailing whitespace dropped.
+        assert_eq!(
+            engine.select_line_bounds(5, 0, true),
+            Some(((2, 0), (9, 0)))
+        );
+        // A blank line has no trimmed selection…
+        assert_eq!(engine.select_line_bounds(0, 1, true), None);
+        // …but the untrimmed fallback selects it.
+        assert!(engine.select_line_bounds(0, 1, false).is_some());
+    }
+
+    #[test]
+    fn select_word_between_bounds_walks_toward_target() {
+        let mut engine = Engine::new(10, 3);
+        engine.write(b"ABC  DEF");
+        // From the unwritten cell (9,0) toward (0,0): nearest word is "DEF".
+        assert_eq!(
+            engine.select_word_between_bounds((9, 0), (0, 0), BOUNDARY),
+            Some(((5, 0), (7, 0)))
+        );
     }
 
     #[test]

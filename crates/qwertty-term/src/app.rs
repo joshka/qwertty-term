@@ -268,8 +268,10 @@ struct Surface {
     last_mouse_cell: Option<(i64, i64)>,
     /// Whether a mouse button is currently held (for out-of-viewport motion).
     mouse_button_down: bool,
-    /// The cell the current selection drag started at, if a drag is in progress.
-    selection_anchor: Option<(usize, usize)>,
+    /// This pane's selection-gesture state machine (click counting, word/line
+    /// behaviors, drag threshold, autoscroll) — port of upstream
+    /// `SelectionGesture.zig`. See [`crate::gesture`].
+    gesture: crate::gesture::SelectionGesture,
     /// Selection highlight colors resolved from the tab's theme at startup.
     selection_colors: SelectionColors,
     /// The terminal's default background as `(r, g, b)` — the presented-frame
@@ -585,6 +587,205 @@ impl Surface {
         )
     }
 
+    // -- selection gestures ------------------------------------------------
+
+    /// Like [`Surface::cell_at`] but with the position clamped into the grid
+    /// first — drags routinely leave the pane (that's what edge-autoscroll is
+    /// for), and upstream clamps too (`posToViewport`).
+    fn cell_at_clamped(&self, x: f32, y: f32) -> (usize, usize) {
+        let max_x = (self.cols * self.font.cell_width as usize).saturating_sub(1) as f32;
+        let max_y = (self.rows * self.font.cell_height as usize).saturating_sub(1) as f32;
+        let cx = x.clamp(0.0, max_x.max(0.0));
+        let cy = y.clamp(0.0, max_y.max(0.0));
+        self.cell_at(cx, cy).unwrap_or((0, 0))
+    }
+
+    /// The absolute screen point under device-pixel `(x, y)` at this pane's
+    /// current scrollback offset, or `None` outside the grid / on an
+    /// unwritten pad row.
+    fn screen_point_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let cell = self.cell_at(x, y)?;
+        self.engine()
+            .window_to_screen_point(cell.0, cell.1, self.scrollback_offset)
+    }
+
+    /// The [`crate::gesture::Geometry`] for this pane's current grid.
+    fn gesture_geometry(&self) -> crate::gesture::Geometry {
+        crate::gesture::Geometry {
+            columns: self.cols as u32,
+            cell_width: self.font.cell_width,
+            padding_left: 0,
+            screen_height: (self.rows * self.font.cell_height as usize) as u32,
+        }
+    }
+
+    /// Handle a left-button press for selection: shift-click extends an
+    /// existing selection (upstream `Surface.zig:3785-3820`); otherwise the
+    /// gesture counts the click and returns the standard single/double/triple
+    /// selection, which is applied here (single click with an existing
+    /// selection clears it — `Surface.zig:4014-4022`).
+    fn selection_press(
+        &mut self,
+        mods: qwertty_term_input::key_mods::Mods,
+        x: f32,
+        y: f32,
+        interval: std::time::Duration,
+    ) {
+        let now = std::time::Instant::now();
+        let alt_screen = self.engine().alt_screen_active();
+
+        // Shift-click continues the previous gesture instead of starting a
+        // new click sequence — but only when a selection exists and we are
+        // outside the click-repeat interval (a quick shift-click may be
+        // increasing the click count instead).
+        if mods.shift && self.gesture.click_count() > 0 {
+            let has_selection = self.engine().selection().is_some();
+            let within_interval = self
+                .gesture
+                .click_time()
+                .is_some_and(|t| now.duration_since(t) <= interval);
+            if has_selection && !within_interval {
+                self.selection_drag(x, y, mods.alt);
+                return;
+            }
+        }
+
+        let Some(point) = self.screen_point_at(x, y) else {
+            return;
+        };
+        // Upstream behaviors: [cell, word, ctrl-or-super ? output : line]
+        // (`Surface.zig:3977-3981`).
+        let behaviors = [
+            crate::gesture::Behavior::Cell,
+            crate::gesture::Behavior::Word,
+            if mods.ctrl || mods.super_ {
+                crate::gesture::Behavior::Output
+            } else {
+                crate::gesture::Behavior::Line
+            },
+        ];
+        let press = crate::gesture::Press {
+            time: now,
+            point,
+            xpos: x as f64,
+            ypos: y as f64,
+            // Repeat distance: one cell width (`Surface.zig:3974`).
+            max_distance: self.font.cell_width as f64,
+            repeat_interval: interval,
+            alt_screen,
+            behaviors,
+            boundary_codepoints: &qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES,
+        };
+        // The gesture needs the engine during the press (word/line lookup);
+        // take it out so the engine guard's `&self` borrow and the gesture's
+        // `&mut` don't overlap.
+        let mut gesture = std::mem::take(&mut self.gesture);
+        let sel = {
+            let engine = self.engine();
+            gesture.press(&engine, &press)
+        };
+        self.gesture = gesture;
+
+        match sel {
+            // Press selections (word/line/output) are never rectangular.
+            Some((a, b)) => {
+                self.engine().select_screen_points(a, b, false);
+            }
+            None => {
+                // A fresh single click clears any existing selection.
+                if self.gesture.click_count() == 1 && self.engine().selection().is_some() {
+                    self.engine().clear_selection();
+                }
+            }
+        }
+    }
+
+    /// Handle a left-button drag for selection at the gesture's granularity.
+    /// `rectangle` is whether option is held (macOS rectangle-select state,
+    /// upstream `surface_mouse.zig:121-126`). A `None` drag selection clears
+    /// (upstream `cursorPosCallback` applies the drag result verbatim).
+    fn selection_drag(&mut self, x: f32, y: f32, rectangle: bool) {
+        if self.gesture.click_count() == 0 {
+            return;
+        }
+        let alt_screen = self.engine().alt_screen_active();
+        if !self.gesture.anchor_valid(alt_screen) {
+            return;
+        }
+        let cell = self.cell_at_clamped(x, y);
+        let Some(point) =
+            self.engine()
+                .window_to_screen_point(cell.0, cell.1, self.scrollback_offset)
+        else {
+            return;
+        };
+        let drag = crate::gesture::Drag {
+            point,
+            xpos: x as f64,
+            ypos: y as f64,
+            rectangle,
+            alt_screen,
+            geometry: self.gesture_geometry(),
+            boundary_codepoints: &qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES,
+        };
+        let mut gesture = std::mem::take(&mut self.gesture);
+        let sel = {
+            let engine = self.engine();
+            gesture.drag(&engine, &drag)
+        };
+        self.gesture = gesture;
+
+        match sel {
+            Some((a, b)) => {
+                // Only cell-granular drags honor the rectangle flag (word/
+                // line/output selections are always linear upstream).
+                let rect = rectangle && self.gesture.behavior() == crate::gesture::Behavior::Cell;
+                self.engine().select_screen_points(a, b, rect);
+            }
+            None => {
+                self.engine().clear_selection();
+            }
+        }
+    }
+
+    /// Handle a left-button release: end the drag phase (keeping the click
+    /// count so the next press can double/triple), and update the clipboard
+    /// if copy-on-select is on and a selection exists (upstream copies on
+    /// release only — `Surface.zig:3860-3872`).
+    fn selection_release(&mut self, x: f32, y: f32, copy_on_select: bool) {
+        let alt_screen = self.engine().alt_screen_active();
+        let point = self.screen_point_at(x, y);
+        self.gesture.release(point, alt_screen);
+        if copy_on_select && let Some(text) = self.engine().selection_string() {
+            crate::clipboard::write(&text);
+        }
+    }
+
+    /// One selection-autoscroll tick: while a drag is parked past the top or
+    /// bottom edge with the button held, scroll the viewport one row in that
+    /// direction and continue the drag at the parked pointer position (the
+    /// row now under it). Driven by the ~60Hz pace tick, mirroring upstream's
+    /// ~15ms `selection_scroll` io timer (`SelectionGesture.autoscrollTick`).
+    fn selection_autoscroll_tick(&mut self) {
+        if !self.mouse_button_down || self.is_dead() {
+            return;
+        }
+        let Some((xpos, ypos, rectangle)) = self.gesture.last_drag() else {
+            return;
+        };
+        match self.gesture.autoscroll() {
+            crate::gesture::Autoscroll::None => return,
+            crate::gesture::Autoscroll::Up => {
+                let max = self.engine().scrollback_len();
+                self.scrollback_offset = (self.scrollback_offset + 1).min(max);
+            }
+            crate::gesture::Autoscroll::Down => {
+                self.scrollback_offset = self.scrollback_offset.saturating_sub(1);
+            }
+        }
+        self.selection_drag(xpos as f32, ypos as f32, rectangle);
+    }
+
     /// Apply a focus change to THIS surface (per-pane focus reporting,
     /// app-hardening). Two effects, both per-SURFACE (previously the tab drove
     /// them per-tab, so a split tab's password poll + mode-1004 reporting were
@@ -769,7 +970,7 @@ impl Surface {
             crate::scroll::WheelOutcome::AltScrollKeys { count, up } => {
                 // Upstream clears the selection before sending cursor keys.
                 self.engine().clear_selection();
-                self.selection_anchor = None;
+                self.gesture.reset();
                 let bytes = arrow_key_bytes(up, cursor_keys);
                 for _ in 0..count {
                     self.io.write(&bytes);
@@ -779,7 +980,7 @@ impl Surface {
                 // Upstream clears the selection when reporting is active
                 // (a shift-override selection could exist).
                 self.engine().clear_selection();
-                self.selection_anchor = None;
+                self.gesture.reset();
                 for _ in 0..count {
                     self.report_wheel(up, mods);
                 }
@@ -986,6 +1187,10 @@ pub struct ControllerState {
     /// Whether finishing a mouse-drag selection immediately copies it to the
     /// clipboard (`copy-on-select` config key).
     copy_on_select: bool,
+    /// The click-repeat interval for double/triple-click detection: the OS
+    /// double-click interval, falling back to upstream's 500ms default
+    /// (`click-repeat-interval`, `Config.zig:4673` + `os/mouse.zig`).
+    mouse_interval: std::time::Duration,
     /// Wheel-scroll multipliers (`mouse-scroll-multiplier` config), clamped to
     /// upstream's valid range.
     scroll_multiplier: crate::scroll::ScrollMultiplier,
@@ -1039,6 +1244,7 @@ impl Controller {
             startup_colors,
             selection_colors,
             copy_on_select: config.copy_on_select,
+            mouse_interval: crate::gesture::click_interval(),
             scroll_multiplier: crate::scroll::ScrollMultiplier {
                 precision: config.mouse_scroll_multiplier.precision,
                 discrete: config.mouse_scroll_multiplier.discrete,
@@ -1386,6 +1592,56 @@ impl Controller {
             .get(&tab)
             .and_then(|t| t.surfaces.get(&surface))
             .map(|s| s.engine().screen_dump())
+    }
+
+    /// A specific surface's terminal view (smoke/test): the selection smoke
+    /// delivers synthetic mouse events straight to the view's
+    /// `mouseDown:`/`mouseDragged:`/`mouseUp:` — dispatching through
+    /// `NSApplication::sendEvent` hit-testing can enter AppKit's nested
+    /// window-drag tracking loop for points near the titlebar and deadlock a
+    /// synthetic event stream (no real mouse-up can ever arrive).
+    pub fn surface_view(&self, tab: TabId, surface: SurfaceId) -> Option<Retained<TerminalView>> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.view.clone())
+    }
+
+    /// A specific surface's current selection text (smoke/test): the engine's
+    /// whitespace-trimmed selection string, `None` when nothing is selected.
+    pub fn surface_selection_string(&self, tab: TabId, surface: SurfaceId) -> Option<String> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .and_then(|s| s.engine().selection_string())
+    }
+
+    /// The *window*-coordinate point at a fractional cell position of a
+    /// surface's grid (smoke/test): `(col + fx, row + fy)` cells, converted
+    /// from the pane view's flipped top-left point space to window base
+    /// coordinates — the `locationInWindow` a synthetic mouse NSEvent needs to
+    /// land on that spot through the real hit-testing path.
+    pub fn surface_cell_window_point(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+        col: f64,
+        row: f64,
+    ) -> Option<NSPoint> {
+        let state = self.0.borrow();
+        let s = state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))?;
+        // Cell metrics are device pixels; view points are device px / scale.
+        let scale = if s.scale > 0.0 { s.scale } else { 2.0 };
+        let x_pt = col * s.font.cell_width as f64 / scale;
+        let y_pt = row * s.font.cell_height as f64 / scale;
+        Some(s.view.convertPoint_toView(NSPoint::new(x_pt, y_pt), None))
     }
 
     /// A specific surface's `(cols, rows)` grid (smoke/test) — the divider-resize
@@ -1762,7 +2018,10 @@ impl Controller {
         y: f32,
         pressed: Option<bool>,
     ) {
-        let copy_on_select = self.0.borrow().copy_on_select;
+        let (copy_on_select, mouse_interval) = {
+            let s = self.0.borrow();
+            (s.copy_on_select, s.mouse_interval)
+        };
         let mut state = self.0.borrow_mut();
         let Some(s) = state
             .tabs
@@ -1778,40 +2037,31 @@ impl Controller {
         if button == Some(qwertty_term_input::mouse::Button::Left) {
             let reporting_active =
                 s.engine().mouse_event() != qwertty_term_input::mouse_encode::MouseEvent::None;
+            // Shift overrides mouse reporting for selection (upstream's
+            // default `mouse-shift-capture = false`, `Surface.zig:3788-3790`).
             let selection_allowed = !reporting_active || mods.shift;
             if selection_allowed {
                 match action {
                     qwertty_term_input::mouse::Action::Press => {
-                        s.engine().clear_selection();
-                        s.selection_anchor = None;
-                        if let Some(cell) = s.cell_at(x, y) {
-                            s.selection_anchor = Some(cell);
-                        }
+                        s.selection_press(mods, x, y, mouse_interval);
                     }
                     qwertty_term_input::mouse::Action::Motion => {
-                        if s.mouse_button_down
-                            && let Some(anchor) = s.selection_anchor
-                            && let Some(cell) = s.cell_at(x, y)
-                        {
-                            let mut engine = s.engine();
-                            if let (Some(start), Some(end)) = (
-                                engine.pin_at(anchor.0, anchor.1),
-                                engine.pin_at(cell.0, cell.1),
-                            ) {
-                                engine.select(start, end, false);
-                            }
+                        if s.mouse_button_down {
+                            // Rectangle select: option held (macOS —
+                            // `surface_mouse.zig:121-126`).
+                            s.selection_drag(x, y, mods.alt);
                         }
                     }
                     qwertty_term_input::mouse::Action::Release => {
-                        if copy_on_select && s.selection_anchor.is_some() {
-                            let text = s.engine().selection_string();
-                            if let Some(text) = text {
-                                crate::clipboard::write(&text);
-                            }
-                        }
-                        s.selection_anchor = None;
+                        s.selection_release(x, y, copy_on_select);
                     }
                 }
+            } else if action == qwertty_term_input::mouse::Action::Press {
+                // Mouse reporting captured the press: the program owns the
+                // pointer, so clear the selection and the click sequence
+                // (upstream `Surface.zig:3908-3915`).
+                s.engine().clear_selection();
+                s.gesture.reset();
             }
         }
 
@@ -2046,6 +2296,11 @@ impl Controller {
                         if surface.is_dead() {
                             surface.settle_dead();
                         }
+                        // Selection edge-autoscroll: while a drag is parked
+                        // past the pane's top/bottom edge, each tick scrolls
+                        // one row and extends the selection (upstream's
+                        // ~15ms `selection_scroll` io timer).
+                        surface.selection_autoscroll_tick();
                         surface.render(*sid == focused, is_split);
                     }
                     if *sid == focused
@@ -2132,7 +2387,7 @@ impl Controller {
             rect: crate::splits::Rect::new(0.0, 0.0, 0.0, 0.0),
             last_mouse_cell: None,
             mouse_button_down: false,
-            selection_anchor: None,
+            gesture: crate::gesture::SelectionGesture::new(),
             selection_colors,
             default_bg,
             frame_dump,
@@ -2747,6 +3002,11 @@ pub struct DelegateIvars {
     smoke_search: bool,
     /// Search smoke phase state: the tab + focused surface under test.
     search_state: RefCell<Option<(TabId, SurfaceId)>>,
+    /// Selection smoke (`QWERTTY_TERM_SMOKE_SELECTION`): drive synthetic mouse
+    /// gestures (double/triple click, drag, shift-extend, edge autoscroll)
+    /// through the real event path and assert the selection text. See
+    /// [`AppDelegate::run_selection_smoke`].
+    smoke_selection: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -2790,6 +3050,7 @@ define_class!(
             let has_keybind = self.ivars().smoke_keybind;
             let has_focus = self.ivars().smoke_focus;
             let has_search = self.ivars().smoke_search;
+            let has_selection = self.ivars().smoke_selection;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -2801,6 +3062,8 @@ define_class!(
                 self.schedule_focus_smoke();
             } else if has_search {
                 self.schedule_search_smoke();
+            } else if has_selection {
+                self.schedule_selection_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -2945,6 +3208,12 @@ define_class!(
         fn search_smoke_check(&self, _timer: &AnyObject) {
             self.finish_search_smoke();
         }
+
+        /// Selection smoke: drive the synthetic mouse gestures and exit 0/1.
+        #[unsafe(method(ghosttySelectionSmoke:))]
+        fn selection_smoke(&self, _timer: &AnyObject) {
+            self.run_selection_smoke();
+        }
     }
 );
 
@@ -2962,6 +3231,7 @@ impl AppDelegate {
         smoke_keybind: bool,
         smoke_focus: bool,
         smoke_search: bool,
+        smoke_selection: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -2976,6 +3246,7 @@ impl AppDelegate {
             focus_state: RefCell::new(None),
             smoke_search,
             search_state: RefCell::new(None),
+            smoke_selection,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -4502,6 +4773,272 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the selection smoke: let the first shell draw its prompt, then
+    /// run the gesture sequence.
+    fn schedule_selection_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttySelectionSmoke:));
+    }
+
+    /// Deliver one synthetic mouse event to the pane view's real
+    /// `mouseDown:`/`mouseDragged:`/`mouseUp:` handler. `location` is in
+    /// window base coordinates (see [`Controller::surface_cell_window_point`])
+    /// — the view converts via `convertPoint:fromView:` exactly as it does
+    /// for a real event. Delivery is direct (not `sendEvent` hit-testing,
+    /// which can enter AppKit's nested window-drag tracking loop for a
+    /// synthetic down near the titlebar and deadlock). `clickCount` is fixed
+    /// at 1: the gesture layer does its own time+distance click counting
+    /// (upstream `SelectionGesture` parity), so double/triple clicks are just
+    /// successive down/up pairs.
+    fn send_mouse(
+        view: &crate::view::TerminalView,
+        win_num: isize,
+        ty: NSEventType,
+        location: NSPoint,
+        mods: NSEventModifierFlags,
+    ) {
+        // SAFETY: standard mouse NSEvent constructor; nil context; delivered
+        // on the main thread to the view's responder methods.
+        unsafe {
+            let cls = objc2::class!(NSEvent);
+            let event: Option<Retained<objc2_app_kit::NSEvent>> = msg_send![
+                cls,
+                mouseEventWithType: ty,
+                location: location,
+                modifierFlags: mods,
+                timestamp: 0.0_f64,
+                windowNumber: win_num,
+                context: std::ptr::null::<AnyObject>(),
+                eventNumber: 0_isize,
+                clickCount: 1_isize,
+                pressure: 1.0_f32,
+            ];
+            let Some(event) = event else { return };
+            match ty {
+                NSEventType::LeftMouseDown => {
+                    let _: () = msg_send![view, mouseDown: &*event];
+                }
+                NSEventType::LeftMouseDragged => {
+                    let _: () = msg_send![view, mouseDragged: &*event];
+                }
+                _ => {
+                    let _: () = msg_send![view, mouseUp: &*event];
+                }
+            }
+        }
+    }
+
+    /// One synthetic left click (down + up) at `location`.
+    fn send_click(
+        view: &crate::view::TerminalView,
+        win_num: isize,
+        location: NSPoint,
+        mods: NSEventModifierFlags,
+    ) {
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseDown, location, mods);
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseUp, location, mods);
+    }
+
+    /// Selection smoke: feed a deterministic screen, then drive the mouse
+    /// gestures through the real window event path and assert the engine's
+    /// selection text after each:
+    ///
+    /// 1. double-click on `beta-gamma` selects the word (`-` is not in the
+    ///    upstream boundary set — `selection_codepoints.zig`);
+    /// 2. triple-click selects the whole (trimmed) line;
+    /// 3. a fresh single click clears the selection;
+    /// 4. press–drag–release selects by cell with the 60% threshold;
+    /// 5. a shift-click past the old end extends the selection
+    ///    (`Surface.zig:3785`);
+    /// 6. a drag parked at the top edge autoscrolls the viewport into
+    ///    scrollback, extending the selection with history content, and stops
+    ///    on release.
+    ///
+    /// Exits 0/1.
+    fn run_selection_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let mtm = self.mtm();
+        let fail = selection_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at selection smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at selection smoke start".into());
+        };
+
+        let app = NSApplication::sharedApplication(mtm);
+        let win_num: isize = app
+            .keyWindow()
+            .or_else(|| controller.active_window())
+            .map(|w| w.windowNumber())
+            .unwrap_or(0);
+        let view = controller
+            .surface_view(tab, surface)
+            .unwrap_or_else(|| fail("no view for the focused surface".into()));
+        let view = &*view;
+
+        // Deterministic screen: clear + home, then known rows (fed straight
+        // into the engine — no pty round-trip).
+        controller.feed_surface_output(tab, surface, b"\x1b[2J\x1b[H");
+        controller.feed_surface_output(
+            tab,
+            surface,
+            b"alpha beta-gamma delta\r\n\r\nthird line here\r\n",
+        );
+        Self::spin(0.1);
+
+        // Scenario separator: anything longer than the click-repeat interval
+        // starts a fresh click sequence.
+        let gap = (crate::gesture::click_interval() + std::time::Duration::from_millis(250))
+            .as_secs_f64();
+        let pt = |col: f64, row: f64| {
+            controller
+                .surface_cell_window_point(tab, surface, col, row)
+                .unwrap_or_else(|| fail("cell → window point mapping failed".into()))
+        };
+        let none = NSEventModifierFlags::empty();
+        let selection = || controller.surface_selection_string(tab, surface);
+
+        // 1. Double-click the middle of "beta-gamma" (row 0, cols 6..15).
+        let word_pt = pt(10.5, 0.5);
+        Self::send_click(view, win_num, word_pt, none);
+        Self::send_click(view, win_num, word_pt, none);
+        let sel = selection();
+        if sel.as_deref() != Some("beta-gamma") {
+            fail(format!(
+                "double-click should select the word 'beta-gamma' (hyphen is \
+                 not a boundary), got {sel:?}"
+            ));
+        }
+
+        // 2. Triple-click selects the whole trimmed line.
+        Self::spin(gap);
+        Self::send_click(view, win_num, word_pt, none);
+        Self::send_click(view, win_num, word_pt, none);
+        Self::send_click(view, win_num, word_pt, none);
+        let sel = selection();
+        if sel.as_deref() != Some("alpha beta-gamma delta") {
+            fail(format!(
+                "triple-click should select the line 'alpha beta-gamma delta', \
+                 got {sel:?}"
+            ));
+        }
+
+        // 3. A fresh single click clears the selection.
+        Self::spin(gap);
+        Self::send_click(view, win_num, pt(12.5, 0.5), none);
+        let sel = selection();
+        if sel.is_some() {
+            fail(format!("a fresh single click should clear, got {sel:?}"));
+        }
+
+        // 4. Cell drag: press in the left part of col 0, drag to the right
+        //    part of col 4, release → "alpha" (both cells inside the 60%
+        //    threshold rule).
+        Self::spin(gap);
+        let from = pt(0.2, 0.5);
+        let to = pt(4.8, 0.5);
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseDown, from, none);
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseDragged, to, none);
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseUp, to, none);
+        let sel = selection();
+        if sel.as_deref() != Some("alpha") {
+            fail(format!("cell drag should select 'alpha', got {sel:?}"));
+        }
+
+        // 5. Shift-click at the end of "delta" (col 21) extends the existing
+        //    selection from the old anchor.
+        Self::spin(gap);
+        Self::send_click(view, win_num, pt(21.8, 0.5), NSEventModifierFlags::Shift);
+        let sel = selection();
+        if sel.as_deref() != Some("alpha beta-gamma delta") {
+            fail(format!(
+                "shift-click should extend to 'alpha beta-gamma delta', got {sel:?}"
+            ));
+        }
+
+        // 6. Edge autoscroll: fill scrollback with numbered markers, press
+        //    mid-screen, park the drag at the very top edge (ypos 0 ≤ the 1px
+        //    autoscroll buffer), and let the pace ticks scroll + extend.
+        let (_, rows) = controller
+            .surface_grid(tab, surface)
+            .unwrap_or_else(|| fail("no grid for autoscroll scenario".into()));
+        let mut content = String::new();
+        for i in 0..80u32 {
+            content.push_str(&format!("SCROLLMARK-{i:03}\r\n"));
+        }
+        controller.feed_surface_output(tab, surface, content.as_bytes());
+        Self::spin(gap.max(0.2));
+        let press_pt = pt(2.5, 5.5);
+        let park_pt = pt(2.5, 0.0);
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseDown, press_pt, none);
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseDragged, park_pt, none);
+        Self::spin(0.6); // ~36 pace ticks at 60Hz, one row each
+        let offset = controller
+            .surface_scrollback_offset(tab, surface)
+            .unwrap_or(0);
+        if offset == 0 {
+            fail("a drag parked at the top edge did not autoscroll the viewport".into());
+        }
+        let sel = selection().unwrap_or_default();
+        let first = sel.lines().next().unwrap_or("");
+        // The selection's top line starts at the parked drag *column* (a
+        // backward cell selection's end point), so it can begin mid-marker
+        // (e.g. "ROLLMARK-021" from column 2) — match the marker tail and
+        // parse the trailing index.
+        if !first.contains("ROLLMARK-") {
+            fail(format!(
+                "autoscrolled selection's top line should be a marker, got {first:?}"
+            ));
+        }
+        let digits: String = {
+            let tail: Vec<char> = first
+                .trim_end()
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            tail.into_iter().rev().collect()
+        };
+        let first_idx: u32 = digits.parse().unwrap_or_else(|_| {
+            fail(format!(
+                "autoscrolled selection's top marker index unparsable, got {first:?}"
+            ))
+        });
+        // Markers visible at press time start around 80 - rows; the selection
+        // must have reached strictly above that (history content).
+        let top_visible_at_press = 80u32.saturating_sub(rows as u32);
+        if first_idx >= top_visible_at_press {
+            fail(format!(
+                "autoscroll should extend the selection into scrollback (top \
+                 selected marker {first_idx}, viewport top at press ~{top_visible_at_press})"
+            ));
+        }
+        // Release stops the autoscroll: the offset must hold steady.
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseUp, park_pt, none);
+        let off_a = controller
+            .surface_scrollback_offset(tab, surface)
+            .unwrap_or(0);
+        Self::spin(0.25);
+        let off_b = controller
+            .surface_scrollback_offset(tab, surface)
+            .unwrap_or(0);
+        if off_a != off_b {
+            fail(format!(
+                "autoscroll should stop on release (offset {off_a} → {off_b})"
+            ));
+        }
+
+        println!(
+            "OK: selection smoke — double-click selected the word, triple-click \
+             the line, a fresh click cleared, press-drag-release selected by cell \
+             ('alpha'), shift-click extended to the full line, and an edge-parked \
+             drag autoscrolled {offset} rows into scrollback (top selected marker \
+             {first_idx}), stopping on release."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -4628,6 +5165,14 @@ fn search_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a selection-smoke failure and exit non-zero. Free `!`-returning fn so
+/// it works inside `Option::unwrap_or_else` closures (which need the never
+/// type).
+fn selection_fail(msg: String) -> ! {
+    eprintln!("FAIL: selection smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -4734,6 +5279,7 @@ pub fn run(
     smoke_keybind: bool,
     smoke_focus: bool,
     smoke_search: bool,
+    smoke_selection: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -4751,6 +5297,7 @@ pub fn run(
         smoke_keybind,
         smoke_focus,
         smoke_search,
+        smoke_selection,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
