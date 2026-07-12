@@ -589,6 +589,61 @@ fn osc52_query_is_not_a_write_event() {
     assert_eq!(s.handler.take_clipboard(), None);
 }
 
+// Mouse-tracking DEC modes (9/1000/1002/1003) set the mutually-exclusive
+// `flags.mouse_event`; disabling any returns to `none`. The later-set mode
+// wins. Port of `stream_terminal.setMode` mouse handling.
+#[test]
+fn mouse_event_modes_set_flag() {
+    use crate::terminal::MouseEvent;
+    let mut s = term(10, 10);
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::None);
+
+    s.feed(b"\x1b[?1000h");
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::Normal);
+    s.feed(b"\x1b[?1002h"); // switching modes replaces the event
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::Button);
+    s.feed(b"\x1b[?1003h");
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::Any);
+    s.feed(b"\x1b[?9h");
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::X10);
+
+    s.feed(b"\x1b[?9l"); // disable -> none
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::None);
+    assert!(!MouseEvent::None.sends_motion());
+    assert!(MouseEvent::Button.sends_motion());
+}
+
+// Mouse-format DEC modes (1005/1006/1015/1016) set `flags.mouse_format`;
+// disabling returns to x10.
+#[test]
+fn mouse_format_modes_set_flag() {
+    use crate::terminal::MouseFormat;
+    let mut s = term(10, 10);
+    assert_eq!(s.handler.terminal.flags.mouse_format, MouseFormat::X10);
+
+    s.feed(b"\x1b[?1006h");
+    assert_eq!(s.handler.terminal.flags.mouse_format, MouseFormat::Sgr);
+    s.feed(b"\x1b[?1016h");
+    assert_eq!(
+        s.handler.terminal.flags.mouse_format,
+        MouseFormat::SgrPixels
+    );
+    s.feed(b"\x1b[?1006l"); // disable -> x10
+    assert_eq!(s.handler.terminal.flags.mouse_format, MouseFormat::X10);
+}
+
+// Full reset (RIS) clears the mouse flags back to their defaults.
+#[test]
+fn full_reset_clears_mouse_flags() {
+    use crate::terminal::{MouseEvent, MouseFormat};
+    let mut s = term(10, 10);
+    s.feed(b"\x1b[?1003h\x1b[?1006h");
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::Any);
+    s.feed(b"\x1bc"); // RIS
+    assert_eq!(s.handler.terminal.flags.mouse_event, MouseEvent::None);
+    assert_eq!(s.handler.terminal.flags.mouse_format, MouseFormat::X10);
+}
+
 // OSC 8 hyperlink start/end wire through to Screen hyperlink attribution.
 // Regression for the previously-dropped `osc_dispatch` arm (#26): the Screen
 // implemented hyperlinks all along, but the stream handler ignored the parsed

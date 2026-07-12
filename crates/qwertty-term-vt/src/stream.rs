@@ -1762,6 +1762,68 @@ impl TerminalHandler {
                 }
             }
             Mode::Column132 => self.terminal.deccolm(enabled),
+
+            // Mouse-tracking modes set the mutually-exclusive event mode;
+            // disabling any of them returns to `none`. Port of
+            // `stream_terminal.setMode` mouse handling.
+            Mode::MouseEventX10 => {
+                self.terminal.flags.mouse_event = if enabled {
+                    crate::terminal::MouseEvent::X10
+                } else {
+                    crate::terminal::MouseEvent::None
+                };
+            }
+            Mode::MouseEventNormal => {
+                self.terminal.flags.mouse_event = if enabled {
+                    crate::terminal::MouseEvent::Normal
+                } else {
+                    crate::terminal::MouseEvent::None
+                };
+            }
+            Mode::MouseEventButton => {
+                self.terminal.flags.mouse_event = if enabled {
+                    crate::terminal::MouseEvent::Button
+                } else {
+                    crate::terminal::MouseEvent::None
+                };
+            }
+            Mode::MouseEventAny => {
+                self.terminal.flags.mouse_event = if enabled {
+                    crate::terminal::MouseEvent::Any
+                } else {
+                    crate::terminal::MouseEvent::None
+                };
+            }
+
+            // Mouse-format modes set the wire format; disabling returns to x10.
+            Mode::MouseFormatUtf8 => {
+                self.terminal.flags.mouse_format = if enabled {
+                    crate::terminal::MouseFormat::Utf8
+                } else {
+                    crate::terminal::MouseFormat::X10
+                };
+            }
+            Mode::MouseFormatSgr => {
+                self.terminal.flags.mouse_format = if enabled {
+                    crate::terminal::MouseFormat::Sgr
+                } else {
+                    crate::terminal::MouseFormat::X10
+                };
+            }
+            Mode::MouseFormatUrxvt => {
+                self.terminal.flags.mouse_format = if enabled {
+                    crate::terminal::MouseFormat::Urxvt
+                } else {
+                    crate::terminal::MouseFormat::X10
+                };
+            }
+            Mode::MouseFormatSgrPixels => {
+                self.terminal.flags.mouse_format = if enabled {
+                    crate::terminal::MouseFormat::SgrPixels
+                } else {
+                    crate::terminal::MouseFormat::X10
+                };
+            }
             _ => {}
         }
     }
