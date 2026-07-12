@@ -180,8 +180,13 @@ Line references: `sh:` = `termio/stream_handler.zig` (pinned), `st:` = `stream_t
    it. Two-line wiring + trait methods + corpus cases. Do first when the vt gate opens.
 2. **DECRQSS incomplete** — no invalid response, no DECSCUSR reply, DECSLRM unconditional.
    Reply-byte corpus cases for each.
-3. **OSC color queries (4/10/11/12) unanswered** — needs `osc_color_report_format` engine
-   option; pairs with OSC 21 (kitty color) set/reset/query, which is fully stubbed.
+3. **OSC color queries (4/10/11/12) unanswered** — pairs with OSC 21 (kitty color)
+   set/reset/query, which is fully stubbed. **Update 2026-07-12 (T8 drift):** upstream
+   `14c829883` now implements both in the lib layer (`stream_terminal.zig`) — so #28 is a
+   direct port with **fixed** formats (xterm 16-bit, kitty 8-bit), NOT a configurable
+   `osc_color_report_format` at the engine layer (that knob is termio-side → #35), and the
+   OSC-21 "note upstream divergence" plan is void (divergence closed). See
+   `t5-execution-plan.md` #28 for the corrected port.
 4. **DSR divergences** — `?6` answered but upstream rejects it (we're too permissive); `?996`
    color-scheme query entirely missing (needs a light/dark seam).
 5. **XTWINOPS size reports missing** — CSI 21 t is engine-answerable today (`get_title`);

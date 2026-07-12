@@ -81,36 +81,64 @@ Upstream `stream_handler.zig:475-544`.
 
 ## #28 — OSC color-report queries (OSC 4/10/11/12) + OSC 21 kitty color
 
+**UPDATED 2026-07-12 (T8 drift):** upstream landed `14c829883` "terminal: report OSC color
+queries in lib-vt" — it implements exactly this in **`stream_terminal.zig`** (the lib layer our
+`TerminalHandler` mirrors), so #28 is now a **direct port of that commit**, NOT a roll-our-own
+"per kitty spec, note divergence" (that framing in stream-handler-delta.md finding 3 predates
+the upstream fix — the finding-issue-3 divergence is closed). Verify the reference build for the
+corpus is at/after `14c829883` (it is, on `~/local/ghostty` main); pin wire bytes to it.
+
+**Key correction:** the lib layer uses **fixed formats** — xterm queries always 16-bit, kitty
+always 8-bit. There is **no** `None/8-bit/16-bit` knob at this layer. The `osc-color-report-format`
+config toggle (none/8/16) is a *termio*-handler concern (`stream_handler.zig`), so it belongs to
+**#35**, layered as an app-side override — do NOT add it to the core `TerminalHandler` reply. My
+earlier "add `osc_color_report_format` option" note was wrong; ignore it.
+
 **Diagnosis:** `ColorRequest::Query` ignored (`stream.rs:1863`); `kitty_color` stub (`:1867`).
-Upstream color queries `stream_handler.zig:1361-1441`; kitty color `:1481-1571`.
+Port targets: `stream_terminal.zig@14c829883` `colorOperation` (:601-687, incl.
+`writeXtermColorReport` :688-720) and `kittyColorOperation` (:722-780).
 
-**New engine option:** add `osc_color_report_format: OscColorReportFormat` to `TerminalHandler`
-(enum `None | Bit8 | Bit16`, default per config — see #35; until config lands, default `Bit16`
-to match xterm/ghostty default and let the corpus exercise it). `Query` with `None` → no reply
-(keeps the existing `osc_color_query_no_reply` case green only if default is `None`; if default
-is `Bit16`, that case's `input.esc` now expects a reply — update it, don't leave it stale).
+**Helpers to port first** (don't exist on our side yet):
 
-**Exact wire bytes** (terminator = the request's own terminator, `\x1b\\` or `\x07`):
+- `Rgb::encode_rgb16(w)` → `rgb:{r*257:04x}/{g*257:04x}/{b*257:04x}` (each byte doubled: 0x12 →
+  0x1212). Confirmed by upstream test: `\x1b]4;2;rgb:1212/3434/5656\x1b\\` for input `12/34/56`.
+- `Rgb::encode_rgb8(w)` → `rgb:{r:02x}/{g:02x}/{b:02x}`.
+- `Terminal::color_for_xterm(target)` → resolved `Option<Rgb>`; **cursor falls back to
+  foreground** when no cursor color set; returns `None` (skip) for unsupported targets.
+- `Terminal::color_for_kitty(key)` → `Option<Rgb>`; plus `key.has_terminal_query_color()` to
+  decide empty-value vs skip for unset keys.
 
-- Palette query, 16-bit: `\x1b]4;{i};rgb:{r*257:04x}/{g*257:04x}/{b*257:04x}` + term.
-- Palette query, 8-bit: `\x1b]4;{i};rgb:{r:02x}/{g:02x}/{b:02x}` + term.
-- Dynamic (fg=10/bg=11/cursor=12), 16-bit: `\x1b]{10|11|12};rgb:{r*257:04x}/…` + term.
-  Cursor with no explicit cursor color falls back to foreground (sh:1369-1370).
-- Multiple queries coalesce into one write (upstream accumulates into one buffer).
+**Exact wire bytes** (terminator = the request's own terminator, `\x1b\\` or `\x07`, **preserved**):
 
-**OSC 21 (kitty color):** set/reset mirror `color_operation` (already have the palette/fg/bg/
-cursor plumbing at `stream.rs:1829`); query builds `\x1b]21` + `;{key}=rgb:{r:02x}/{g:02x}/{b:02x}`
-per key (sh:1489-1514), unset key → `;{key}=` (empty). Note the OSC-21-query upstream divergence
-(our finding issue-3) in the case comment.
+- Xterm palette query: `\x1b]4;{i};` + `encode_rgb16` + term.
+- Xterm dynamic (fg=10/bg=11/cursor=12): `\x1b]{10|11|12};` + `encode_rgb16` + term.
+- Skip (no output) when `color_for_xterm` returns `None`.
+- Multiple queries coalesce into one write (upstream accumulates into one `Allocating` writer).
 
-**Corpus** (`corpus/reply_diffing/`):
+**OSC 21 (kitty color):** set/reset already plumbed via `color_operation` (`stream.rs:1829`);
+port the query path: write prefix `\x1b]21` once (on first output), then per key
+`;{key}=` + `encode_rgb8`; unset-but-terminal-backed key (`has_terminal_query_color`) →
+`;{key}=` (empty value); unsupported key → skip. Terminator appended once at end.
 
-- `osc_color_query_palette_16bit/input.esc`: `\e]4;1;?\e\\` (default 16-bit) → `rgb:` 4-hex reply.
+**Parser note:** the commit also fixes an alloc leak — "OSC parser releases color operation
+request lists during reset." Our Rust `osc::Parser` frees on `reset` via `Vec` drop, so this is
+likely a no-op for us — but confirm `reset()` clears any retained `ColorList` and add a
+multi-query test (the leak surfaced under repeated queries).
+
+**Corpus** (`corpus/reply_diffing/`; pin against reference ≥ `14c829883`):
+
+- **Update the existing `osc_color_query_no_reply` case** — it currently asserts *no* reply;
+  against the new reference it now *replies*. Rename to `osc_color_query_palette` / adjust, or
+  it will diff-fail. (Do NOT leave it as-is.)
+- `osc_color_query_palette_16bit/input.esc`: `\e]4;1;?\e\\` → `\e]4;1;rgb:XXXX/XXXX/XXXX\e\\`.
 - `osc_color_query_fg_bg/input.esc`: `\e]10;?\e\\\e]11;?\e\\`.
-- `osc_color_query_set_then_read/input.esc`: `\e]4;1;rgb:12/34/56\e\\\e]4;1;?\e\\` (set → read back).
-- `osc21_kitty_query/input.esc`: `\e]21;foreground=?\e\\` (per kitty spec; may need a `SKIP`
-  sentinel plus an `#[ignore]` test if the reference's OSC 21 reply differs — document the
-  divergence).
+- `osc_color_query_set_then_read/input.esc`: `\e]4;2;rgb:12/34/56\e\\\e]4;2;?\e\\` → expect
+  `rgb:1212/3434/5656` (the doubled 16-bit form; matches upstream test).
+- `osc_color_query_cursor_fallback/input.esc`: `\e]12;?\e\\` with no cursor color set → expect
+  the foreground color reported (cursor→fg fallback).
+- `osc21_kitty_query/input.esc`: `\e]21;foreground=?\e\\` → `\e]21;foreground=rgb:XX/XX/XX\e\\`
+  (8-bit). Now that upstream implements it, expect agreement — no `SKIP` needed unless a live
+  diff proves otherwise.
 
 Pairs with #35 (the `osc-color-report-format` config key gates `None`/`8-bit`/`16-bit`).
 
