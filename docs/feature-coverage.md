@@ -121,7 +121,9 @@ items are `[ ]` wholesale unless noted.
 
 ## Quick terminal & extra surfaces
 
-- [ ] Quick terminal (dropdown) + `quick-terminal-*` (position/size/animation/autohide) — ~8 keys
+- [x] Quick terminal (dropdown): borderless key window, `quick-terminal-position`
+      (top/bottom/left/right/center), `-size` (%/px per axis), `-animation-duration`,
+      `-autohide`; in-app toggle (Cmd-`, View menu). Global hotkey deferred (ADR 0002).
 - [ ] `new-window`/`new-tab` from CLI/AppleScript beyond the default first window
 
 ## Process, launch & lifecycle

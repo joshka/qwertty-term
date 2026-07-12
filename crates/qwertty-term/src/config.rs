@@ -67,10 +67,34 @@ pub struct Config {
     /// back to background).
     #[serde(rename = "unfocused-split-fill")]
     pub unfocused_split_fill: Option<String>,
+    /// Which screen edge the quick-terminal dropdown animates from:
+    /// `top`/`bottom`/`left`/`right`/`center` (upstream `quick-terminal-position`,
+    /// `Config.zig:2624`, default `top`). Unknown values fall back to the
+    /// default (see [`Config::quick_terminal_position`]).
+    #[serde(rename = "quick-terminal-position")]
+    pub quick_terminal_position: Option<String>,
+    /// The quick-terminal size, `<primary>[,<secondary>]` where each axis is a
+    /// `N%` percentage or `Npx` pixel value (upstream `quick-terminal-size`,
+    /// `Config.zig:2647`). Unset axes take the position's default (see
+    /// [`crate::quickterm::Size`]).
+    #[serde(rename = "quick-terminal-size")]
+    pub quick_terminal_size: Option<String>,
+    /// The quick-terminal slide animation duration in seconds (upstream
+    /// `quick-terminal-animation-duration`, `Config.zig:2720`, default 0.2).
+    #[serde(rename = "quick-terminal-animation-duration")]
+    pub quick_terminal_animation_duration: f64,
+    /// Whether the quick terminal auto-hides when it loses focus (upstream
+    /// `quick-terminal-autohide`, `Config.zig:2730`, default `true` on macOS).
+    #[serde(rename = "quick-terminal-autohide")]
+    pub quick_terminal_autohide: bool,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
 pub const DEFAULT_UNFOCUSED_SPLIT_OPACITY: f64 = 0.7;
+
+/// The default `quick-terminal-animation-duration` in seconds (upstream
+/// `Config.zig:2720`).
+pub const DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION: f64 = 0.2;
 
 impl Default for Config {
     fn default() -> Self {
@@ -83,6 +107,11 @@ impl Default for Config {
             keybind: Vec::new(),
             unfocused_split_opacity: DEFAULT_UNFOCUSED_SPLIT_OPACITY,
             unfocused_split_fill: None,
+            quick_terminal_position: None,
+            quick_terminal_size: None,
+            quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
+            // macOS default is `true` (upstream `Config.zig:2730`).
+            quick_terminal_autohide: true,
         }
     }
 }
@@ -106,6 +135,23 @@ impl Config {
                 None
             }
         }
+    }
+
+    /// The quick-terminal drop position, defaulting to `top` when unset or the
+    /// value is unrecognized (upstream `quick-terminal-position`).
+    pub fn quick_terminal_position(&self) -> crate::quickterm::Position {
+        self.quick_terminal_position
+            .as_deref()
+            .and_then(crate::quickterm::Position::parse)
+            .unwrap_or_default()
+    }
+
+    /// The parsed quick-terminal size (all-defaults when unset).
+    pub fn quick_terminal_size(&self) -> crate::quickterm::Size {
+        self.quick_terminal_size
+            .as_deref()
+            .map(crate::quickterm::Size::parse)
+            .unwrap_or_default()
     }
 }
 
@@ -168,6 +214,16 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # Color unfocused splits are dimmed toward (an X11 color name or RRGGBB hex).
 # Defaults to the terminal background when unset.
 # unfocused-split-fill = "black"
+
+# Quick terminal (dropdown). Position is the screen edge it slides from:
+# top (default), bottom, left, right, or center. Size is "<primary>[,<secondary>]"
+# where each axis is a percentage (20%) or pixels (300px); unset axes use the
+# position default. Animation duration is in seconds; autohide drops the window
+# when it loses focus.
+# quick-terminal-position = "top"
+# quick-terminal-size = "25%"
+# quick-terminal-animation-duration = 0.2
+# quick-terminal-autohide = true
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -247,6 +303,49 @@ mod tests {
         assert_eq!(config.unfocused_split_opacity(), 0.7);
         assert_eq!(config.unfocused_split_fill, None);
         assert_eq!(config.unfocused_split_fill(), None);
+        // Quick terminal: upstream defaults (top, all-default size, 0.2s, autohide).
+        assert_eq!(
+            config.quick_terminal_position(),
+            crate::quickterm::Position::Top
+        );
+        assert_eq!(
+            config.quick_terminal_size(),
+            crate::quickterm::Size::default()
+        );
+        assert_eq!(config.quick_terminal_animation_duration, 0.2);
+        assert!(config.quick_terminal_autohide);
+    }
+
+    #[test]
+    fn parses_quick_terminal_keys() {
+        let toml = "\
+            quick-terminal-position = \"bottom\"\n\
+            quick-terminal-size = \"50%,500px\"\n\
+            quick-terminal-animation-duration = 0.35\n\
+            quick-terminal-autohide = false\n";
+        let config = parse(toml).unwrap();
+        assert_eq!(
+            config.quick_terminal_position(),
+            crate::quickterm::Position::Bottom
+        );
+        assert_eq!(
+            config.quick_terminal_size(),
+            crate::quickterm::Size {
+                primary: Some(crate::quickterm::Dim::Percentage(50.0)),
+                secondary: Some(crate::quickterm::Dim::Pixels(500)),
+            }
+        );
+        assert_eq!(config.quick_terminal_animation_duration, 0.35);
+        assert!(!config.quick_terminal_autohide);
+    }
+
+    #[test]
+    fn quick_terminal_unknown_position_falls_back_to_top() {
+        let config = parse("quick-terminal-position = \"sideways\"\n").unwrap();
+        assert_eq!(
+            config.quick_terminal_position(),
+            crate::quickterm::Position::Top
+        );
     }
 
     #[test]
