@@ -2105,31 +2105,76 @@ impl Handler for TerminalHandler {
         self.write_pty(s.as_bytes());
     }
     fn decrqss(&mut self, setting: dcs::Decrqss) {
-        // Build the `\eP1$r ... \e\\` reply. Only SGR is answered with real
-        // content; the others match upstream's DECRQSS surface.
+        // Build the `\eP{valid}$r{body}\e\\` reply. Port of the DECRQSS handler
+        // in `termio/stream_handler.zig`: we ALWAYS reply — `valid` is 1 when
+        // we produced a payload for the setting, else 0 (`\eP0$r\e\\`), which
+        // is how xterm signals an unrecognized/unhandled request. (Upstream's
+        // *lib* core has no DECRQSS logic, so the vt-diff reference stays
+        // silent here — this reply path is a documented divergence covered by
+        // unit tests, not the differential corpus; see the SKIP on
+        // `corpus/reply_diffing/decrqss_sgr_scope`.)
+        use crate::screen::cursor::CursorStyle;
         let body = match setting {
             // SGR: the params from `printAttributes`, suffixed with the
             // request's own final byte `m` (xterm echoes the setting).
             dcs::Decrqss::Sgr => format!("{}m", self.terminal.print_attributes()),
+            // DECSCUSR: the current cursor style + blink, encoded as the 1..6
+            // parameter DECSCUSR would take (block/underline/bar × blink), plus
+            // the ` q` final. block_hollow has no DECSCUSR value so it reports
+            // as block. Port of `stream_handler.zig:501-513`.
+            dcs::Decrqss::Decscusr => {
+                let blink = self.terminal.modes.get(Mode::CursorBlinking);
+                let n: u8 = match self.terminal.screen().cursor.cursor_style {
+                    CursorStyle::Block | CursorStyle::BlockHollow => {
+                        if blink {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    CursorStyle::Underline => {
+                        if blink {
+                            3
+                        } else {
+                            4
+                        }
+                    }
+                    CursorStyle::Bar => {
+                        if blink {
+                            5
+                        } else {
+                            6
+                        }
+                    }
+                };
+                format!("{n} q")
+            }
             // DECSTBM: report the current scrolling region as `top;bottom r`.
             dcs::Decrqss::Decstbm => format!(
                 "{};{}r",
                 self.terminal.scrolling_region.top + 1,
                 self.terminal.scrolling_region.bottom + 1
             ),
-            // DECSLRM: `left;right s`.
-            dcs::Decrqss::Decslrm => format!(
-                "{};{}s",
-                self.terminal.scrolling_region.left + 1,
-                self.terminal.scrolling_region.right + 1
-            ),
-            // DECSCUSR / none: nothing meaningful to report.
-            dcs::Decrqss::Decscusr | dcs::Decrqss::None => String::new(),
+            // DECSLRM: `left;right s`, but ONLY when left/right-margin mode
+            // (DECLRMM, mode 69) is enabled; otherwise the request is invalid
+            // and we emit the empty (valid=0) response. Port of
+            // `stream_handler.zig:522-531`.
+            dcs::Decrqss::Decslrm => {
+                if self.terminal.modes.get(Mode::EnableLeftAndRightMargin) {
+                    format!(
+                        "{};{}s",
+                        self.terminal.scrolling_region.left + 1,
+                        self.terminal.scrolling_region.right + 1
+                    )
+                } else {
+                    String::new()
+                }
+            }
+            // Unrecognized / unhandled request: empty payload → valid=0.
+            dcs::Decrqss::None => String::new(),
         };
-        if body.is_empty() {
-            return;
-        }
-        let reply = format!("\x1bP1$r{body}\x1b\\");
+        let valid = u8::from(!body.is_empty());
+        let reply = format!("\x1bP{valid}$r{body}\x1b\\");
         self.write_pty(reply.as_bytes());
     }
     fn xtversion(&mut self) {
