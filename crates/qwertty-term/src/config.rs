@@ -104,6 +104,24 @@ pub struct Config {
     /// (upstream `mouse-hide-while-typing`, `Config.zig:921`, default false).
     #[serde(rename = "mouse-hide-while-typing")]
     pub mouse_hide_while_typing: bool,
+    /// Require confirmation before pasting text that appears unsafe (contains a
+    /// newline or a bracketed-paste end sequence) — the copy/paste-attack guard
+    /// (upstream `clipboard-paste-protection`, `Config.zig:2372`, default true).
+    #[serde(rename = "clipboard-paste-protection")]
+    pub clipboard_paste_protection: bool,
+    /// Trust bracketed pastes (framed by the running program) as safe (upstream
+    /// `clipboard-paste-bracketed-safe`, `Config.zig:2378`, default true).
+    #[serde(rename = "clipboard-paste-bracketed-safe")]
+    pub clipboard_paste_bracketed_safe: bool,
+    /// Trim trailing whitespace from copied lines that have other content
+    /// (upstream `clipboard-trim-trailing-spaces`, `Config.zig:2367`, default
+    /// true).
+    #[serde(rename = "clipboard-trim-trailing-spaces")]
+    pub clipboard_trim_trailing_spaces: bool,
+    /// Clear the text selection when the user types (upstream
+    /// `selection-clear-on-typing`, `Config.zig:724`, default true).
+    #[serde(rename = "selection-clear-on-typing")]
+    pub selection_clear_on_typing: bool,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -132,6 +150,11 @@ impl Default for Config {
             bell_features: None,
             right_click_action: None,
             mouse_hide_while_typing: false,
+            // All clipboard-hardening keys default on (upstream defaults).
+            clipboard_paste_protection: true,
+            clipboard_paste_bracketed_safe: true,
+            clipboard_trim_trailing_spaces: true,
+            selection_clear_on_typing: true,
         }
     }
 }
@@ -189,6 +212,15 @@ impl Config {
             .as_deref()
             .map(crate::context_menu::RightClickAction::parse)
             .unwrap_or_default()
+    }
+
+    /// The paste-protection settings (`clipboard-paste-protection` +
+    /// `clipboard-paste-bracketed-safe`).
+    pub fn paste_protection(&self) -> crate::paste::PasteProtection {
+        crate::paste::PasteProtection {
+            enabled: self.clipboard_paste_protection,
+            bracketed_safe: self.clipboard_paste_bracketed_safe,
+        }
     }
 }
 
@@ -272,6 +304,14 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # the next mouse move).
 # right-click-action = "context-menu"
 # mouse-hide-while-typing = false
+
+# Clipboard hardening (all default true): confirm before pasting unsafe
+# (multiline) text; trust bracketed pastes as safe; trim trailing whitespace
+# from copied lines; clear the selection when you start typing.
+# clipboard-paste-protection = true
+# clipboard-paste-bracketed-safe = true
+# clipboard-trim-trailing-spaces = true
+# selection-clear-on-typing = true
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -371,6 +411,34 @@ mod tests {
             crate::context_menu::RightClickAction::ContextMenu
         );
         assert!(!config.mouse_hide_while_typing);
+        // Clipboard hardening: all upstream defaults are on.
+        assert_eq!(
+            config.paste_protection(),
+            crate::paste::PasteProtection::default()
+        );
+        assert!(config.clipboard_trim_trailing_spaces);
+        assert!(config.selection_clear_on_typing);
+    }
+
+    #[test]
+    fn parses_clipboard_hardening_keys() {
+        let config = parse(
+            "clipboard-paste-protection = false\n\
+             clipboard-paste-bracketed-safe = false\n\
+             clipboard-trim-trailing-spaces = false\n\
+             selection-clear-on-typing = false\n",
+        )
+        .unwrap();
+        assert!(!config.clipboard_paste_protection);
+        assert_eq!(
+            config.paste_protection(),
+            crate::paste::PasteProtection {
+                enabled: false,
+                bracketed_safe: false,
+            }
+        );
+        assert!(!config.clipboard_trim_trailing_spaces);
+        assert!(!config.selection_clear_on_typing);
     }
 
     #[test]

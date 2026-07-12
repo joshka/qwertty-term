@@ -1289,6 +1289,16 @@ pub struct ControllerState {
     right_click_action: crate::context_menu::RightClickAction,
     /// Whether to hide the mouse cursor while typing (`mouse-hide-while-typing`).
     mouse_hide_while_typing: bool,
+    /// Paste-protection settings (`clipboard-paste-protection` + `-bracketed-safe`).
+    paste_protection: crate::paste::PasteProtection,
+    /// Trim trailing whitespace from copied lines (`clipboard-trim-trailing-spaces`).
+    clipboard_trim_trailing_spaces: bool,
+    /// Clear the selection when the user types (`selection-clear-on-typing`).
+    selection_clear_on_typing: bool,
+    /// Smoke/test override for the unsafe-paste confirmation: `Some(answer)`
+    /// short-circuits the modal alert (which a headless smoke can't drive).
+    /// `None` in normal operation. See [`Controller::set_paste_confirm_hook`].
+    paste_confirm_hook: Option<bool>,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1373,6 +1383,10 @@ impl Controller {
             bell_features: config.bell_features(),
             right_click_action: config.right_click_action(),
             mouse_hide_while_typing: config.mouse_hide_while_typing,
+            paste_protection: config.paste_protection(),
+            clipboard_trim_trailing_spaces: config.clipboard_trim_trailing_spaces,
+            selection_clear_on_typing: config.selection_clear_on_typing,
+            paste_confirm_hook: None,
         })))
     }
 
@@ -2515,6 +2529,7 @@ impl Controller {
     pub fn encode_key_to_surface(&self, tab: TabId, surface: SurfaceId, raw: &RawKeyEvent) {
         let mut state = self.0.borrow_mut();
         let cfg = state.input_config;
+        let clear_on_typing = state.selection_clear_on_typing;
         if let Some(s) = state
             .tabs
             .get_mut(&tab)
@@ -2528,6 +2543,12 @@ impl Controller {
                 // scrolled-back panes are affected; this pane is the focused
                 // (first-responder) one that received the key.
                 s.snap_to_bottom();
+                // `selection-clear-on-typing`: a real keystroke drops any
+                // selection (upstream clears it on typed input).
+                if clear_on_typing {
+                    s.engine().clear_selection();
+                    s.gesture.reset();
+                }
                 s.io.write(&bytes);
             }
         }
@@ -2537,12 +2558,18 @@ impl Controller {
     /// text is user input, so it snaps this pane's viewport to the bottom.
     pub fn send_text_to_surface(&self, tab: TabId, surface: SurfaceId, text: &str) {
         let mut state = self.0.borrow_mut();
+        let clear_on_typing = state.selection_clear_on_typing;
         if let Some(s) = state
             .tabs
             .get_mut(&tab)
             .and_then(|t| t.surfaces.get_mut(&surface))
         {
             s.snap_to_bottom();
+            // `selection-clear-on-typing`: committed text is typed input.
+            if clear_on_typing {
+                s.engine().clear_selection();
+                s.gesture.reset();
+            }
             s.io.write(text.as_bytes());
         }
     }
@@ -2753,37 +2780,24 @@ impl Controller {
     }
 
     /// Copy the *focused* pane's current selection to the system clipboard
-    /// (Cmd-C). No-op if there is no selection.
+    /// (Cmd-C). No-op if there is no selection. Reuses the hardened per-surface
+    /// path (honors `clipboard-trim-trailing-spaces`).
     fn copy_selection_from_active(&self) {
         let Some(tab) = self.active_tab() else { return };
-        let state = self.0.borrow();
-        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.focused_surface())
-            && let Some(text) = s.engine().selection_string()
-        {
-            crate::clipboard::write(&text);
-        }
-    }
-
-    /// Paste the clipboard into the *focused* pane's PTY, bracketed if the
-    /// program enabled bracketed paste.
-    fn paste_into_active(&self) {
-        let Some(tab) = self.active_tab() else { return };
-        let Some(text) = crate::clipboard::read() else {
+        let Some(surface) = self.0.borrow().tabs.get(&tab).map(|t| t.tree.focused()) else {
             return;
         };
-        let state = self.0.borrow();
-        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.focused_surface()) {
-            let payload = if s.engine().bracketed_paste() {
-                let mut p = Vec::with_capacity(text.len() + 12);
-                p.extend_from_slice(b"\x1b[200~");
-                p.extend_from_slice(text.as_bytes());
-                p.extend_from_slice(b"\x1b[201~");
-                p
-            } else {
-                text.into_bytes()
-            };
-            s.io.write(&payload);
-        }
+        self.copy_surface_selection(tab, surface);
+    }
+
+    /// Paste the clipboard into the *focused* pane's PTY (Cmd-V). Reuses the
+    /// hardened per-surface path (honors `clipboard-paste-protection`).
+    fn paste_into_active(&self) {
+        let Some(tab) = self.active_tab() else { return };
+        let Some(surface) = self.0.borrow().tabs.get(&tab).map(|t| t.tree.focused()) else {
+            return;
+        };
+        self.paste_into_surface(tab, surface);
     }
 
     // -- right-click / mouse behaviors ------------------------------------
@@ -2791,6 +2805,61 @@ impl Controller {
     /// The configured `right-click-action`.
     pub fn right_click_action(&self) -> crate::context_menu::RightClickAction {
         self.0.borrow().right_click_action
+    }
+
+    /// Override the unsafe-paste confirmation answer (smoke/test): `Some(true)`
+    /// = confirm, `Some(false)` = decline, `None` = show the real modal.
+    pub fn set_paste_confirm_hook(&self, answer: Option<bool>) {
+        self.0.borrow_mut().paste_confirm_hook = answer;
+    }
+
+    /// Whether pasting `text` into `surface` would be gated as unsafe under the
+    /// current `clipboard-paste-protection` config (smoke/test): folds in the
+    /// pane's live bracketed-paste mode.
+    pub fn paste_is_unsafe(&self, tab: TabId, surface: SurfaceId, text: &str) -> bool {
+        let state = self.0.borrow();
+        let bracketed = state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.engine().bracketed_paste())
+            .unwrap_or(false);
+        crate::paste::is_unsafe(text, bracketed, state.paste_protection)
+    }
+
+    /// Paste `text` into `surface` as if from the clipboard (smoke/test): runs
+    /// the full hardened paste path (protection + confirm hook) without going
+    /// through `NSPasteboard`.
+    pub fn paste_text_for_test(&self, tab: TabId, surface: SurfaceId, text: &str) {
+        let bracketed = {
+            let state = self.0.borrow();
+            state
+                .tabs
+                .get(&tab)
+                .and_then(|t| t.surfaces.get(&surface))
+                .map(|s| s.engine().bracketed_paste())
+                .unwrap_or(false)
+        };
+        let protection = self.0.borrow().paste_protection;
+        if crate::paste::is_unsafe(text, bracketed, protection) && !self.confirm_unsafe_paste(text)
+        {
+            return;
+        }
+        self.write_paste(tab, surface, text, bracketed);
+    }
+
+    /// Select `n` cells on row 0 of `surface` (smoke/test), so tests can create
+    /// a selection without driving mouse events.
+    pub fn smoke_select_row0(&self, tab: TabId, surface: SurfaceId, n: usize) {
+        let mut state = self.0.borrow_mut();
+        if let Some(s) = state
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.surfaces.get_mut(&surface))
+        {
+            let mut engine = s.engine();
+            engine.select_screen_points((0, 0), (n.saturating_sub(1), 0), false);
+        }
     }
 
     /// The context-menu item titles for a surface (smoke/test): actionable
@@ -2880,35 +2949,88 @@ impl Controller {
         }
     }
 
-    /// Copy `surface`'s selection to the system clipboard (no-op without one).
+    /// Copy `surface`'s selection to the system clipboard (no-op without one),
+    /// honoring `clipboard-trim-trailing-spaces`.
     fn copy_surface_selection(&self, tab: TabId, surface: SurfaceId) {
+        let trim = self.0.borrow().clipboard_trim_trailing_spaces;
         let state = self.0.borrow();
         if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface))
-            && let Some(text) = s.engine().selection_string()
+            && let Some(text) = s.engine().selection_string_opt(trim)
         {
             crate::clipboard::write(&text);
         }
     }
 
     /// Paste the system clipboard into `surface`'s pty (bracketed if the
-    /// program enabled bracketed paste).
+    /// program enabled bracketed paste). Honors `clipboard-paste-protection`:
+    /// an unsafe paste (newline / bracketed-end sequence) prompts for
+    /// confirmation first (a modal alert), and only proceeds if the user
+    /// confirms.
     fn paste_into_surface(&self, tab: TabId, surface: SurfaceId) {
         let Some(text) = crate::clipboard::read() else {
             return;
         };
+        // Decide safety under a scoped borrow (read the pane's bracketed mode +
+        // the config), then release it before any modal alert / io write.
+        let (bracketed, protection) = {
+            let state = self.0.borrow();
+            let bracketed = state
+                .tabs
+                .get(&tab)
+                .and_then(|t| t.surfaces.get(&surface))
+                .map(|s| s.engine().bracketed_paste())
+                .unwrap_or(false);
+            (bracketed, state.paste_protection)
+        };
+        if crate::paste::is_unsafe(&text, bracketed, protection)
+            && !self.confirm_unsafe_paste(&text)
+        {
+            // User declined the unsafe paste.
+            return;
+        }
+        self.write_paste(tab, surface, &text, bracketed);
+    }
+
+    /// Write `text` to `surface`'s pty as a paste (bracketed if `bracketed`).
+    /// Split out so the confirmed and direct paths share the encoding.
+    fn write_paste(&self, tab: TabId, surface: SurfaceId, text: &str, bracketed: bool) {
         let state = self.0.borrow();
         if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
-            let payload = if s.engine().bracketed_paste() {
+            let payload = if bracketed {
                 let mut p = Vec::with_capacity(text.len() + 12);
                 p.extend_from_slice(b"\x1b[200~");
                 p.extend_from_slice(text.as_bytes());
                 p.extend_from_slice(b"\x1b[201~");
                 p
             } else {
-                text.into_bytes()
+                text.as_bytes().to_vec()
             };
             s.io.write(&payload);
         }
+    }
+
+    /// Show a modal confirmation for an unsafe paste; returns whether the user
+    /// chose to paste anyway. No controller borrow is held across the modal
+    /// (`runModal` spins its own run loop, which can re-enter the controller).
+    fn confirm_unsafe_paste(&self, text: &str) -> bool {
+        let mtm = self.0.borrow().mtm;
+        // The smoke can't drive a modal; a test hook lets it answer
+        // deterministically (see `set_paste_confirm_hook`).
+        if let Some(answer) = self.0.borrow().paste_confirm_hook {
+            return answer;
+        }
+        let alert = objc2_app_kit::NSAlert::new(mtm);
+        let lines = text.lines().count().max(1);
+        alert.setMessageText(&NSString::from_str("Paste multiple lines?"));
+        alert.setInformativeText(&NSString::from_str(&format!(
+            "The clipboard contains {lines} lines of text. Pasting it may run \
+             commands. Paste anyway?"
+        )));
+        alert.addButtonWithTitle(&NSString::from_str("Paste"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        // NSAlertFirstButtonReturn == 1000 ("Paste").
+        let response = alert.runModal();
+        response == objc2_app_kit::NSAlertFirstButtonReturn
     }
 
     /// Apply a font-size step to *every* pane in the active tab and rebuild
@@ -3900,6 +4022,9 @@ pub struct DelegateIvars {
     /// Mouse smoke (`QWERTTY_TERM_SMOKE_MOUSE`): assert the right-click context
     /// menu items + Split/Close actions. See [`AppDelegate::run_mouse_smoke`].
     smoke_mouse: bool,
+    /// Clipboard smoke (`QWERTTY_TERM_SMOKE_CLIPBOARD`): paste-protection +
+    /// selection-clear-on-typing. See [`AppDelegate::run_clipboard_smoke`].
+    smoke_clipboard: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -3948,6 +4073,7 @@ define_class!(
             let has_quickterm = self.ivars().smoke_quickterm;
             let has_bell = self.ivars().smoke_bell;
             let has_mouse = self.ivars().smoke_mouse;
+            let has_clipboard = self.ivars().smoke_clipboard;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -3969,6 +4095,8 @@ define_class!(
                 self.schedule_bell_smoke();
             } else if has_mouse {
                 self.schedule_mouse_smoke();
+            } else if has_clipboard {
+                self.schedule_clipboard_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -4143,6 +4271,12 @@ define_class!(
         fn mouse_smoke(&self, _timer: &AnyObject) {
             self.run_mouse_smoke();
         }
+
+        /// Clipboard smoke: paste-protection + selection-clear, exit 0/1.
+        #[unsafe(method(ghosttyClipboardSmoke:))]
+        fn clipboard_smoke(&self, _timer: &AnyObject) {
+            self.run_clipboard_smoke();
+        }
     }
 );
 
@@ -4165,6 +4299,7 @@ impl AppDelegate {
         smoke_quickterm: bool,
         smoke_bell: bool,
         smoke_mouse: bool,
+        smoke_clipboard: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -4184,6 +4319,7 @@ impl AppDelegate {
             smoke_quickterm,
             smoke_bell,
             smoke_mouse,
+            smoke_clipboard,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -6316,6 +6452,83 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the clipboard smoke: let the child settle, then run.
+    fn schedule_clipboard_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyClipboardSmoke:));
+    }
+
+    /// Clipboard-hardening smoke: paste-protection classification + gating, and
+    /// selection-clear-on-typing. Runs against a `cat` child (set via
+    /// `QWERTTY_TERM_COMMAND`) so pastes echo deterministically and no shell
+    /// enables bracketed paste. Exits 0/1.
+    fn run_clipboard_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = clipboard_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at clipboard smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at clipboard smoke start".into());
+        };
+
+        // 1. Classification: a multiline paste is unsafe; a single line is safe.
+        if !controller.paste_is_unsafe(tab, surface, "rm -rf /\nyes") {
+            fail("a multiline paste should be classified unsafe".into());
+        }
+        if controller.paste_is_unsafe(tab, surface, "ls -la") {
+            fail("a single-line paste should be classified safe".into());
+        }
+
+        // 2. Gating: decline an unsafe paste → it never reaches the pty (cat
+        //    would otherwise echo it). Then confirm one → it does.
+        controller.set_paste_confirm_hook(Some(false));
+        controller.paste_text_for_test(tab, surface, "DECLINEDMARK\nrest");
+        Self::spin(0.6);
+        let screen = controller
+            .surface_screen_text(tab, surface)
+            .unwrap_or_default();
+        if screen.contains("DECLINEDMARK") {
+            fail(format!(
+                "a declined unsafe paste still reached the pty (marker present).\n\
+                 --- screen ---\n{screen}"
+            ));
+        }
+
+        controller.set_paste_confirm_hook(Some(true));
+        controller.paste_text_for_test(tab, surface, "CONFIRMEDMARK\nrest");
+        Self::spin(0.8);
+        let screen = controller
+            .surface_screen_text(tab, surface)
+            .unwrap_or_default();
+        if !screen.contains("CONFIRMEDMARK") {
+            fail(format!(
+                "a confirmed unsafe paste did not reach the pty (marker absent).\n\
+                 --- screen ---\n{screen}"
+            ));
+        }
+
+        // 3. selection-clear-on-typing: make a selection, then type → cleared.
+        controller.feed_surface_output(tab, surface, b"\r\nSELECTME\r\n");
+        Self::spin(0.2);
+        controller.smoke_select_row0(tab, surface, 4);
+        if !controller.surface_has_selection(tab, surface) {
+            fail("failed to create a selection for the clear-on-typing check".into());
+        }
+        // Typed text (the IME-commit path) clears the selection.
+        controller.send_text_to_surface(tab, surface, "x");
+        if controller.surface_has_selection(tab, surface) {
+            fail("typing did not clear the selection (selection-clear-on-typing)".into());
+        }
+
+        println!(
+            "OK: clipboard smoke — paste-protection classified a multiline paste unsafe \
+             (declined paste never reached the pty; confirmed one did), and typing \
+             cleared the selection."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -6474,6 +6687,12 @@ fn mouse_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a clipboard-smoke failure and exit non-zero.
+fn clipboard_fail(msg: String) -> ! {
+    eprintln!("FAIL: clipboard smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -6585,6 +6804,7 @@ pub fn run(
     smoke_quickterm: bool,
     smoke_bell: bool,
     smoke_mouse: bool,
+    smoke_clipboard: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -6607,6 +6827,7 @@ pub fn run(
         smoke_quickterm,
         smoke_bell,
         smoke_mouse,
+        smoke_clipboard,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

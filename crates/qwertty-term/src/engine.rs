@@ -223,10 +223,19 @@ impl Engine {
     /// The current selection's text (trimmed trailing whitespace per row), or
     /// `None` if there is no selection. This may reach above the currently
     /// rendered window into scrollback; `Screen::selection_string` walks the
-    /// pagelist directly rather than needing a full `Snapshot`.
+    /// pagelist directly rather than needing a full `Snapshot`. Always trims
+    /// (the default copy path); use [`Engine::selection_string_opt`] to control
+    /// trimming per `clipboard-trim-trailing-spaces`.
     pub fn selection_string(&self) -> Option<String> {
+        self.selection_string_opt(true)
+    }
+
+    /// Like [`Engine::selection_string`] but with explicit trailing-whitespace
+    /// trimming (`trim`), so the copy path can honor
+    /// `clipboard-trim-trailing-spaces`.
+    pub fn selection_string_opt(&self, trim: bool) -> Option<String> {
         let sel = self.terminal().screen().selection.as_ref()?;
-        Some(self.terminal().screen().selection_string(sel, true))
+        Some(self.terminal().screen().selection_string(sel, trim))
     }
 
     // -- selection gestures (absolute-screen space) ------------------------
@@ -698,6 +707,25 @@ mod tests {
         let end = engine.pin_at(4, 0).unwrap();
         engine.select(start, end, false);
         assert_eq!(engine.selection_string().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn selection_string_opt_controls_trailing_space_trim() {
+        // A selection over "abc" plus trailing blanks: trim=true drops the
+        // trailing spaces (clipboard-trim-trailing-spaces), trim=false keeps
+        // them.
+        let mut engine = Engine::new(10, 3);
+        // Explicit trailing space characters (written cells), not blank
+        // unwritten cells (which produce nothing either way).
+        engine.write(b"abc   ");
+        let start = engine.pin_at(0, 0).unwrap();
+        let end = engine.pin_at(5, 0).unwrap();
+        engine.select(start, end, false);
+        assert_eq!(engine.selection_string_opt(true).as_deref(), Some("abc"));
+        assert_eq!(
+            engine.selection_string_opt(false).as_deref(),
+            Some("abc   ")
+        );
     }
 
     #[test]

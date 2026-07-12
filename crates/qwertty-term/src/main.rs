@@ -73,6 +73,11 @@
 //!   right-click context menu's items for the focused pane (Paste/splits/close,
 //!   Copy only with a selection), then invoke Split Right (assert 2 panes) and
 //!   Close Pane (assert back to 1), then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_CLIPBOARD=1` — run the clipboard-hardening smoke:
+//!   assert paste-protection classifies multiline pastes as unsafe (gated by a
+//!   confirmation) while single-line pastes pass, and that typing clears the
+//!   selection (`selection-clear-on-typing`), then exit 0/1. Uses `cat` as the
+//!   child so pastes echo deterministically.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -177,6 +182,8 @@ fn run_window() {
     let smoke_bell = std::env::var_os("QWERTTY_TERM_SMOKE_BELL").is_some();
     // Mouse smoke: assert the right-click context menu + split/close actions.
     let smoke_mouse = std::env::var_os("QWERTTY_TERM_SMOKE_MOUSE").is_some();
+    // Clipboard smoke: paste-protection + selection-clear-on-typing.
+    let smoke_clipboard = std::env::var_os("QWERTTY_TERM_SMOKE_CLIPBOARD").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -192,6 +199,7 @@ fn run_window() {
         smoke_quickterm,
         smoke_bell,
         smoke_mouse,
+        smoke_clipboard,
     );
 }
 
