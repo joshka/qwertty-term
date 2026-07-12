@@ -88,6 +88,38 @@ impl Selection {
         }
     }
 
+    /// Untrack this selection's tracked pins, except any pin the replacement
+    /// `keep` still owns. A caller may pass the screen's current tracked
+    /// selection back into [`Screen::select`](crate::screen::Screen::select)
+    /// by value; since a tracked selection is reused (not re-tracked), it
+    /// shares the exact same pin pointers, and releasing them unconditionally
+    /// would leave `keep` dereferencing freed pool entries on the next
+    /// selection op. Exact and partial aliases retain their shared pins while
+    /// ordinary replacements still reclaim both. Port of the aliasing-aware
+    /// cleanup in upstream `0c299000f` (`Screen.select`).
+    pub(crate) fn deinit_preserving(&self, pages: &mut PageList, keep: &Selection) {
+        // An untracked selection owns no pool pins, so there is nothing to
+        // release (mirrors upstream's `.untracked => old.deinit(self)`, whose
+        // `deinit` is a no-op for untracked bounds).
+        let Bounds::Tracked { start, end } = self.bounds else {
+            return;
+        };
+        let (keep_start, keep_end): (*const Pin, *const Pin) = match keep.bounds {
+            Bounds::Tracked { start, end } => (start, end),
+            Bounds::Untracked { .. } => (std::ptr::null(), std::ptr::null()),
+        };
+        // Pointer identity: a shared pin has the same tracked-pool address.
+        let shared = |p: *mut Pin| {
+            std::ptr::eq(p as *const Pin, keep_start) || std::ptr::eq(p as *const Pin, keep_end)
+        };
+        if !shared(start) {
+            pages.untrack_pin(start);
+        }
+        if !shared(end) {
+            pages.untrack_pin(end);
+        }
+    }
+
     /// True if this is a tracked selection. Port of `tracked`.
     pub fn tracked(&self) -> bool {
         matches!(self.bounds, Bounds::Tracked { .. })

@@ -1450,9 +1450,12 @@ impl Screen {
             sel.track(&mut self.pages)
         };
 
-        // Untrack the prior selection.
+        // Untrack the prior selection, but preserve any pins the replacement
+        // still owns. A caller may pass our current tracked selection back in
+        // by value; releasing the shared pins would dangle `tracked_sel`. Port
+        // of upstream 0c299000f.
         if let Some(old) = self.selection.take() {
-            old.deinit(&mut self.pages);
+            old.deinit_preserving(&mut self.pages, &tracked_sel);
         }
         self.selection = Some(tracked_sel);
         self.dirty.selection = true;
