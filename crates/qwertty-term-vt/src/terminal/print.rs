@@ -9,6 +9,7 @@
 //! seam — see `TODO(chunk:terminal-print-grapheme)`.
 
 use crate::charsets::{self, Charset};
+use crate::page::ref_set::SetId;
 use crate::page::size::CellCountInt;
 use crate::page::style::DEFAULT_ID;
 use crate::page::{Cell, ContentTag, SemanticContent, Wide};
@@ -318,6 +319,71 @@ impl Terminal {
                 k = simple;
                 if k >= cell_count {
                     break;
+                }
+
+                // Bulk path for runs of cells that differ from the expected
+                // simple cell only by their style id: the common case when
+                // styled text overwrites previously styled (or default-styled)
+                // rows, e.g. TUI redraws. One scan finds the run of identical
+                // old styles, the ref counts are fixed with a single
+                // release_multiple/use_multiple pair, and the cells get the
+                // same branch-free fill as the simple case. Port of upstream
+                // printSliceFill's bulk path (cb2d78587). Cells with
+                // graphemes, hyperlinks, or wide content still fall through
+                // to the general path below.
+                {
+                    let old_bits = unsafe { (*base_cell.add(k)).cval() };
+                    let first = old_bits & Cell::SIMPLE_MASK;
+                    let old_style = unsafe { (*base_cell.add(k)).style_id() };
+                    if first == Cell::simple_check_expected(old_style) {
+                        // A plain narrow cell with style_id == cursor style
+                        // would have passed the simple check above.
+                        debug_assert!(old_style != style_id);
+
+                        // Find the run of cells with identical masked bits.
+                        let mut m = k + 1;
+                        while m < cell_count {
+                            let bits = unsafe { (*base_cell.add(m)).cval() };
+                            if (bits & Cell::SIMPLE_MASK) != first {
+                                break;
+                            }
+                            m += 1;
+                        }
+
+                        // Fix up the style ref counts for the whole run at
+                        // once. Each old cell held a reference to old_style,
+                        // so the bulk release is safe by construction.
+                        let n = m - k;
+                        if old_style != DEFAULT_ID {
+                            // SAFETY: mem is the owning page's base; old_style
+                            // is live with ref_count >= n (one per cell).
+                            unsafe {
+                                (*page).styles().release_multiple(
+                                    mem,
+                                    old_style,
+                                    SetId::from_usize(n),
+                                );
+                            }
+                        }
+                        if style_id != DEFAULT_ID {
+                            // SAFETY: same page base; style_id is the cursor's
+                            // live style reference.
+                            unsafe {
+                                (*page)
+                                    .styles()
+                                    .use_multiple(mem, style_id, SetId::from_usize(n));
+                            }
+                        }
+
+                        for idx in k..m {
+                            let bits = template_bits | ((cps[printed + idx] as u64) << cp_shift);
+                            unsafe {
+                                *base_cell.add(idx) = Cell::from_cval(bits);
+                            }
+                        }
+                        k = m;
+                        continue 'fill;
+                    }
                 }
 
                 // General path for the cell that failed the masked check.
