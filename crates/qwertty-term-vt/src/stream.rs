@@ -371,6 +371,13 @@ pub trait Handler {
     fn window_title(&mut self, title: &str) {}
     fn report_pwd(&mut self, url: &str) {}
     fn semantic_prompt(&mut self, cmd: &osc::SemanticPrompt) {}
+    /// OSC 8 hyperlink start (`ESC ] 8 ; params ; uri ST`). `uri` is the link
+    /// target; `id` is the optional `id=` param that lets multiple
+    /// non-contiguous runs form one logical link. Port of
+    /// `stream_terminal.Handler.startHyperlink`.
+    fn start_hyperlink(&mut self, uri: &str, id: Option<&str>) {}
+    /// OSC 8 hyperlink end (`ESC ] 8 ; ; ST`). Port of `endHyperlink`.
+    fn end_hyperlink(&mut self) {}
     fn color_operation(&mut self, requests: &osc::ColorList) {}
     fn kitty_color(&mut self, cmd: &osc::KittyColorProtocol) {}
     fn mouse_shape(&mut self, value: &str) {}
@@ -1478,10 +1485,8 @@ impl<H: Handler> Stream<H> {
             C::ColorOperation { requests, .. } => self.handler.color_operation(&requests),
             C::KittyColorProtocol(k) => self.handler.kitty_color(&k),
             C::ClipboardContents { kind, data } => self.handler.clipboard(kind, &data),
-            C::HyperlinkStart { .. } | C::HyperlinkEnd => {
-                // Hyperlink start/end are Screen effects (seam); not needed
-                // for the differential screen-text comparison.
-            }
+            C::HyperlinkStart { id, uri } => self.handler.start_hyperlink(&uri, id.as_deref()),
+            C::HyperlinkEnd => self.handler.end_hyperlink(),
             // Everything else has no terminal-modifying effect (kitty
             // clipboard protocol (5522, a NON-goal — parsed but not applied,
             // see module docs), notifications, conemu, kitty text/dnd,
@@ -1921,6 +1926,19 @@ impl Handler for TerminalHandler {
     }
     fn semantic_prompt(&mut self, cmd: &osc::SemanticPrompt) {
         self.terminal.semantic_prompt(cmd);
+    }
+    fn start_hyperlink(&mut self, uri: &str, id: Option<&str>) {
+        // The Screen owns hyperlink state + per-cell attribution. A failure
+        // (string-pool / set-rehash OOM) is non-fatal: we simply don't
+        // attribute the link, matching upstream's `catch` and the internal
+        // callers in screen/mod.rs that discard the same `Result`.
+        let _ = self
+            .terminal
+            .screen_mut()
+            .start_hyperlink(uri.as_bytes(), id.map(str::as_bytes));
+    }
+    fn end_hyperlink(&mut self) {
+        self.terminal.screen_mut().end_hyperlink();
     }
     fn color_operation(&mut self, requests: &osc::ColorList) {
         use osc::{ColorRequest, ColorTarget, Dynamic};
