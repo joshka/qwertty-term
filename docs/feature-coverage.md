@@ -66,11 +66,11 @@ items are `[ ]` wholesale unless noted.
 - [ ] `background-image` (+ fit/position/repeat/opacity)
 - [ ] `background-blur`, `background-opacity-cells`
 - [ ] `custom-shader` (shadertoy) + animation
-- [~] Kitty image *rendering* (R6 — slices 1–3 + 5 done: RGBA transmit→texture→placement
-      quads incl. unicode placeholders, scrollback tracking + viewport clip/cull,
-      delete/eviction + storage-limit texture reclaim, **and live-app rendering** (kitty
-      data threaded through `SnapshotWindow`, so images draw in the running terminal, not
-      just the test path); offscreen readback + dirty-equality. Remaining: z-order buckets (4))
+- [x] Kitty image *rendering* (R6 COMPLETE — RGBA transmit→texture→placement quads incl.
+      unicode placeholders, scrollback tracking + viewport clip/cull, delete/eviction +
+      storage-limit texture reclaim, live-app rendering (kitty data through `SnapshotWindow`),
+      and z-order buckets (below-bg / below-text / above-text); offscreen readback +
+      dirty-equality-proven. Follow-up perf note in #19: `Image.data`→`Arc` for copy-free)
 - [ ] Link detection/underline overlay (R7), `link-url`, `link-previews`
 - [ ] `resize-overlay`, OpenGL backend (R9, Linux)
 

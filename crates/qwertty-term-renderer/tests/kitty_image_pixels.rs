@@ -391,3 +391,77 @@ fn kitty_image_via_from_window_live_app_path() {
         );
     }
 }
+
+/// R6 slice 4: z-order buckets. A solid image with `z < 0` draws *below* text
+/// (a full-block glyph over it stays visible), while `z >= 0` draws *above* text
+/// (the image covers the glyph). Same glyph, opposite layering by z.
+#[test]
+fn kitty_image_z_order_below_and_above_text() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping z-order test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 10u16;
+    let rows = 3u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    // A 1×1 red pixel, displayed as one cell at the cursor with the given z.
+    let display = |col_1: u32, z: i32, id: u32| -> Vec<u8> {
+        let payload = base64::engine::general_purpose::STANDARD.encode([255u8, 0, 0, 255]);
+        format!("\x1b[1;{col_1}H\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,z={z},i={id};{payload}\x1b\\")
+            .into_bytes()
+    };
+
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    // Full-block glyphs across row 0 (fills each cell with the fg color).
+    stream.feed("█████████".as_bytes());
+    stream.feed(&display(3, -1, 1)); // below text at 0-indexed col 2
+    stream.feed(&display(7, 1, 2)); // above text at 0-indexed col 6
+    let term = stream.handler.terminal;
+
+    let snapshot = FullSnapshot::capture(&term, 0);
+    assert_eq!(snapshot.kitty_placements().len(), 2, "two placements");
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    engine.update_frame(&snapshot, &mut grid, FrameOptions::default());
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+    let (sw, sh) = engine.screen_size();
+    let frame = Frame {
+        pixels,
+        width: sw,
+        height: sh,
+        cell_w: cw as usize,
+        cell_h: ch as usize,
+    };
+
+    // Below-text (z=-1) at col 2: the block glyph draws OVER the red image →
+    // the cell shows the (light) glyph, not red.
+    let below = frame.cell_center(2, 0);
+    assert!(
+        below.r > 120 && below.g > 120 && below.b > 120,
+        "z<0 image is below text: block glyph stays visible (light), got {below:?}"
+    );
+    // Above-text (z=1) at col 6: the red image draws OVER the block glyph →
+    // the cell shows red.
+    let above = frame.cell_center(6, 0);
+    assert!(
+        above.r > 180 && above.g < 70 && above.b < 70,
+        "z>=0 image is above text: image covers the glyph (red), got {above:?}"
+    );
+}
