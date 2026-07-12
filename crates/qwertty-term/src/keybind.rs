@@ -49,15 +49,6 @@ pub fn build_set(entries: &[String]) -> Set {
     set
 }
 
-/// Resolve a physical key + modifier state to its bound [`Action`] (cloned), or
-/// `None` if unbound. Probes the physical trigger then the key's Unicode
-/// codepoint, mirroring the first two probes of [`Set::get_event`]. Used by the
-/// chord-dispatch path (`performKeyEquivalent:`); the byte-producing `text:`
-/// counterpart is [`resolve_text_bytes`].
-pub fn resolve_action(set: &Set, key: Key, mods: TabMods) -> Option<Action> {
-    lookup_action(set, key, to_mods(mods)).cloned()
-}
-
 /// Resolve a physical key + modifier state to the bytes a byte-emitting binding
 /// sends to the pty (`text:` / `esc:` / `csi:`), or `None` for any other (or no)
 /// binding. Probes the physical trigger first, then the key's Unicode codepoint
@@ -103,8 +94,9 @@ pub fn action_bytes(action: &Action) -> Option<Vec<u8>> {
 /// [`sequence_step`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SeqStep {
-    /// The key completed a binding; dispatch this action and end the sequence.
-    Leaf(Action),
+    /// The key completed a binding; dispatch these actions (in order) and end the
+    /// sequence. A plain leaf yields one action; a `chain=` leaf yields several.
+    Leaf(Vec<Action>),
     /// The key is a further leader; the sequence continues one level deeper. The
     /// carried [`Trigger`] is the one that matched (pushed onto the path).
     Descend(Trigger),
@@ -133,13 +125,33 @@ pub fn sequence_step(set: &Set, path: &[Trigger], key: Key, mods: TabMods) -> Se
     let m = to_mods(mods);
     for trigger in candidate_triggers(key, m) {
         if let Some(bound) = level.get(trigger) {
-            return SeqStep::Leaf(bound.action.clone());
+            return SeqStep::Leaf(vec![bound.action.clone()]);
+        }
+        if let Some((actions, _flags)) = level.get_chained(trigger) {
+            return SeqStep::Leaf(actions.to_vec());
         }
         if level.get_leader(trigger).is_some() {
             return SeqStep::Descend(trigger);
         }
     }
     SeqStep::NoMatch
+}
+
+/// Resolve a physical key + modifier state to the action(s) it runs: one for a
+/// plain leaf, several for a `chain=` leaf, or empty if unbound. Probes physical
+/// then codepoint (like [`Set::get_event`]). Used by the single-key chord path
+/// (`performKeyEquivalent:`), which dispatches each action in order.
+pub fn resolve_actions(set: &Set, key: Key, mods: TabMods) -> Vec<Action> {
+    let m = to_mods(mods);
+    for trigger in candidate_triggers(key, m) {
+        if let Some(bound) = set.get(trigger) {
+            return vec![bound.action.clone()];
+        }
+        if let Some((actions, _flags)) = set.get_chained(trigger) {
+            return actions.to_vec();
+        }
+    }
+    Vec::new()
 }
 
 /// The physical then codepoint triggers to probe for a `(key, mods)`, matching
@@ -343,7 +355,7 @@ mod tests {
         // Then `c` completes the sequence → its leaf action.
         assert_eq!(
             sequence_step(&set, &[leader], Key::KeyC, TabMods::default()),
-            SeqStep::Leaf(Action::Text("zz".to_string()))
+            SeqStep::Leaf(vec![Action::Text("zz".to_string())])
         );
 
         // An unrelated key after the leader aborts (NoMatch).
@@ -356,6 +368,22 @@ mod tests {
         assert_eq!(
             sequence_step(&set, &[], Key::KeyC, TabMods::default()),
             SeqStep::NoMatch
+        );
+    }
+
+    #[test]
+    fn chain_binding_resolves_to_all_actions_in_order() {
+        // `x=text:A` then `chain=text:B` makes `x` a chained leaf running both.
+        let set = build_set(&["x=text:A".to_string(), "chain=text:B".to_string()]);
+        assert_eq!(
+            resolve_actions(&set, Key::KeyX, TabMods::default()),
+            vec![Action::Text("A".to_string()), Action::Text("B".to_string())]
+        );
+        // A plain (non-chained) binding resolves to a single-element vec.
+        let plain = build_set(&["y=text:C".to_string()]);
+        assert_eq!(
+            resolve_actions(&plain, Key::KeyY, TabMods::default()),
+            vec![Action::Text("C".to_string())]
         );
     }
 

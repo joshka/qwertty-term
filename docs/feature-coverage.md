@@ -159,10 +159,11 @@ items are `[ ]` wholesale unless noted.
       macOS split/search/tab chords are now upstream's exact defaults. Remaining: wire
       the remaining action categories (font-size, scroll, clipboard, window, …) + the
       runtime sequence/chain (leader-key) dispatch.
-- [~] `Binding.zig` runtime: **leader-key sequences dispatched** (`ctrl+a>c`, via
-      `handle_key_sequence` — a leader stack over the `Set`'s `Leader`/`Leaf` storage;
-      idle-timeout + flush-on-abort deferred). Remaining: chained-action (`chain=`)
-      dispatch, key tables, `global` binds, `performable` fallthrough.
+- [~] `Binding.zig` runtime: **leader-key sequences** (`ctrl+a>c`) **and `chain=`
+      multi-action bindings dispatched** (`handle_key_sequence` + `resolve_actions`
+      over the `Set`'s `Leader`/`Leaf`/`LeafChained` storage). Remaining: sequence
+      idle-timeout + flush-on-abort, key tables, `global` binds, `performable`
+      fallthrough.
 - [ ] Most keybind *actions* that need new behavior: `jump_to_prompt`,
       `write_scrollback_file`, `inspector`, `scroll_page_*`, `adjust_selection`,
       `select_all`, `clear_screen`, `crash`, config-reload
