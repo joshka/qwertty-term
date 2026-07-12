@@ -49,6 +49,11 @@
 //! This crate depends on `qwertty-term-vt` (read-only use of its snapshot APIs)
 //! and never the reverse.
 //!
+//! For the end-to-end "VT bytes in, pixels out" embedding flow — feed a
+//! terminal, [`snapshot::FullSnapshot::capture_live`] it, and
+//! [`engine::Engine::render`] one offscreen frame — see the quickstart in the
+//! [`engine`] module docs (macOS only) and the `examples/frame-capture` crate.
+//!
 //! See `docs/analysis/renderer-r0.md` for the survey of the R0 Zig source,
 //! `docs/analysis/renderer-r1.md` for the R1 GPU-backend survey
 //! (`src/renderer/Metal.zig` + `src/renderer/metal/`, commit `2da015cd6`), and

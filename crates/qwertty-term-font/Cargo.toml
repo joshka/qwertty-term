@@ -6,6 +6,14 @@ license.workspace = true
 repository.workspace = true
 description = "Font table parsing, cell-metrics derivation, and texture atlas allocation for qwertty-term. Standalone port of Ghostty's src/font/ opentype layer, Metrics.zig, and Atlas.zig."
 
+# The CoreText face/collection/discovery layer (Face, Collection,
+# CodepointResolver's backing) is `cfg(target_os = "macos")` — CoreText is the
+# only font backend today. docs.rs defaults to a Linux target, which would omit
+# those modules; build the docs for a darwin target so the full API is shown.
+[package.metadata.docs.rs]
+default-target = "x86_64-apple-darwin"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+
 [lib]
 name = "qwertty_term_font"
 
