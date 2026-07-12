@@ -17,7 +17,8 @@
 use freetype::face::LoadFlag;
 use freetype::{Library, RenderMode};
 
-use crate::metrics::FaceMetrics;
+use crate::constraint::Constraint;
+use crate::metrics::{FaceMetrics, Metrics};
 use crate::presentation::{Presentation, PresentationMode};
 use crate::raster::{Bitmap, PixelFormat};
 
@@ -111,6 +112,39 @@ impl Face {
     /// Load the embedded JetBrains Mono fallback at `size_px`.
     pub fn load_embedded(size_px: f64) -> Result<Face, Error> {
         Self::load_from_bytes(crate::embedded::JETBRAINS_MONO_VARIABLE, size_px)
+    }
+
+    /// Embedded bold. **Approximate:** the embedded JetBrains Mono is a variable
+    /// font with no separate bold file and FreeType `wght`-instance selection
+    /// isn't wired yet, so this is the regular face with synthetic bold applied
+    /// (ADR 003 P2 "approximate"). Real bold comes from an actual bold member
+    /// when a family has one.
+    pub fn load_embedded_bold(size_px: f64) -> Result<Face, Error> {
+        Ok(Self::load_embedded(size_px)?.synthetic_bold(Self::synthetic_bold_line_width(size_px)))
+    }
+
+    /// Embedded italic — the real italic variable font (true italic outlines).
+    pub fn load_embedded_italic(size_px: f64) -> Result<Face, Error> {
+        Self::load_from_bytes(crate::embedded::JETBRAINS_MONO_VARIABLE_ITALIC, size_px)
+    }
+
+    /// Embedded bold-italic: the real italic font with synthetic bold applied
+    /// (approximate, as [`load_embedded_bold`](Self::load_embedded_bold)).
+    pub fn load_embedded_bold_italic(size_px: f64) -> Result<Face, Error> {
+        Ok(Self::load_embedded_italic(size_px)?
+            .synthetic_bold(Self::synthetic_bold_line_width(size_px)))
+    }
+
+    /// Embedded Nerd Font symbols face (Powerline/PUA icons).
+    pub fn load_embedded_symbols_nerd_font(size_px: f64) -> Result<Face, Error> {
+        Self::load_from_bytes(crate::embedded::SYMBOLS_NERD_FONT_MONO, size_px)
+    }
+
+    /// An independent copy of this face at `size_px`, byte-backed as before but
+    /// with synthetic flags reset (matches `coretext::Face::try_clone`, used by
+    /// the collection's alias-to-regular / synthesize-on-a-fresh-copy paths).
+    pub fn try_clone(&self, size_px: f64) -> Result<Face, Error> {
+        Self::load_from_bytes_indexed(&self.bytes, size_px, self.face_index)
     }
 
     /// The pixel size this face was loaded at.
@@ -332,6 +366,26 @@ impl Face {
     }
 }
 
+impl Face {
+    /// Rasterize with an optional glyph constraint (Nerd Font icon sizing /
+    /// emoji cover-fit).
+    ///
+    /// **Linux approximation (ADR 003 P2 "un-gate now, approximate"):** the
+    /// constraint is currently a no-op — the glyph is rasterized at its natural
+    /// size. Constrained glyphs (Nerd Font PUA icons, emoji) therefore render
+    /// unscaled, which can overflow the cell; honoring the constraint (a
+    /// bitmap-scale or outline transform) is a follow-up. The signature matches
+    /// `coretext::Face::rasterize_constrained` so the shared `grid` code drives
+    /// both faces uniformly.
+    pub fn rasterize_constrained(
+        &self,
+        glyph_id: u32,
+        _constraint: Option<(Constraint, &Metrics, u32)>,
+    ) -> Result<Bitmap, Error> {
+        self.rasterize(glyph_id)
+    }
+}
+
 /// Approximate emboldening: dilate coverage 1px to the right by taking, for each
 /// pixel, the max of it and its left neighbour. Thickens vertical strokes by ~1px
 /// without touching the glyph outline (no unsafe FreeType FFI). A coarse stand-in
@@ -456,6 +510,25 @@ mod tests {
             total_ink(&bold),
             total_ink(&regular)
         );
+    }
+
+    #[test]
+    fn embedded_family_loaders_and_try_clone() {
+        // Every embedded family variant loads and can rasterize 'H'.
+        for face in [
+            Face::load_embedded(16.0).unwrap(),
+            Face::load_embedded_bold(16.0).unwrap(),
+            Face::load_embedded_italic(16.0).unwrap(),
+            Face::load_embedded_bold_italic(16.0).unwrap(),
+            Face::load_embedded_symbols_nerd_font(16.0).unwrap(),
+        ] {
+            let clone = face.try_clone(24.0).expect("try_clone");
+            assert_eq!(clone.size_px(), 24.0, "clone takes the new size");
+            // The nerd-font face may not have 'H'; the text faces do.
+            if let Some(gid) = face.glyph_index('H') {
+                assert!(face.rasterize(gid).is_ok());
+            }
+        }
     }
 
     #[test]
