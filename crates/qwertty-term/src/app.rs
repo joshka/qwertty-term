@@ -1225,10 +1225,12 @@ pub struct ControllerState {
     /// Wheel-scroll multipliers (`mouse-scroll-multiplier` config), clamped to
     /// upstream's valid range.
     scroll_multiplier: crate::scroll::ScrollMultiplier,
-    /// User `text:` keybindings parsed from `config.keybind` at startup
-    /// (`crate::keybind`). Resolved in the key path BEFORE the encoder, so a
-    /// bound chord sends its literal bytes instead of the encoder's default.
-    keybinds: crate::keybind::KeybindTable,
+    /// User keybindings parsed from `config.keybind` at startup into the ported
+    /// `Binding.zig` [`Set`](qwertty_term_input::binding::Set). Resolved in the
+    /// key path BEFORE the encoder; currently only `text:` actions are dispatched
+    /// from here (a bound chord sends its literal bytes instead of the encoder's
+    /// default) — the remaining actions are wired as the bespoke tables collapse.
+    keybinds: qwertty_term_input::binding::Set,
     /// Unfocused-split dimming overlay alpha (`1 - unfocused-split-opacity`,
     /// clamped). 0 disables dimming (opacity 1.0). Applied to unfocused panes of
     /// multi-pane tabs only.
@@ -1315,7 +1317,7 @@ impl Controller {
                 discrete: config.mouse_scroll_multiplier.discrete,
             }
             .clamped(),
-            keybinds: crate::keybind::KeybindTable::parse(&config.keybind),
+            keybinds: crate::keybind::build_set(&config.keybind),
             // Overlay alpha = 1 - opacity (upstream `SurfaceView.swift` getter),
             // opacity clamped to [0.15, 1.0]. Opacity 1.0 → alpha 0 → no dimming.
             unfocused_dim_alpha: 1.0 - config.unfocused_split_opacity(),
@@ -2294,7 +2296,7 @@ impl Controller {
         mods: crate::tabkeys::TabMods,
     ) -> bool {
         let mut state = self.0.borrow_mut();
-        let Some(bytes) = state.keybinds.resolve(key, mods).map(<[u8]>::to_vec) else {
+        let Some(bytes) = crate::keybind::resolve_text_bytes(&state.keybinds, key, mods) else {
             return false;
         };
         if let Some(s) = state
