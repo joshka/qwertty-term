@@ -436,17 +436,32 @@ pub enum DeviceAttributesReq {
 pub enum DeviceStatusReq {
     OperatingStatus,
     CursorPosition,
+    /// `CSI ? 996 n` — report the current light/dark color scheme (mode 2031
+    /// family). The `?` prefix is required.
+    ColorScheme,
 }
 
 impl DeviceStatusReq {
-    /// Port of `device_status.reqFromInt`.
+    /// Port of `device_status.reqFromInt`. The `question` flag is the `?`
+    /// private-marker: upstream's entry table pins each request to a specific
+    /// marker, so `CSI 6 n` (CPR) is valid but the private `CSI ? 6 n` is not,
+    /// and the color-scheme report is only valid as `CSI ? 996 n`.
     fn from_int(value: u16, question: bool) -> Option<DeviceStatusReq> {
         match (value, question) {
             (5, false) => Some(DeviceStatusReq::OperatingStatus),
-            (6, _) => Some(DeviceStatusReq::CursorPosition),
+            (6, false) => Some(DeviceStatusReq::CursorPosition),
+            (996, true) => Some(DeviceStatusReq::ColorScheme),
             _ => None,
         }
     }
+}
+
+/// The OS color scheme, reported in response to `CSI ? 996 n` (and mode 2031
+/// change notifications). Port of `device_status.ColorScheme`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    Light,
+    Dark,
 }
 
 /// The stream: composes decoder + parser and routes parser actions to a
@@ -1581,6 +1596,14 @@ pub struct TerminalHandler {
     /// executed against the terminal ([`kitty::execute`]), with any response
     /// pushed onto `output`. Glyph commands are a documented seam.
     apc_handler: apc::Handler,
+    /// The current OS light/dark color scheme, if the embedder has told us one
+    /// via [`TerminalHandler::set_color_scheme`]. `None` until then. Consumed
+    /// by the `CSI ? 996 n` (DSR color-scheme) reply: upstream answers this
+    /// query via a `color_scheme` effect callback that returns `null` when the
+    /// scheme is unknown, in which case it stays silent — we mirror that with
+    /// `None` → no reply. (The apprt/embedder is the source of truth for the
+    /// OS theme; the terminal core just relays it.)
+    color_scheme: Option<ColorScheme>,
 }
 
 /// Convenience accessors for the common `Stream<TerminalHandler>` pairing, so
@@ -1622,7 +1645,17 @@ impl TerminalHandler {
             pending_clipboard: None,
             pending_bell: false,
             apc_handler: apc::Handler::new(),
+            color_scheme: None,
         }
+    }
+
+    /// Tell the terminal the current OS light/dark color scheme, so a
+    /// `CSI ? 996 n` (DSR color-scheme) query can be answered. Until this is
+    /// set the query is answered with silence (matching upstream's `null`
+    /// effect). The embedder should call this on startup and whenever the OS
+    /// theme changes (upstream also re-reports live under mode 2031).
+    pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
+        self.color_scheme = Some(scheme);
     }
 
     /// Drain the accumulated reply bytes.
@@ -2039,6 +2072,17 @@ impl Handler for TerminalHandler {
                 };
                 let resp = format!("\x1b[{};{}R", y + 1, x + 1);
                 self.write_pty(resp.as_bytes());
+            }
+            DeviceStatusReq::ColorScheme => {
+                // Port of `device_status.encodeColorSchemeReport`: dark →
+                // `CSI ? 997 ; 1 n`, light → `CSI ? 997 ; 2 n`. With no scheme
+                // known we stay silent (upstream's `color_scheme` effect
+                // returns null → no reply).
+                match self.color_scheme {
+                    Some(ColorScheme::Dark) => self.write_pty(b"\x1b[?997;1n"),
+                    Some(ColorScheme::Light) => self.write_pty(b"\x1b[?997;2n"),
+                    None => {}
+                }
             }
         }
     }
