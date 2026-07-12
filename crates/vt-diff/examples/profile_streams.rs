@@ -6,7 +6,7 @@
 //!   cargo build -p vt-diff --release --example profile_streams
 //!   samply record ./target/release/examples/profile_streams <stream> <iters>
 //!
-//! `<stream>` is one of: ascii sgr utf8 cursor dense erase redraw scrolling scroll-region all
+//! `<stream>` is one of: ascii sgr utf8 cursor dense erase redraw cjk scrolling scroll-region all
 //! `<iters>` repeats the payload feed that many times (default sized for ~seconds).
 
 use std::time::Instant;
@@ -37,6 +37,17 @@ fn sgr_stream() -> Vec<u8> {
 
 fn utf8_stream() -> Vec<u8> {
     let chunk = "héllo wörld 好的 テスト 🙂👍 mixed ascii tail\r\n";
+    chunk
+        .bytes()
+        .cycle()
+        .take(STREAM_MIB * 1024 * 1024)
+        .collect()
+}
+
+/// Wide-heavy stream: mostly CJK (width-2) codepoints, exercising the wide
+/// print_slice fill's (wide, spacer_tail) pair path.
+fn cjk_stream() -> Vec<u8> {
+    let chunk = "你好世界这是宽字符吞吐测试文本一二三四五六七八九十百千万\r\n";
     chunk
         .bytes()
         .cycle()
@@ -173,6 +184,7 @@ fn main() {
         ("ascii", ascii_stream()),
         ("sgr", sgr_stream()),
         ("utf8", utf8_stream()),
+        ("cjk", cjk_stream()),
         ("cursor", cursor_stream()),
         ("dense", dense_cells_stream()),
         ("erase", erase_stream()),

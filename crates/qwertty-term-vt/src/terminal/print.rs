@@ -134,7 +134,7 @@ impl Terminal {
     pub fn print_slice(&mut self, cps: &[u32]) {
         let mut i = 0;
         while i < cps.len() {
-            let consumed = self.print_slice_fast_narrow(&cps[i..]);
+            let consumed = self.print_slice_fast(&cps[i..]);
             if consumed > 0 {
                 i += consumed;
                 continue;
@@ -145,10 +145,11 @@ impl Terminal {
         }
     }
 
-    /// Attempt to print a prefix of `cps` via the batched narrow fast path.
+    /// Attempt to print a prefix of `cps` via the batched fast path.
     /// Returns the number of codepoints consumed (0 => caller must use `print`).
-    /// Port of the narrow portion of `printSliceFast` + `printSliceFill`.
-    fn print_slice_fast_narrow(&mut self, cps: &[u32]) -> usize {
+    /// Port of `printSliceFast`: dispatches to the width-specialized
+    /// [`print_slice_fill`](Self::print_slice_fill) (narrow / wide).
+    fn print_slice_fast(&mut self, cps: &[u32]) -> usize {
         // Only the main display is supported.
         if self.status_display != super::StatusDisplay::Main {
             return 0;
@@ -189,7 +190,7 @@ impl Terminal {
                 return 0;
             }
             // [0x10, 0xFF] is always narrow and never clusters.
-            return self.print_slice_fill_narrow(cps, grapheme_cluster, allow_unicode);
+            return self.print_slice_fill::<false>(cps, grapheme_cluster, allow_unicode);
         }
 
         if !allow_unicode {
@@ -207,17 +208,25 @@ impl Terminal {
         if grapheme_cluster && (self.screen().cursor.pending_wrap || self.screen().cursor.x != 0) {
             return 0;
         }
-        // Only narrow (width-1) codepoints are handled here; wide runs defer
-        // to `print`.
-        if crate::unicode::codepoint_width(cp0) != 1 {
-            return 0;
+        // Dispatch by width class: narrow (width 1) or wide (width 2). The
+        // width is a runtime value while `print_slice_fill` is specialized on
+        // the const-generic width, so this selects the instantiation. Anything
+        // else (zero-width combining marks etc.) defers to `print`.
+        match crate::unicode::codepoint_width(cp0) {
+            1 => self.print_slice_fill::<false>(cps, grapheme_cluster, allow_unicode),
+            2 => self.print_slice_fill::<true>(cps, grapheme_cluster, allow_unicode),
+            _ => 0,
         }
-        self.print_slice_fill_narrow(cps, grapheme_cluster, allow_unicode)
     }
 
-    /// The row-filling narrow batch. The first codepoint is validated by the
-    /// caller. Port of `printSliceFill(.narrow, ...)`.
-    fn print_slice_fill_narrow(
+    /// The row-filling batch, specialized on width class at compile time.
+    /// `WIDE == false` fills narrow (width-1) cells one per codepoint;
+    /// `WIDE == true` fills wide (width-2) codepoints as `(wide, spacer_tail)`
+    /// cell pairs, with spacer-head handling at the right edge. The first
+    /// codepoint is validated by the caller. Port of the comptime-specialized
+    /// `printSliceFill(width, ...)` (47e26df60; the narrow-only bulk style
+    /// path is cb2d78587).
+    fn print_slice_fill<const WIDE: bool>(
         &mut self,
         cps: &[u32],
         grapheme_cluster: bool,
@@ -225,20 +234,25 @@ impl Terminal {
     ) -> usize {
         use crate::unicode::{BreakState, grapheme_break};
 
-        // Determine the run of narrow, batchable codepoints. For cps after the
-        // first, the previous cp in the run is always written as a fresh
-        // single-cp cell, so the grapheme-break check against it is exact.
+        // Cells occupied per codepoint of this width class.
+        let cells_per_cp: usize = if WIDE { 2 } else { 1 };
+        let expected_width = cells_per_cp as u8;
+
+        // Determine the run of same-width-class batchable codepoints. For cps
+        // after the first, the previous cp in the run is always written as a
+        // fresh single-codepoint cell, so the grapheme-break check is exact.
         let run_len: usize = {
             let mut r = cps.len();
             for idx in 1..cps.len() {
                 let cp = cps[idx];
-                if (0x10..=0xFF).contains(&cp) {
+                // [0x10, 0xFF] is always narrow (width 1) and never clusters.
+                if !WIDE && (0x10..=0xFF).contains(&cp) {
                     continue;
                 }
                 if cp > 0xFF
                     && allow_unicode
                     && cp != crate::kitty::unicode::PLACEHOLDER
-                    && crate::unicode::codepoint_width(cp) == 1
+                    && crate::unicode::codepoint_width(cp) == expected_width
                 {
                     if !grapheme_cluster {
                         continue;
@@ -270,6 +284,12 @@ impl Terminal {
                 self.scrolling_region.right + 1
             };
 
+            // A degenerate 1-wide region can't hold a wide char; print() has
+            // special handling, so defer the rest to it.
+            if WIDE && (right_limit - self.scrolling_region.left) <= 1 {
+                break 'outer;
+            }
+
             let cursor_x = self.screen().cursor.x;
             let avail = (right_limit - cursor_x) as usize;
             debug_assert!(avail > 0);
@@ -287,16 +307,63 @@ impl Terminal {
             };
             let check_expected = Cell::simple_check_expected(style_id);
 
-            // Cells we can write into this row.
-            let count = avail.min(run_len - printed);
-            debug_assert!(count > 0);
-            let cell_count = count;
-
             // SAFETY: the cursor cell/page pointers are live and the run stays
             // within [cursor.x, right_limit) of the current row.
             let base_cell = self.screen().cursor.page_cell;
             let page = unsafe { self.screen().cursor_page() };
             let mem = unsafe { (*page).memory_mut() };
+
+            // Wide char with only one cell left in the row: print() writes a
+            // spacer head (or a blank narrow cell inside a right margin) and
+            // wraps. We require a simple destination cell; else fall back.
+            if WIDE && avail == 1 {
+                let bits = unsafe { (*base_cell).cval() };
+                if (bits & Cell::SIMPLE_MASK) != check_expected {
+                    break 'outer;
+                }
+                let spacer_bits = if right_limit == self.cols {
+                    // SAFETY: cursor row live.
+                    unsafe {
+                        (*self.screen().cursor.page_row).set_wrap(true);
+                    }
+                    let mut c = Cell::from_cval(template_bits);
+                    c.set_wide(Wide::SpacerHead);
+                    c.cval()
+                } else {
+                    template_bits // blank narrow cell inside a right margin
+                };
+                // SAFETY: cursor row live; base_cell is the current cell.
+                unsafe {
+                    (*self.screen().cursor.page_row).set_dirty(true);
+                    if style_id != DEFAULT_ID {
+                        (*self.screen().cursor.page_row).set_styled(true);
+                    }
+                    *base_cell = Cell::from_cval(spacer_bits);
+                }
+                self.print_wrap();
+                continue 'outer;
+            }
+
+            // Cells we can write into this row (whole codepoints only).
+            let count = (avail / cells_per_cp).min(run_len - printed);
+            debug_assert!(count > 0);
+            let cell_count = count * cells_per_cp;
+
+            // Wide cells always come in (wide, spacer_tail) pairs.
+            let wide_bits: u64 = if WIDE {
+                let mut w = Cell::from_cval(template_bits);
+                w.set_wide(Wide::Wide);
+                w.cval()
+            } else {
+                0
+            };
+            let spacer_tail_bits: u64 = if WIDE {
+                let mut s = Cell::from_cval(template_bits);
+                s.set_wide(Wide::SpacerTail);
+                s.cval()
+            } else {
+                0
+            };
 
             let mut k = 0usize; // cells written this row
             'fill: while k < cell_count {
@@ -310,28 +377,42 @@ impl Terminal {
                     simple += 1;
                 }
 
-                for idx in k..simple {
-                    let bits = template_bits | ((cps[printed + idx] as u64) << cp_shift);
-                    unsafe {
-                        *base_cell.add(idx) = Cell::from_cval(bits);
+                if WIDE {
+                    // Only whole (wide, spacer_tail) pairs can be written.
+                    let pair_end = k + (simple - k) / 2 * 2;
+                    let mut idx = k;
+                    while idx < pair_end {
+                        let bits = wide_bits | ((cps[printed + idx / 2] as u64) << cp_shift);
+                        unsafe {
+                            *base_cell.add(idx) = Cell::from_cval(bits);
+                            *base_cell.add(idx + 1) = Cell::from_cval(spacer_tail_bits);
+                        }
+                        idx += 2;
                     }
+                    k = pair_end;
+                } else {
+                    for idx in k..simple {
+                        let bits = template_bits | ((cps[printed + idx] as u64) << cp_shift);
+                        unsafe {
+                            *base_cell.add(idx) = Cell::from_cval(bits);
+                        }
+                    }
+                    k = simple;
                 }
-                k = simple;
                 if k >= cell_count {
                     break;
                 }
 
-                // Bulk path for runs of cells that differ from the expected
-                // simple cell only by their style id: the common case when
-                // styled text overwrites previously styled (or default-styled)
-                // rows, e.g. TUI redraws. One scan finds the run of identical
-                // old styles, the ref counts are fixed with a single
+                // Bulk path (narrow only) for runs of cells that differ from
+                // the expected simple cell only by their style id: the common
+                // case when styled text overwrites previously styled (or
+                // default) rows, e.g. TUI redraws. One scan finds the run of
+                // identical old styles, the ref counts are fixed with a single
                 // release_multiple/use_multiple pair, and the cells get the
-                // same branch-free fill as the simple case. Port of upstream
-                // printSliceFill's bulk path (cb2d78587). Cells with
-                // graphemes, hyperlinks, or wide content still fall through
-                // to the general path below.
-                {
+                // same branch-free fill. Port of printSliceFill's bulk path
+                // (cb2d78587). Cells with graphemes, hyperlinks, or wide
+                // content still fall through to the general path below.
+                if !WIDE {
                     let old_bits = unsafe { (*base_cell.add(k)).cval() };
                     let first = old_bits & Cell::SIMPLE_MASK;
                     let old_style = unsafe { (*base_cell.add(k)).style_id() };
@@ -386,36 +467,50 @@ impl Terminal {
                     }
                 }
 
-                // General path for the cell that failed the masked check.
+                // General path for the cell(s) that failed the masked check.
                 // Anything needing cleanup (wide/spacer, grapheme, hyperlink)
-                // falls back to print().
-                let cell = unsafe { &mut *base_cell.add(k) };
-                if cell.wide() != Wide::Narrow || cell.has_grapheme() || cell.hyperlink() {
-                    break 'fill;
-                }
-                // Style-only mismatch: adjust ref counts, then overwrite.
-                if cell.style_id() != style_id {
-                    if cell.style_id() != DEFAULT_ID {
-                        // SAFETY: mem is the owning page's base; id is live.
-                        unsafe {
-                            (*page).styles().release(mem, cell.style_id());
-                        }
-                    }
-                    if style_id != DEFAULT_ID {
-                        // SAFETY: same page base; style_id is the cursor's live id.
-                        unsafe {
-                            (*page).styles().use_id(mem, style_id);
-                        }
+                // in either cell of the pair falls back to print().
+                for offset in 0..cells_per_cp {
+                    let cell = unsafe { &*base_cell.add(k + offset) };
+                    if cell.wide() != Wide::Narrow || cell.has_grapheme() || cell.hyperlink() {
+                        break 'fill;
                     }
                 }
-                let bits = template_bits | ((cps[printed + k] as u64) << cp_shift);
-                unsafe {
-                    *base_cell.add(k) = Cell::from_cval(bits);
+                // Style-only mismatch: adjust ref counts per cell, then write.
+                for offset in 0..cells_per_cp {
+                    let cell_style = unsafe { (*base_cell.add(k + offset)).style_id() };
+                    if cell_style != style_id {
+                        if cell_style != DEFAULT_ID {
+                            // SAFETY: mem is the owning page's base; id is live.
+                            unsafe {
+                                (*page).styles().release(mem, cell_style);
+                            }
+                        }
+                        if style_id != DEFAULT_ID {
+                            // SAFETY: same page base; style_id is the cursor's live id.
+                            unsafe {
+                                (*page).styles().use_id(mem, style_id);
+                            }
+                        }
+                    }
                 }
-                k += 1;
+                if WIDE {
+                    let bits = wide_bits | ((cps[printed + k / 2] as u64) << cp_shift);
+                    unsafe {
+                        *base_cell.add(k) = Cell::from_cval(bits);
+                        *base_cell.add(k + 1) = Cell::from_cval(spacer_tail_bits);
+                    }
+                } else {
+                    let bits = template_bits | ((cps[printed + k] as u64) << cp_shift);
+                    unsafe {
+                        *base_cell.add(k) = Cell::from_cval(bits);
+                    }
+                }
+                k += cells_per_cp;
             }
 
             if k > 0 {
+                debug_assert_eq!(k % cells_per_cp, 0);
                 // SAFETY: cursor row live.
                 unsafe {
                     (*self.screen().cursor.page_row).set_dirty(true);
@@ -423,8 +518,8 @@ impl Terminal {
                         (*self.screen().cursor.page_row).set_styled(true);
                     }
                 }
-                self.previous_char = Some(cps[printed + k - 1]);
-                printed += k;
+                self.previous_char = Some(cps[printed + k / cells_per_cp - 1]);
+                printed += k / cells_per_cp;
 
                 // Advance the cursor. If we filled through the right limit, the
                 // cursor stays on the last cell with pending_wrap set.
