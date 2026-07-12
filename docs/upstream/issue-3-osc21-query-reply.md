@@ -43,7 +43,7 @@ OSC 4/10/11 style queries and OSC 21 (`kittyColorReport`).
 With a terminal created via the C API (or the in-tree Zig test below), install a
 `GHOSTTY_TERMINAL_OPT_WRITE_PTY` callback and feed:
 
-```
+```text
 \x1b[5n              -> replies \x1b[0n   (callback plumbing works)
 \x1b]21;foreground=?\x1b\\   -> no reply  (kitty replies \x1b]21;foreground=rgb:..\x1b\\)
 \x1b]4;0;?\x1b\\             -> no reply  (xterm replies \x1b]4;0;rgb:..\x07)
