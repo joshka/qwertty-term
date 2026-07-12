@@ -57,18 +57,30 @@ impl std::error::Error for Error {}
 /// metric derivation).
 pub struct Face {
     face: freetype::Face,
-    /// The font bytes, kept for the `ttf-parser` metric derivation.
+    /// The font bytes, kept for the `ttf-parser` metric derivation and for
+    /// rustybuzz shaping (`ShapeFace::source_bytes`).
     bytes: Vec<u8>,
     size_px: f64,
+    /// Subface index within a `.ttc`/`.otc` collection (0 for a single face).
+    face_index: u32,
 }
 
 impl Face {
     /// Load a face from in-memory font bytes at `size_px`.
     pub fn load_from_bytes(bytes: &[u8], size_px: f64) -> Result<Face, Error> {
+        Self::load_from_bytes_indexed(bytes, size_px, 0)
+    }
+
+    /// Load subface `face_index` from a collection (or `0` for a single face).
+    pub fn load_from_bytes_indexed(
+        bytes: &[u8],
+        size_px: f64,
+        face_index: u32,
+    ) -> Result<Face, Error> {
         let lib = Library::init().map_err(|_| Error::LibraryInitFailed)?;
         let owned = bytes.to_vec();
         let face = lib
-            .new_memory_face(owned.clone(), 0)
+            .new_memory_face(owned.clone(), face_index as isize)
             .map_err(|_| Error::FaceLoadFailed)?;
         // Integer pixel sizing for slice 1 (fractional 26.6 sizing is a later
         // refinement); round to the nearest pixel like a display would.
@@ -78,6 +90,7 @@ impl Face {
             face,
             bytes: owned,
             size_px,
+            face_index,
         })
     }
 
@@ -89,6 +102,26 @@ impl Face {
     /// The pixel size this face was loaded at.
     pub fn size_px(&self) -> f64 {
         self.size_px
+    }
+
+    /// The font bytes this face was loaded from (for rustybuzz shaping). Always
+    /// `Some` for a FreeType face — it is always byte-backed (unlike a CoreText
+    /// system face, whose bytes may be unavailable).
+    pub fn source_bytes(&self) -> Option<&[u8]> {
+        Some(&self.bytes)
+    }
+
+    /// Subface index within a collection (`.ttc`), `0` for a single face.
+    pub fn face_index(&self) -> u32 {
+        self.face_index
+    }
+
+    /// The applied `wght` variation instance, if any. Slice 1/2 load the font's
+    /// default instance and apply no variation, so this is `None` (the shaper
+    /// then shapes the default instance, which is correct). Returns `Some` once
+    /// a `with_wght_variation` path lands (later P2 slice).
+    pub fn wght(&self) -> Option<f32> {
+        None
     }
 
     /// The glyph id for a character, or `None` if the face has no glyph for it.
