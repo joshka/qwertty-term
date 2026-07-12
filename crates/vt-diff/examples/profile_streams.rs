@@ -6,7 +6,7 @@
 //!   cargo build -p vt-diff --release --example profile_streams
 //!   samply record ./target/release/examples/profile_streams <stream> <iters>
 //!
-//! `<stream>` is one of: ascii sgr utf8 cursor dense erase scrolling scroll-region all
+//! `<stream>` is one of: ascii sgr utf8 cursor dense erase redraw scrolling scroll-region all
 //! `<iters>` repeats the payload feed that many times (default sized for ~seconds).
 
 use std::time::Instant;
@@ -107,6 +107,28 @@ fn erase_stream() -> Vec<u8> {
     v
 }
 
+/// Upstream's "TUI redraw" pattern (cb2d78587): repaint the full screen with
+/// uniform-style rows whose color rotates every frame, no clear in between —
+/// every cell is overwritten with a different style than it holds. Exercises
+/// the print_slice bulk style-only fill.
+fn redraw_stream() -> Vec<u8> {
+    let mut v = Vec::with_capacity(STREAM_MIB * 1024 * 1024 + 4096);
+    let mut frame: u32 = 0;
+    'outer: loop {
+        v.extend_from_slice(b"\x1b[H");
+        for line in 0..ROWS as u32 {
+            v.extend_from_slice(format!("\x1b[38;5;{}m", (frame + line) % 156 + 100).as_bytes());
+            v.extend(std::iter::repeat_n(b'x', COLS as usize));
+            v.extend_from_slice(b"\r\n");
+            if v.len() >= STREAM_MIB * 1024 * 1024 {
+                break 'outer;
+            }
+        }
+        frame += 1;
+    }
+    v
+}
+
 fn scrolling_stream() -> Vec<u8> {
     b"y\n"
         .iter()
@@ -154,6 +176,7 @@ fn main() {
         ("cursor", cursor_stream()),
         ("dense", dense_cells_stream()),
         ("erase", erase_stream()),
+        ("redraw", redraw_stream()),
         ("scrolling", scrolling_stream()),
         ("scroll-region", scroll_region_stream()),
     ];
