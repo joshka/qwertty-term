@@ -105,7 +105,9 @@ items are `[ ]` wholesale unless noted.
 - [x] Native NSWindow tabs, `new_tab`/`close_tab`/`goto_tab` (Cmd+1–9)/`move_tab`
 - [x] `tab-inherit-working-directory` (OSC 7 pwd)
 - [x] Tab bar visible only at 2+ tabs; Ctrl+Tab cycling
-- [ ] OSC-synced tab titles (`set_tab_title` action + live title from OSC 0/2)
+- [x] Live tab titles from OSC 0/2 (per-tab window/tab-label sync, ghost-emoji
+      fallback after the 500ms grace — title smoke)
+- [ ] `set_tab_title` keybind action (needs the Binding.zig system — T3)
 - [ ] `window-show-tab-bar` policy, `gtk-tabs-location`/`gtk-wide-tabs` (Linux)
 
 ## Splits (`src/apprt` + Splits, slice 1+2 done)
