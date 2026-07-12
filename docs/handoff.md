@@ -6,6 +6,17 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
+## Thread plan authored (2026-07-10, Fable pass)
+
+The port's completion is now organized as parallel Claude threads — see
+`docs/threads/README.md` (architecture: waves, territories, PR workflow, gate, status
+protocol) and `docs/threads/t1..t8-*.md` (per-thread specs with model tiers + backlogs).
+Wave 1: T1 perf (Opus), T2 renderer (Opus), T4 app polish (Opus), T8 ops (Sonnet).
+Wave 2: T3 config/keybinds, T5 vt-complete, T6 library/publish. T7 Linux parked behind an
+ADR. Launch recipe is in the README. Crates are PUBLISHED (0.1.0, all 8, 2026-07-08).
+Open items folded into thread backlogs: DOOM-fire regression -> T1 first item; three-way
+bench (agent in work/bench3) -> T1 inherits; upstream findings filing -> T8.
+
 ## IN FLIGHT at session pause (2026-07-10, usage limits)
 
 One chunk workspace has an agent finishing independently; each was told to gate +
