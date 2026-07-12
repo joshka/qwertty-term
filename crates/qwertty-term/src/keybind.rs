@@ -1,275 +1,102 @@
-//! Minimal user-configurable `keybind` support — the `text:` action subset only.
+//! User-configurable `keybind` dispatch, backed by the real `Binding.zig` port.
 //!
 //! The maintainer's real ghostty config contains
 //! `keybind = shift+enter=text:\x1b\r`, which makes Shift+Enter send `ESC CR`
-//! (many TUIs — e.g. some REPLs / editors — treat that as "insert newline
-//! without submitting"). This module supports EXACTLY that shape: a chord →
-//! literal-bytes table, parsed from config at startup and dispatched in the key
-//! path *before* the PTY encoder (the same interception discipline
-//! [`crate::tabkeys`] / [`crate::splitkeys`] use, but for arbitrary user chords
-//! that emit bytes rather than built-in tab/split actions).
+//! (many TUIs treat that as "insert newline without submitting"). This module
+//! wires the user's `keybind` config entries into
+//! [`qwertty_term_input::binding::Set`] — the ported `Binding.zig` trigger/action
+//! system — and dispatches the `text:` action in the key path *before* the PTY
+//! encoder (the same interception discipline [`crate::tabkeys`] /
+//! [`crate::splitkeys`] use, but for arbitrary user chords that emit bytes).
 //!
-//! This is explicitly **not** the full `Binding.zig` port (~4.9k LoC, deferred).
-//! It is a static-ish table + a pure `resolve`, structured so the eventual full
-//! keybind chunk can absorb it: the trigger grammar and the `text:` unescaper are
-//! pure functions over the same AppKit-free [`TabMods`](crate::tabkeys::TabMods)
-//! bitset and [`qwertty_term_input::key::Key`] the built-in tables already use.
+//! This replaces the previous bespoke `text:`-only table: trigger parsing, the
+//! action model, and last-wins overwrite now come from the shared port
+//! (`Set::parse_and_put`), so every trigger shape and action the port supports
+//! parses here. For now only `text:` is *dispatched* at this seam; the other
+//! actions (tab/split/search/window/…) are dispatched in later keybind slices as
+//! the four bespoke tables are collapsed into this one `Set`.
 //!
 //! # Upstream syntax (cited)
 //!
-//! Trigger grammar — `src/input/Binding.zig` `Trigger.parse` (Ghostty commit
-//! `2da015cd6`, lines ~1236–1370): the trigger is split on `+`; each part is
-//! either a modifier (matched against the `key.Mods` field names `shift` /
-//! `ctrl` / `alt` / `super`, plus aliases such as `cmd`/`command`→`super`,
-//! `opt`/`option`→`alt`, `control`→`ctrl`) or a key name (physical `key.Key`
-//! names like `enter`/`tab`/`escape`/`space`/arrows, a single Unicode codepoint
-//! `a`..`z`/`0`..`9`, or a W3C name). We support the modifier set + the key
-//! subset the task calls out (letters, digits, `enter`/`tab`/`escape`/`space`,
-//! `f1`..`f12`, the four arrows) — enough for the maintainer's binding and the
-//! common cases; anything else logs a warning and is skipped.
-//!
-//! `text:` action — `src/input/Binding.zig` (the `text: []const u8` action,
-//! documented "Uses Zig string literal syntax"): the value after `text:` is a
-//! Zig string literal, unescaped via `std.zig.string_literal` when the action is
-//! performed. Ghostty's supported escapes include `\n` `\r` `\t` `\\` `\"` `\'`
-//! `\xNN` `\u{NNNN}`, plus ghostty's `\e` extension for ESC (0x1b). We implement
-//! that subset here; the maintainer's `\x1b\r` exercises `\xNN` + `\r`.
+//! Trigger grammar + `text:` action — `src/input/Binding.zig` (Ghostty commit
+//! `2da015cd6`); see `docs/analysis/keybinds.md`. The `text:` value is Zig
+//! string-literal syntax, unescaped when the action is performed; supported
+//! escapes are `\n` `\r` `\t` `\\` `\"` `\'` `\0` `\xNN` `\u{NNNN}` plus
+//! ghostty's `\e` extension for ESC (0x1b). The unescape happens at dispatch
+//! (the port stores the raw `text:` value verbatim), via [`unescape_text`].
 
+use qwertty_term_input::binding::{Action, Set, Trigger, TriggerKey};
 use qwertty_term_input::key::Key;
+use qwertty_term_input::key_mods::Mods;
 
 use crate::tabkeys::TabMods;
 
-/// One parsed user keybind: an exact `(key, mods)` trigger → the literal bytes a
-/// `text:` action emits to the focused pane's pty.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextKeybind {
-    pub key: Key,
-    pub mods: TabMods,
-    pub bytes: Vec<u8>,
-}
-
-/// The parsed keybind table: user `text:` bindings resolved from config at
-/// startup. A future config-driven keybind chunk layers over this.
-#[derive(Debug, Clone, Default)]
-pub struct KeybindTable {
-    bindings: Vec<TextKeybind>,
-}
-
-impl KeybindTable {
-    /// Parse a list of `keybind` config entries (each `"<trigger>=text:<value>"`).
-    /// Unknown actions/keys/modifiers do NOT error the config: the offending
-    /// entry logs a warning to stderr and is skipped, so a single bad line can't
-    /// take the whole config down (task requirement + matches ghostty's lenient
-    /// "error only shows in logs" policy for `text:`).
-    ///
-    /// A later entry with the same trigger overrides an earlier one (last wins),
-    /// matching how a config re-declaring a keybind replaces it.
-    pub fn parse(entries: &[String]) -> Self {
-        let mut bindings: Vec<TextKeybind> = Vec::new();
-        for entry in entries {
-            match parse_entry(entry) {
-                Ok(binding) => {
-                    // Last-wins on an exact trigger collision.
-                    bindings.retain(|b| !(b.key == binding.key && b.mods == binding.mods));
-                    bindings.push(binding);
-                }
-                Err(reason) => {
-                    eprintln!("qwertty-term: ignoring keybind '{entry}': {reason}");
-                }
-            }
+/// Build the user keybind [`Set`] from `config.keybind` entries. Each entry is a
+/// full `"<trigger>=<action>"` string parsed by the ported `Binding.zig` system
+/// (`Set::parse_and_put`). An invalid entry logs a warning to stderr and is
+/// skipped, so a single bad line never takes the whole config down (house rule +
+/// ghostty's lenient policy). Later entries override earlier ones (last-wins),
+/// which the `Set` handles.
+pub fn build_set(entries: &[String]) -> Set {
+    let mut set = Set::new();
+    for entry in entries {
+        if let Err(reason) = set.parse_and_put(entry) {
+            eprintln!("qwertty-term: ignoring keybind '{entry}': {reason:?}");
         }
-        KeybindTable { bindings }
     }
-
-    /// Resolve a physical key + modifier state to the `text:` bytes to send, or
-    /// `None` if no user binding matches. Exact match on key + the four
-    /// modifiers, so a binding never swallows a key it wasn't declared for.
-    pub fn resolve(&self, key: Key, mods: TabMods) -> Option<&[u8]> {
-        self.bindings
-            .iter()
-            .find(|b| b.key == key && b.mods == mods)
-            .map(|b| b.bytes.as_slice())
-    }
-
-    /// Number of parsed bindings (test/introspection).
-    pub fn len(&self) -> usize {
-        self.bindings.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bindings.is_empty()
-    }
+    set
 }
 
-/// Parse one `"<trigger>=text:<value>"` entry into a [`TextKeybind`].
-fn parse_entry(entry: &str) -> Result<TextKeybind, String> {
-    // Split on the FIRST '='. The trigger never contains '=' (it is `+`-joined
-    // modifier/key names), so everything after the first '=' is the action.
-    let (trigger, action) = entry
-        .split_once('=')
-        .ok_or_else(|| "missing '=' between trigger and action".to_string())?;
-
-    // Only the `text:` action is supported. Any other action (split:, new_tab,
-    // …) is deliberately out of scope for this minimal subset — skip with a
-    // warning rather than erroring (a full keybind port would handle them).
-    let value = action
-        .strip_prefix("text:")
-        .ok_or_else(|| format!("unsupported action '{action}' (only 'text:' is supported)"))?;
-
-    let (key, mods) = parse_trigger(trigger)?;
-    let bytes = unescape_text(value)?;
-    Ok(TextKeybind { key, mods, bytes })
-}
-
-/// Parse a `+`-joined trigger (`"shift+enter"`, `"ctrl+alt+a"`) into a key + the
-/// four-modifier bitset. Ported subset of upstream `Binding.zig` `Trigger.parse`.
-fn parse_trigger(trigger: &str) -> Result<(Key, TabMods), String> {
-    if trigger.is_empty() {
-        return Err("empty trigger".to_string());
-    }
-    let mut mods = TabMods::default();
-    let mut key: Option<Key> = None;
-
-    for part in trigger.split('+') {
-        let part = part.trim();
-        if part.is_empty() {
-            return Err("empty trigger component (stray '+')".to_string());
-        }
-        // A modifier component sets a bit; anything else must be the (single)
-        // key. Modifier names + upstream aliases (Binding.zig key_mods.alias).
-        if let Some(set) = modifier_bit(part) {
-            set(&mut mods);
-            continue;
-        }
-        // Not a modifier → it's the key. Only one key per trigger.
-        if key.is_some() {
-            return Err(format!(
-                "more than one non-modifier key in trigger ('{part}')"
-            ));
-        }
-        key = Some(parse_key_name(part).ok_or_else(|| format!("unknown key '{part}'"))?);
-    }
-
-    let key = key.ok_or_else(|| "trigger has modifiers but no key".to_string())?;
-    Ok((key, mods))
-}
-
-/// If `name` is a modifier keyword (or upstream alias), return a setter for its
-/// bit. `None` means `name` is not a modifier (so it must be the key).
-fn modifier_bit(name: &str) -> Option<fn(&mut TabMods)> {
-    // Case-insensitive match on the modifier keywords ghostty accepts.
-    match name.to_ascii_lowercase().as_str() {
-        "shift" => Some(|m: &mut TabMods| m.shift = true),
-        "ctrl" | "control" => Some(|m: &mut TabMods| m.ctrl = true),
-        "alt" | "opt" | "option" => Some(|m: &mut TabMods| m.alt = true),
-        "super" | "cmd" | "command" => Some(|m: &mut TabMods| m.super_ = true),
+/// Resolve a physical key + modifier state to the bytes a `text:` binding emits,
+/// or `None` if no `text:` binding matches. Probes the physical trigger first,
+/// then the key's Unicode codepoint (mirroring the first two probes of
+/// [`Set::get_event`]) — a `text:` binding may be declared either way
+/// (`shift+enter` parses to physical `enter`; `ctrl+a` parses to unicode `a`).
+///
+/// Only `text:` is dispatched here for now; any other bound action falls through
+/// (returns `None`), preserving today's behaviour until the remaining actions
+/// are wired.
+pub fn resolve_text_bytes(set: &Set, key: Key, mods: TabMods) -> Option<Vec<u8>> {
+    match lookup_action(set, key, to_mods(mods))? {
+        Action::Text(value) => unescape_text(value).ok(),
         _ => None,
     }
 }
 
-/// Map a ghostty key name to the physical [`Key`], for the supported subset:
-/// `enter`/`tab`/`escape`/`space`, the four arrows, `f1`..`f12`, single letters
-/// `a`..`z`, and single digits `0`..`9`. Returns `None` for anything else
-/// (caller warns + skips).
-fn parse_key_name(name: &str) -> Option<Key> {
-    let lower = name.to_ascii_lowercase();
-    let named = match lower.as_str() {
-        "enter" | "return" => Some(Key::Enter),
-        "tab" => Some(Key::Tab),
-        "escape" | "esc" => Some(Key::Escape),
-        "space" => Some(Key::Space),
-        "up" | "arrow_up" => Some(Key::ArrowUp),
-        "down" | "arrow_down" => Some(Key::ArrowDown),
-        "left" | "arrow_left" => Some(Key::ArrowLeft),
-        "right" | "arrow_right" => Some(Key::ArrowRight),
-        "f1" => Some(Key::F1),
-        "f2" => Some(Key::F2),
-        "f3" => Some(Key::F3),
-        "f4" => Some(Key::F4),
-        "f5" => Some(Key::F5),
-        "f6" => Some(Key::F6),
-        "f7" => Some(Key::F7),
-        "f8" => Some(Key::F8),
-        "f9" => Some(Key::F9),
-        "f10" => Some(Key::F10),
-        "f11" => Some(Key::F11),
-        "f12" => Some(Key::F12),
-        _ => None,
-    };
-    if named.is_some() {
-        return named;
+/// The `text:` value stored by the port is the raw, still-escaped string; look
+/// it up by trigger and hand back a reference to it.
+fn lookup_action(set: &Set, key: Key, mods: Mods) -> Option<&Action> {
+    if let Some(bound) = set.get(Trigger {
+        key: TriggerKey::Physical(key),
+        mods,
+    }) {
+        return Some(&bound.action);
     }
-    // Single letter a..z or digit 0..9 (upstream matches these as a single
-    // Unicode codepoint; we map to the physical KeyA.. / Digit0.. variant).
-    let mut chars = lower.chars();
-    let (c, rest) = (chars.next(), chars.next());
-    match (c, rest) {
-        (Some(c @ 'a'..='z'), None) => Some(letter_key(c)),
-        (Some(d @ '0'..='9'), None) => Some(digit_key(d)),
-        _ => None,
+    let cp = key.codepoint()?;
+    set.get(Trigger {
+        key: TriggerKey::Unicode(cp),
+        mods,
+    })
+    .map(|bound| &bound.action)
+}
+
+/// The four AppKit-free bindable modifiers, already in `mods.binding()` form (no
+/// locks/sides), as the `Set`'s forward map expects.
+fn to_mods(mods: TabMods) -> Mods {
+    Mods {
+        shift: mods.shift,
+        ctrl: mods.ctrl,
+        alt: mods.alt,
+        super_: mods.super_,
+        ..Mods::default()
     }
 }
 
-/// `'a'..='z'` → `Key::KeyA..=Key::KeyZ` (the enum variants are contiguous).
-fn letter_key(c: char) -> Key {
-    // SAFETY of the arithmetic: `KeyA..KeyZ` are the 26 contiguous variants
-    // (key.rs lines 191–216); we index by the letter's 0..25 offset. Done with
-    // an explicit match table generator to avoid any transmute.
-    const LETTERS: [Key; 26] = [
-        Key::KeyA,
-        Key::KeyB,
-        Key::KeyC,
-        Key::KeyD,
-        Key::KeyE,
-        Key::KeyF,
-        Key::KeyG,
-        Key::KeyH,
-        Key::KeyI,
-        Key::KeyJ,
-        Key::KeyK,
-        Key::KeyL,
-        Key::KeyM,
-        Key::KeyN,
-        Key::KeyO,
-        Key::KeyP,
-        Key::KeyQ,
-        Key::KeyR,
-        Key::KeyS,
-        Key::KeyT,
-        Key::KeyU,
-        Key::KeyV,
-        Key::KeyW,
-        Key::KeyX,
-        Key::KeyY,
-        Key::KeyZ,
-    ];
-    LETTERS[(c as u8 - b'a') as usize]
-}
-
-/// `'0'..='9'` → `Key::Digit0..=Key::Digit9`.
-fn digit_key(d: char) -> Key {
-    const DIGITS: [Key; 10] = [
-        Key::Digit0,
-        Key::Digit1,
-        Key::Digit2,
-        Key::Digit3,
-        Key::Digit4,
-        Key::Digit5,
-        Key::Digit6,
-        Key::Digit7,
-        Key::Digit8,
-        Key::Digit9,
-    ];
-    DIGITS[(d as u8 - b'0') as usize]
-}
-
-/// Unescape a ghostty `text:` value (Zig string literal syntax + ghostty's `\e`)
-/// into literal bytes. Supported escapes: `\n` `\r` `\t` `\\` `\"` `\'` `\0`
-/// `\e` (ESC, 0x1b), `\xNN` (two hex digits → one byte), and `\u{NNNN}` (a
-/// Unicode codepoint, UTF-8-encoded). Anything else is an error (the whole
-/// binding is skipped with a warning — matching ghostty's "invalid escape only
-/// shows in logs" leniency, scoped to the one binding rather than the config).
-fn unescape_text(value: &str) -> Result<Vec<u8>, String> {
+/// Decode a `text:` value's Zig string-literal escapes to the bytes to send.
+/// Supports `\n` `\r` `\t` `\\` `\"` `\'` `\0` `\xNN` `\u{NNNN}` and ghostty's
+/// `\e` (ESC). Returns an error string for a malformed escape (the caller skips
+/// sending on error).
+pub fn unescape_text(value: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(value.len());
     let mut chars = value.chars().peekable();
     while let Some(c) = chars.next() {
@@ -341,32 +168,82 @@ mod tests {
         }
     }
 
-    #[test]
-    fn maintainer_shift_enter_binding_parses_to_esc_cr() {
-        // The maintainer's real config line.
-        let table = KeybindTable::parse(&["shift+enter=text:\\x1b\\r".to_string()]);
-        assert_eq!(table.len(), 1);
-        assert_eq!(
-            table.resolve(Key::Enter, shift()),
-            Some(&b"\x1b\r"[..]),
-            "shift+enter must send ESC CR"
-        );
-        // Plain enter (no shift) is NOT bound — it falls through to the encoder
-        // (which sends \r), so this binding never swallows a normal Return.
-        assert_eq!(table.resolve(Key::Enter, TabMods::default()), None);
-    }
-
-    #[test]
-    fn e_escape_and_named_esc_both_yield_esc() {
-        let table = KeybindTable::parse(&["ctrl+a=text:\\e[A".to_string()]);
-        assert_eq!(table.resolve(Key::KeyA, mods_ctrl()), Some(&b"\x1b[A"[..]));
-    }
-
-    fn mods_ctrl() -> TabMods {
+    fn ctrl() -> TabMods {
         TabMods {
             ctrl: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn maintainer_shift_enter_binding_sends_esc_cr() {
+        // The maintainer's real config line.
+        let set = build_set(&["shift+enter=text:\\x1b\\r".to_string()]);
+        assert_eq!(
+            resolve_text_bytes(&set, Key::Enter, shift()),
+            Some(b"\x1b\r".to_vec()),
+            "shift+enter must send ESC CR"
+        );
+        // Plain enter (no shift) is NOT bound — it falls through to the encoder
+        // (which sends \r), so this binding never swallows a normal Return.
+        assert_eq!(
+            resolve_text_bytes(&set, Key::Enter, TabMods::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn unicode_trigger_binding_resolves_via_codepoint() {
+        // `ctrl+a` parses to a *unicode* trigger ('a'); dispatch must find it via
+        // the key's codepoint probe, not the physical one.
+        let set = build_set(&["ctrl+a=text:\\e[A".to_string()]);
+        assert_eq!(
+            resolve_text_bytes(&set, Key::KeyA, ctrl()),
+            Some(b"\x1b[A".to_vec())
+        );
+    }
+
+    #[test]
+    fn unknown_action_or_trigger_is_skipped_not_fatal() {
+        // A bad entry + a good entry: the good one still binds, the bad ones are
+        // dropped (warning to stderr), NOT an error.
+        let set = build_set(&[
+            "shift+enter=totally_bogus_action".to_string(), // unknown action
+            "=text:x".to_string(),                          // empty trigger
+            "shift+enter=text:\\x1b\\r".to_string(),        // good
+        ]);
+        assert_eq!(
+            resolve_text_bytes(&set, Key::Enter, shift()),
+            Some(b"\x1b\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn last_binding_wins_on_trigger_collision() {
+        let set = build_set(&[
+            "shift+enter=text:a".to_string(),
+            "shift+enter=text:b".to_string(),
+        ]);
+        assert_eq!(
+            resolve_text_bytes(&set, Key::Enter, shift()),
+            Some(b"b".to_vec())
+        );
+    }
+
+    #[test]
+    fn non_text_action_falls_through_at_this_seam() {
+        // A bound non-`text:` action parses fine but is not dispatched here yet
+        // (returns None → falls through), matching pre-collapse behaviour.
+        let set = build_set(&["shift+enter=new_tab".to_string()]);
+        assert_eq!(resolve_text_bytes(&set, Key::Enter, shift()), None);
+    }
+
+    #[test]
+    fn does_not_collide_with_builtin_tab_or_split_bindings() {
+        // The common maintainer binding (shift+enter) is disjoint from both
+        // built-in tables, so it never shadows navigation.
+        assert_eq!(crate::tabkeys::resolve(Key::Enter, shift()), None);
+        assert_eq!(crate::splitkeys::resolve(Key::Enter, shift()), None);
     }
 
     #[test]
@@ -387,74 +264,5 @@ mod tests {
         assert!(unescape_text("\\q").is_err());
         assert!(unescape_text("\\xZZ").is_err());
         assert!(unescape_text("\\u1b").is_err());
-    }
-
-    #[test]
-    fn trigger_parses_modifiers_and_key_subset() {
-        assert_eq!(parse_trigger("shift+enter").unwrap(), (Key::Enter, shift()));
-        assert_eq!(
-            parse_trigger("ctrl+alt+a").unwrap(),
-            (
-                Key::KeyA,
-                TabMods {
-                    ctrl: true,
-                    alt: true,
-                    ..Default::default()
-                }
-            )
-        );
-        // Aliases: cmd→super, opt→alt, control→ctrl.
-        assert_eq!(
-            parse_trigger("cmd+k").unwrap().1,
-            TabMods {
-                super_: true,
-                ..Default::default()
-            }
-        );
-        assert_eq!(parse_trigger("f5").unwrap().0, Key::F5);
-        assert_eq!(parse_trigger("escape").unwrap().0, Key::Escape);
-        assert_eq!(parse_trigger("down").unwrap().0, Key::ArrowDown);
-        assert_eq!(parse_trigger("space").unwrap().0, Key::Space);
-        assert_eq!(parse_trigger("9").unwrap().0, Key::Digit9);
-    }
-
-    #[test]
-    fn trigger_rejects_unknown_key_and_empty() {
-        assert!(parse_trigger("shift+wat").is_err());
-        assert!(parse_trigger("").is_err());
-        assert!(parse_trigger("shift").is_err()); // no key
-        assert!(parse_trigger("enter+tab").is_err()); // two keys
-    }
-
-    #[test]
-    fn unknown_action_or_key_is_skipped_not_fatal() {
-        // A bad entry + a good entry: the good one still parses, the bad one is
-        // dropped (warning to stderr), NOT an error.
-        let table = KeybindTable::parse(&[
-            "shift+enter=split:right".to_string(),   // unsupported action
-            "ctrl+nope=text:x".to_string(),          // unknown key
-            "shift+enter=text:\\x1b\\r".to_string(), // good
-        ]);
-        assert_eq!(table.len(), 1);
-        assert_eq!(table.resolve(Key::Enter, shift()), Some(&b"\x1b\r"[..]));
-    }
-
-    #[test]
-    fn last_binding_wins_on_trigger_collision() {
-        let table = KeybindTable::parse(&[
-            "shift+enter=text:a".to_string(),
-            "shift+enter=text:b".to_string(),
-        ]);
-        assert_eq!(table.len(), 1);
-        assert_eq!(table.resolve(Key::Enter, shift()), Some(&b"b"[..]));
-    }
-
-    #[test]
-    fn does_not_collide_with_builtin_tab_or_split_bindings() {
-        // A user text: binding on a chord that is ALSO a built-in tab/split chord
-        // is the user's call; but the common maintainer binding (shift+enter) is
-        // disjoint from both built-in tables, so it never shadows navigation.
-        assert_eq!(crate::tabkeys::resolve(Key::Enter, shift()), None);
-        assert_eq!(crate::splitkeys::resolve(Key::Enter, shift()), None);
     }
 }

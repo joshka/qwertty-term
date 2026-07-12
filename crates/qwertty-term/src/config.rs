@@ -48,8 +48,9 @@ pub struct Config {
     /// and the `text:` value uses ghostty's escape sequences (`\x1b`, `\r`, `\e`,
     /// `\\`, …). The maintainer's real binding is
     /// `"shift+enter=text:\\x1b\\r"`. Unknown actions/keys are logged and
-    /// skipped, never fatal. Parsed into a [`crate::keybind::KeybindTable`] at
-    /// startup (`crate::app::Controller::new`).
+    /// skipped, never fatal. Parsed into the ported `Binding.zig`
+    /// [`Set`](qwertty_term_input::binding::Set) at startup
+    /// (`crate::app::Controller::new`, via `crate::keybind::build_set`).
     #[serde(default)]
     pub keybind: Vec<String>,
     /// The opacity (opposite of transparency) of an *unfocused* split pane, in
@@ -430,18 +431,18 @@ mod tests {
                 "ctrl+a=text:\\e[H".to_string()
             ]
         );
-        // End-to-end: the array parses into a live table with the right bytes.
-        let table = crate::keybind::KeybindTable::parse(&config.keybind);
-        assert_eq!(table.len(), 2);
+        // End-to-end: the array parses into a live keybind Set with the right bytes.
+        let set = crate::keybind::build_set(&config.keybind);
         assert_eq!(
-            table.resolve(
+            crate::keybind::resolve_text_bytes(
+                &set,
                 qwertty_term_input::key::Key::Enter,
                 crate::tabkeys::TabMods {
                     shift: true,
                     ..Default::default()
                 }
             ),
-            Some(&b"\x1b\r"[..])
+            Some(b"\x1b\r".to_vec())
         );
     }
 
