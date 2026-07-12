@@ -12,6 +12,7 @@
 
 pub mod bell;
 pub mod config;
+pub mod context_menu;
 pub mod engine;
 pub mod font_size;
 pub mod frame_dump;

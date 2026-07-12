@@ -1285,6 +1285,10 @@ pub struct ControllerState {
     quick_terminal_config: QuickTerminalConfig,
     /// Which `bell-features` fire on a terminal BEL (see [`crate::bell`]).
     bell_features: crate::bell::BellFeatures,
+    /// What a right-click does (`right-click-action`, default context menu).
+    right_click_action: crate::context_menu::RightClickAction,
+    /// Whether to hide the mouse cursor while typing (`mouse-hide-while-typing`).
+    mouse_hide_while_typing: bool,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1367,6 +1371,8 @@ impl Controller {
                 autohide: config.quick_terminal_autohide,
             },
             bell_features: config.bell_features(),
+            right_click_action: config.right_click_action(),
+            mouse_hide_while_typing: config.mouse_hide_while_typing,
         })))
     }
 
@@ -2648,6 +2654,131 @@ impl Controller {
         }
     }
 
+    // -- right-click / mouse behaviors ------------------------------------
+
+    /// The configured `right-click-action`.
+    pub fn right_click_action(&self) -> crate::context_menu::RightClickAction {
+        self.0.borrow().right_click_action
+    }
+
+    /// The context-menu item titles for a surface (smoke/test): actionable
+    /// items by title, separators as `"---"`. Built from the same pure model
+    /// the view uses, so it mirrors what a right-click would show.
+    pub fn context_menu_titles(&self, tab: TabId, surface: SurfaceId) -> Vec<String> {
+        let has_selection = self.surface_has_selection(tab, surface);
+        crate::context_menu::context_items(has_selection)
+            .into_iter()
+            .map(|item| match item {
+                crate::context_menu::ContextItem::Separator => "---".to_string(),
+                crate::context_menu::ContextItem::Action(a) => a.title().to_string(),
+            })
+            .collect()
+    }
+
+    /// Whether `mouse-hide-while-typing` is enabled.
+    pub fn mouse_hide_while_typing(&self) -> bool {
+        self.0.borrow().mouse_hide_while_typing
+    }
+
+    /// Whether `surface` in `tab` currently has a text selection (gates the
+    /// context menu's Copy item).
+    pub fn surface_has_selection(&self, tab: TabId, surface: SurfaceId) -> bool {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.engine().selection().is_some())
+            .unwrap_or(false)
+    }
+
+    /// Whether `surface` in `tab` has mouse reporting active — when it does, a
+    /// right-click belongs to the program, so we suppress the context menu
+    /// (matching upstream `mouseCaptured`).
+    pub fn surface_reporting_active(&self, tab: TabId, surface: SurfaceId) -> bool {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.engine().mouse_event() != qwertty_term_input::mouse_encode::MouseEvent::None)
+            .unwrap_or(false)
+    }
+
+    /// Perform a context-menu [`ContextAction`](crate::context_menu::ContextAction)
+    /// against the right-clicked pane: copy its selection, paste into it, split
+    /// it, or close it. Focuses the pane first so split/close act on it.
+    pub fn context_menu_action(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+        action: crate::context_menu::ContextAction,
+    ) {
+        use crate::context_menu::ContextAction as CA;
+        // Focus the target pane so splits/close operate on it (and a following
+        // paste goes to the right pty).
+        self.focus_surface_in_tab(tab, surface);
+        match action {
+            CA::Copy => self.copy_surface_selection(tab, surface),
+            CA::Paste => self.paste_into_surface(tab, surface),
+            CA::SplitRight | CA::SplitLeft | CA::SplitDown | CA::SplitUp => {
+                if let Some(dir) = action.split_direction() {
+                    self.handle_split_action(tab, SplitAction::NewSplit(dir));
+                }
+            }
+            CA::ClosePane => self.close_surface(tab, surface),
+        }
+    }
+
+    /// The direct (non-menu) right-click actions: `paste` / `copy` /
+    /// `copy-or-paste`. `ignore` and `context-menu` are handled elsewhere.
+    pub fn right_click_direct(&self, tab: TabId, surface: SurfaceId) {
+        use crate::context_menu::RightClickAction as RCA;
+        match self.right_click_action() {
+            RCA::Paste => self.paste_into_surface(tab, surface),
+            RCA::Copy => self.copy_surface_selection(tab, surface),
+            RCA::CopyOrPaste => {
+                if self.surface_has_selection(tab, surface) {
+                    self.copy_surface_selection(tab, surface);
+                } else {
+                    self.paste_into_surface(tab, surface);
+                }
+            }
+            RCA::ContextMenu | RCA::Ignore => {}
+        }
+    }
+
+    /// Copy `surface`'s selection to the system clipboard (no-op without one).
+    fn copy_surface_selection(&self, tab: TabId, surface: SurfaceId) {
+        let state = self.0.borrow();
+        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface))
+            && let Some(text) = s.engine().selection_string()
+        {
+            crate::clipboard::write(&text);
+        }
+    }
+
+    /// Paste the system clipboard into `surface`'s pty (bracketed if the
+    /// program enabled bracketed paste).
+    fn paste_into_surface(&self, tab: TabId, surface: SurfaceId) {
+        let Some(text) = crate::clipboard::read() else {
+            return;
+        };
+        let state = self.0.borrow();
+        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
+            let payload = if s.engine().bracketed_paste() {
+                let mut p = Vec::with_capacity(text.len() + 12);
+                p.extend_from_slice(b"\x1b[200~");
+                p.extend_from_slice(text.as_bytes());
+                p.extend_from_slice(b"\x1b[201~");
+                p
+            } else {
+                text.into_bytes()
+            };
+            s.io.write(&payload);
+        }
+    }
+
     /// Apply a font-size step to *every* pane in the active tab and rebuild
     /// their grids. Font size is a tab-wide setting (all panes share the
     /// configured size), so a step applies to all of them, then re-lay-out so
@@ -3634,6 +3765,9 @@ pub struct DelegateIvars {
     /// 🔔 title indicator appears then clears on refocus. See
     /// [`AppDelegate::run_bell_smoke`].
     smoke_bell: bool,
+    /// Mouse smoke (`QWERTTY_TERM_SMOKE_MOUSE`): assert the right-click context
+    /// menu items + Split/Close actions. See [`AppDelegate::run_mouse_smoke`].
+    smoke_mouse: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -3681,6 +3815,7 @@ define_class!(
             let has_title = self.ivars().smoke_title;
             let has_quickterm = self.ivars().smoke_quickterm;
             let has_bell = self.ivars().smoke_bell;
+            let has_mouse = self.ivars().smoke_mouse;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -3700,6 +3835,8 @@ define_class!(
                 self.schedule_quickterm_smoke();
             } else if has_bell {
                 self.schedule_bell_smoke();
+            } else if has_mouse {
+                self.schedule_mouse_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -3868,6 +4005,12 @@ define_class!(
         fn bell_smoke(&self, _timer: &AnyObject) {
             self.run_bell_smoke();
         }
+
+        /// Mouse smoke: assert the context menu + split/close, exit 0/1.
+        #[unsafe(method(ghosttyMouseSmoke:))]
+        fn mouse_smoke(&self, _timer: &AnyObject) {
+            self.run_mouse_smoke();
+        }
     }
 );
 
@@ -3889,6 +4032,7 @@ impl AppDelegate {
         smoke_title: bool,
         smoke_quickterm: bool,
         smoke_bell: bool,
+        smoke_mouse: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -3907,6 +4051,7 @@ impl AppDelegate {
             smoke_title,
             smoke_quickterm,
             smoke_bell,
+            smoke_mouse,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -5957,6 +6102,88 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the mouse smoke: let the first window settle, then run.
+    fn schedule_mouse_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyMouseSmoke:));
+    }
+
+    /// Mouse-behaviors smoke: assert the right-click context menu's contents
+    /// for the focused pane, then that its Split Right / Close Pane items
+    /// actually split and collapse the tab. Exits 0/1.
+    fn run_mouse_smoke(&self) {
+        use crate::context_menu::ContextAction;
+        let controller = &self.ivars().controller;
+        let fail = mouse_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at mouse smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at mouse smoke start".into());
+        };
+
+        // Right-click shows the context menu by default.
+        if controller.right_click_action() != crate::context_menu::RightClickAction::ContextMenu {
+            fail("default right-click-action should be context-menu".into());
+        }
+
+        // Menu contents with no selection: Paste, split ×4, Close (no Copy).
+        let titles = controller.context_menu_titles(tab, surface);
+        let expected = vec![
+            "Paste",
+            "---",
+            "Split Right",
+            "Split Left",
+            "Split Down",
+            "Split Up",
+            "---",
+            "Close Pane",
+        ];
+        if titles != expected {
+            fail(format!(
+                "context menu (no selection) items {titles:?} != expected {expected:?}"
+            ));
+        }
+
+        // One pane to start.
+        if controller.active_surface_count() != Some(1) {
+            fail(format!(
+                "expected 1 pane at start, saw {:?}",
+                controller.active_surface_count()
+            ));
+        }
+
+        // Invoke "Split Right" from the context menu → 2 panes.
+        controller.context_menu_action(tab, surface, ContextAction::SplitRight);
+        Self::spin(0.3);
+        if controller.active_surface_count() != Some(2) {
+            fail(format!(
+                "Split Right from the context menu did not create a 2nd pane (saw {:?})",
+                controller.active_surface_count()
+            ));
+        }
+
+        // The new pane is focused; "Close Pane" collapses back to 1.
+        let Some(new_surface) = controller.active_focused_surface() else {
+            fail("no focused surface after split".into());
+        };
+        controller.context_menu_action(tab, new_surface, ContextAction::ClosePane);
+        Self::spin(0.3);
+        if controller.active_surface_count() != Some(1) {
+            fail(format!(
+                "Close Pane from the context menu did not collapse the split (saw {:?})",
+                controller.active_surface_count()
+            ));
+        }
+
+        println!(
+            "OK: mouse smoke — right-click context menu showed Paste/splits/Close (Copy \
+             gated on selection), and its Split Right / Close Pane items split then \
+             collapsed the tab."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -6109,6 +6336,12 @@ fn bell_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a mouse-smoke failure and exit non-zero.
+fn mouse_fail(msg: String) -> ! {
+    eprintln!("FAIL: mouse smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -6219,6 +6452,7 @@ pub fn run(
     smoke_title: bool,
     smoke_quickterm: bool,
     smoke_bell: bool,
+    smoke_mouse: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -6240,6 +6474,7 @@ pub fn run(
         smoke_title,
         smoke_quickterm,
         smoke_bell,
+        smoke_mouse,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

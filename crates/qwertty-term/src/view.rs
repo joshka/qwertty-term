@@ -19,8 +19,10 @@ use std::cell::RefCell;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSTextInputClient, NSView};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSCursor, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSTextInputClient, NSView,
+};
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSPoint, NSRange, NSRangePointer, NSRect,
     NSSize, NSString, NSUInteger,
@@ -70,6 +72,10 @@ define_class!(
         /// input context / dead-key / IME callbacks), then encode.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            // `mouse-hide-while-typing`: hide the cursor until the next mouse
+            // move (AppKit auto-reveals it). Cheap; gated on the config.
+            self.maybe_hide_cursor_while_typing();
+
             let raw = raw_from_nsevent(event, false);
 
             // User `text:` keybinds intercept HERE, before `interpretKeyEvents`
@@ -159,7 +165,66 @@ define_class!(
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
-            self.route_mouse(event, MouseKind::Down, Some(MouseBtn::Right));
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            // When the program is capturing the mouse, a right-click belongs to
+            // it — report it and skip any app-side action (AppKit already got a
+            // nil from `menuForEvent:` so no menu shows).
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            if reporting {
+                self.route_mouse(event, MouseKind::Down, Some(MouseBtn::Right));
+                return;
+            }
+            // Focus this pane, then run the direct right-click action
+            // (paste/copy/copy-or-paste). The `context-menu` case never reaches
+            // here — `menuForEvent:` returns a menu and AppKit shows it instead;
+            // `ignore` is a no-op.
+            self.with_controller(|c| {
+                c.focus_surface_in_tab(tab, surface);
+                c.right_click_direct(tab, surface);
+            });
+        }
+
+        /// AppKit asks for the context menu on right-click (and ctrl+left-click).
+        /// Return the pane's menu only when `right-click-action = context-menu`
+        /// and the program isn't capturing the mouse; otherwise nil so the
+        /// normal right-mouse path runs. Building a non-nil menu makes AppKit
+        /// display it and suppress `rightMouseDown:`.
+        #[unsafe(method_id(menuForEvent:))]
+        fn menu_for_event(&self, _event: &NSEvent) -> Option<Retained<NSMenu>> {
+            use crate::context_menu::RightClickAction;
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let action = self
+                .with_controller(|c| c.right_click_action())
+                .unwrap_or_default();
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            // Single tail expression (the method_id macro rewrites the return,
+            // so avoid early `return None`).
+            if action == RightClickAction::ContextMenu && !reporting {
+                let has_selection = self
+                    .with_controller(|c| c.surface_has_selection(tab, surface))
+                    .unwrap_or(false);
+                Some(self.build_context_menu(has_selection))
+            } else {
+                None
+            }
+        }
+
+        /// Context-menu item click: recover the [`ContextAction`] from the
+        /// sender's tag and run it against this pane.
+        ///
+        /// [`ContextAction`]: crate::context_menu::ContextAction
+        #[unsafe(method(ghosttyContextMenuAction:))]
+        fn context_menu_action(&self, sender: &AnyObject) {
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let Some(action) = crate::context_menu::ContextAction::from_tag(tag) else {
+                return;
+            };
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.with_controller(|c| c.context_menu_action(tab, surface, action));
         }
 
         #[unsafe(method(rightMouseUp:))]
@@ -507,6 +572,52 @@ impl TerminalView {
         }
         // SAFETY: main-thread-only; the controller outlives the view.
         Some(f(unsafe { &*ptr }))
+    }
+
+    /// If `mouse-hide-while-typing` is on, hide the cursor until the mouse next
+    /// moves (upstream `mouse-hide-while-typing`; AppKit's
+    /// `setHiddenUntilMouseMoves(true)` is exactly this behavior — it
+    /// auto-reveals on the next move, so no manual show path is needed).
+    fn maybe_hide_cursor_while_typing(&self) {
+        if self.with_controller(|c| c.mouse_hide_while_typing()) == Some(true) {
+            NSCursor::setHiddenUntilMouseMoves(true);
+        }
+    }
+
+    /// Build the right-click context menu for this pane from the pure
+    /// [`context_items`](crate::context_menu::context_items) model. Each
+    /// actionable item targets this view's `ghosttyContextMenuAction:` selector
+    /// and carries the action's tag; separators are inserted verbatim.
+    fn build_context_menu(&self, has_selection: bool) -> Retained<NSMenu> {
+        let mtm = self.mtm();
+        let menu = NSMenu::new(mtm);
+        let empty = NSString::from_str("");
+        for item in crate::context_menu::context_items(has_selection) {
+            match item {
+                crate::context_menu::ContextItem::Separator => {
+                    menu.addItem(&NSMenuItem::separatorItem(mtm));
+                }
+                crate::context_menu::ContextItem::Action(action) => {
+                    let title = NSString::from_str(action.title());
+                    // SAFETY: standard NSMenuItem construction on the main
+                    // thread; the selector is implemented on this class.
+                    let menu_item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            mtm.alloc(),
+                            &title,
+                            Some(sel!(ghosttyContextMenuAction:)),
+                            &empty,
+                        )
+                    };
+                    menu_item.setTag(action.tag());
+                    // SAFETY: the target (this view) outlives the transient
+                    // context menu; main-thread call.
+                    unsafe { menu_item.setTarget(Some(self)) };
+                    menu.addItem(&menu_item);
+                }
+            }
+        }
+        menu
     }
 }
 

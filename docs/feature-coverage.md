@@ -168,9 +168,11 @@ items are `[ ]` wholesale unless noted.
 
 - [x] Reporting (5 formats), wheel → scrollback / alternate-scroll ladder
 - [x] `mouse-scroll-multiplier`, shift-to-select over reporting
-- [ ] `mouse-hide-while-typing`, `focus-follows-mouse`, `cursor-click-to-move`
-- [ ] `middle-click-action`, `right-click-action`, `mouse-shift-capture` config
-- [ ] `context-menu` (right-click menu)
+- [x] `context-menu` (right-click menu): Copy (on selection)/Paste/Split ×4/Close,
+      per-pane; `right-click-action` (context-menu/paste/copy/copy-or-paste/ignore)
+- [x] `mouse-hide-while-typing` (hide on keystroke, reveal on move)
+- [ ] `focus-follows-mouse` (needs tracking areas), `cursor-click-to-move` (OSC133 zone)
+- [ ] `middle-click-action`, `mouse-shift-capture` config
 
 ## Clipboard & selection
 

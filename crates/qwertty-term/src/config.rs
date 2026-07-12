@@ -95,6 +95,15 @@ pub struct Config {
     /// [`Config::bell_features`].
     #[serde(rename = "bell-features")]
     pub bell_features: Option<String>,
+    /// What a right-click does: `context-menu` (default) / `paste` / `copy` /
+    /// `copy-or-paste` / `ignore` (upstream `right-click-action`,
+    /// `Config.zig:2432`). Parsed by [`Config::right_click_action`].
+    #[serde(rename = "right-click-action")]
+    pub right_click_action: Option<String>,
+    /// Hide the mouse cursor while typing, revealing it on the next mouse move
+    /// (upstream `mouse-hide-while-typing`, `Config.zig:921`, default false).
+    #[serde(rename = "mouse-hide-while-typing")]
+    pub mouse_hide_while_typing: bool,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -121,6 +130,8 @@ impl Default for Config {
             // macOS default is `true` (upstream `Config.zig:2730`).
             quick_terminal_autohide: true,
             bell_features: None,
+            right_click_action: None,
+            mouse_hide_while_typing: false,
         }
     }
 }
@@ -169,6 +180,14 @@ impl Config {
         self.bell_features
             .as_deref()
             .map(crate::bell::BellFeatures::parse)
+            .unwrap_or_default()
+    }
+
+    /// The parsed `right-click-action` (defaults to `context-menu`).
+    pub fn right_click_action(&self) -> crate::context_menu::RightClickAction {
+        self.right_click_action
+            .as_deref()
+            .map(crate::context_menu::RightClickAction::parse)
             .unwrap_or_default()
     }
 }
@@ -247,6 +266,12 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # system / audio / attention / title / border, each optionally "no-"-prefixed
 # to disable (or "true"/"false" for all/none). Default: attention + title.
 # bell-features = "system, attention, title"
+
+# What a right-click does: context-menu (default), paste, copy, copy-or-paste,
+# or ignore. And whether to hide the mouse cursor while typing (shown again on
+# the next mouse move).
+# right-click-action = "context-menu"
+# mouse-hide-while-typing = false
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -340,6 +365,23 @@ mod tests {
         // Bell: upstream default is attention + title.
         assert_eq!(config.bell_features(), crate::bell::BellFeatures::default());
         assert!(config.bell_features().attention && config.bell_features().title);
+        // Mouse: right-click shows the context menu by default; no hide-on-type.
+        assert_eq!(
+            config.right_click_action(),
+            crate::context_menu::RightClickAction::ContextMenu
+        );
+        assert!(!config.mouse_hide_while_typing);
+    }
+
+    #[test]
+    fn parses_mouse_keys() {
+        let config =
+            parse("right-click-action = \"paste\"\nmouse-hide-while-typing = true\n").unwrap();
+        assert_eq!(
+            config.right_click_action(),
+            crate::context_menu::RightClickAction::Paste
+        );
+        assert!(config.mouse_hide_while_typing);
     }
 
     #[test]
