@@ -166,6 +166,17 @@ impl Rgb {
             return Err(ParseColorError::InvalidFormat);
         }
 
+        // Every accepted form — the hex triples, `rgb:`/`rgbi:`, and all X11
+        // color names — is pure ASCII. Reject non-ASCII input up front: it can
+        // never be a valid spec, and without this the `&input[..]` byte-slicing
+        // below panics when a multi-byte UTF-8 boundary is crossed (e.g. an OSC
+        // color spec of `Đ%`, bytes C4 90 25, has `len() == 3` and `&input[0..1]`
+        // lands mid-char). Upstream byte-slices raw `[]const u8` and simply
+        // fails the hex parse, so `InvalidFormat` is the matching outcome.
+        if !input.is_ascii() {
+            return Err(ParseColorError::InvalidFormat);
+        }
+
         if let Some(rest) = input.strip_prefix('#') {
             return match rest.len() {
                 3 => Ok(Rgb::new(
@@ -1089,6 +1100,19 @@ mod tests {
         assert!(Rgb::parse("#12345").is_err());
         assert!(Rgb::parse("12345").is_err());
         assert!(Rgb::parse("nosuchcolor").is_err());
+    }
+
+    // Regression: non-ASCII specs must return InvalidFormat, not panic. The
+    // `&input[..]` byte-slicing used to cross a UTF-8 char boundary (found by
+    // T1's OSC parser fuzz: `ESC ] 18 ; Đ%` → spec bytes C4 90 25, len 3).
+    #[test]
+    fn parse_non_ascii_is_invalid_not_panic() {
+        assert!(Rgb::parse("Đ%").is_err()); // len 3 bytes -> hit the bare-hex arm
+        assert!(Rgb::parse("ĐĐ").is_err()); // len 4 bytes -> rgb-prefix byte slice
+        assert!(Rgb::parse("ĐĐĐ").is_err()); // len 6 bytes -> bare-6-hex arm
+        assert!(Rgb::parse("#Đ").is_err()); // non-ASCII after '#'
+        assert!(Rgb::parse("rgb:12/34/5Đ").is_err()); // trailing non-ASCII component
+        assert!(Rgb::parse("café").is_err()); // valid-looking name with accent
     }
 
     // Port of "DynamicPalette: init".
