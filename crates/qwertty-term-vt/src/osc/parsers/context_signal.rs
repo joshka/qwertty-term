@@ -137,10 +137,9 @@ pub fn parse(rest: &str) -> Option<Command> {
 
     let (action, prefix_len) = if let Some(r) = data.strip_prefix("start=") {
         (ContextAction::Start, data.len() - r.len())
-    } else if let Some(r) = data.strip_prefix("end=") {
-        (ContextAction::End, data.len() - r.len())
     } else {
-        return None;
+        let r = data.strip_prefix("end=")?;
+        (ContextAction::End, data.len() - r.len())
     };
 
     let after_prefix = &data[prefix_len..];

@@ -961,11 +961,13 @@ fn ctrl_seq(logical_key: Key, utf8: &str, unshifted_codepoint: u32, mods: Mods) 
         // If we have exactly one UTF8 byte, we assume that is the character we
         // want to convert to a C0 byte.
         utf8_bytes[0]
-    } else if let Some(cp) = logical_key.codepoint() {
-        // If we have a logical key that maps to a single byte printable
-        // character, we use that. This supports cyrillic layouts (Russian,
-        // Mongolian): their `c` key maps to U+0441 but every terminal encodes
-        // this as ctrl+c.
+    } else {
+        // Otherwise, if we have a logical key that maps to a single byte
+        // printable character, we use that. This supports cyrillic layouts
+        // (Russian, Mongolian): their `c` key maps to U+0441 but every
+        // terminal encodes this as ctrl+c. Without such a codepoint we don't
+        // have a character to reliably map to a C0 byte.
+        let cp = logical_key.codepoint()?;
         if let Ok(byte) = u8::try_from(cp) {
             // For this case, we only map to the key if we have exactly ctrl
             // pressed. Shift would modify the key and we don't know how to do
@@ -977,9 +979,6 @@ fn ctrl_seq(logical_key: Key, utf8: &str, unshifted_codepoint: u32, mods: Mods) 
         } else {
             return None;
         }
-    } else {
-        // Otherwise we don't have a character to reliably map to a C0 byte.
-        return None;
     };
 
     // Remove shift if we have something outside of the US letter range. This

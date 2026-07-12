@@ -7074,7 +7074,7 @@ fn print_slice_differential(
         // Full screen contents must match after every op.
         let str1 = t1.screen().dump_string(crate::point::Tag::Screen, false);
         let str2 = t2.screen().dump_string(crate::point::Tag::Screen, false);
-        assert_eq!(str1, str2, "last print cps: {:?}", &cps_buf);
+        assert_eq!(str1, str2, "last print cps: {:?}", cps_buf);
     }
 
     // Page integrity (styles refcounts, grapheme maps, etc.) must hold.
