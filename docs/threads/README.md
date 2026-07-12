@@ -72,7 +72,7 @@ be able to resume from those three alone.
 ```sh
 jj describe -m "<area>: <summary>"                  # after local gate passes
 jj bookmark create <id>/<feature> -r @-             # or move an existing one
-jj git push --allow-new --bookmark <id>/<feature>
+jj git push --bookmark <id>/<feature>     # jj ≥0.43: new bookmarks auto-track (no --allow-new)
 gh pr create --base main --title "..." --body "...gate evidence..."
 # merge policy below; after merge:
 jj git fetch && jj rebase -d main ...               # rebase your line onto new main
