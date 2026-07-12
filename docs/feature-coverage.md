@@ -187,8 +187,9 @@ items are `[ ]` wholesale unless noted.
 - [x] Double-click *word* / triple-click *line* gestures (+ shift-click extend,
       ctrl/cmd-triple-click output select, option rectangle select, drag-past-
       edge viewport autoscroll — `SelectionGesture.zig` port, selection smoke)
-- [ ] `selection-word-chars`, `clipboard-paste-protection`/`-bracketed-safe`
-- [ ] `clipboard-trim-trailing-spaces`, `selection-clear-on-typing`/`-on-copy`
+- [x] `clipboard-paste-protection`/`-bracketed-safe` (confirm unsafe/multiline
+      pastes), `clipboard-trim-trailing-spaces`, `selection-clear-on-typing`
+- [ ] `selection-word-chars` (T3 config), `selection-clear-on-copy`
 - [ ] `clipboard-read`/`clipboard-write` permission gates
 - [ ] Primary selection / `primary-paste` (Linux)
 
