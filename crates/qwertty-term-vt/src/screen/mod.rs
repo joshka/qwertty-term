@@ -1518,6 +1518,52 @@ impl Screen {
         Some(Selection::init(start, end, false))
     }
 
+    /// Select the nearest word to `start` that lies between `start` and `end`
+    /// (inclusive), walking cell-by-cell from `start` toward `end`. Because it
+    /// selects "nearest to `start`", `start` may be before *or* after `end`.
+    /// `boundary_codepoints` is passed through to [`Screen::select_word`].
+    /// Port of `selectWordBetween`.
+    pub fn select_word_between(
+        &self,
+        start: Pin,
+        end: Pin,
+        boundary_codepoints: &[u32],
+    ) -> Option<Selection> {
+        // SAFETY: caller-provided pins are valid pins into this screen's live
+        // pages (same contract as `select_word`); the iterator is bounded by
+        // `end` and only used for the duration of this call.
+        unsafe {
+            let dir = if start.before(end) {
+                Direction::RightDown
+            } else {
+                Direction::LeftUp
+            };
+            let mut it = start.cell_iterator(dir, Some(end));
+            while let Some(pin) = it.next() {
+                // Boundary conditions (defensive, mirroring upstream: the
+                // bounded iterator already stops at `end`).
+                match dir {
+                    Direction::RightDown => {
+                        if end.before(pin) {
+                            return None;
+                        }
+                    }
+                    Direction::LeftUp => {
+                        if pin.before(end) {
+                            return None;
+                        }
+                    }
+                }
+
+                // If we found a word, then return it.
+                if let Some(sel) = self.select_word(pin, boundary_codepoints) {
+                    return Some(sel);
+                }
+            }
+        }
+        None
+    }
+
     /// Select the word under `pin`. A word is a consecutive run of cells that
     /// are exclusively whitespace/boundary or exclusively non-boundary. Spans
     /// soft-wraps. `None` if the cell is empty. Port of `selectWord`.
@@ -2189,6 +2235,31 @@ impl Screen {
 /// Default codepoints considered whitespace for line-selection trimming. Port of
 /// `selection_codepoints.default_line_whitespace`.
 pub const DEFAULT_LINE_WHITESPACE: [u32; 3] = [0, ' ' as u32, '\t' as u32];
+
+/// Default boundary codepoints for word selection: `` \t'"│`|:;,()[]{}<>$ ``
+/// (plus null). Port of `selection_codepoints.default_word_boundaries`.
+pub const DEFAULT_WORD_BOUNDARIES: [u32; 20] = [
+    0,
+    ' ' as u32,
+    '\t' as u32,
+    '\'' as u32,
+    '"' as u32,
+    '│' as u32,
+    '`' as u32,
+    '|' as u32,
+    ':' as u32,
+    ';' as u32,
+    ',' as u32,
+    '(' as u32,
+    ')' as u32,
+    '[' as u32,
+    ']' as u32,
+    '{' as u32,
+    '}' as u32,
+    '<' as u32,
+    '>' as u32,
+    '$' as u32,
+];
 
 /// Options for [`Screen::select_line`]. Port of `Screen.SelectLine`.
 #[derive(Debug, Clone, Copy)]

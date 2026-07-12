@@ -15,6 +15,7 @@ pub mod engine;
 pub mod font_size;
 pub mod frame_dump;
 pub mod geometry;
+pub mod gesture;
 pub mod input;
 pub mod keybind;
 pub mod menu;
