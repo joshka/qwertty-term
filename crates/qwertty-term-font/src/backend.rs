@@ -33,11 +33,10 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     #[cfg(target_os = "macos")]
     fn default_is_coretext_on_macos() {
+        use super::*;
         assert_eq!(Backend::default_for_platform(), Backend::CoreText);
     }
 }
