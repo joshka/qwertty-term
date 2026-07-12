@@ -132,6 +132,46 @@ pub enum MouseShiftCapture {
     True,
 }
 
+/// The mouse-tracking event mode. Mutually exclusive; set by DEC modes
+/// 9/1000/1002/1003. Port of `mouse.Event`. The input layer reads this to
+/// decide whether (and which) mouse events to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseEvent {
+    #[default]
+    None,
+    /// Mode 9: X10 compatibility (press only).
+    X10,
+    /// Mode 1000: normal (press + release).
+    Normal,
+    /// Mode 1002: button-event (press/release + motion while pressed).
+    Button,
+    /// Mode 1003: any-event (all motion).
+    Any,
+}
+
+impl MouseEvent {
+    /// True if this mode reports motion events. Port of `mouse.eventSendsMotion`.
+    pub fn sends_motion(self) -> bool {
+        matches!(self, MouseEvent::Button | MouseEvent::Any)
+    }
+}
+
+/// The mouse-report wire format. Mutually exclusive; set by DEC modes
+/// 1005/1006/1015/1016. Port of `mouse.Format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseFormat {
+    #[default]
+    X10,
+    /// Mode 1005: UTF-8.
+    Utf8,
+    /// Mode 1006: SGR.
+    Sgr,
+    /// Mode 1015: urxvt.
+    Urxvt,
+    /// Mode 1016: SGR-pixels.
+    SgrPixels,
+}
+
 /// Packed terminal flags. Port of `Terminal.flags`.
 #[derive(Debug, Clone, Copy)]
 pub struct Flags {
@@ -139,9 +179,12 @@ pub struct Flags {
     pub shell_redraws_prompt: Redraw,
     /// Set via ESC[4;2m (XTMODKEYS); any other modify-key mode clears it.
     pub modify_other_keys_2: bool,
-    // TODO(chunk:input): mouse_event / mouse_format / mouse_shape are stored
-    // but interpreted by the stream/input layer, not by Terminal.
     pub mouse_shift_capture: MouseShiftCapture,
+    /// The active mouse-tracking mode (DEC 9/1000/1002/1003). State only; the
+    /// input layer encodes the actual reports.
+    pub mouse_event: MouseEvent,
+    /// The active mouse-report format (DEC 1005/1006/1015/1016).
+    pub mouse_format: MouseFormat,
     pub focused: bool,
     pub password_input: bool,
     pub selection_scroll: bool,
@@ -155,6 +198,8 @@ impl Default for Flags {
             shell_redraws_prompt: Redraw::True,
             modify_other_keys_2: false,
             mouse_shift_capture: MouseShiftCapture::Null,
+            mouse_event: MouseEvent::None,
+            mouse_format: MouseFormat::X10,
             focused: true,
             password_input: false,
             selection_scroll: false,
