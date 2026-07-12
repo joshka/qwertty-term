@@ -10,8 +10,19 @@
 #   scripts/bench-vtebench.sh                      # bench qwertty-term (default)
 #   scripts/bench-vtebench.sh --terminal ghostty   # bench real Ghostty.app
 #   scripts/bench-vtebench.sh --max-secs 5         # shorter per-suite cap
+#   scripts/bench-vtebench.sh --terminal ghostty \
+#       --app-path ~/local/ghostty-main/macos/build/ReleaseLocal/Ghostty.app \
+#       --label ghostty-main                       # drive an alternate bundle
 #
-# Outputs land in target/vtebench/<terminal>/:
+# Flags:
+#   --app-path <path>  ghostty only: point at a specific Ghostty.app bundle (or
+#                      its inner MacOS/ghostty binary) instead of the default
+#                      /Applications/Ghostty.app. Lets you A/B multiple builds.
+#   --label <name>     override the target/vtebench/<name>/ output subdir so
+#                      several ghostty builds (1.3.1, main) don't clobber each
+#                      other. Defaults to the --terminal value.
+#
+# Outputs land in target/vtebench/<label>/:
 #   results.dat   gnuplot-compatible per-sample times, ms (all suites)
 #   summary.txt   per-suite mean/stddev derived from results.dat
 #   grid.txt      `stty size` inside the terminal (fairness check)
@@ -43,6 +54,8 @@ GHOSTTY_APP_BUNDLE="/Applications/Ghostty.app/Contents/MacOS/ghostty"
 
 TERMINAL="qwertty-term"
 MAX_SECS=10
+APP_PATH=""
+LABEL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --terminal)
@@ -51,6 +64,14 @@ while [[ $# -gt 0 ]]; do
         ;;
     --max-secs)
         MAX_SECS="$2"
+        shift 2
+        ;;
+    --app-path)
+        APP_PATH="$2"
+        shift 2
+        ;;
+    --label)
+        LABEL="$2"
         shift 2
         ;;
     -h | --help)
@@ -71,6 +92,23 @@ qwertty-term | ghostty) ;;
     exit 2
     ;;
 esac
+
+# Resolve an --app-path override to the inner ghostty binary. Accept either the
+# .app bundle or the binary itself.
+if [[ -n "$APP_PATH" ]]; then
+    if [[ "$TERMINAL" != "ghostty" ]]; then
+        echo "--app-path only applies to --terminal ghostty" >&2
+        exit 2
+    fi
+    if [[ -d "$APP_PATH" && "$APP_PATH" == *.app ]]; then
+        GHOSTTY_APP_BUNDLE="$APP_PATH/Contents/MacOS/ghostty"
+    else
+        GHOSTTY_APP_BUNDLE="$APP_PATH"
+    fi
+fi
+
+# Output subdir label; defaults to the terminal name.
+LABEL="${LABEL:-$TERMINAL}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -104,7 +142,7 @@ echo "==> building vtebench (release)"
 cargo build --release --quiet --manifest-path "$VTEBENCH_DIR/Cargo.toml"
 VTEBENCH_BIN="$VTEBENCH_DIR/target/release/vtebench"
 
-OUT_DIR="$REPO_ROOT/target/vtebench/$TERMINAL"
+OUT_DIR="$REPO_ROOT/target/vtebench/$LABEL"
 mkdir -p "$OUT_DIR"
 rm -f "$OUT_DIR"/{summary.txt,results.dat,grid.txt,exit-code.txt,stderr.txt}
 
