@@ -1,0 +1,214 @@
+# Feature coverage — qwertty-term vs Ghostty
+
+Module-by-module feature matrix, built from Ghostty's own feature catalog at commit
+`2da015cd6` (its ~230 `Config.zig` options, `Binding.zig` keybind actions, and terminal
+modes) cross-referenced against what qwertty-term has shipped. Curated, not
+per-sequence-exhaustive — each section can be deepened to individual-sequence granularity
+by a dedicated audit thread.
+
+Legend: `[x]` parity / working · `[~]` partial or reduced · `[ ]` not yet · `[—]`
+deliberately not planned (deviation / non-goal). macOS is the target platform; Linux/GTK
+items are `[ ]` wholesale unless noted.
+
+## Terminal / VT engine (`src/terminal`, ~85% — certified, differential-proven)
+
+- [x] Parser: CSI/OSC/DCS/APC/ESC state machine, UTF-8 decode, param overflow policy
+- [x] Screen/grid: pages, scrollback, wide chars, graphemes, styles (ref-counted)
+- [x] Cursor movement (CUP/CUU/CUD/CUF/CUB/CHA/VPA/HVP), scroll regions (DECSTBM/DECSLRM)
+- [x] Erase/insert/delete (ED/EL/ICH/DCH/IL/DL/ECH), REP
+- [x] SGR: bold/faint/italic/underline(+styles)/blink/inverse/invisible/strike, 16/256/truecolor
+- [x] Modes: DECCKM, DECAWM autowrap, origin, insert, reverse, alt-screen 1047/1049
+- [x] Mouse modes 1000/1002/1003/1006/1015, focus 1004, bracketed paste 2004
+- [x] Synchronized output 2026, DECSCUSR cursor shapes
+- [x] Charsets (G0–G3, DEC special graphics), DECALN
+- [x] Kitty graphics protocol (transmit/place/delete; exec path)
+- [x] Kitty keyboard protocol (progressive enhancement flags)
+- [x] Kitty unicode placeholders (U=1)
+- [x] OSC 0/1/2 title, 4/104 palette, 7 cwd, 8 hyperlink, 10/11/12 fg/bg/cursor, 52 clipboard
+- [x] OSC 133 shell-integration marks, 22 pointer shape
+- [x] DCS: DECRQSS (partial), XTGETTCAP (partial)
+- [x] Scrollback engine + viewport pins; Unicode grapheme break + width (UAX #29/#11, exact)
+- [x] Selection model + literal-substring search (no regex, matches upstream)
+- [x] Snapshot/formatter (owned styled grid + reply queue) — the embeddability seam
+- [~] XTWINOPS / title stack (core reports done; some ops stubbed)
+- [~] XTGETTCAP / DECRQSS full capability set
+- [ ] tmux control mode (`4.3k` Zig, deferred)
+- [ ] OSC 21 color query reply (upstream finding filed in `work/upstream/`)
+- [ ] VT config toggles: `title-report`, `enquiry-response`, `vt-kam-allowed` (KAM),
+      `osc-color-report-format`, `scrollback-limit`, `image-storage-limit`
+
+## Fonts & text shaping (`src/font`, ~72%)
+
+- [x] `font-family` (+ discovery of styled members: bold/italic/bold-italic)
+- [x] `font-family-bold`/`-italic`/`-bold-italic` explicit overrides
+- [x] Bold/italic via variable-font `wght` axis + synthetic fallback ladder
+- [x] Ligatures (rustybuzz shaping, run-based, live in the render engine)
+- [x] Emoji (Apple Color Emoji discovery, pre-seeded like upstream)
+- [x] Nerd-font glyphs + per-icon constraint sizing (codegen'd table, byte-exact)
+- [x] Procedural sprites: box drawing, blocks, braille, powerline, legacy computing
+- [x] `font-size`, embedded default fonts (JetBrains Mono + symbols, vendored)
+- [x] CoreText face + fallback discovery, byte-backed named faces
+- [~] `font-feature` (OpenType features passthrough — shaper supports, config unwired)
+- [~] `font-variation*` (axes settable internally; config keys unwired)
+- [ ] `font-thicken` / `font-thicken-strength` (config flags; default-off path matches)
+- [ ] `adjust-*` metric overrides (cell/cursor/underline/baseline/box nudge — ~18 keys)
+- [ ] `font-codepoint-map`, `font-style*` name overrides, `grapheme-width-method` config
+- [ ] FreeType/fontconfig backend (Linux), `force-autohint`, `freetype-load-flags`
+
+## Rendering (`src/renderer`, ~60%)
+
+- [x] Metal backend, IOSurface-on-CALayer presentation, retina/contentsScale
+- [x] Upstream shaders verbatim; frozen wire structs; grayscale + color atlases
+- [x] Per-row dirty tracking (equality-proven vs full redraw)
+- [x] Run-based shaping cache; `alpha-blending` native, `minimum-contrast`
+- [x] `background-opacity`, `display-p3` / `window-colorspace`
+- [~] Timer-based frame pacing (CVDisplayLink not yet wired)
+- [ ] `background-image` (+ fit/position/repeat/opacity)
+- [ ] `background-blur`, `background-opacity-cells`
+- [ ] `custom-shader` (shadertoy) + animation
+- [ ] Kitty image *rendering* (R6 — engine parses, renderer doesn't draw yet)
+- [ ] Link detection/underline overlay (R7), `link-url`, `link-previews`
+- [ ] `resize-overlay`, OpenGL backend (R9, Linux)
+
+## Colors & theming
+
+- [x] `theme` (Ghostty theme-file format loaded), 256-color palette + dynamic palette
+- [x] `selection-background`/`-foreground`, `cursor-color`/`cursor-text`
+- [x] `split-divider` (implicit), search highlight colors
+- [~] `bold-color`, `cursor-opacity`, `faint-opacity` (some wired, some not)
+- [ ] `palette-generate`/`palette-harmonious`, `window-theme` auto light/dark
+- [ ] `cell-foreground`/`cell-background`, `background-opacity-cells`
+
+## Cursor
+
+- [x] Styles: block, bar, underline (+ `cursor-style`), hollow when unfocused
+- [x] Bar-at-prompt via shell integration (DECSCUSR)
+- [x] Hidden when scrolled into history
+- [~] `cursor-style-blink` (style set; blink timer not implemented)
+- [ ] `cursor-click-to-move`, `cursor-opacity`, `cursor-color` config override
+
+## Window & app chrome
+
+- [x] Native AppKit window, `window-padding-x/y`, content-flush layout
+- [x] `window-decoration`, native + non-native fullscreen
+- [x] Menu bar (basic), key-window activation
+- [~] `window-height`/`-width`/`-position` (defaults; config unwired)
+- [ ] `window-save-state`, `window-step-resize`, `window-title`/`-subtitle` templates
+- [ ] `window-titlebar-background`/`-foreground`, `window-new-tab-position`
+- [ ] `resize-overlay`, `command-palette`, undo/redo (`undo-timeout`)
+
+## Tabs
+
+- [x] Native NSWindow tabs, `new_tab`/`close_tab`/`goto_tab` (Cmd+1–9)/`move_tab`
+- [x] `tab-inherit-working-directory` (OSC 7 pwd)
+- [x] Tab bar visible only at 2+ tabs; Ctrl+Tab cycling
+- [ ] OSC-synced tab titles (`set_tab_title` action + live title from OSC 0/2)
+- [ ] `window-show-tab-bar` policy, `gtk-tabs-location`/`gtk-wide-tabs` (Linux)
+
+## Splits (`src/apprt` + Splits, slice 1+2 done)
+
+- [x] `new_split` (Cmd+D / Cmd+Shift+D), `goto_split` directional + prev/next
+- [x] `resize_split` chords, `toggle_split_zoom`, equalize
+- [x] Divider drag, close-collapse, per-pane io/focus/scrollback isolation
+- [x] Unfocused-split dimming (`unfocused-split-opacity`, `-fill`)
+- [x] `split-inherit-working-directory`
+- [ ] `split-preserve-zoom`, `split-divider-color` config, drag-to-reparent
+
+## Quick terminal & extra surfaces
+
+- [ ] Quick terminal (dropdown) + `quick-terminal-*` (position/size/animation/autohide) — ~8 keys
+- [ ] `new-window`/`new-tab` from CLI/AppleScript beyond the default first window
+
+## Process, launch & lifecycle
+
+- [x] Spawn `$SHELL`, inherit env/cwd; command override seam (`GHOSTTY_RS_COMMAND`)
+- [x] `working-directory` / cwd inheritance (OSC 7)
+- [~] `command` / `-e` initial command (env-override path exists; full `-e` CLI parse partial)
+- [ ] `initial-command`, `initial-window`, `wait-after-command`
+- [ ] `confirm-close-surface`, `quit-after-last-window-closed` (+ delay)
+- [ ] `abnormal-command-exit-runtime`, `window-inherit-working-directory`/`-font-size`
+
+## Input & keybindings (`src/input`, ~78% encoders / ~10% bind system)
+
+- [x] Kitty keyboard encoding, full legacy encoder, 117-entry macOS keymap
+- [x] Bracketed paste, `macos-option-as-alt`
+- [x] `keybind = text:` subset (custom byte sequences, e.g. shift+enter)
+- [~] Font-size binds (increase/decrease/set) — actions exist, not all wired to config
+- [ ] Full `Binding.zig` system: leader/chains, key tables, `global` binds, `performable`
+- [ ] Most keybind *actions*: `jump_to_prompt`, `write_scrollback_file`, `inspector`,
+      `scroll_page_*`, `adjust_selection`, `navigate_search` binds, `crash`, config-reload
+- [ ] `key-remap`, `keybind` config parsing beyond the `text:` subset
+
+## Mouse
+
+- [x] Reporting (5 formats), wheel → scrollback / alternate-scroll ladder
+- [x] `mouse-scroll-multiplier`, shift-to-select over reporting
+- [ ] `mouse-hide-while-typing`, `focus-follows-mouse`, `cursor-click-to-move`
+- [ ] `middle-click-action`, `right-click-action`, `mouse-shift-capture` config
+- [ ] `context-menu` (right-click menu)
+
+## Clipboard & selection
+
+- [x] `copy-on-select`, OSC 52 read/write, selection string extraction
+- [x] Double-click-drag select (basic); per-pane selection
+- [ ] Double-click *word* / triple-click *line* gestures
+- [ ] `selection-word-chars`, `clipboard-paste-protection`/`-bracketed-safe`
+- [ ] `clipboard-trim-trailing-spaces`, `selection-clear-on-typing`/`-on-copy`
+- [ ] `clipboard-read`/`clipboard-write` permission gates
+- [ ] Primary selection / `primary-paste` (Linux)
+
+## Shell integration (`src/shell-integration`)
+
+- [x] Vendored bash/zsh/fish scripts (byte-identical, sha256 manifest)
+- [x] OSC 133 prompt marks, OSC 7 cwd, bar-cursor-at-prompt
+- [x] `shell-integration` auto-detect + injection (ZDOTDIR indirection)
+- [~] `shell-integration-features` granular toggles
+- [ ] `ssh-env` / `ssh-terminfo` propagation, `jump_to_prompt` navigation
+
+## Config system (`src/config`, ~5% — deliberate deviation)
+
+- [x] Minimal TOML config (theme, copy-on-select, font-family, font-size, keybind subset)
+- [x] `theme` resolution via Ghostty theme files
+- [—] Ghostty's custom config format (replaced by TOML — ADR)
+- [ ] `+import-ghostty-config` converter
+- [ ] `config-file` includes, `config-reload`, `config-default-files`
+- [ ] Full option surface (~200 keys) — most map to features listed elsewhere here
+
+## Notifications, bell, progress
+
+- [ ] Bell (`bell-features`, `bell-audio-path`/`-volume`)
+- [ ] `desktop-notifications` / `app-notifications`
+- [ ] `notify-on-command-finish` (+ action/after), `abnormal-command-exit-runtime`
+- [ ] `progress-style` (OSC 9;4 progress bar)
+
+## Platform: macOS (`macos/Sources`, ~45% reimplemented natively in Rust)
+
+- [x] Native window/tabs/splits/menu/IME (NSTextInputClient), theme, selection
+- [x] `macos-option-as-alt`, retina, key-window activation
+- [~] `macos-titlebar-style` (tabbed layout works; style variants partial)
+- [ ] `macos-secure-input` (+ indication/auto), `macos-custom-icon`/`-icon*`
+- [ ] `macos-menu-bar`, `macos-applescript`, `macos-shortcuts`, `macos-dock-drop-behavior`
+- [ ] `macos-window-buttons`, `-window-shadow`, `-glass-*`, `-titlebar-proxy-icon`
+- [ ] Sparkle `auto-update`, `macos-hidden`
+
+## Platform: Linux / GTK (0% — not started)
+
+- [ ] GTK apprt, Wayland/X11, all `gtk-*` (~10 keys), `linux-cgroup*`, FreeType/fontconfig
+
+## Embeddability / library (a qwertty-term goal beyond Ghostty)
+
+- [x] Headless offscreen render + RGBA/PNG readback (`examples/frame-capture`)
+- [x] VT / fonts / renderer as plain Rust crates, no global state
+- [x] Injectable fonts; deterministic output (betamax reference consumer)
+- [~] Injectable clock (seams present; not all paths threaded)
+- [x] **crates.io publish — all 8 crates at 0.1.0** (`qwertty-term` + `-vt`/`-font`/
+      `-renderer`/`-termio`/`-input`/`-sprite`/`-ffi`; published 2026-07-08, docs.rs built)
+- [~] MB5 API polish (6 items from MB2: Display errors, matched Engine+Grid pair, RGBA
+      readback, one-call render) — may still remain despite the 0.1.0 cut
+
+## Advanced / tooling
+
+- [x] Differential testing vs `libghostty-vt`, resize-interleaved fuzzing, Miri
+- [x] vtebench lane (faster than Ghostty 1.3.1 in 9/10 suites)
+- [ ] Inspector / debug overlay, `write_screen_file`/`write_scrollback_file` actions
+- [ ] `command-palette`, `resize-overlay`, glyph APC protocol, animation
