@@ -189,6 +189,10 @@ pub struct Engine {
     /// Kitty images referenced this frame (set by `update_frame`); uploaded to
     /// `images` in `prepare_image_frame`.
     pending_images: Vec<KittyImage>,
+    /// Ids of all images the terminal still holds this frame (set by
+    /// `update_frame`); `prepare_image_frame` evicts cached textures whose id
+    /// left this set (R6 slice 3 — delete + `image-storage-limit` eviction).
+    pending_live_ids: Vec<u32>,
 }
 
 /// A GPU-resident kitty image: its texture plus the `generation` it was
@@ -267,6 +271,7 @@ impl Engine {
             image_instances: Vec::new(),
             pending_placements: Vec::new(),
             pending_images: Vec::new(),
+            pending_live_ids: Vec::new(),
         })
     }
 
@@ -278,6 +283,14 @@ impl Engine {
     /// The pixel dimensions of the current render target.
     pub fn screen_size(&self) -> (usize, usize) {
         (self.screen_width, self.screen_height)
+    }
+
+    /// Number of kitty image textures currently resident in the GPU cache.
+    /// Reflects eviction (R6 slice 3): drops when the terminal deletes an image
+    /// or `image-storage-limit` evicts one. For tests / diagnostics.
+    #[must_use]
+    pub fn image_cache_len(&self) -> usize {
+        self.images.len()
     }
 
     /// Rebuild the CPU-side [`Contents`] and [`Uniforms`] from `snapshot`,
@@ -406,6 +419,9 @@ impl Engine {
         self.pending_images.clear();
         self.pending_images
             .extend_from_slice(snapshot.kitty_images());
+        self.pending_live_ids.clear();
+        self.pending_live_ids
+            .extend_from_slice(snapshot.kitty_live_ids());
     }
 
     /// Build the frame uniforms (port of `updateScreenSizeUniforms` + the
@@ -1127,8 +1143,18 @@ impl Engine {
             image_instances,
             pending_images,
             pending_placements,
+            pending_live_ids,
             ..
         } = self;
+
+        // Evict cached textures for images the terminal no longer holds (R6
+        // slice 3): a deleted or storage-limit-evicted image drops out of the
+        // live-id set, so its GPU texture is freed here. On the `from_window`
+        // path the live set is empty but `images` was never populated, so this
+        // is a no-op. (`pending_live_ids` is small — a handful of images.)
+        if !images.is_empty() {
+            images.retain(|id, _| pending_live_ids.contains(id));
+        }
 
         for img in pending_images.iter() {
             let (w, h) = (img.width as usize, img.height as usize);

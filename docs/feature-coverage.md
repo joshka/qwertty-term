@@ -66,10 +66,11 @@ items are `[ ]` wholesale unless noted.
 - [ ] `background-image` (+ fit/position/repeat/opacity)
 - [ ] `background-blur`, `background-opacity-cells`
 - [ ] `custom-shader` (shadertoy) + animation
-- [~] Kitty image *rendering* (R6 — slices 1–2 done: RGBA transmit→texture→placement
-      quads incl. unicode placeholders, scrollback tracking + viewport clip/cull, via
-      the capture path + offscreen readback + dirty-equality; remaining:
-      delete/eviction (3), z-order buckets (4), live-app `SnapshotWindow` threading)
+- [~] Kitty image *rendering* (R6 — slices 1–3 done: RGBA transmit→texture→placement
+      quads incl. unicode placeholders, scrollback tracking + viewport clip/cull,
+      delete/eviction + storage-limit texture reclaim, via the capture path + offscreen
+      readback + dirty-equality; remaining: z-order buckets (4), live-app
+      `SnapshotWindow` threading)
 - [ ] Link detection/underline overlay (R7), `link-url`, `link-previews`
 - [ ] `resize-overlay`, OpenGL backend (R9, Linux)
 

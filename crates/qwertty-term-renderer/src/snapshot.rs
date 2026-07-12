@@ -265,6 +265,14 @@ pub trait RenderSnapshot {
     fn kitty_images(&self) -> &[KittyImage] {
         &[]
     }
+
+    /// The ids of all images the terminal still holds this frame (R6 slice 3).
+    /// A renderer evicts cached GPU textures whose id is absent here. Defaults
+    /// to empty — impls that don't track kitty state carry no live set, and a
+    /// renderer never populates its cache from them, so eviction is a no-op.
+    fn kitty_live_ids(&self) -> &[u32] {
+        &[]
+    }
 }
 
 /// A full-copy [`RenderSnapshot`] implementation backed by
@@ -286,6 +294,9 @@ pub struct FullSnapshot {
     /// empty on the `from_window` path (see [`KittyPlacement`] docs).
     kitty_placements: Vec<KittyPlacement>,
     kitty_images: Vec<KittyImage>,
+    /// The ids of all images the terminal still holds (R6 slice 3), for GPU
+    /// texture eviction. Empty on the `from_window` path.
+    kitty_live_ids: Vec<u32>,
 }
 
 impl FullSnapshot {
@@ -297,11 +308,13 @@ impl FullSnapshot {
     /// `Full`) and does not touch the terminal's dirty state. For incremental
     /// redraw use [`FullSnapshot::capture_tracking`].
     pub fn capture(terminal: &Terminal, scrollback_offset: usize) -> FullSnapshot {
-        let (kitty_placements, kitty_images) = resolve_kitty(terminal, scrollback_offset);
+        let (kitty_placements, kitty_images, kitty_live_ids) =
+            resolve_kitty(terminal, scrollback_offset);
         FullSnapshot {
             window: terminal.snapshot_window(scrollback_offset),
             kitty_placements,
             kitty_images,
+            kitty_live_ids,
         }
     }
 
@@ -319,11 +332,13 @@ impl FullSnapshot {
     /// dirty state mutates the terminal, exactly as upstream `RenderState`'s
     /// snapshot does under the render lock).
     pub fn capture_tracking(terminal: &mut Terminal, scrollback_offset: usize) -> FullSnapshot {
-        let (kitty_placements, kitty_images) = resolve_kitty(terminal, scrollback_offset);
+        let (kitty_placements, kitty_images, kitty_live_ids) =
+            resolve_kitty(terminal, scrollback_offset);
         FullSnapshot {
             window: terminal.snapshot_window_tracking(scrollback_offset),
             kitty_placements,
             kitty_images,
+            kitty_live_ids,
         }
     }
 
@@ -342,6 +357,7 @@ impl FullSnapshot {
             window,
             kitty_placements: Vec::new(),
             kitty_images: Vec::new(),
+            kitty_live_ids: Vec::new(),
         }
     }
 }
@@ -354,13 +370,24 @@ impl FullSnapshot {
 fn resolve_kitty(
     terminal: &Terminal,
     scrollback_offset: usize,
-) -> (Vec<KittyPlacement>, Vec<KittyImage>) {
+) -> (Vec<KittyPlacement>, Vec<KittyImage>, Vec<u32>) {
     use qwertty_term_vt::kitty::{TerminalGeometry, image_rgba, resolve_placements};
 
     let screen = terminal.screen();
     let storage = &screen.kitty_images;
-    if !storage.enabled() || storage.placements.is_empty() {
-        return (Vec::new(), Vec::new());
+    if !storage.enabled() {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    // The full set of images the terminal still holds (R6 slice 3). The renderer
+    // evicts any cached GPU texture whose id has left this set — which covers
+    // both explicit deletes and `image-storage-limit` eviction, since vt drops
+    // the image from `storage.images` either way. Cheap: just the u32 ids.
+    let live_ids: Vec<u32> = storage.images.keys().copied().collect();
+    if storage.placements.is_empty() {
+        // No placements to draw, but images may still exist — keep their
+        // textures (return the live set so they aren't evicted).
+        return (Vec::new(), Vec::new(), live_ids);
     }
 
     let geo = TerminalGeometry {
@@ -370,9 +397,6 @@ fn resolve_kitty(
         height_px: terminal.height_px,
     };
     let resolved = resolve_placements(storage, &screen.pages, &geo, scrollback_offset);
-    if resolved.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
 
     let mut placements = Vec::with_capacity(resolved.len());
     let mut images: Vec<KittyImage> = Vec::new();
@@ -405,7 +429,7 @@ fn resolve_kitty(
             });
         }
     }
-    (placements, images)
+    (placements, images, live_ids)
 }
 
 impl RenderSnapshot for FullSnapshot {
@@ -481,6 +505,10 @@ impl RenderSnapshot for FullSnapshot {
 
     fn kitty_images(&self) -> &[KittyImage] {
         &self.kitty_images
+    }
+
+    fn kitty_live_ids(&self) -> &[u32] {
+        &self.kitty_live_ids
     }
 }
 
@@ -697,5 +725,53 @@ mod tests {
                 None => { /* cursor scrolled out entirely — also valid */ }
             }
         }
+    }
+
+    /// R6 slice 3: `kitty_live_ids` reflects the terminal's live image set across
+    /// deletes — the eviction signal the renderer's texture cache retains against.
+    /// GPU-less (resolution only).
+    #[test]
+    fn kitty_live_ids_track_storage_deletes() {
+        use base64::Engine as _;
+
+        // Transmit-only (no display) of a 2×2 RGBA image with the given id.
+        let transmit = |id: u32| -> Vec<u8> {
+            let rgba = [1u8, 2, 3, 255].repeat(4);
+            let payload = base64::engine::general_purpose::STANDARD.encode(&rgba);
+            format!("\x1b_Ga=t,f=32,i={id},s=2,v=2;{payload}\x1b\\").into_bytes()
+        };
+        let sorted = |t: &Terminal| -> Vec<u32> {
+            let mut ids = FullSnapshot::capture(t, 0).kitty_live_ids().to_vec();
+            ids.sort_unstable();
+            ids
+        };
+
+        let mut stream = Stream::new(TerminalHandler::new(Terminal::new(Options {
+            cols: 10,
+            rows: 4,
+            ..Default::default()
+        })));
+        stream.feed(&transmit(1));
+        stream.feed(&transmit(2));
+        assert_eq!(
+            sorted(&stream.handler.terminal),
+            vec![1, 2],
+            "both images live"
+        );
+
+        // Delete image 1 (by id, freeing it).
+        stream.feed(b"\x1b_Ga=d,d=I,i=1\x1b\\");
+        assert_eq!(
+            sorted(&stream.handler.terminal),
+            vec![2],
+            "image 1 evicted from live set"
+        );
+
+        // Delete all.
+        stream.feed(b"\x1b_Ga=d,d=A\x1b\\");
+        assert!(
+            sorted(&stream.handler.terminal).is_empty(),
+            "all images gone from live set"
+        );
     }
 }

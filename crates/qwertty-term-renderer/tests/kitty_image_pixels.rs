@@ -159,6 +159,80 @@ fn kitty_image_offscreen_readback() {
     }
 }
 
+/// R6 slice 3 end-to-end: deleting an image evicts its GPU texture from the
+/// cache (memory reclaim) while the surviving image keeps rendering.
+#[test]
+fn kitty_image_eviction_on_delete() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping eviction test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 20u16;
+    let rows = 8u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    // Image 1 (red) at rows 0..=2; image 2 (green) at rows 4..=6.
+    let red = [255u8, 0, 0, 255].repeat(4);
+    let green = [0u8, 255, 0, 255].repeat(4);
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    stream.feed(b"\x1b[H");
+    stream.feed(&transmit_and_display_rgba(1, 2, 2, 4, 3, &red));
+    stream.feed(b"\x1b[5;1H");
+    stream.feed(&transmit_and_display_rgba(2, 2, 2, 4, 3, &green));
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    let opts = FrameOptions::default();
+    let render = |engine: &mut Engine, term: &Terminal, grid: &mut Grid| -> Frame {
+        let snap = FullSnapshot::capture(term, 0);
+        engine.update_frame(&snap, grid, opts);
+        engine.sync_atlas(grid).expect("sync atlas");
+        let pixels = engine.draw_frame().expect("draw frame");
+        let (sw, sh) = engine.screen_size();
+        Frame {
+            pixels,
+            width: sw,
+            height: sh,
+            cell_w: cw as usize,
+            cell_h: ch as usize,
+        }
+    };
+    let is_red = |p: Px| p.r > 180 && p.g < 70 && p.b < 70;
+    let is_green = |p: Px| p.g > 180 && p.r < 70 && p.b < 70;
+
+    // Both images resident + drawn.
+    let f1 = render(&mut engine, &stream.handler.terminal, &mut grid);
+    assert_eq!(engine.image_cache_len(), 2, "both textures cached");
+    assert!(is_red(f1.cell_center(1, 1)), "image 1 red");
+    assert!(is_green(f1.cell_center(1, 5)), "image 2 green");
+
+    // Delete image 1 → its texture is evicted; image 2 survives.
+    stream.feed(b"\x1b_Ga=d,d=I,i=1\x1b\\");
+    let f2 = render(&mut engine, &stream.handler.terminal, &mut grid);
+    assert_eq!(engine.image_cache_len(), 1, "image 1 texture evicted");
+    assert!(!is_red(f2.cell_center(1, 1)), "image 1 no longer drawn");
+    assert!(is_green(f2.cell_center(1, 5)), "image 2 still green");
+
+    // Delete all → cache fully drained.
+    stream.feed(b"\x1b_Ga=d,d=A\x1b\\");
+    let _ = render(&mut engine, &stream.handler.terminal, &mut grid);
+    assert_eq!(engine.image_cache_len(), 0, "all textures evicted");
+}
+
 /// R6 slice 2 end-to-end: an image scrolled partly above the viewport renders
 /// only its visible bottom rows (top clipped by the GPU), and the resolver
 /// reports the expected negative `grid_row`. Exercises the scrollback-offset
