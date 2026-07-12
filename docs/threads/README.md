@@ -51,6 +51,28 @@ The spec file is the thread's constitution. On session death/limit, relaunch the
 the status file + jj describe + pushed branch are the durable state — a fresh session must
 be able to resume from those three alone.
 
+## Resume protocol (the standard nudge)
+
+When told to continue (or just "go"), run this loop — don't wait for item-by-item
+direction:
+
+1. Read your `status/<id>.md`, then skim every sibling's **Blockers** and **Inbox** lines.
+2. Process your **Inbox** first — you may be someone's blocker; unblocking others is
+   higher priority than your own next item.
+3. Pick the top **unblocked** backlog item. If your top item is gated, drop to the next
+   collision-free one — **never idle**.
+4. Ship it via the PR pipeline; self-merge when the gate is green per the merge policy.
+5. Update your status file (current item / last merged / blockers / inbox triaged).
+6. If genuinely blocked on everything, write **who** you're waiting on in your Blockers
+   line and stop — don't spin. Otherwise loop until your backlog drains.
+
+**Who to nudge when the fleet stalls** (heuristic, for the orchestrator/human): grep the
+**Blockers** line across `status/*.md`. `none` → that thread just needs the standard loop
+above. A line naming another thread → nudge the **named** thread (the unblocker) with the
+specific ask, not the blocked one. A red shared CI check blocks everyone — whoever owns the
+failing crate fixes it first, P0. Cross-thread asks travel as **Inbox** lines in the
+target's status file (append-only; the owner triages into their backlog).
+
 ## Shared invariants (every thread, non-negotiable)
 
 ### jj discipline (hard-won; violations have eaten work)
