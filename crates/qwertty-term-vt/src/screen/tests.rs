@@ -1600,6 +1600,33 @@ fn select_replaces_existing_pins() {
     assert_eq!(s.pages.count_tracked_pins(), tracked + 2);
 }
 
+// Port of `test "Screen: reselecting tracked selection preserves its pins"`.
+// Regression for the aliased-pin double-free (upstream 0c299000f): passing the
+// screen's current tracked selection back into `select` must not release the
+// pins the replacement still holds.
+#[test]
+fn reselecting_tracked_selection_preserves_pins() {
+    let mut s = init(10, 2, 0);
+    s.select(Some(Selection::init(
+        sel_pin(&s, Point::active(1, 0)),
+        sel_pin(&s, Point::active(3, 0)),
+        false,
+    )));
+    let tracked = s.pages.count_tracked_pins();
+
+    // Re-select the current tracked selection by value. Before the fix this
+    // freed the shared pins, so the next access dereferenced stale pool slots.
+    let current = s.selection.unwrap();
+    s.select(Some(current));
+
+    // No pin was leaked or freed, and the selection is still valid/forward.
+    assert_eq!(s.pages.count_tracked_pins(), tracked);
+    assert_eq!(
+        s.selection.unwrap().order(&s.pages),
+        crate::screen::selection::Order::Forward
+    );
+}
+
 // ---- selectAll ----------------------------------------------------------
 
 // Port of `test "Screen: selectAll"`.
