@@ -11,6 +11,47 @@
 //! The engine owns a [`Contents`], the [`Uniforms`], and a [`SwapChain`]; each
 //! frame it consumes a [`RenderSnapshot`] and a `qwertty-term-font` [`Grid`] to
 //! rebuild the buffers, then draws. See `docs/analysis/renderer-r4.md`.
+//!
+//! # Embeddability quickstart
+//!
+//! The whole headless "VT bytes in, pixels out" story — feed a terminal,
+//! snapshot it, render one offscreen frame, read back the pixels. This is the
+//! shape a recorder like [betamax](https://github.com/joshka/betamax) embeds;
+//! `examples/frame-capture` is the same flow wired to a PNG encoder.
+//!
+//! ```no_run
+//! use qwertty_term_font::coretext::Face;
+//! use qwertty_term_font::{CodepointResolver, Collection, Grid, Metrics};
+//! use qwertty_term_renderer::engine::{Engine, FrameOptions};
+//! use qwertty_term_renderer::snapshot::FullSnapshot;
+//! use qwertty_term_vt::stream::{Stream, TerminalHandler};
+//! use qwertty_term_vt::terminal::{Options, Terminal};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Font substrate: embedded JetBrains Mono → deterministic metrics + atlas.
+//! let face = Face::load_embedded(16.0)?;
+//! let metrics = Metrics::calc(face.face_metrics());
+//! let resolver = CodepointResolver::new(Collection::new(face));
+//! let mut grid = Grid::new(resolver, metrics)?;
+//!
+//! // 2. Terminal state machine: feed it raw VT bytes.
+//! let terminal = Terminal::new(Options { cols: 20, rows: 4, ..Default::default() });
+//! let mut stream = Stream::new(TerminalHandler::new(terminal));
+//! stream.feed(b"\x1b[1;32mhello\x1b[0m");
+//!
+//! // 3. Engine reads its cell geometry straight from the grid — no desync.
+//! let mut engine = Engine::for_grid(&grid)?;
+//!
+//! // 4. Snapshot the live screen and render one frame in a single call.
+//! let snapshot = FullSnapshot::capture_live(stream.terminal());
+//! let frame = engine.render(&snapshot, &mut grid, FrameOptions::default())?;
+//!
+//! // 5. Pixels, format stated by the accessor: RGBA for PNG/`image` buffers.
+//! assert_eq!(frame.bgra().len(), frame.width() * frame.height() * 4);
+//! let _rgba = frame.to_rgba();
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::HashMap;
 

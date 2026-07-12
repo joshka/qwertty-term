@@ -6,6 +6,14 @@ license.workspace = true
 repository.workspace = true
 description = "Renderer core ported from Ghostty: geometry, cursor style resolution, row heuristics, and the RenderSnapshot contract between qwertty-term-vt and any renderer backend"
 
+# The engine/Metal backend (Engine, render, Frame — the whole GPU path) is
+# `cfg(target_os = "macos")`. docs.rs defaults to a Linux target, which would
+# render a gutted crate with those modules missing; build the docs for a darwin
+# target so the full public API is documented.
+[package.metadata.docs.rs]
+default-target = "x86_64-apple-darwin"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+
 [lib]
 name = "qwertty_term_renderer"
 
