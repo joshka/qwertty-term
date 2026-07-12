@@ -12,13 +12,17 @@
 //! Deleting those tables is the proof the port is real.
 
 pub mod action;
+pub mod defaults;
 pub mod flags;
 pub mod parser;
+pub mod set;
 pub mod trigger;
 
 pub use action::Action;
+pub use defaults::default_set;
 pub use flags::Flags;
 pub use parser::{Binding, ParseItem, Parser};
+pub use set::{Bound, Set};
 pub use trigger::{Trigger, TriggerKey};
 
 /// Errors from parsing a keybind. Port of `Binding.Error`

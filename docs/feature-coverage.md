@@ -139,10 +139,12 @@ items are `[ ]` wholesale unless noted.
 - [x] Bracketed paste, `macos-option-as-alt`
 - [x] `keybind = text:` subset (custom byte sequences, e.g. shift+enter)
 - [~] Font-size binds (increase/decrease/set) — actions exist, not all wired to config
-- [~] `Binding.zig` port slice (a): trigger/action/flags model + parse layer in
-      `qwertty-term-input::binding` (10-rule `Trigger::parse`, 85-action enum +
-      `Action::parse`, flag prefixes, `=`-splitter, chain + sequence parsing, compat
-      table). Next: `Set` storage/lookup + default keymap, then dispatch integration.
+- [~] `Binding.zig` port in `qwertty-term-input::binding`: trigger/action/flags model
+      + parse layer (10-rule `Trigger::parse`, 85-action enum + `Action::parse`, flag
+      prefixes, `=`-splitter, chain + sequence parsing, compat table) **and** the
+      runtime `Set` (case-folded `mods.binding()` lookup, 5-probe `get_event`, `put`
+      overwrite) **and** the full macOS `default_set()` (93 upstream-verified default
+      binds). Next: reverse map + sequences/chains dispatch, then app-crate integration.
 - [ ] Full `Binding.zig` system runtime: leader/chains dispatch, key tables, `global`
       binds, `performable` fallthrough (model parsed; runtime `Set` pending)
 - [ ] Most keybind *actions*: `jump_to_prompt`, `write_scrollback_file`, `inspector`,
