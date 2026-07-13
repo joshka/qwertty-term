@@ -1679,6 +1679,54 @@ fn resolve_colors(
     (startup_colors, selection_colors)
 }
 
+/// The URL at viewport cell `(col, row)` in `snap` (R7 slice 3): the OSC8
+/// hyperlink URI if the cell carries one, otherwise a regex-detected URL on
+/// that row that covers the column. `None` if the cell isn't over a link.
+fn url_at_cell(
+    snap: &qwertty_term_vt::snapshot::SnapshotWindow,
+    col: usize,
+    row: usize,
+) -> Option<String> {
+    use qwertty_term_vt::page::hyperlink::LinkKey;
+    let cells = &snap.window.get(row)?.cells;
+    // OSC8 link: the cell carries the URI directly (via its `LinkKey`).
+    if let Some(key) = &cells.get(col)?.link {
+        let uri = match key {
+            LinkKey::Implicit(_, uri) | LinkKey::Explicit(_, uri) => uri,
+        };
+        return Some(String::from_utf8_lossy(uri).into_owned());
+    }
+    // Otherwise, regex-detect a URL on the row and return the span under `col`.
+    // (Mirrors the renderer's hover detection; the char↔column mapping is small
+    // enough to keep local rather than share across the crate boundary.)
+    let mut text = String::new();
+    let mut col_of_char: Vec<usize> = Vec::new();
+    let mut byte_of_char: Vec<usize> = Vec::new();
+    for (x, cell) in cells.iter().enumerate() {
+        if cell.is_spacer() {
+            continue;
+        }
+        byte_of_char.push(text.len());
+        col_of_char.push(x);
+        text.push(cell.ch);
+        for &c in &cell.combining {
+            text.push(c);
+        }
+    }
+    let byte = col_of_char
+        .iter()
+        .position(|&c| c == col)
+        .map(|i| byte_of_char[i])?;
+    let span = qwertty_term_renderer::link::url_span_at(&text, byte)?;
+    Some(text[span].to_string())
+}
+
+/// Open `url` with the system handler (macOS LaunchServices via `open`). The
+/// URL is passed as a single argv element (no shell), so it can't inject.
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
 impl Controller {
     /// Build a controller from loaded config.
     pub fn new(config: &crate::config::Config, mtm: MainThreadMarker) -> Self {
@@ -3340,6 +3388,25 @@ impl Controller {
         if action == qwertty_term_input::mouse::Action::Motion {
             let hovered = s.cell_at(x, y);
             s.hovered_cell = hovered;
+        }
+
+        // R7 slice 3: cmd+click opens the link under the pointer (OSC8 or a
+        // regex-detected URL) and consumes the event, so it doesn't also start a
+        // selection or send a mouse report. Matches the hover-underline affordance.
+        if action == qwertty_term_input::mouse::Action::Press
+            && button == Some(qwertty_term_input::mouse::Button::Left)
+            && mods.super_
+            && let Some((col, row)) = s.cell_at(x, y)
+        {
+            let url = {
+                let engine = s.engine();
+                let snap = engine.snapshot_window(s.scrollback_offset);
+                url_at_cell(&snap, col, row)
+            };
+            if let Some(url) = url {
+                open_url(&url);
+                return;
+            }
         }
 
         if button == Some(qwertty_term_input::mouse::Button::Left) {
@@ -9420,8 +9487,46 @@ pub fn run(
 mod tests {
     use super::arrow_key_bytes;
     use super::lock_or_recover;
+    use super::url_at_cell;
     use crate::engine::Engine;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn url_at_cell_resolves_osc8_and_regex_urls() {
+        use qwertty_term_vt::stream::{Stream, TerminalHandler};
+        use qwertty_term_vt::terminal::{Options, Terminal};
+
+        // Row 0: an OSC8 link over "ab" → then a plain "http://x.io" (regex).
+        let term = Terminal::new(Options {
+            cols: 40,
+            rows: 2,
+            ..Default::default()
+        });
+        let mut stream = Stream::new(TerminalHandler::new(term));
+        stream.feed(b"\x1b]8;;https://osc8.test\x1b\\ab\x1b]8;;\x1b\\ http://x.io");
+        let snap = stream.handler.terminal.snapshot_window(0);
+
+        // OSC8 cells (col 0-1) resolve to the OSC8 URI (not the visible text).
+        assert_eq!(
+            url_at_cell(&snap, 0, 0).as_deref(),
+            Some("https://osc8.test")
+        );
+        assert_eq!(
+            url_at_cell(&snap, 1, 0).as_deref(),
+            Some("https://osc8.test")
+        );
+
+        // The plain URL starts at col 3 ("ab" + space). Any column inside it
+        // resolves to the detected URL span text.
+        let http_col = 3 + "http:".len(); // a column inside "http://x.io"
+        assert_eq!(
+            url_at_cell(&snap, http_col, 0).as_deref(),
+            Some("http://x.io")
+        );
+
+        // The separating space (col 2) is over neither link.
+        assert_eq!(url_at_cell(&snap, 2, 0), None);
+    }
 
     #[test]
     fn arrow_key_bytes_match_upstream_alternate_scroll_sequences() {
