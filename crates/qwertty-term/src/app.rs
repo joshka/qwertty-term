@@ -285,6 +285,10 @@ struct Surface {
     /// behaviors, drag threshold, autoscroll) — port of upstream
     /// `SelectionGesture.zig`. See [`crate::gesture`].
     gesture: crate::gesture::SelectionGesture,
+    /// Word-boundary codepoints for double/triple-click word selection
+    /// (`selection-word-chars` config, or the built-in default set), shared from
+    /// the controller.
+    word_boundaries: std::sync::Arc<[u32]>,
     /// Selection highlight colors resolved from the tab's theme at startup.
     selection_colors: SelectionColors,
     /// The terminal's default background as `(r, g, b)` — the presented-frame
@@ -824,7 +828,7 @@ impl Surface {
             repeat_interval: interval,
             alt_screen,
             behaviors,
-            boundary_codepoints: &qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES,
+            boundary_codepoints: &self.word_boundaries,
         };
         // The gesture needs the engine during the press (word/line lookup);
         // take it out so the engine guard's `&self` borrow and the gesture's
@@ -876,7 +880,7 @@ impl Surface {
             rectangle,
             alt_screen,
             geometry: self.gesture_geometry(),
-            boundary_codepoints: &qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES,
+            boundary_codepoints: &self.word_boundaries,
         };
         let mut gesture = std::mem::take(&mut self.gesture);
         let sel = {
@@ -1452,10 +1456,15 @@ pub struct ControllerState {
     /// Whether finishing a mouse-drag selection immediately copies it to the
     /// clipboard (`copy-on-select` config key).
     copy_on_select: bool,
-    /// The click-repeat interval for double/triple-click detection: the OS
-    /// double-click interval, falling back to upstream's 500ms default
+    /// The click-repeat interval for double/triple-click detection: the
+    /// `click-repeat-interval` config value if set, else the OS double-click
+    /// interval, falling back to upstream's 500ms default
     /// (`click-repeat-interval`, `Config.zig:4673` + `os/mouse.zig`).
     mouse_interval: std::time::Duration,
+    /// Word-boundary codepoints for double/triple-click word selection
+    /// (`selection-word-chars` config, or the built-in default set). Shared into
+    /// each surface at build time. `Arc<[u32]>` so panes share one allocation.
+    word_boundaries: std::sync::Arc<[u32]>,
     /// Wheel-scroll multipliers (`mouse-scroll-multiplier` config), clamped to
     /// upstream's valid range.
     scroll_multiplier: crate::scroll::ScrollMultiplier,
@@ -1693,7 +1702,17 @@ impl Controller {
             startup_colors,
             selection_colors,
             copy_on_select: config.copy_on_select,
-            mouse_interval: crate::gesture::click_interval(),
+            mouse_interval: config
+                .click_repeat_interval()
+                .unwrap_or_else(crate::gesture::click_interval),
+            word_boundaries: config
+                .selection_word_chars_codepoints()
+                .map(std::sync::Arc::from)
+                .unwrap_or_else(|| {
+                    std::sync::Arc::from(
+                        qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES.as_slice(),
+                    )
+                }),
             scroll_multiplier: crate::scroll::ScrollMultiplier {
                 precision: config.mouse_scroll_multiplier.precision,
                 discrete: config.mouse_scroll_multiplier.discrete,
@@ -4225,7 +4244,16 @@ impl Controller {
         scale: f64,
         cwd: Option<&std::path::Path>,
     ) -> Option<Surface> {
-        let (family, default_size, startup_colors, selection_colors, dim_alpha, dim_fill, mods) = {
+        let (
+            family,
+            default_size,
+            startup_colors,
+            selection_colors,
+            dim_alpha,
+            dim_fill,
+            mods,
+            word_boundaries,
+        ) = {
             let s = self.0.borrow();
             (
                 s.font_family.clone(),
@@ -4235,6 +4263,7 @@ impl Controller {
                 s.unfocused_dim_alpha,
                 s.unfocused_dim_fill,
                 s.metric_modifiers.clone(),
+                s.word_boundaries.clone(),
             )
         };
 
@@ -4280,6 +4309,7 @@ impl Controller {
             mouse_button_down: false,
             hovered_cell: None,
             gesture: crate::gesture::SelectionGesture::new(),
+            word_boundaries,
             selection_colors,
             default_bg,
             frame_dump,
@@ -4685,6 +4715,13 @@ impl Controller {
         let tab = self.active_tab()?;
         let state = self.0.borrow();
         Some((state.tabs.get(&tab)?.window.clone(), tab))
+    }
+
+    /// The resolved click-repeat interval (the `click-repeat-interval` config
+    /// value if set, else the OS/default) — the observable proof the config key
+    /// is wired into double/triple-click detection (smoke/test).
+    pub fn mouse_interval(&self) -> std::time::Duration {
+        self.0.borrow().mouse_interval
     }
 
     /// The active window's restoration `identifier` (the observable proof that
@@ -5452,6 +5489,10 @@ pub struct DelegateIvars {
     /// Session smoke (`QWERTTY_TERM_SMOKE_SESSION`): capture/round-trip/restore
     /// the window-session tree. See [`AppDelegate::run_session_smoke`].
     smoke_session: bool,
+    /// Word-chars smoke (`QWERTTY_TERM_SMOKE_WORDCHARS`): assert
+    /// `selection-word-chars` + `click-repeat-interval` config wiring. See
+    /// [`AppDelegate::run_wordchars_smoke`].
+    smoke_wordchars: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -5532,6 +5573,7 @@ define_class!(
             let has_mouse2 = self.ivars().smoke_mouse2;
             let has_savestate = self.ivars().smoke_savestate;
             let has_session = self.ivars().smoke_session;
+            let has_wordchars = self.ivars().smoke_wordchars;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -5573,6 +5615,8 @@ define_class!(
                 self.schedule_savestate_smoke();
             } else if has_session {
                 self.schedule_session_smoke();
+            } else if has_wordchars {
+                self.schedule_wordchars_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -5867,6 +5911,13 @@ define_class!(
         fn session_smoke(&self, _timer: &AnyObject) {
             self.run_session_smoke();
         }
+
+        /// Word-chars smoke: assert selection-word-chars + click-repeat-interval
+        /// config wiring, exit 0/1.
+        #[unsafe(method(ghosttyWordCharsSmoke:))]
+        fn wordchars_smoke(&self, _timer: &AnyObject) {
+            self.run_wordchars_smoke();
+        }
     }
 );
 
@@ -5899,6 +5950,7 @@ impl AppDelegate {
         smoke_mouse2: bool,
         smoke_savestate: bool,
         smoke_session: bool,
+        smoke_wordchars: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -5928,6 +5980,7 @@ impl AppDelegate {
             smoke_mouse2,
             smoke_savestate,
             smoke_session,
+            smoke_wordchars,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -7721,6 +7774,78 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_wordchars_smoke(&self) {
+        self.schedule_selector(0.5, sel!(ghosttyWordCharsSmoke:));
+    }
+
+    /// `selection-word-chars` + `click-repeat-interval` config smoke. Launched
+    /// with `selection-word-chars = " -"` (hyphen is a boundary) and
+    /// `click-repeat-interval = 1234`: double-clicking "beta-gamma" then selects
+    /// only "beta" — the inverse of the default-config selection smoke, where the
+    /// hyphen is *not* a boundary and the word is "beta-gamma" — and the resolved
+    /// click interval matches the config. Exits 0/1.
+    fn run_wordchars_smoke(&self) {
+        let mtm = self.mtm();
+        let controller = &self.ivars().controller;
+        let fail = wordchars_fail;
+
+        // 1. click-repeat-interval flowed into the resolved mouse interval.
+        if controller.mouse_interval() != std::time::Duration::from_millis(1234) {
+            fail(format!(
+                "click-repeat-interval=1234 should set the mouse interval; got {:?}",
+                controller.mouse_interval()
+            ));
+        }
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at wordchars smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at wordchars smoke start".into());
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let win_num: isize = app
+            .keyWindow()
+            .or_else(|| controller.active_window())
+            .map(|w| w.windowNumber())
+            .unwrap_or(0);
+        let view = controller
+            .surface_view(tab, surface)
+            .unwrap_or_else(|| fail("no view for the focused surface".into()));
+        let view = &*view;
+
+        controller.feed_surface_output(tab, surface, b"\x1b[2J\x1b[H");
+        controller.feed_surface_output(tab, surface, b"alpha beta-gamma delta\r\n");
+        Self::spin(0.1);
+
+        let pt = |col: f64, row: f64| {
+            controller
+                .surface_cell_window_point(tab, surface, col, row)
+                .unwrap_or_else(|| fail("cell → window point mapping failed".into()))
+        };
+        let none = NSEventModifierFlags::empty();
+
+        // 2. Double-click the middle of "beta" (cols 6..9). With `-` now a
+        //    boundary, the word stops at the hyphen → "beta".
+        let word_pt = pt(7.5, 0.5);
+        Self::send_click(view, win_num, word_pt, none);
+        Self::send_click(view, win_num, word_pt, none);
+        let sel = controller.surface_selection_string(tab, surface);
+        if sel.as_deref() != Some("beta") {
+            fail(format!(
+                "with selection-word-chars including '-', double-click should select \
+                 'beta' (hyphen is a boundary); got {sel:?}"
+            ));
+        }
+
+        println!(
+            "OK: wordchars smoke — click-repeat-interval set the mouse interval to \
+             1234ms, and selection-word-chars made '-' a boundary so a double-click \
+             selected 'beta' rather than 'beta-gamma'."
+        );
+        std::process::exit(0);
+    }
+
     /// Schedule the title smoke: let the first shell settle, then run.
     fn schedule_title_smoke(&self) {
         self.schedule_selector(0.7, sel!(ghosttyTitleSmoke:));
@@ -9015,6 +9140,12 @@ fn session_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a wordchars smoke failure and exit non-zero.
+fn wordchars_fail(msg: String) -> ! {
+    eprintln!("FAIL: wordchars smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -9136,6 +9267,7 @@ pub fn run(
     smoke_mouse2: bool,
     smoke_savestate: bool,
     smoke_session: bool,
+    smoke_wordchars: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -9168,6 +9300,7 @@ pub fn run(
         smoke_mouse2,
         smoke_savestate,
         smoke_session,
+        smoke_wordchars,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
