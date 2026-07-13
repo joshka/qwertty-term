@@ -694,6 +694,15 @@ struct Pipeline {
     /// buffer without the metadata lock; ownership is enforced by the ring
     /// protocol, exactly as upstream's `bufs` outside the mutex.
     bufs: [std::cell::UnsafeCell<Box<[u8; BUFFER_CAPACITY]>>; BUFFER_COUNT],
+    /// Read end of the parse-idle self-pipe (gather polls it while bridging).
+    /// The parse stage writes a byte when it drains the ring dry so gather can
+    /// stop bridging a refill gap immediately instead of sleeping the poll
+    /// timeout — the request/response latency fix (upstream `bb0ac4c72`).
+    /// `None` if the pipe couldn't be created (degrades to timeout-bounded
+    /// bridging).
+    idle_read: Option<OwnedFd>,
+    /// Write end of the parse-idle self-pipe (parse signals gather).
+    idle_write: Option<OwnedFd>,
 }
 
 // Safe: the ring protocol guarantees a buffer is accessed by exactly one
@@ -712,10 +721,21 @@ struct PipelineMeta {
     count: usize,
     /// Set by gather when the stream is over; parse drains then exits.
     done: bool,
+    /// Set by gather (under this lock) only while it is about to sleep in a
+    /// bridge poll. The gate for the parse-idle wake: parse writes the
+    /// self-pipe only when it goes idle *and* `bridging` is set, so an
+    /// interactive terminal (never bridging) pays no extra syscalls. Port of
+    /// upstream `bb0ac4c72`'s `Pipeline.bridging`.
+    bridging: bool,
 }
 
 impl Pipeline {
     fn new() -> Pipeline {
+        // A CLOEXEC + NONBLOCK self-pipe lets the parse stage wake the gather
+        // stage the instant it goes idle mid-bridge (upstream `bb0ac4c72`).
+        // Failure is non-fatal: bridging then falls back to the poll timeout.
+        // (`pipe2` isn't available on Apple, so set the flags by hand.)
+        let (idle_read, idle_write) = Self::make_idle_pipe();
         Pipeline {
             meta: Mutex::new(PipelineMeta {
                 lens: [0; BUFFER_COUNT],
@@ -723,13 +743,37 @@ impl Pipeline {
                 tail: 0,
                 count: 0,
                 done: false,
+                bridging: false,
             }),
             batch_ready: Condvar::new(),
             slot_free: Condvar::new(),
             bufs: std::array::from_fn(|_| {
                 std::cell::UnsafeCell::new(Box::new([0u8; BUFFER_CAPACITY]))
             }),
+            idle_read,
+            idle_write,
         }
+    }
+
+    /// Create the parse-idle self-pipe with CLOEXEC on both ends and NONBLOCK on
+    /// the read end (so gather's drain loop never blocks). Returns `(None, None)`
+    /// on any failure — the wake optimization is then simply skipped.
+    fn make_idle_pipe() -> (Option<OwnedFd>, Option<OwnedFd>) {
+        let (read, write) = match rustix::pipe::pipe() {
+            Ok(pair) => pair,
+            Err(err) => {
+                eprintln!("qwertty-term-termio: read thread failed to create idle pipe: {err}");
+                return (None, None);
+            }
+        };
+        // Best-effort CLOEXEC on both ends; NONBLOCK on the read end (drained in
+        // a loop) — the write is a single byte we drop if the pipe is full.
+        let _ = rustix::io::fcntl_setfd(&read, rustix::io::FdFlags::CLOEXEC);
+        let _ = rustix::io::fcntl_setfd(&write, rustix::io::FdFlags::CLOEXEC);
+        if !set_nonblock(read.as_raw_fd()) {
+            return (None, None);
+        }
+        (Some(read), Some(write))
     }
 }
 
@@ -849,14 +893,29 @@ fn reader_main(fd: OwnedFd, quit: OwnedFd, mut sink: Sink) {
         };
         sink(batch);
 
-        {
+        let wake_gather = {
             let mut meta = pipeline.meta.lock().unwrap();
             meta.tail = (meta.tail + 1) % BUFFER_COUNT;
             meta.count -= 1;
-        }
+            // We just drained the ring dry while the gather stage is mid-bridge:
+            // interrupt its poll so it delivers immediately instead of sleeping
+            // the timeout (upstream `bb0ac4c72`). Only fires while `bridging`,
+            // so interactive/bulk streams pay nothing.
+            meta.count == 0 && meta.bridging
+        };
         pipeline.slot_free.notify_one();
+        if wake_gather && let Some(w) = pipeline.idle_write.as_ref() {
+            let _ = rustix::io::write(w, b"i");
+        }
     }
     // The loop only exits via the `done` return above, which joins `gather`.
+}
+
+/// Clear the `bridging` flag, closing the window during which the parse stage
+/// may write the self-pipe. Called by the gather stage right after each bridge
+/// poll returns. Port of upstream `bb0ac4c72`'s `clearBridging`.
+fn clear_bridging(pipeline: &Pipeline) {
+    pipeline.meta.lock().unwrap().bridging = false;
 }
 
 /// The io-gather stage. Drains the pty into rotating buffers, bridging the
@@ -881,6 +940,9 @@ fn gather_main(fd: OwnedFd, quit: OwnedFd, pipeline: Arc<Pipeline>) {
     let quit_raw = quit.as_raw_fd();
     let fd_b = unsafe { BorrowedFd::borrow_raw(fd_raw) };
     let quit_b = unsafe { BorrowedFd::borrow_raw(quit_raw) };
+    // Read end of the parse-idle self-pipe, added to the bridge poll set so the
+    // parse stage can interrupt a bridge the instant it goes idle (`bb0ac4c72`).
+    let idle_raw = pipeline.idle_read.as_ref().map(|f| f.as_raw_fd());
 
     use rustix::event::{PollFd, PollFlags, poll};
 
@@ -940,16 +1002,53 @@ fn gather_main(fd: OwnedFd, quit: OwnedFd, pipeline: Arc<Pipeline>) {
                         None => bridge_start = Some(now),
                     }
 
-                    let mut fds = [
-                        PollFd::new(&fd_b, PollFlags::IN),
-                        PollFd::new(&quit_b, PollFlags::IN),
-                    ];
+                    // Sleeping for a refill gap is only free while the parse
+                    // stage is busy (the wait hides behind parse time). If it is
+                    // already idle, deliver now — every poll µs would be added
+                    // latency (upstream `bb0ac4c72`). Otherwise arm `bridging` so
+                    // parse wakes us via the self-pipe the moment it drains dry.
+                    {
+                        let mut meta = pipeline.meta.lock().unwrap();
+                        if meta.count == 0 {
+                            break 'gather;
+                        }
+                        meta.bridging = true;
+                    }
+
                     let timeout = rustix::event::Timespec {
                         tv_sec: 0,
                         tv_nsec: (BRIDGE_POLL_TIMEOUT_MS as i64) * 1_000_000,
                     };
-                    let r = match poll(&mut fds, Some(&timeout)) {
-                        Ok(r) => r,
+                    // Poll the pty + quit fds, plus the parse-idle self-pipe when
+                    // it exists. Extract revents before the borrowed `PollFd`s
+                    // drop so `clear_bridging` can re-lock cleanly.
+                    let idle_b = idle_raw.map(|r| unsafe { BorrowedFd::borrow_raw(r) });
+                    let polled = if let Some(idle_b) = idle_b.as_ref() {
+                        let mut fds = [
+                            PollFd::new(&fd_b, PollFlags::IN),
+                            PollFd::new(&quit_b, PollFlags::IN),
+                            PollFd::new(idle_b, PollFlags::IN),
+                        ];
+                        poll(&mut fds, Some(&timeout)).map(|r| {
+                            (
+                                r,
+                                fds[0].revents(),
+                                fds[1].revents(),
+                                Some(fds[2].revents()),
+                            )
+                        })
+                    } else {
+                        let mut fds = [
+                            PollFd::new(&fd_b, PollFlags::IN),
+                            PollFd::new(&quit_b, PollFlags::IN),
+                        ];
+                        poll(&mut fds, Some(&timeout))
+                            .map(|r| (r, fds[0].revents(), fds[1].revents(), None))
+                    };
+                    // Close the wake window before acting on the result.
+                    clear_bridging(&pipeline);
+                    let (r, data_revents, quit_revents, idle_revents) = match polled {
+                        Ok(t) => t,
                         Err(_) => break 'gather,
                     };
                     // Quiet for a full timeout: burst ended.
@@ -957,13 +1056,26 @@ fn gather_main(fd: OwnedFd, quit: OwnedFd, pipeline: Arc<Pipeline>) {
                         break 'gather;
                     }
                     // Quit signal: deliver and stop.
-                    if fds[1].revents().contains(PollFlags::IN) {
+                    if quit_revents.contains(PollFlags::IN) {
                         fatal = true;
+                        break 'gather;
+                    }
+                    // Parse went idle mid-bridge: drain the wake byte(s) and
+                    // deliver immediately (the round-trip latency fix).
+                    if idle_revents.is_some_and(|re| re.contains(PollFlags::IN)) {
+                        if let Some(ir) = pipeline.idle_read.as_ref() {
+                            let mut trash = [0u8; 16];
+                            while let Ok(n) = rustix::io::read(ir, &mut trash) {
+                                if n < trash.len() {
+                                    break;
+                                }
+                            }
+                        }
                         break 'gather;
                     }
                     // HUP without IN: no more data. Deliver, let outer poll
                     // decide.
-                    if !fds[0].revents().contains(PollFlags::IN) {
+                    if !data_revents.contains(PollFlags::IN) {
                         break 'gather;
                     }
                     // Data available: keep reading.
