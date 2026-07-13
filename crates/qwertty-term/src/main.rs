@@ -78,6 +78,10 @@
 //!   confirmation) while single-line pastes pass, and that typing clears the
 //!   selection (`selection-clear-on-typing`), then exit 0/1. Uses `cat` as the
 //!   child so pastes echo deterministically.
+//! - `QWERTTY_TERM_SMOKE_WINDOWSTATE=1` — run the window-state smoke: with
+//!   `window-width`/`window-height` cells configured, assert the first window's
+//!   content size matches the requested cell grid (later windows keep the
+//!   default), then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -184,6 +188,9 @@ fn run_window() {
     let smoke_mouse = std::env::var_os("QWERTTY_TERM_SMOKE_MOUSE").is_some();
     // Clipboard smoke: paste-protection + selection-clear-on-typing.
     let smoke_clipboard = std::env::var_os("QWERTTY_TERM_SMOKE_CLIPBOARD").is_some();
+    // Window-state smoke: assert the first window honors configured initial
+    // geometry (window-width/-height cells + window-position).
+    let smoke_windowstate = std::env::var_os("QWERTTY_TERM_SMOKE_WINDOWSTATE").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -200,6 +207,7 @@ fn run_window() {
         smoke_bell,
         smoke_mouse,
         smoke_clipboard,
+        smoke_windowstate,
     );
 }
 
