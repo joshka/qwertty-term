@@ -155,13 +155,57 @@ impl ReferenceTerminal {
         value
     }
 
+    /// Read a `bool *`-typed datum (1 byte). Using [`get_u16`](Self::get_u16)
+    /// here would read an adjacent byte as garbage.
+    fn get_bool(&self, key: std::ffi::c_int) -> bool {
+        let mut value: bool = false;
+        // SAFETY: handle is valid; `key` selects a bool-typed datum and
+        // `value` is a valid out-pointer of that type.
+        let result =
+            unsafe { ffi::ghostty_terminal_get(self.handle, key, &raw mut value as *mut c_void) };
+        assert_eq!(
+            result,
+            ffi::GHOSTTY_SUCCESS,
+            "ghostty_terminal_get({key}) failed: {result}"
+        );
+        value
+    }
+
+    /// Read an enum-typed datum (ghostty C enums are `int`-width).
+    fn get_enum(&self, key: std::ffi::c_int) -> std::ffi::c_int {
+        let mut value: std::ffi::c_int = 0;
+        // SAFETY: handle is valid; `key` selects an int-width enum datum and
+        // `value` is a valid out-pointer of that type.
+        let result =
+            unsafe { ffi::ghostty_terminal_get(self.handle, key, &raw mut value as *mut c_void) };
+        assert_eq!(
+            result,
+            ffi::GHOSTTY_SUCCESS,
+            "ghostty_terminal_get({key}) failed: {result}"
+        );
+        value
+    }
+
     /// Raw plain-text dump of the active screen (scrollback + visible grid)
     /// as produced by the libghostty-vt formatter with `trim = true`:
     /// trailing whitespace is trimmed from non-blank lines, but trailing
     /// blank lines for empty grid rows may be present.
     pub fn raw_text(&self) -> String {
+        self.format_with_emit(ffi::GHOSTTY_FORMATTER_FORMAT_PLAIN)
+    }
+
+    /// Styled dump of the active screen via the libghostty-vt **VT** formatter:
+    /// the screen re-emitted as VT sequences INCLUDING SGR attributes. Mirror of
+    /// [`RustTerminal::formatter_vt_text`](crate::RustTerminal::formatter_vt_text).
+    pub fn raw_text_vt(&self) -> String {
+        self.format_with_emit(ffi::GHOSTTY_FORMATTER_FORMAT_VT)
+    }
+
+    /// Run the libghostty-vt terminal formatter with the given emit format
+    /// (`trim = true`) and return its output.
+    fn format_with_emit(&self, emit: std::ffi::c_int) -> String {
         let options = ffi::GhosttyFormatterTerminalOptions {
-            emit: ffi::GHOSTTY_FORMATTER_FORMAT_PLAIN,
+            emit,
             trim: true,
             ..Default::default()
         };
@@ -215,7 +259,7 @@ impl ReferenceTerminal {
                 "ghostty_formatter_format_buf failed: {result}"
             );
             buf.truncate(written);
-            String::from_utf8(buf).expect("plain-text formatter output is UTF-8")
+            String::from_utf8(buf).expect("formatter output is UTF-8")
         };
 
         // SAFETY: formatter is valid and not used after this call.
@@ -235,10 +279,23 @@ impl Oracle for ReferenceTerminal {
         normalize_screen_text(&self.raw_text())
     }
 
+    fn styled_text(&self) -> String {
+        self.raw_text_vt()
+    }
+
     fn cursor(&self) -> CursorPos {
         CursorPos {
             row: self.get_u16(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_Y),
             col: self.get_u16(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_X),
+        }
+    }
+
+    fn term_state(&self) -> crate::TermState {
+        crate::TermState {
+            pending_wrap: self.get_bool(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP),
+            alt_screen: self.get_enum(ffi::GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)
+                == ffi::GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
+            cursor_visible: self.get_bool(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE),
         }
     }
 }

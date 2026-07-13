@@ -12,7 +12,7 @@ mod esc;
 pub use esc::decode_escaped_stream;
 
 mod oracle;
-pub use oracle::{CursorPos, Oracle, ScreenDump, normalize_screen_text};
+pub use oracle::{CursorPos, Oracle, ScreenDump, TermState, normalize_screen_text};
 
 mod rust_engine;
 pub use rust_engine::RustTerminal;

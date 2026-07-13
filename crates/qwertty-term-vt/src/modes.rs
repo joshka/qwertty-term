@@ -212,7 +212,13 @@ impl ModeState {
         let defaults = ModeValues::defaults();
         Self {
             values: defaults,
-            saved: ModeValues::default(),
+            // Upstream inits `values`, `saved`, and `default` all to the same
+            // `ModePacked = .{}` (per-mode defaults) — NOT an all-false struct.
+            // So restoring a mode that was never saved yields its default, e.g.
+            // `CSI ? 25 r` leaves cursor_visible = true. Using the derived
+            // (all-false) `Default` here would wrongly restore such modes to
+            // false. (Found via the ghostty AFL corpus differential replay.)
+            saved: defaults,
             default: defaults,
         }
     }
@@ -221,7 +227,9 @@ impl ModeState {
     /// state. Port of `ModeState.reset`.
     pub fn reset(&mut self) {
         self.values = self.default;
-        self.saved = ModeValues::default();
+        // Match upstream `self.saved = .{}`: reset saved to the per-mode
+        // defaults, not an all-false struct (see `new`).
+        self.saved = self.default;
     }
 
     /// Set a mode to a value. Port of `ModeState.set`.
@@ -473,5 +481,27 @@ mod tests {
             let (value, ansi) = mode_value_ansi(mode);
             assert_eq!(mode_from_int(value, ansi), Some(mode));
         }
+    }
+
+    // Restoring a mode that was never saved must yield its DEFAULT, not `false`.
+    // Upstream inits `saved` to the per-mode defaults (`ModePacked = .{}`), so
+    // e.g. `CSI ? 25 r` (XTRESTORE of cursor_visible, default true) with no
+    // prior save leaves the mode at true. Found via the ghostty AFL corpus
+    // differential replay.
+    #[test]
+    fn restore_unsaved_mode_yields_its_default() {
+        let mut m = ModeState::new();
+        // CursorVisible defaults to true; nothing saved yet.
+        assert!(m.get(Mode::CursorVisible));
+        m.set(Mode::CursorVisible, false);
+        assert!(!m.get(Mode::CursorVisible));
+        // Restore with no matching save -> back to the default (true), not false.
+        assert!(m.restore(Mode::CursorVisible));
+        assert!(m.get(Mode::CursorVisible));
+
+        // reset() must also restore `saved` to the defaults, not all-false.
+        m.set(Mode::CursorVisible, false);
+        m.reset();
+        assert!(m.restore(Mode::CursorVisible));
     }
 }
