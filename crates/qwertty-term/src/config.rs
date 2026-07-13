@@ -130,6 +130,24 @@ pub struct Config {
     /// app falls back to a dock attention request.
     #[serde(rename = "desktop-notifications")]
     pub desktop_notifications: bool,
+    /// When to notify on an OSC 133 command completion: `never` (default) /
+    /// `unfocused` / `always` (upstream `notify-on-command-finish`,
+    /// `Config.zig:1217`). Requires shell integration (OSC 133). Parsed by
+    /// [`Config::notify_on_command_finish`].
+    #[serde(rename = "notify-on-command-finish")]
+    pub notify_on_command_finish: Option<String>,
+    /// Which effects fire on command finish, as a comma list of `bell`/`notify`
+    /// (each `no-`-prefixable; `true`/`false`/`none` for all/none). Upstream
+    /// `notify-on-command-finish-action` (`Config.zig:1231`), default `bell`
+    /// on + `notify` off. Parsed by [`Config::notify_on_command_finish_action`].
+    #[serde(rename = "notify-on-command-finish-action")]
+    pub notify_on_command_finish_action: Option<String>,
+    /// Minimum command duration (seconds) before a finish notifies (upstream
+    /// `notify-on-command-finish-after`, `Config.zig:1268`, default 5s). A
+    /// reduced form of upstream's `Duration` string — plain seconds, matching
+    /// the other duration keys in this config.
+    #[serde(rename = "notify-on-command-finish-after")]
+    pub notify_on_command_finish_after: f64,
     /// Whether to quit the app after the last window/surface closes (upstream
     /// `quit-after-last-window-closed`, `Config.zig:2509`, default **false** on
     /// macOS — the standard "app stays running with no windows" behavior).
@@ -189,6 +207,10 @@ impl Default for Config {
             // Applications may post OSC 9/777 desktop notifications by default
             // (upstream `Config.zig:3690`).
             desktop_notifications: true,
+            // Command-finish notifications are off by default (upstream `never`).
+            notify_on_command_finish: None,
+            notify_on_command_finish_action: None,
+            notify_on_command_finish_after: 5.0,
             // macOS default: stay running after the last window closes
             // (upstream `Config.zig:2509` → false on macOS).
             quit_after_last_window_closed: false,
@@ -245,6 +267,28 @@ impl Config {
             .as_deref()
             .map(crate::bell::BellFeatures::parse)
             .unwrap_or_default()
+    }
+
+    /// The parsed `notify-on-command-finish` mode (default `Never`).
+    pub fn notify_on_command_finish(&self) -> crate::notify::NotifyOnCommandFinish {
+        self.notify_on_command_finish
+            .as_deref()
+            .map(crate::notify::NotifyOnCommandFinish::parse)
+            .unwrap_or_default()
+    }
+
+    /// The parsed `notify-on-command-finish-action` (default `bell` on).
+    pub fn notify_on_command_finish_action(&self) -> crate::notify::CommandFinishAction {
+        self.notify_on_command_finish_action
+            .as_deref()
+            .map(crate::notify::CommandFinishAction::parse)
+            .unwrap_or_default()
+    }
+
+    /// The `notify-on-command-finish-after` threshold as a `Duration`
+    /// (non-negative; default 5s).
+    pub fn notify_on_command_finish_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.notify_on_command_finish_after.max(0.0))
     }
 
     /// The parsed `right-click-action` (defaults to `context-menu`).
@@ -380,6 +424,14 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # unbundled the app falls back to a dock attention request.
 # desktop-notifications = true
 
+# Notify when a shell command finishes (needs OSC 133 shell integration):
+# never (default) / unfocused / always. The action is a comma list of bell /
+# notify (default bell), and only commands running at least
+# notify-on-command-finish-after seconds notify.
+# notify-on-command-finish = "never"
+# notify-on-command-finish-action = "bell"
+# notify-on-command-finish-after = 5
+
 # Window state. quit-after-last-window-closed keeps the standard macOS behavior
 # of staying running with no windows when false (default); set true to quit.
 # window-width/height are the initial size in cells (0 = default). Both
@@ -497,6 +549,19 @@ mod tests {
         assert!(config.selection_clear_on_typing);
         // Desktop notifications: allowed by default (upstream).
         assert!(config.desktop_notifications);
+        // Command-finish notifications: off by default, bell action, 5s.
+        assert_eq!(
+            config.notify_on_command_finish(),
+            crate::notify::NotifyOnCommandFinish::Never
+        );
+        assert_eq!(
+            config.notify_on_command_finish_action(),
+            crate::notify::CommandFinishAction::default()
+        );
+        assert_eq!(
+            config.notify_on_command_finish_after(),
+            std::time::Duration::from_secs(5)
+        );
         // Window state: macOS default doesn't quit after last window; no
         // configured geometry.
         assert!(!config.quit_after_last_window_closed);
@@ -559,6 +624,31 @@ mod tests {
         assert!(!off.desktop_notifications);
         // Absent → upstream default (allowed).
         assert!(parse("").unwrap().desktop_notifications);
+    }
+
+    #[test]
+    fn parses_notify_on_command_finish_keys() {
+        let config = parse(
+            "notify-on-command-finish = \"always\"\n\
+             notify-on-command-finish-action = \"bell, notify\"\n\
+             notify-on-command-finish-after = 2.5\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.notify_on_command_finish(),
+            crate::notify::NotifyOnCommandFinish::Always
+        );
+        assert_eq!(
+            config.notify_on_command_finish_action(),
+            crate::notify::CommandFinishAction {
+                bell: true,
+                notify: true
+            }
+        );
+        assert_eq!(
+            config.notify_on_command_finish_after(),
+            std::time::Duration::from_secs_f64(2.5)
+        );
     }
 
     #[test]

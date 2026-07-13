@@ -226,8 +226,9 @@ items are `[ ]` wholesale unless noted.
       5s-identical, upstream core policy) → delivered (dock attention + log; notify
       smoke). Real `UNUserNotificationCenter` banner deferred to the bundling
       milestone (ADR 0003). `app-notifications` still open
-- [ ] `notify-on-command-finish` (+ action/after), `abnormal-command-exit-runtime`
-      (needs OSC 133 command-boundary tracking in the VT engine)
+- [~] `notify-on-command-finish` (+ `-action` bell/notify, `-after` threshold): OSC 133
+      `C`/`D` boundary tracking in the VT engine → per-surface timing → mode/threshold gate
+      → bell and/or notification (notifycmd smoke). `abnormal-command-exit-runtime` still open
 - [ ] `progress-style` (OSC 9;4 progress bar)
 
 ## Platform: macOS (`macos/Sources`, ~45% reimplemented natively in Rust)

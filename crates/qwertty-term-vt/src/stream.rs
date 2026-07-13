@@ -238,6 +238,21 @@ impl Emitted {
     }
 }
 
+/// An OSC 133 shell-integration command boundary the app observes to time and
+/// notify on command completion (`notify-on-command-finish`). Emitted by the
+/// concrete handler as it processes semantic-prompt marks; drained by the app
+/// via [`TerminalHandler::take_command_boundaries`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandBoundary {
+    /// `OSC 133 ; C` — end of prompt input, start of command output. The app
+    /// starts its per-surface command timer here.
+    OutputStart,
+    /// `OSC 133 ; D [; exit]` — the command finished. `exit_code` is the
+    /// positional exit status when the shell reported one (`None` for a bare
+    /// `133;D`). The app computes elapsed time from the matching `OutputStart`.
+    End { exit_code: Option<i32> },
+}
+
 /// The handler interface the [`Stream`] dispatches parser actions onto.
 ///
 /// This is the Rust analogue of ghostty's `comptime Handler` with its
@@ -1691,6 +1706,14 @@ pub struct TerminalHandler {
     /// policy on drain. `None` until one arrives. The
     /// [`TerminalHandler::show_desktop_notification`] handler was a no-op.
     pending_notification: Option<(String, String)>,
+    /// OSC 133 command boundaries (`C`/`D`) observed since the last
+    /// [`TerminalHandler::take_command_boundaries`] drain, in order. Unlike the
+    /// latched bell/notification, this is an ordered queue: the app pairs each
+    /// `OutputStart` with the following `End` to time the command, so a burst
+    /// must not coalesce. Usually empty (an empty `Vec` doesn't allocate), so
+    /// the per-tick drain is cheap. The `semantic_prompt` handler already ran
+    /// for row tagging; this is the additional app-observable signal.
+    pending_command_boundaries: Vec<CommandBoundary>,
     /// The APC sub-protocol handler (kitty graphics / glyph). Port of
     /// `stream_terminal.Handler.apc_handler`. The stream's `apc_start`/
     /// `apc_put`/`apc_end` events drive it; on `end` a completed
@@ -1772,6 +1795,7 @@ impl TerminalHandler {
             pending_clipboard: None,
             pending_bell: false,
             pending_notification: None,
+            pending_command_boundaries: Vec::new(),
             apc_handler: apc::Handler::new(),
             color_scheme: None,
             cell_size: None,
@@ -1838,6 +1862,14 @@ impl TerminalHandler {
     /// [`TerminalHandler::pending_notification`].
     pub fn take_notification(&mut self) -> Option<(String, String)> {
         self.pending_notification.take()
+    }
+
+    /// Take (and clear) the OSC 133 command boundaries observed since the last
+    /// drain, in order. The app pairs each `OutputStart` with the following
+    /// `End` to time the command for `notify-on-command-finish`. See
+    /// [`TerminalHandler::pending_command_boundaries`].
+    pub fn take_command_boundaries(&mut self) -> Vec<CommandBoundary> {
+        std::mem::take(&mut self.pending_command_boundaries)
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
@@ -2230,6 +2262,23 @@ impl Handler for TerminalHandler {
     }
     fn semantic_prompt(&mut self, cmd: &osc::SemanticPrompt) {
         self.terminal.semantic_prompt(cmd);
+        // Additionally surface command boundaries for the app's
+        // `notify-on-command-finish`: `C` starts command output (timer start),
+        // `D` ends the command (with its optional exit code). Other marks
+        // (prompt/fresh-line) are row-tagging only.
+        use osc::SemanticPromptAction as A;
+        match cmd.action {
+            A::EndInputStartOutput => {
+                self.pending_command_boundaries
+                    .push(CommandBoundary::OutputStart);
+            }
+            A::EndCommand => {
+                self.pending_command_boundaries.push(CommandBoundary::End {
+                    exit_code: cmd.exit_code(),
+                });
+            }
+            _ => {}
+        }
     }
     fn start_hyperlink(&mut self, uri: &str, id: Option<&str>) {
         // The Screen owns hyperlink state + per-cell attribution. A failure

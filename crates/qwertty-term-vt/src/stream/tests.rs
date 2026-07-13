@@ -587,6 +587,48 @@ fn osc9_and_osc777_latch_a_drainable_notification() {
     assert!(s.handler.take_notification().is_none());
 }
 
+// OSC 133 C/D marks are surfaced as an ordered command-boundary queue for
+// `notify-on-command-finish` (in addition to the row-tagging semantic prompt).
+#[test]
+fn osc133_command_boundaries_are_drained_in_order() {
+    use crate::stream::CommandBoundary;
+    let mut s = term(10, 10);
+    assert!(
+        s.handler.take_command_boundaries().is_empty(),
+        "no boundaries before any OSC 133"
+    );
+
+    // C starts output; D;0 ends the command with exit code 0.
+    s.feed(b"\x1b]133;C\x07");
+    s.feed(b"\x1b]133;D;0\x07");
+    assert_eq!(
+        s.handler.take_command_boundaries(),
+        vec![
+            CommandBoundary::OutputStart,
+            CommandBoundary::End { exit_code: Some(0) },
+        ]
+    );
+    // Drained.
+    assert!(s.handler.take_command_boundaries().is_empty());
+
+    // A non-zero exit is captured; a bare D carries no exit code.
+    s.feed(b"\x1b]133;C\x07\x1b]133;D;7\x07");
+    s.feed(b"\x1b]133;C\x07\x1b]133;D\x07");
+    assert_eq!(
+        s.handler.take_command_boundaries(),
+        vec![
+            CommandBoundary::OutputStart,
+            CommandBoundary::End { exit_code: Some(7) },
+            CommandBoundary::OutputStart,
+            CommandBoundary::End { exit_code: None },
+        ]
+    );
+
+    // Prompt/fresh-line marks (A/B) are row-tagging only, not boundaries.
+    s.feed(b"\x1b]133;A\x07\x1b]133;B\x07");
+    assert!(s.handler.take_command_boundaries().is_empty());
+}
+
 // OSC 52 clipboard write: surfaced as a drainable event, raw (still
 // base64-encoded) per upstream's `clipboardContents` policy (decode is an
 // apprt/embedder decision, not a terminal-core one).
