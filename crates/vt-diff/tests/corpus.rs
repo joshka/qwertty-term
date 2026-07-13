@@ -283,3 +283,28 @@ fn regression_da2_firmware_version_mismatch() {
 fn regression_decrqss_answered_by_core_engine() {
     assert_case_agrees("reply_diffing/decrqss_sgr_scope");
 }
+
+/// KNOWN DIVERGENCE (post-pin, INTENTIONAL): scroll-region optimization.
+///
+/// Unlike the divergences above (where the Rust port is arguably wrong), here
+/// the Rust port is deliberately AHEAD of the pinned oracle. Upstream commit
+/// `77190bd02` ("terminal: handful of scroll region optimizations") stopped
+/// creating scrollback for top-anchored full-width regions on screens that
+/// don't retain scrollback (the alt screen). The `qwertty-term-vt` port mirrors
+/// that (see `Terminal::index`/`scroll_up`), but our differential oracle
+/// (`libghostty-vt`) is pinned at `2da015cd6`, which PREDATES `77190bd02` and
+/// still routes those scrolls through `cursorScrollAbove`, leaving the
+/// scrolled-out rows in scrollback.
+///
+/// The **visible grid and cursor are byte-identical**; the only difference is
+/// phantom rows in the oracle's scrollback that upstream itself calls "never
+/// visible ... simply pruned later". Three probe cases exercise the top-anchored
+/// path (`scroll_regions/alt_top_region_{ind,csi_s,bg_ind}`); each carries a
+/// `SKIP` sentinel. Un-SKIP these (and delete this test) once the oracle is
+/// re-pinned past `77190bd02`. The non-diverging alt-screen cases
+/// (`alt_bottom_region_ind`, `alt_full_screen_ind`) run in the main sweep.
+#[test]
+#[ignore]
+fn regression_scroll_region_post_pin_scrollback() {
+    assert_case_agrees("scroll_regions/alt_top_region_ind");
+}
