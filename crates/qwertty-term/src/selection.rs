@@ -347,6 +347,7 @@ mod tests {
                             combining: Vec::new(),
                             width: CellWidth::Narrow,
                             style: CellStyle::default(),
+                            link: None,
                         };
                         cols
                     ],

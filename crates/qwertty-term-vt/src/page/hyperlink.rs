@@ -39,6 +39,21 @@ pub enum EntryId {
     Implicit(OffsetInt),
 }
 
+/// An owned, page-independent identity for a cell's hyperlink: the [`EntryId`]
+/// resolved to plain bytes plus the URI. Two cells belong to the *same*
+/// hyperlink iff their `LinkKey`s are equal — mirroring [`PageEntry::eql`]
+/// (implicit compared by counter, explicit by id string, both plus the URI),
+/// but comparable across pages without juggling page bases. Produced by
+/// `Page::hyperlink_key`; carried through the snapshot so a renderer can match
+/// the cells of a hovered link (R7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkKey {
+    /// An implicit link: the per-page counter value + the URI bytes.
+    Implicit(OffsetInt, Vec<u8>),
+    /// An explicit link: the `id=` string bytes + the URI bytes.
+    Explicit(Vec<u8>, Vec<u8>),
+}
+
 /// A hyperlink committed to page memory. Port of `hyperlink.zig` `PageEntry`.
 ///
 /// The strings (`uri`, explicit `id`) are offset slices into the owning page's

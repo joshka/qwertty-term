@@ -87,6 +87,7 @@ mod tests {
                 bg,
                 ..CellStyle::default()
             },
+            link: None,
         }
     }
 
