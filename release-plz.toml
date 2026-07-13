@@ -6,8 +6,11 @@
 # every crate in dependency order. Nothing publishes without merging that PR.
 
 [workspace]
-# Single hand-maintained changelog at the repo root (not per-crate files).
-changelog_path = "./CHANGELOG.md"
+# The root CHANGELOG.md is hand-curated. release-plz's auto-generation is sparse
+# and per-crate for this shared-version workspace, so it does NOT manage the
+# changelog — it only bumps versions, tags, and publishes. Maintainers edit
+# CHANGELOG.md by hand (move `[Unreleased]` → a dated version section per release).
+changelog_update = false
 
 # Only release when a release PR merges (not on every push to main).
 release_always = false

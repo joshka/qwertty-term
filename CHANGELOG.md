@@ -1,9 +1,9 @@
 # Changelog
 
-<!-- Release sections below are generated/updated by release-plz. Disable
-markdownlint on this file — machine-generated changelog content routinely trips
-line-length, bare-url, list-style, and duplicate-heading rules, and shouldn't
-block CI. -->
+<!-- This changelog is hand-curated; release-plz bumps versions + publishes but
+does NOT edit this file (release-plz.toml `changelog_update = false`). On each
+release, rename `[Unreleased]` to the version + date. markdownlint is disabled
+here because version-link headings routinely exceed the line-length limit. -->
 <!-- markdownlint-disable -->
 
 All notable changes to the qwertty-term crate family. The crates share one
@@ -12,17 +12,23 @@ workspace version and release together. This project adheres to
 bump (`0.x.0`) may carry breaking changes and a patch bump (`0.x.y`) is
 additive.
 
-## Unreleased — 0.2.0
+## [Unreleased]
 
-## [0.2.0](https://github.com/joshka/qwertty-term/compare/qwertty-term-sprite-v0.1.0...qwertty-term-sprite-v0.2.0) - 2026-07-13
+### Added
 
-### Other
+- **`qwertty-term` (app):** `selection-word-chars` and `click-repeat-interval`
+  config keys (#30).
 
-- *(sprite)* lock cursor-height regression (adjust-cursor-height) ([#158](https://github.com/joshka/qwertty-term/pull/158))
+### Changed
 
-The next release is **0.2.0** (not 0.1.1): it carries one small breaking change
-to a `qwertty-term-vt` snapshot type (see Breaking), so per SemVer the minor
-version bumps. Everything else is additive.
+- **`qwertty-term-vt`:** scroll-region scroll-path optimization, ported from
+  upstream `77190bd02` (#204).
+
+## [0.2.0] - 2026-07-13
+
+Carries one breaking change to a `qwertty-term-vt` snapshot type (see Breaking),
+so per SemVer the minor version bumps. Everything else is additive. Published via
+crates.io Trusted Publishing.
 
 ### Breaking
 
@@ -79,6 +85,8 @@ version bumps. Everything else is additive.
 - **`qwertty-term-vt`:** reject non-ASCII OSC color specs instead of panicking;
   preserve aliased selection pins in `Screen::select`; handle stored grapheme
   breaks on a mode-2027 toggle; zero-capacity / growth-doubling latent bugs.
+- **`qwertty-term-font`:** cursor sprites sized on `cell_height` instead of
+  `cursor_height`, so `adjust-cursor-height` had no effect (#158).
 
 ### Documentation
 
@@ -86,7 +94,7 @@ version bumps. Everything else is additive.
   a darwin target (with the `freetype` feature) so the macOS-only renderer and
   font API is documented; intra-doc link fixes.
 
-## 0.1.0 — 2026-07-08
+## [0.1.0] - 2026-07-08
 
 Initial release of all eight crates: `qwertty-term`, `qwertty-term-vt`,
 `qwertty-term-font`, `qwertty-term-renderer`, `qwertty-term-termio`,
