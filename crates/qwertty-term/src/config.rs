@@ -9,13 +9,18 @@
 //! binaries. It is intentionally *not* the eventual `ghostty-config` crate — see
 //! `docs/rewrite-prompt.md`'s config decision table.
 //!
-//! Load order: `$QWERTTY_TERM_CONFIG_DIR/config.toml` if set, else
-//! `~/.config/qwertty-term/config.toml` (created with a commented example on first
-//! run if missing). Parsing is lenient — unknown keys are ignored and a
-//! malformed file falls back to defaults rather than failing startup.
+//! Load order (later overrides earlier): the default-location files —
+//! `~/.config/qwertty-term/config.toml`, then (macOS) `~/Library/Application
+//! Support/qwertty-term/config.toml` — each expanded with its `config-file`
+//! includes, then CLI `--key=value` overrides. `$QWERTTY_TERM_CONFIG_DIR`, if set,
+//! collapses the default list to a single `<dir>/config.toml`. A commented
+//! example is written on first run when no file exists anywhere. Parsing is
+//! lenient — unknown keys are ignored and a malformed file falls back to defaults
+//! rather than failing startup.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::{env, fs, path::PathBuf};
 
 use serde::Deserialize;
@@ -556,23 +561,87 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # window-position-y = 50
 "#;
 
-/// Load the config, creating the file with a commented example if it does not
-/// exist. Returns [`Config::default`] if `$HOME` (and `$QWERTTY_TERM_CONFIG_DIR`)
-/// are unset, the file can't be read, or it fails to parse.
+/// CLI `--key=value` overrides captured once at startup and replayed on every
+/// [`load`] — including live reloads — so a flag like `--font-size=20` survives a
+/// config reload instead of silently reverting to the file value.
+static CLI_OVERRIDES: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Load the config: merge every default-location file that exists, then apply the
+/// CLI overrides captured by [`load_with_cli`]. Creates a commented template on
+/// first run. Returns [`Config::default`] on total failure (no `$HOME`, unreadable
+/// files, un-deserializable merge).
 pub fn load() -> Config {
-    let Some(path) = config_path() else {
-        return Config::default();
-    };
-
-    if !path.exists() {
-        create_default_config(&path);
-        return Config::default();
-    }
-
-    load_from(&path)
+    load_merged(CLI_OVERRIDES.get().map(Vec::as_slice).unwrap_or(&[]))
 }
 
-/// Load a config file plus its `config-file` includes, merged into one [`Config`].
+/// Like [`load`], but first captures `overrides` (raw `--key=value` args) so they
+/// apply now *and* on every subsequent [`load`] (reload). Call once, at startup;
+/// later calls are ignored (the first set of overrides sticks).
+pub fn load_with_cli(overrides: Vec<String>) -> Config {
+    let _ = CLI_OVERRIDES.set(overrides);
+    load()
+}
+
+/// The default config-file locations, **lowest priority first** (later files
+/// override earlier ones, mirroring upstream `loadDefaultFiles`,
+/// `docs/analysis/config-core.md` §2):
+///
+/// 1. XDG: `~/.config/qwertty-term/config.toml`
+/// 2. macOS only: `~/Library/Application Support/qwertty-term/config.toml`
+///
+/// `$QWERTTY_TERM_CONFIG_DIR`, if set, replaces the whole list with a single
+/// explicit `<dir>/config.toml` (so tests and power users get one hermetic file).
+fn default_config_paths() -> Vec<PathBuf> {
+    if let Some(dir) = env::var_os("QWERTTY_TERM_CONFIG_DIR") {
+        return vec![PathBuf::from(dir).join("config.toml")];
+    }
+    let Some(home) = env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let home = PathBuf::from(home);
+    #[allow(unused_mut)]
+    let mut paths = vec![
+        home.join(".config")
+            .join("qwertty-term")
+            .join("config.toml"),
+    ];
+    #[cfg(target_os = "macos")]
+    paths.push(
+        home.join("Library")
+            .join("Application Support")
+            .join("qwertty-term")
+            .join("config.toml"),
+    );
+    paths
+}
+
+/// Merge all existing default-location files (each with its includes) in priority
+/// order, then apply `overrides`, into one [`Config`].
+fn load_merged(overrides: &[String]) -> Config {
+    let paths = default_config_paths();
+    let existing: Vec<PathBuf> = paths.iter().filter(|p| p.exists()).cloned().collect();
+
+    // First run: drop a commented template at the primary (XDG) location so the
+    // user has something to edit. Only when *no* location has a file.
+    if existing.is_empty()
+        && let Some(primary) = paths.first()
+    {
+        create_default_config(primary);
+    }
+
+    let mut merged = toml::Table::new();
+    for path in &existing {
+        load_file_into(&mut merged, path);
+    }
+    apply_cli_overrides(&mut merged, overrides);
+
+    toml::Value::Table(merged).try_into().unwrap_or_else(|err| {
+        eprintln!("failed to load merged config: {err}");
+        Config::default()
+    })
+}
+
+/// Load one config file plus its `config-file` includes, merging into `merged`.
 ///
 /// Include semantics mirror upstream (`docs/analysis/config-core.md` §3): the
 /// `config-file` directive (a string or array of strings) is processed
@@ -583,8 +652,7 @@ pub fn load() -> Config {
 /// skipped with a warning. The merge is last-wins for scalars and **appends** for
 /// arrays (so `keybind` accumulates across files). Any per-file read/parse error
 /// is warned and skipped — a bad include never fails startup.
-fn load_from(root: &Path) -> Config {
-    let mut merged = toml::Table::new();
+fn load_file_into(merged: &mut toml::Table, root: &Path) {
     let mut queue: VecDeque<(PathBuf, bool)> = VecDeque::new();
     queue.push_back((root.to_path_buf(), false));
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -619,13 +687,76 @@ fn load_from(root: &Path) -> Config {
             let (rel, opt) = parse_include_spec(&spec);
             queue.push_back((resolve_include(dir, rel), opt));
         }
-        merge_tables(&mut merged, table);
+        merge_tables(merged, table);
     }
+}
 
-    toml::Value::Table(merged).try_into().unwrap_or_else(|err| {
-        eprintln!("failed to load merged config: {err}");
-        Config::default()
-    })
+/// Test-only thin wrapper: load a single file (plus includes) into a fresh
+/// [`Config`], bypassing the default-location search and CLI overrides.
+#[cfg(test)]
+fn load_from(root: &Path) -> Config {
+    let mut merged = toml::Table::new();
+    load_file_into(&mut merged, root);
+    toml::Value::Table(merged)
+        .try_into()
+        .unwrap_or_else(|_| Config::default())
+}
+
+/// Keys whose value must be a *list* even from a single CLI flag, so a
+/// `--keybind=…` appends to (rather than replaces) file-provided values under
+/// [`merge_tables`]. Currently only `keybind` is repeatable.
+const CLI_ARRAY_KEYS: &[&str] = &["keybind"];
+
+/// Apply `--key=value` overrides on top of the file-merged `merged` table.
+///
+/// Each override is applied **incrementally and validated**: an override that
+/// would make the config fail to deserialize is warned and dropped, so one bad
+/// flag can never discard the whole (already-valid) file config. Scalars last-win
+/// (CLI beats files); repeatable keys ([`CLI_ARRAY_KEYS`]) append. Values are
+/// coerced by trying the raw text as a TOML literal (numbers/bools/quoted
+/// strings) and falling back to a bare string, so `--font-size=16` becomes an
+/// integer while `--theme=Nord` becomes a string.
+fn apply_cli_overrides(merged: &mut toml::Table, args: &[String]) {
+    for arg in args {
+        let Some((key, raw)) = arg.strip_prefix("--").and_then(|b| b.split_once('=')) else {
+            eprintln!("ignoring CLI arg (expected --key=value): {arg}");
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = if CLI_ARRAY_KEYS.contains(&key) {
+            toml::Value::Array(vec![toml::Value::String(raw.to_string())])
+        } else {
+            parse_toml_scalar(raw)
+        };
+
+        let mut candidate = merged.clone();
+        let mut one = toml::Table::new();
+        one.insert(key.to_string(), value);
+        merge_tables(&mut candidate, one);
+
+        if toml::Value::Table(candidate.clone())
+            .try_into::<Config>()
+            .is_ok()
+        {
+            *merged = candidate;
+        } else {
+            eprintln!("ignoring invalid CLI override: {arg}");
+        }
+    }
+}
+
+/// Coerce a raw CLI value string into a TOML scalar: parse it as a TOML literal
+/// (int/float/bool/quoted string) if it is one, else keep it as a bare string.
+fn parse_toml_scalar(raw: &str) -> toml::Value {
+    if let Ok(table) = format!("v = {raw}").parse::<toml::Table>()
+        && let Some(value) = table.get("v")
+    {
+        return value.clone();
+    }
+    toml::Value::String(raw.to_string())
 }
 
 /// Remove the `config-file` include directive from `table`, returning the listed
@@ -696,19 +827,6 @@ fn create_default_config(path: &PathBuf) {
     if let Err(err) = fs::write(path, EXAMPLE_CONFIG) {
         eprintln!("failed to write {}: {err}", path.display());
     }
-}
-
-fn config_path() -> Option<PathBuf> {
-    if let Some(dir) = env::var_os("QWERTTY_TERM_CONFIG_DIR") {
-        return Some(PathBuf::from(dir).join("config.toml"));
-    }
-    let home = env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(".config")
-            .join("qwertty-term")
-            .join("config.toml"),
-    )
 }
 
 #[cfg(test)]
@@ -1172,5 +1290,92 @@ mod tests {
         .unwrap();
         let config = load_from(&dir.join("config.toml"));
         assert_eq!(config.theme.as_deref(), Some("A"));
+    }
+
+    // ---- two-location merge ----
+
+    #[test]
+    fn load_file_into_merges_locations_in_priority_order() {
+        // Simulate the XDG (low) then App Support (high) files: the second file
+        // overrides the shared scalar and its keybind appends.
+        let dir = scratch_dir("locations");
+        fs::write(
+            dir.join("low.toml"),
+            "theme = \"Low\"\nfont-size = 12\nkeybind = [\"a=text:x\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("high.toml"),
+            "theme = \"High\"\nkeybind = [\"b=text:y\"]\n",
+        )
+        .unwrap();
+
+        let mut merged = toml::Table::new();
+        load_file_into(&mut merged, &dir.join("low.toml"));
+        load_file_into(&mut merged, &dir.join("high.toml"));
+        let config: Config = toml::Value::Table(merged).try_into().unwrap();
+
+        assert_eq!(config.theme.as_deref(), Some("High")); // high wins
+        assert_eq!(config.font_size, Some(12.0)); // low-only key survives
+        assert_eq!(config.keybind, vec!["a=text:x", "b=text:y"]); // appended
+    }
+
+    // ---- CLI overrides ----
+
+    fn merged_with_overrides(base: &str, args: &[&str]) -> Config {
+        let mut merged: toml::Table = base.parse().unwrap();
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        apply_cli_overrides(&mut merged, &args);
+        toml::Value::Table(merged).try_into().unwrap()
+    }
+
+    #[test]
+    fn cli_override_beats_file_and_infers_types() {
+        let config = merged_with_overrides(
+            "theme = \"File\"\nfont-size = 10\n",
+            &[
+                "--theme=Cli",           // bare string
+                "--font-size=16",        // number
+                "--copy-on-select=true", // bool
+            ],
+        );
+        assert_eq!(config.theme.as_deref(), Some("Cli"));
+        assert_eq!(config.font_size, Some(16.0));
+        assert!(config.copy_on_select);
+    }
+
+    #[test]
+    fn cli_keybind_appends_to_file_values() {
+        let config = merged_with_overrides(
+            "keybind = [\"a=text:x\"]\n",
+            &["--keybind=b=text:y", "--keybind=c=text:z"],
+        );
+        assert_eq!(config.keybind, vec!["a=text:x", "b=text:y", "c=text:z"]);
+    }
+
+    #[test]
+    fn cli_string_value_with_spaces_is_quoted() {
+        let config = merged_with_overrides("", &["--font-family=FiraCode Nerd Font Mono"]);
+        assert_eq!(
+            config.font_family.as_deref(),
+            Some("FiraCode Nerd Font Mono")
+        );
+    }
+
+    #[test]
+    fn invalid_cli_override_is_dropped_not_fatal() {
+        // `--font-size=huge` can't become an f32 → that one override is dropped,
+        // but the valid file value and the valid `--theme` override both survive.
+        let config =
+            merged_with_overrides("font-size = 14\n", &["--font-size=huge", "--theme=Kept"]);
+        assert_eq!(config.font_size, Some(14.0)); // bad override ignored
+        assert_eq!(config.theme.as_deref(), Some("Kept")); // good one applied
+    }
+
+    #[test]
+    fn malformed_cli_arg_is_ignored() {
+        // Missing `=` and missing `--` are both skipped without affecting output.
+        let config = merged_with_overrides("theme = \"X\"\n", &["--no-value", "theme=Y"]);
+        assert_eq!(config.theme.as_deref(), Some("X"));
     }
 }
