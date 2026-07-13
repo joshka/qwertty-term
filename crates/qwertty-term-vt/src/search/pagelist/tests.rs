@@ -84,6 +84,54 @@ fn simple_search() {
     search.deinit(&mut t.screen_mut().pages);
 }
 
+// Regression (upstream 5d8eb78b7): `feed` must reset the tracked pin's x/y to
+// the new node's bottom-right cell. A preceding page made shorter by a split
+// would otherwise leave the pin out of bounds and trip the PageList integrity
+// check on the next operation.
+#[test]
+fn feed_keeps_pin_within_shorter_page() {
+    use crate::pagelist::Pin;
+
+    let mut pages = PageList::init(10, 2, None);
+
+    // Fill the first page to capacity, then allocate and fill a second page.
+    // (Explicit `loop`/break rather than `while cond`: `grow()` mutates the page
+    // through a raw pointer, which clippy's while_immutable_condition can't see.)
+    let first = pages.first_node();
+    loop {
+        let (rows, cap) = unsafe { ((*first).data.size.rows, (*first).data.capacity.rows) };
+        if rows >= cap {
+            break;
+        }
+        pages.grow();
+    }
+    pages.grow(); // last page full -> creates the second page
+    let second = pages.last_node();
+    loop {
+        let (rows, cap) = unsafe { ((*second).data.size.rows, (*second).data.capacity.rows) };
+        if rows >= cap {
+            break;
+        }
+        pages.grow();
+    }
+
+    // Split the first page at row 1 so `first` becomes a shorter intermediate page.
+    pages.split(Pin::with(first, 1, 0)).unwrap();
+    let shorter = unsafe { (*first).next };
+    assert!(
+        unsafe { (*shorter).data.size.rows } < unsafe { (*second).data.size.rows },
+        "the split should leave a shorter intermediate page"
+    );
+
+    // Search from the last page and feed once: the pin advances into the
+    // shorter page and must remain valid (this panicked before the fix).
+    let mut search = PageListSearch::init(b"x", &mut pages, second);
+    assert!(search.feed());
+    assert_eq!(unsafe { (*search.pin).node }, shorter);
+    assert!(pages.pin_is_valid(unsafe { *search.pin }));
+    search.deinit(&mut pages);
+}
+
 #[test]
 fn feed_multiple_pages_with_matches() {
     let mut t = term(10, 10);
