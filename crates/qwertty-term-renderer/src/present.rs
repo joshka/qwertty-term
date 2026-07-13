@@ -63,6 +63,11 @@ impl Engine {
         layer: &IOSurfaceLayer,
     ) -> Result<Option<Vec<u8>>, MetalError> {
         let (presented, pixels) = self.draw_and_present_inner(layer, true)?;
+        if presented {
+            // Present-smoothness measurement (#141): feed the presented frame to
+            // the env-gated recorder (no-op unless QWERTTY_TERM_PRESENT_STATS).
+            self.record_present(&pixels);
+        }
         Ok(if presented { Some(pixels) } else { None })
     }
 

@@ -133,6 +133,70 @@ pub struct PresentReport {
     pub content_step_cv: f64,
 }
 
+/// Env-gated recorder that feeds [`PresentStats`] from the live present path and
+/// prints a periodic report to stderr (#141 measurement). Enabled by
+/// `QWERTTY_TERM_PRESENT_STATS`; report cadence in frames via
+/// `QWERTTY_TERM_PRESENT_STATS_EVERY` (default 120). Requires the host to run the
+/// readback present path (`QWERTTY_TERM_ASSERT_PRESENT=1`) so presented pixels are
+/// available — the recorder derives its content signature (mean luma) from them.
+pub struct PresentStatsRecorder {
+    stats: PresentStats,
+    epoch: std::time::Instant,
+    report_every: u64,
+}
+
+impl PresentStatsRecorder {
+    /// Build from the environment, or `None` if `QWERTTY_TERM_PRESENT_STATS` is
+    /// unset.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        std::env::var_os("QWERTTY_TERM_PRESENT_STATS")?;
+        let report_every = std::env::var("QWERTTY_TERM_PRESENT_STATS_EVERY")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120)
+            .max(1);
+        Some(Self {
+            stats: PresentStats::new(),
+            epoch: std::time::Instant::now(),
+            report_every,
+        })
+    }
+
+    /// Record one presented frame from its BGRA readback (mean luma is the
+    /// content signature); prints the running report every `report_every` frames.
+    pub fn record(&mut self, bgra: &[u8]) {
+        let ts_ns = self.epoch.elapsed().as_nanos() as u64;
+        self.stats.record(ts_ns, mean_luma_bgra(bgra));
+        let r = self.stats.report();
+        if r.frames.is_multiple_of(self.report_every) {
+            eprintln!(
+                "PRESENT_STATS frames={} cadence_ms={:.3}±{:.3} content_step={:.3}±{:.3} judder_cv={:.3}",
+                r.frames,
+                r.present_interval_ms_mean,
+                r.present_interval_ms_stddev,
+                r.content_step_mean,
+                r.content_step_stddev,
+                r.content_step_cv,
+            );
+        }
+    }
+}
+
+/// Mean Rec.601 luma (0..=255) of a tightly-packed BGRA buffer — the content
+/// signature the recorder tracks per present.
+fn mean_luma_bgra(bgra: &[u8]) -> f64 {
+    let px = bgra.len() / 4;
+    if px == 0 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for c in bgra.chunks_exact(4) {
+        sum += 0.299 * f64::from(c[2]) + 0.587 * f64::from(c[1]) + 0.114 * f64::from(c[0]);
+    }
+    sum / px as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +270,17 @@ mod tests {
             "jittery cadence should raise interval stddev, got {r:?}"
         );
         assert!(r.content_step_cv < 1e-9, "content steps are even, {r:?}");
+    }
+
+    #[test]
+    fn mean_luma_bgra_matches_rec601() {
+        assert_eq!(mean_luma_bgra(&[]), 0.0);
+        // White pixel (b,g,r,a) = 255 each → luma 255.
+        assert!((mean_luma_bgra(&[255, 255, 255, 255]) - 255.0).abs() < 1e-9);
+        assert_eq!(mean_luma_bgra(&[0, 0, 0, 255]), 0.0);
+        // Pure red (b=0,g=0,r=255) → 0.299*255.
+        assert!((mean_luma_bgra(&[0, 0, 255, 255]) - 0.299 * 255.0).abs() < 1e-9);
+        // Two pixels (white, black) → mean 127.5.
+        assert!((mean_luma_bgra(&[255, 255, 255, 255, 0, 0, 0, 255]) - 127.5).abs() < 1e-9);
     }
 }
