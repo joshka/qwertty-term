@@ -218,6 +218,11 @@ pub struct Config {
     /// Parsed by [`Config::confirm_close_surface`].
     #[serde(rename = "confirm-close-surface")]
     pub confirm_close_surface: Option<String>,
+    /// Whether macOS restores windows across quit/relaunch: `default` (follow
+    /// the system setting) / `never` / `always` (upstream `window-save-state`,
+    /// `Config.zig:2229`). Parsed by [`Config::window_save_state`].
+    #[serde(rename = "window-save-state")]
+    pub window_save_state: Option<String>,
     /// When to show the `cols ⨯ rows` resize overlay: `always` / `never` /
     /// `after-first` (default, upstream `resize-overlay`, `Config.zig:2292`).
     /// Parsed by [`Config::resize_overlay`].
@@ -317,6 +322,7 @@ impl Default for Config {
             // Confirm before closing a surface with a running process (upstream
             // default `true`).
             confirm_close_surface: None,
+            window_save_state: None,
             // Resize overlay: after-first / center / 750ms (upstream defaults).
             resize_overlay: None,
             resize_overlay_position: None,
@@ -464,6 +470,14 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// The parsed `window-save-state` mode (default `Default`).
+    pub fn window_save_state(&self) -> WindowSaveState {
+        self.window_save_state
+            .as_deref()
+            .map(WindowSaveState::parse)
+            .unwrap_or_default()
+    }
+
     /// The parsed `resize-overlay` mode (default `AfterFirst`).
     pub fn resize_overlay(&self) -> crate::resize_overlay::ResizeOverlayMode {
         self.resize_overlay
@@ -573,6 +587,31 @@ impl ConfirmCloseSurface {
             "false" | "never" => Self::Never,
             "always" => Self::Always,
             _ => Self::OnRunning,
+        }
+    }
+}
+
+/// Whether macOS restores windows across quit/relaunch (`window-save-state`,
+/// upstream `WindowSaveState`, `Config.zig:9174`, default `default`). Maps to
+/// the `NSQuitAlwaysKeepsWindows` user default + per-window `isRestorable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowSaveState {
+    /// Follow the system "Close windows when quitting an app" setting.
+    #[default]
+    Default,
+    /// Never restore windows.
+    Never,
+    /// Always restore windows.
+    Always,
+}
+
+impl WindowSaveState {
+    /// Parse the config value; unknown values fall back to `default`.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "never" => Self::Never,
+            "always" => Self::Always,
+            _ => Self::Default,
         }
     }
 }
@@ -707,6 +746,10 @@ const EXAMPLE_CONFIG: &str = r##"# qwertty-term config
 # integration), or "always". Without shell integration this errs toward
 # confirming.
 # confirm-close-surface = "true"
+
+# Whether macOS restores windows across quit/relaunch: "default" (follow the
+# system "Close windows when quitting an app" setting), "never", or "always".
+# window-save-state = "default"
 
 # The cols x rows resize overlay shown during a live window resize:
 # resize-overlay = "always" / "never" / "after-first" (default; not on the
@@ -1067,6 +1110,11 @@ mod tests {
             config.confirm_close_surface(),
             crate::config::ConfirmCloseSurface::OnRunning
         );
+        // Window-save-state defaults to `default` (follow the system setting).
+        assert_eq!(
+            config.window_save_state(),
+            crate::config::WindowSaveState::Default
+        );
         // Resize overlay defaults: after-first, center, 750ms.
         assert_eq!(
             config.resize_overlay(),
@@ -1216,6 +1264,28 @@ mod tests {
         assert_eq!(
             parse("").unwrap().confirm_close_surface(),
             ConfirmCloseSurface::OnRunning
+        );
+    }
+
+    #[test]
+    fn parses_window_save_state_key() {
+        use crate::config::WindowSaveState;
+        assert_eq!(
+            parse("window-save-state = \"never\"\n")
+                .unwrap()
+                .window_save_state(),
+            WindowSaveState::Never
+        );
+        assert_eq!(
+            parse("window-save-state = \"always\"\n")
+                .unwrap()
+                .window_save_state(),
+            WindowSaveState::Always
+        );
+        // Absent + unknown → default.
+        assert_eq!(
+            parse("").unwrap().window_save_state(),
+            WindowSaveState::Default
         );
     }
 

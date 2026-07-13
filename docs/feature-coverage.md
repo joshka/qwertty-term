@@ -100,7 +100,10 @@ items are `[ ]` wholesale unless noted.
 - [x] `window-decoration`, native + non-native fullscreen
 - [x] Menu bar (basic), key-window activation
 - [x] `window-height`/`-width`/`-position` (initial geometry: cells → first window)
-- [ ] `window-save-state`, `window-step-resize`, `window-title`/`-subtitle` templates
+- [~] `window-save-state` (default/never/always): config-gates macOS native restoration
+      (`NSQuitAlwaysKeepsWindows` + per-window `isRestorable`; savestate smoke). Content restore
+      (tabs/splits/cwd via NSWindowRestoration + NSSecureCoding) is a follow-up
+- [ ] `window-step-resize`, `window-title`/`-subtitle` templates
 - [ ] `window-titlebar-background`/`-foreground`, `window-new-tab-position`
 - [x] `resize-overlay` (+ `-position`, `-duration`): `cols ⨯ rows` HUD (NSTextField overlay)
       on live resize, positioned per config, auto-hiding after the duration (resize smoke)

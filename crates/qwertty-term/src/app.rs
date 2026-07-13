@@ -1537,6 +1537,9 @@ pub struct ControllerState {
     /// When to confirm before closing a surface with a running process
     /// (`confirm-close-surface`).
     confirm_close_surface: crate::config::ConfirmCloseSurface,
+    /// Whether macOS restores windows across quit/relaunch (`window-save-state`);
+    /// drives each window's `isRestorable`.
+    window_save_state: crate::config::WindowSaveState,
     /// Smoke/test override for the close-confirmation modal: `Some(answer)`
     /// short-circuits the alert (which a headless smoke can't drive). `None` in
     /// normal operation. See [`Controller::set_close_confirm_hook`].
@@ -1615,6 +1618,12 @@ impl Controller {
             .font_size
             .unwrap_or(crate::font_size::DEFAULT_FONT_SIZE);
 
+        // `window-save-state` drives macOS's `NSQuitAlwaysKeepsWindows` default
+        // (read by AppKit at quit): `never` → false, `always` → true, `default`
+        // → remove the override so the system "Close windows when quitting an
+        // app" setting applies. Port of upstream AppDelegate.applicationWill…
+        apply_window_save_state_default(config.window_save_state());
+
         let (startup_colors, selection_colors) = resolve_colors(config);
 
         Controller(Rc::new(RefCell::new(ControllerState {
@@ -1669,6 +1678,7 @@ impl Controller {
             progress_style: config.progress_style,
             confirm_close_surface: config.confirm_close_surface(),
             close_confirm_hook: None,
+            window_save_state: config.window_save_state(),
             resize_overlay_mode: config.resize_overlay(),
             resize_overlay_position: config.resize_overlay_position(),
             resize_overlay_duration: config.resize_overlay_duration(),
@@ -3327,6 +3337,14 @@ impl Controller {
         self.0.borrow().quit_after_last_window_closed
     }
 
+    /// Whether the active tab's window is marked restorable — the observable
+    /// effect of `window-save-state` (smoke/test).
+    pub fn active_window_is_restorable(&self) -> Option<bool> {
+        let state = self.0.borrow();
+        let tab = self.active_tab()?;
+        Some(state.tabs.get(&tab)?.window.isRestorable())
+    }
+
     /// The configured initial window size in cells (`window-width`/`-height`),
     /// or `None` when unset (smoke/test).
     pub fn configured_initial_cells(&self) -> Option<(u32, u32)> {
@@ -4156,6 +4174,11 @@ impl Controller {
         // Paint the window background the terminal colour so any sub-cell
         // remainder strip is seamless (see the R5 dark-band fix).
         set_window_background(&window, default_bg);
+        // `window-save-state`: mark the window (non-)restorable so macOS's native
+        // window restoration honors the config. `never` opts every window out.
+        window.setRestorable(
+            self.0.borrow().window_save_state != crate::config::WindowSaveState::Never,
+        );
 
         let window_delegate = WindowDelegate::new(mtm, self.clone(), id);
         window.setDelegate(Some(ProtocolObject::from_ref(&*window_delegate)));
@@ -4519,6 +4542,21 @@ enum FontStep {
     Up,
     Down,
     Reset,
+}
+
+/// Apply `window-save-state` to the `NSQuitAlwaysKeepsWindows` standard user
+/// default that AppKit reads at quit to decide whether to persist/restore
+/// windows: `never` → false, `always` → true, `default` → remove the override
+/// (system setting applies). Port of upstream `AppDelegate`'s equivalent.
+fn apply_window_save_state_default(state: crate::config::WindowSaveState) {
+    use crate::config::WindowSaveState as W;
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str("NSQuitAlwaysKeepsWindows");
+    match state {
+        W::Never => defaults.setBool_forKey(false, &key),
+        W::Always => defaults.setBool_forKey(true, &key),
+        W::Default => defaults.removeObjectForKey(&key),
+    }
 }
 
 /// Build the resize-overlay HUD label: a rounded, semi-transparent dark badge
@@ -4962,6 +5000,9 @@ pub struct DelegateIvars {
     /// Mouse-2 smoke (`QWERTTY_TERM_SMOKE_MOUSE2`): middle-click paste +
     /// focus-follows-mouse. See [`AppDelegate::run_mouse2_smoke`].
     smoke_mouse2: bool,
+    /// Save-state smoke (`QWERTTY_TERM_SMOKE_SAVESTATE`): assert window-save-state
+    /// wiring. See [`AppDelegate::run_savestate_smoke`].
+    smoke_savestate: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -5040,6 +5081,7 @@ define_class!(
             let has_confirmclose = self.ivars().smoke_confirmclose;
             let has_resize = self.ivars().smoke_resize;
             let has_mouse2 = self.ivars().smoke_mouse2;
+            let has_savestate = self.ivars().smoke_savestate;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -5077,6 +5119,8 @@ define_class!(
                 self.schedule_resize_smoke();
             } else if has_mouse2 {
                 self.schedule_mouse2_smoke();
+            } else if has_savestate {
+                self.schedule_savestate_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -5313,6 +5357,12 @@ define_class!(
         fn mouse2_smoke(&self, _timer: &AnyObject) {
             self.run_mouse2_smoke();
         }
+
+        /// Save-state smoke: assert window-save-state wiring, exit 0/1.
+        #[unsafe(method(ghosttySaveStateSmoke:))]
+        fn savestate_smoke(&self, _timer: &AnyObject) {
+            self.run_savestate_smoke();
+        }
     }
 );
 
@@ -5343,6 +5393,7 @@ impl AppDelegate {
         smoke_confirmclose: bool,
         smoke_resize: bool,
         smoke_mouse2: bool,
+        smoke_savestate: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -5370,6 +5421,7 @@ impl AppDelegate {
             smoke_confirmclose,
             smoke_resize,
             smoke_mouse2,
+            smoke_savestate,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -7978,6 +8030,40 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_savestate_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttySaveStateSmoke:));
+    }
+
+    /// Window-save-state smoke: with `window-save-state = never` configured,
+    /// assert the window is marked non-restorable and the
+    /// `NSQuitAlwaysKeepsWindows` user default was set to false. Exits 0/1.
+    fn run_savestate_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = savestate_fail;
+
+        // 1. The window reflects the config (never → non-restorable).
+        match controller.active_window_is_restorable() {
+            Some(false) => {}
+            other => fail(format!(
+                "with window-save-state=never the window should be non-restorable; got {other:?}"
+            )),
+        }
+
+        // 2. The NSQuitAlwaysKeepsWindows default was set (present) and false.
+        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        let key = NSString::from_str("NSQuitAlwaysKeepsWindows");
+        let present = defaults.objectForKey(&key).is_some();
+        if !present || defaults.boolForKey(&key) {
+            fail("NSQuitAlwaysKeepsWindows should be present and false for never".into());
+        }
+
+        println!(
+            "OK: savestate smoke — window-save-state=never marked the window non-restorable \
+             and set NSQuitAlwaysKeepsWindows=false."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -8239,6 +8325,12 @@ fn mouse2_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a save-state smoke failure and exit non-zero.
+fn savestate_fail(msg: String) -> ! {
+    eprintln!("FAIL: savestate smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -8358,6 +8450,7 @@ pub fn run(
     smoke_confirmclose: bool,
     smoke_resize: bool,
     smoke_mouse2: bool,
+    smoke_savestate: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -8388,6 +8481,7 @@ pub fn run(
         smoke_confirmclose,
         smoke_resize,
         smoke_mouse2,
+        smoke_savestate,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
