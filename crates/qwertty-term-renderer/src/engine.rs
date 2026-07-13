@@ -230,6 +230,7 @@ pub struct Engine<B: GpuBackend = DefaultBackend> {
     image_text_end: usize,
     /// Env-gated present-smoothness recorder (#141). `None` unless
     /// `QWERTTY_TERM_PRESENT_STATS` is set; fed from the readback present path.
+    #[cfg(target_os = "macos")]
     present_recorder: Option<crate::present_stats::PresentStatsRecorder>,
 }
 
@@ -327,6 +328,7 @@ impl<B: GpuBackend> Engine<B> {
             pending_live_ids: Vec::new(),
             image_bg_end: 0,
             image_text_end: 0,
+            #[cfg(target_os = "macos")]
             present_recorder: crate::present_stats::PresentStatsRecorder::from_env(),
         })
     }
@@ -334,6 +336,7 @@ impl<B: GpuBackend> Engine<B> {
     /// Feed the presented frame's BGRA readback to the present-smoothness
     /// recorder, if `QWERTTY_TERM_PRESENT_STATS` enabled it (#141). No-op
     /// otherwise. Called from the readback present path.
+    #[cfg(target_os = "macos")]
     pub(crate) fn record_present(&mut self, bgra: &[u8]) {
         if let Some(rec) = self.present_recorder.as_mut() {
             rec.record(bgra);
