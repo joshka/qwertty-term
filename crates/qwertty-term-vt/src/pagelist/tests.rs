@@ -518,6 +518,46 @@ fn resize_no_reflow_less_cols_then_more_cols() {
     assert_eq!(s.cols(), 100);
 }
 
+// Regression: a non-reflow column shrink lowers each page's `size.cols` but
+// leaves `capacity.cols` at the old (wider) value. If a later row-grow prunes
+// and *reuses* such a page, `reinit` rebuilds it from its capacity and restores
+// `size.cols` to that stale width — splicing a wrong-width page into the active
+// area. A subsequent wide-char write then plants a spacer_head at a column valid
+// for the terminal width but past the page's real last column
+// (InvalidSpacerHeadLocation). The grow-prune reuse guard must reject
+// capacity-width mismatches so a fresh, correctly-sized page is allocated.
+#[test]
+fn resize_no_reflow_shrink_then_grow_prunes_stale_width_page() {
+    // Wide start so pages carry a wide capacity; tight max_size so row growth
+    // forces prune+reuse of scrollback pages.
+    let mut s = PageList::init(400, 20, Some(crate::page::size_of_std_page() * 3));
+
+    // Build several pages of scrollback at the wide width.
+    s.grow_rows(std_page_cap_rows(&s) as usize * 4);
+
+    // Non-reflow shrink: size.cols drops to 80, capacity.cols stays 400.
+    s.resize(Resize {
+        cols: Some(80),
+        reflow: false,
+        ..Default::default()
+    });
+    assert_eq!(s.cols(), 80);
+
+    // Grow more rows: prune+reuse now recycles the stale-400-capacity pages.
+    s.grow_rows(std_page_cap_rows(&s) as usize * 4);
+
+    // Every page must match the active column count.
+    let mut node = s.first_node();
+    while !node.is_null() {
+        assert_eq!(
+            s.node_page(node).size.cols,
+            80,
+            "page spliced into the list at a stale width"
+        );
+        node = s.node_next(node);
+    }
+}
+
 // ---- resize reflow ----
 
 #[test]

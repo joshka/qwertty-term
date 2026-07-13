@@ -185,8 +185,17 @@ impl PageList {
             }
             (*self.viewport_pin).garbage = false;
 
-            // Non-standard pages can't be reused.
-            if (*first).data.byte_len() > std_size() {
+            // Non-standard pages can't be reused. Neither can a page whose
+            // capacity width no longer matches the active column count: `reinit`
+            // rebuilds the page from its own capacity, restoring `size.cols` to
+            // the stale `capacity.cols`, which would splice a wrong-width page
+            // into the active area (a later wide-char write then plants a
+            // spacer_head at a column valid for `self.cols` but past the page's
+            // real last column — InvalidSpacerHeadLocation). This happens after
+            // a non-reflow column shrink, which lowers `size.cols` but leaves
+            // `capacity.cols` untouched. Destroy it and let the caller allocate
+            // a page sized for `self.cols`.
+            if (*first).data.byte_len() > std_size() || (*first).data.capacity.cols != self.cols {
                 self.destroy_node(first);
                 return None;
             }
