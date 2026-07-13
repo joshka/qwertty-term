@@ -2917,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "block2 0.6.2",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cbindgen",
  "qwertty-term-input",
@@ -2949,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-font"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "freetype-rs",
  "objc2 0.6.4",
@@ -2964,11 +2964,11 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-input"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "qwertty-term-renderer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "block2 0.6.2",
@@ -3004,7 +3004,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-sprite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "png 0.17.16",
  "tiny-skia",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-termio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "polling",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "qwertty-term-vt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "criterion",
