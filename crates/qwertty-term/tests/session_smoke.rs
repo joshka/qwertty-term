@@ -4,10 +4,12 @@
 //! a fresh tab — both a single pane and a full multi-pane tree (structure +
 //! per-split ratios).
 //!
-//! This is the app-visible restore path — the serializable model is unit-tested
-//! in `session.rs`, and this smoke drives the live capture/restore. Wiring the
-//! JSON into macOS's `NSWindowRestoration` `NSCoder` (so a genuine quit+relaunch
-//! replays it) is the remaining OS step, only exercisable by a real relaunch.
+//! It also drives the OS-restoration coder wiring as far as a headless test can:
+//! the window is restorable + carries its restoration identifier, and a live
+//! session round-trips through a real `NSKeyedArchiver`/`NSKeyedUnarchiver` (the
+//! exact Cocoa `NSCoder` path AppKit uses to persist restorable state). The one
+//! part no smoke can reach is macOS actually invoking restoration on a genuine
+//! quit+relaunch — that is manual-verification only.
 //!
 //! Like the other windowed smokes this needs a real GUI (windowserver) session,
 //! so it is `#[ignore]`d by default:

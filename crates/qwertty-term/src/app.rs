@@ -47,12 +47,13 @@ use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSColor,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSView, NSWindow,
-    NSWindowDelegate, NSWindowLevel, NSWindowStyleMask, NSWindowTabbingMode,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen,
+    NSUserInterfaceItemIdentification, NSView, NSWindow, NSWindowDelegate, NSWindowLevel,
+    NSWindowRestoration, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
-    NSRunLoopCommonModes, NSSize, NSString,
+    MainThreadMarker, NSCoder, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
 };
 use objc2_quartz_core::CADisplayLink;
 use objc2_quartz_core::{CALayer, CATransaction};
@@ -4286,9 +4287,18 @@ impl Controller {
         set_window_background(&window, default_bg);
         // `window-save-state`: mark the window (non-)restorable so macOS's native
         // window restoration honors the config. `never` opts every window out.
-        window.setRestorable(
-            self.0.borrow().window_save_state != crate::config::WindowSaveState::Never,
-        );
+        let restorable = self.0.borrow().window_save_state != crate::config::WindowSaveState::Never;
+        window.setRestorable(restorable);
+        if restorable {
+            // Give the window a stable identifier + name the app delegate as its
+            // restoration class so AppKit re-provides it on relaunch (the delegate
+            // hands back the launch window and refills content via the window
+            // delegate's `didDecodeRestorableState`). Content is encoded there.
+            window.setIdentifier(Some(&NSString::from_str(WINDOW_RESTORATION_IDENTIFIER)));
+            unsafe {
+                window.setRestorationClass(Some(<AppDelegate as objc2::ClassType>::class()));
+            }
+        }
 
         let window_delegate = WindowDelegate::new(mtm, self.clone(), id);
         window.setDelegate(Some(ProtocolObject::from_ref(&*window_delegate)));
@@ -4547,6 +4557,75 @@ impl Controller {
         path.pop();
     }
 
+    /// Encode `tab`'s restorable [`WindowSession`](crate::session::WindowSession)
+    /// into `coder` (the window-restoration `NSCoder` macOS hands us from
+    /// `window:willEncodeRestorableState:`) as a JSON `NSString` under
+    /// [`SESSION_CODER_KEY`]. No-op if the tab is gone. The counterpart is
+    /// [`decode_session_from`](Self::decode_session_from); the pair is exercised
+    /// end-to-end (through a real `NSKeyedArchiver`) by the session smoke.
+    pub fn encode_session_into(&self, coder: &objc2_foundation::NSCoder, tab: TabId) {
+        let Some(session) = self.capture_window_session(tab) else {
+            return;
+        };
+        let json = NSString::from_str(&session.to_json());
+        let key = NSString::from_str(SESSION_CODER_KEY);
+        // SAFETY: `json` is an `NSString` (secure-codable); the coder retains a
+        // copy under `key`. Nothing here outlives the call.
+        unsafe { coder.encodeObject_forKey(Some(&json), &key) };
+    }
+
+    /// Decode a [`WindowSession`](crate::session::WindowSession) previously
+    /// archived by [`encode_session_into`](Self::encode_session_into) from
+    /// `coder`, or `None` if the key is absent or the payload doesn't parse.
+    /// Secure decode restricted to `NSString`, so a hostile archive can't
+    /// instantiate an unexpected class.
+    pub fn decode_session_from(
+        coder: &objc2_foundation::NSCoder,
+    ) -> Option<crate::session::WindowSession> {
+        let key = NSString::from_str(SESSION_CODER_KEY);
+        // SAFETY: we constrain the decoded class to `NSString` and only read it.
+        let obj = unsafe {
+            coder.decodeObjectOfClass_forKey(<NSString as objc2::ClassType>::class(), &key)
+        }?;
+        let s = obj.downcast::<NSString>().ok()?;
+        crate::session::WindowSession::from_json(&s.to_string())
+    }
+
+    /// Rebuild `session`'s split content into `tab`'s existing (single-pane)
+    /// tree: grow the current pane into the full tree and apply each ratio. Used
+    /// by the window-restoration `didDecodeRestorableState` path — the OS has
+    /// already recreated (or, for us, is reusing) the window, and we refill its
+    /// content. The tab's current pane becomes the tree's leftmost leaf.
+    pub fn restore_content_into_tab(&self, tab: TabId, session: &crate::session::WindowSession) {
+        let anchor = {
+            let state = self.0.borrow();
+            match state.tabs.get(&tab) {
+                Some(t) => t.tree.focused(),
+                None => return,
+            }
+        };
+        self.rebuild_session_tree(tab, &session.tree, anchor);
+        self.apply_session_ratios(tab, &session.tree, &mut Vec::new());
+    }
+
+    /// The active tab and its window — the window macOS restoration reuses for a
+    /// restored session (handing back the launch window instead of creating a
+    /// duplicate). `None` if there is no active tab.
+    pub fn active_window_and_tab(&self) -> Option<(Retained<NSWindow>, TabId)> {
+        let tab = self.active_tab()?;
+        let state = self.0.borrow();
+        Some((state.tabs.get(&tab)?.window.clone(), tab))
+    }
+
+    /// The active window's restoration `identifier` (the observable proof that
+    /// the restorable-window wiring set it), or `None` if unset (smoke/test).
+    pub fn active_window_identifier(&self) -> Option<String> {
+        let tab = self.active_tab()?;
+        let state = self.0.borrow();
+        let id = state.tabs.get(&tab)?.window.identifier()?;
+        Some(id.to_string())
+    }
+
     /// Move focus to the spatially-adjacent pane of `tab` in `direction`, if one
     /// exists. No-op otherwise (mirrors upstream's performable check).
     pub fn goto_split(&self, tab: TabId, direction: Direction) {
@@ -4780,6 +4859,15 @@ enum FontStep {
 
 /// Map a live split-tree node to its serializable session form, resolving each
 /// leaf's working directory from its surface's engine (OSC 7).
+/// The `NSCoder` key our window-session JSON is archived under in the macOS
+/// window-restoration state. A namespaced constant so a future key can't
+/// silently collide with AppKit's own restorable-state keys.
+const SESSION_CODER_KEY: &str = "term.qwertty.windowSession";
+
+/// The restoration `identifier` set on every restorable window, matched by the
+/// app delegate's `restoreWindowWithIdentifier:` on relaunch.
+const WINDOW_RESTORATION_IDENTIFIER: &str = "term.qwertty.mainWindow";
+
 fn node_to_session(node: &crate::splits::Node, t: &Tab) -> crate::session::SessionNode {
     use crate::session::{SessionAxis, SessionNode};
     use crate::splits::{Axis, Node};
@@ -5070,6 +5158,29 @@ define_class!(
         fn window_did_change_backing_properties(&self, _notification: &NSNotification) {
             let ivars = self.ivars();
             ivars.controller.resync_tab_geometry(ivars.tab);
+        }
+
+        /// `window-save-state`: encode this window's restorable session (its
+        /// split tree + per-pane cwd) into the state coder. macOS calls this when
+        /// it snapshots restorable state (window-save-state must not be `never`,
+        /// which leaves the window non-restorable so this never fires).
+        #[unsafe(method(window:willEncodeRestorableState:))]
+        fn window_will_encode_restorable_state(&self, _window: &NSWindow, state: &NSCoder) {
+            let ivars = self.ivars();
+            ivars.controller.encode_session_into(state, ivars.tab);
+        }
+
+        /// `window-save-state`: decode a session previously encoded above and
+        /// rebuild its split content into this window's tab. Fires when macOS
+        /// hands a restored window its saved state on relaunch.
+        #[unsafe(method(window:didDecodeRestorableState:))]
+        fn window_did_decode_restorable_state(&self, _window: &NSWindow, state: &NSCoder) {
+            let ivars = self.ivars();
+            if let Some(session) = Controller::decode_session_from(state) {
+                ivars
+                    .controller
+                    .restore_content_into_tab(ivars.tab, &session);
+            }
         }
     }
 );
@@ -5420,6 +5531,51 @@ define_class!(
         fn should_terminate_after_last(&self, _app: &NSApplication) -> bool {
             // Honor `quit-after-last-window-closed` (default false on macOS).
             self.ivars().controller.quit_after_last_window_closed()
+        }
+
+        /// Opt into secure-coded window restoration (required on macOS 12+, else
+        /// AppKit logs and disables restoration). Our restorable state is a single
+        /// secure-coded `NSString` (JSON), decoded via `decodeObjectOfClass:`.
+        #[unsafe(method(applicationSupportsSecureRestorableState:))]
+        fn supports_secure_restorable_state(&self, _app: &NSApplication) -> bool {
+            true
+        }
+    }
+
+    // `window-save-state`: the app delegate is each restorable window's
+    // `restorationClass`. On relaunch AppKit calls this to re-provide the window;
+    // rather than build a second window (the launch path already made one), we
+    // reuse the active window and let its delegate's `didDecodeRestorableState`
+    // refill the split content from `state`.
+    unsafe impl NSWindowRestoration for AppDelegate {
+        #[unsafe(method(restoreWindowWithIdentifier:state:completionHandler:))]
+        fn restore_window(
+            _identifier: &NSString,
+            _state: &NSCoder,
+            completion_handler: &block2::DynBlock<
+                dyn Fn(*mut NSWindow, *mut objc2_foundation::NSError),
+            >,
+        ) {
+            // AppKit drives restoration on the main thread.
+            let Some(mtm) = MainThreadMarker::new() else {
+                completion_handler.call((std::ptr::null_mut(), std::ptr::null_mut()));
+                return;
+            };
+            // Reach the controller through the shared app delegate; hand back the
+            // active (launch) window so AppKit associates the saved state with it
+            // and then invokes `window:didDecodeRestorableState:` to rebuild.
+            let window = NSApplication::sharedApplication(mtm)
+                .delegate()
+                .and_then(|d| d.downcast::<AppDelegate>().ok())
+                .and_then(|d| d.ivars().controller.active_window_and_tab())
+                .map(|(w, _tab)| w);
+            match window {
+                Some(w) => completion_handler
+                    .call((Retained::as_ptr(&w) as *mut NSWindow, std::ptr::null_mut())),
+                None => {
+                    completion_handler.call((std::ptr::null_mut(), std::ptr::null_mut()))
+                }
+            }
         }
     }
 
@@ -8389,6 +8545,19 @@ impl AppDelegate {
             fail("no focused surface at session smoke start".into());
         };
 
+        // 0. OS restoration wiring: with the default config the window is
+        //    restorable and carries the restoration identifier the app delegate's
+        //    restorationClass matches on relaunch.
+        if controller.active_window_is_restorable() != Some(true) {
+            fail("default-config window should be restorable".into());
+        }
+        match controller.active_window_identifier().as_deref() {
+            Some(WINDOW_RESTORATION_IDENTIFIER) => {}
+            other => fail(format!(
+                "restorable window should carry the restoration identifier; got {other:?}"
+            )),
+        }
+
         // 1. Set a cwd via OSC 7, then capture — the single leaf carries it.
         controller.feed_surface_output(tab, surface, b"\x1b]7;file:///tmp\x07");
         Self::spin(0.2);
@@ -8466,10 +8635,39 @@ impl AppDelegate {
             ));
         }
 
+        // 6. Persist `tab`'s live session through a real `NSKeyedArchiver` and
+        //    recover it from an `NSKeyedUnarchiver` — the exact Cocoa coder path
+        //    macOS drives for window-restoration state. Proves the NSCoder codec
+        //    (`encode_session_into` / `decode_session_from`) round-trips.
+        use objc2::AllocAnyThread;
+        use objc2_foundation::{NSKeyedArchiver, NSKeyedUnarchiver};
+        let live = controller
+            .capture_window_session(tab)
+            .unwrap_or_else(|| fail("capture of the coder-source tab returned None".into()));
+        let archiver = NSKeyedArchiver::initRequiringSecureCoding(NSKeyedArchiver::alloc(), true);
+        controller.encode_session_into(&archiver, tab);
+        archiver.finishEncoding();
+        let data = archiver.encodedData();
+        let unarchiver = match unsafe {
+            NSKeyedUnarchiver::initForReadingFromData_error(NSKeyedUnarchiver::alloc(), &data)
+        } {
+            Ok(u) => u,
+            Err(e) => fail(format!("NSKeyedUnarchiver init failed: {e:?}")),
+        };
+        let Some(decoded) = Controller::decode_session_from(&unarchiver) else {
+            fail("decode_session_from recovered no session from the archive".into());
+        };
+        if decoded != live {
+            fail(format!(
+                "coder round-trip changed the session; encoded {live:?}, decoded {decoded:?}"
+            ));
+        }
+
         println!(
             "OK: session smoke — captured a tab's tree + cwd, round-tripped the JSON, \
              captured a split as two leaves, restored a single-pane session into a fresh \
-             tab, and rebuilt a 3-pane session (structure + ratios) into another."
+             tab, rebuilt a 3-pane session (structure + ratios) into another, and \
+             round-tripped a live session through a real NSKeyedArchiver/NSCoder."
         );
         std::process::exit(0);
     }
