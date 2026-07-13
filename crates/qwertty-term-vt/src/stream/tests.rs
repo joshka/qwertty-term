@@ -672,6 +672,41 @@ fn osc22_sets_mouse_shape() {
     assert_eq!(s.handler.terminal.mouse_shape, MouseShape::Text);
 }
 
+// XTWINOPS CSI 21 t reports the window title as `OSC l <title> ST`, empty when
+// no title is set. Always answerable (no size seam needed).
+#[test]
+fn xtwinops_21t_title_report() {
+    let mut s = term(10, 4);
+    // No title yet -> empty report.
+    s.feed(b"\x1b[21t");
+    assert_eq!(s.handler.take_output(), b"\x1b]l\x1b\\");
+
+    // Set a title via OSC 2, then query.
+    s.feed(b"\x1b]2;hello\x1b\\");
+    s.feed(b"\x1b[21t");
+    assert_eq!(s.handler.take_output(), b"\x1b]lhello\x1b\\");
+}
+
+// XTWINOPS 14/16/18 t are silent until the embedder provides a cell size, then
+// report pixel / cell / char geometry. Mirrors the lib layer's null `size`
+// effect.
+#[test]
+fn xtwinops_size_reports_gated_on_cell_size() {
+    let mut s = term(80, 24);
+    // Unset -> silent.
+    s.feed(b"\x1b[14t\x1b[16t\x1b[18t");
+    assert!(s.handler.take_output().is_empty());
+
+    // Provide a 9x18 cell; 80x24 grid.
+    s.handler.set_cell_size(9, 18);
+    s.feed(b"\x1b[14t"); // text-area px: rows*18=432 ; cols*9=720
+    assert_eq!(s.handler.take_output(), b"\x1b[4;432;720t");
+    s.feed(b"\x1b[16t"); // cell px: height;width
+    assert_eq!(s.handler.take_output(), b"\x1b[6;18;9t");
+    s.feed(b"\x1b[18t"); // chars: rows;cols
+    assert_eq!(s.handler.take_output(), b"\x1b[8;24;80t");
+}
+
 // OSC 8 hyperlink start/end wire through to Screen hyperlink attribution.
 // Regression for the previously-dropped `osc_dispatch` arm (#26): the Screen
 // implemented hyperlinks all along, but the stream handler ignored the parsed
