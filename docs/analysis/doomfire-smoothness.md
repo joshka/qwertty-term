@@ -1,10 +1,25 @@
 # DOOM-fire smoothness gap (post-present-pacing)
 
-Status: **diagnosed, handed off.** Present pacing is fixed (#139). The residual
-judder is a renderer + io sampling problem that lives in **T2** (`qwertty-term-renderer`)
-and **T4** (`qwertty-term` app / termio), not T1 (engine). Engine throughput is already
-at or above parity with Ghostty main on the vt lanes — this is not a parse/apply-speed
-problem.
+Status: **diagnosed, handed off — and since largely resolved by the follow-ups
+below.** This was the original T1→T2/T4 handoff after #139; two of its premises
+were later corrected by measurement. Read these first:
+
+- `docs/analysis/renderer-present-backpressure.md` (T2, #141) — the render path
+  is already vsync-driven; the "render free-runs / no present backpressure"
+  framing below is superseded. Real gap = fire-and-forget present (1 frame in
+  flight), addressed with a metric seam; a full rewrite is unjustified on
+  current evidence (DOOM-fire on main is visibly smooth, ~950–1120 fps).
+- `docs/analysis/doomfire-io-findings.md` (T4, #141) — shipped the `bb0ac4c72`
+  self-pipe wake (#148); measured the io path and *rejected* the `d34b54e9b`
+  mirror (no render-lock starvation here). The "bursty io apply" gap below is
+  quantified there.
+
+The original diagnosis (kept for the record) follows.
+
+Present pacing is fixed (#139). The residual judder is a renderer + io sampling
+problem that lives in **T2** (`qwertty-term-renderer`) and **T4** (`qwertty-term`
+app / termio), not T1 (engine). Engine throughput is already at or above parity
+with Ghostty main on the vt lanes — this is not a parse/apply-speed problem.
 
 ## Symptom
 

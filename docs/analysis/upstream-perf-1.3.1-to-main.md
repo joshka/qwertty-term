@@ -30,6 +30,27 @@ post-pin; porting those needs source-verification against `~/local/ghostty-main`
 | #13237 | `bb0ac4c72` | don't bridge pty reads while the parser is idle                                                               | termio (T4)                                                                                                                     |
 | #13245 | `896aca499` | return free-listed page memory to the OS                                                                      | memory hygiene, not throughput (T5/T1 later)                                                                                    |
 
+## Shipped status (updated 2026-07-13)
+
+The T1 engine items from the table above have now largely landed; this section
+tracks which and where the numbers live:
+
+- **Dense/medium/sync package** (`47e26df60`, `cb2d78587`, `cee35cabf`,
+  `8d663a76e`) — **SHIPPED.** Drove `dense_cells` from a 2.29× loss to a 0.64×
+  *lead* vs Ghostty main (see `docs/benchmarks/vtebench-baseline.md`).
+- **CSI/SGR dispatch package** (`253e4f9c3`, `1a88f3622`, `300f42c7a`) —
+  **SHIPPED.**
+- **Wide-class `printSliceFill`** (the `.wide` path of `47e26df60`) — **SHIPPED.**
+  Drove the `unicode` (0.50× lead) and CJK engine wins.
+- **Scroll-region optimizations** (`77190bd02`, #13231) — **SHIPPED as #204**
+  (`b01b02e`). Closes the region-scroll losses this doc flagged; in-process
+  engine bench: `scroll-region` +29%, `scrolling` +7% (no regression). The
+  vtebench three-way region-scroll rows are being re-measured post-#204.
+- **ASCII-in-ESC-scan** (`083d9709b`) — folded into our SWAR scan work.
+- **Not T1 / deferred:** `2f0e6659d` + `bb0ac4c72` (termio, T4 — `bb0ac4c72`
+  shipped as #148, see `docs/analysis/doomfire-io-findings.md`); `446f80f4e`
+  (renderer, T2); `896aca499` (page-memory hygiene).
+
 ## Reading order for the T1 items
 
 1. `47e26df60` + `cb2d78587` + `cee35cabf` + `8d663a76e` — the dense/medium/sync_cells

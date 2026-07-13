@@ -1,5 +1,14 @@
 # dense_cells / print-path port gaps vs upstream perf sprint
 
+> **EXECUTED (2026-07-13).** This was the *work plan*; the gaps below have since
+> been closed. The wide-class `print_slice` fill (gap #1's missing half), the
+> bulk style-only run fill (#2), and per-run `release_multiple` in clear paths
+> (#4) all shipped. Result: `dense_cells` went from a 2.29× loss to a **0.64×
+> lead** and `unicode` to a **0.50× lead** vs Ghostty main
+> (`docs/benchmarks/vtebench-baseline.md`). The "Partial/Absent" status column
+> below is the *pre-work* state, retained for the file:line map; don't read it as
+> current.
+
 Recorded 2026-07-11 (T1, sub-agent deep-read; upstream `~/local/ghostty` at pin
 `2da015cd6`, port at main `eee56f7f26e5`). Companion to
 `upstream-perf-1.3.1-to-main.md` — this is the file:line-level gap map for the four

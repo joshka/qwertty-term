@@ -186,12 +186,22 @@ Gate status: **PASS — every stream >= 0.5x.** All four moved from 0.15-0.31x t
 
 ### Deferred (not landed this pass)
 
+> **Update 2026-07-13:** the two "deferred" items below were scoped to *this M1
+> pass*; the wide fill has since shipped as its own package (see below). The
+> `utf8-mixed` 0.57× figure in "Final result" is therefore the *pre-wide-fill*
+> number — current engine throughput on the wide/CJK path now *leads* Ghostty
+> main (`unicode` 0.50×, `dense_cells` 0.64× in
+> `docs/benchmarks/vtebench-baseline.md`). Later dispatch/clear_cells work also
+> moved `sgr` and `cursor` further than the numbers here.
+
 - **SIMD `utf8DecodeUntilControlSeq`** — the scalar decode-until-control-seq scan
   is ported; the SIMD bulk decoder (std::simd / simdutf) is a later item and was
-  out of this chunk's charter.
+  out of this chunk's charter. *(Still deferred.)*
 - **Batched WIDE `printSliceFill(.wide, …)`** — only the narrow fill is ported;
   wide runs defer to per-cp `print` (correct, just not batched). utf8-mixed
-  would gain a little more from a wide batch.
+  would gain a little more from a wide batch. **→ SHIPPED** as the wide-class
+  `print_slice` fill (port of the `.wide` path of `47e26df60`); it drove the
+  `unicode`/CJK wins recorded in the vtebench baseline.
 - **Dependencies added: none.** (`memchr` was evaluated for the ground scan but
   the hand-rolled ESC-stop scan in `decode_until_control_seq` is already tight
   and keeps the crate dependency-free; no justification to add it.)
