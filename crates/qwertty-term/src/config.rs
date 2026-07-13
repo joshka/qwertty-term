@@ -14,6 +14,8 @@
 //! run if missing). Parsing is lenient — unknown keys are ignored and a
 //! malformed file falls back to defaults rather than failing startup.
 
+use std::collections::{HashSet, VecDeque};
+use std::path::Path;
 use std::{env, fs, path::PathBuf};
 
 use serde::Deserialize;
@@ -456,14 +458,115 @@ pub fn load() -> Config {
         return Config::default();
     }
 
-    let Ok(contents) = fs::read_to_string(&path) else {
-        return Config::default();
-    };
+    load_from(&path)
+}
 
-    parse(&contents).unwrap_or_else(|err| {
-        eprintln!("failed to parse {}: {err}", path.display());
+/// Load a config file plus its `config-file` includes, merged into one [`Config`].
+///
+/// Include semantics mirror upstream (`docs/analysis/config-core.md` §3): the
+/// `config-file` directive (a string or array of strings) is processed
+/// **deferred**, breadth-first, *after* the file that declares it — so an include
+/// overrides keys set in its parent. Paths resolve relative to the *including*
+/// file's directory (`~/` expanded), a `?` prefix marks an include optional
+/// (missing is silently skipped), and a **cycle** (a file already loaded) is
+/// skipped with a warning. The merge is last-wins for scalars and **appends** for
+/// arrays (so `keybind` accumulates across files). Any per-file read/parse error
+/// is warned and skipped — a bad include never fails startup.
+fn load_from(root: &Path) -> Config {
+    let mut merged = toml::Table::new();
+    let mut queue: VecDeque<(PathBuf, bool)> = VecDeque::new();
+    queue.push_back((root.to_path_buf(), false));
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    while let Some((path, optional)) = queue.pop_front() {
+        // Cycle / diamond dedup on the canonical path.
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !seen.insert(canonical) {
+            eprintln!("config-file: cycle detected, skipping {}", path.display());
+            continue;
+        }
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(err) => {
+                if !optional {
+                    eprintln!("config-file: cannot read {}: {err}", path.display());
+                }
+                continue;
+            }
+        };
+        let mut table: toml::Table = match contents.parse() {
+            Ok(table) => table,
+            Err(err) => {
+                eprintln!("failed to parse {}: {err}", path.display());
+                continue;
+            }
+        };
+        // Enqueue this file's includes (relative to its own dir), removing the
+        // directive so it never reaches `Config` deserialization.
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        for spec in take_includes(&mut table) {
+            let (rel, opt) = parse_include_spec(&spec);
+            queue.push_back((resolve_include(dir, rel), opt));
+        }
+        merge_tables(&mut merged, table);
+    }
+
+    toml::Value::Table(merged).try_into().unwrap_or_else(|err| {
+        eprintln!("failed to load merged config: {err}");
         Config::default()
     })
+}
+
+/// Remove the `config-file` include directive from `table`, returning the listed
+/// paths (accepts a single string or an array of strings).
+fn take_includes(table: &mut toml::Table) -> Vec<String> {
+    match table.remove("config-file") {
+        Some(toml::Value::String(s)) => vec![s],
+        Some(toml::Value::Array(arr)) => arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A leading `?` marks an include optional (missing → silently skipped).
+fn parse_include_spec(spec: &str) -> (&str, bool) {
+    match spec.strip_prefix('?') {
+        Some(rest) => (rest, true),
+        None => (spec, false),
+    }
+}
+
+/// Resolve an include path: `~/` expansion, then (if still relative) against the
+/// including file's directory.
+fn resolve_include(dir: &Path, rel: &str) -> PathBuf {
+    let expanded = match rel.strip_prefix("~/") {
+        Some(rest) => match env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(rel),
+        },
+        None => PathBuf::from(rel),
+    };
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        dir.join(expanded)
+    }
+}
+
+/// Merge `other` into `base`: recurse into sub-tables, **append** arrays (so
+/// repeatables like `keybind` accumulate), and otherwise last-wins.
+fn merge_tables(base: &mut toml::Table, other: toml::Table) {
+    for (key, value) in other {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(bt)), toml::Value::Table(ot)) => merge_tables(bt, ot),
+            (Some(toml::Value::Array(ba)), toml::Value::Array(oa)) => ba.extend(oa),
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
 }
 
 /// Parse a TOML string into a [`Config`]. Split out so it is unit-testable
@@ -808,5 +911,85 @@ mod tests {
     #[test]
     fn malformed_toml_is_an_error_not_a_panic() {
         assert!(parse("theme = [this is not valid").is_err());
+    }
+
+    // ---- config-file includes ----
+
+    #[test]
+    fn merge_tables_appends_arrays_and_overrides_scalars() {
+        let mut base: toml::Table = "theme = \"A\"\nkeybind = [\"a=text:x\"]\n".parse().unwrap();
+        let other: toml::Table = "theme = \"B\"\nkeybind = [\"b=text:y\"]\n".parse().unwrap();
+        merge_tables(&mut base, other);
+        // Scalar: last wins.
+        assert_eq!(base["theme"].as_str(), Some("B"));
+        // Array: appended.
+        let binds: Vec<_> = base["keybind"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(binds, vec!["a=text:x", "b=text:y"]);
+    }
+
+    #[test]
+    fn parse_include_spec_handles_optional_prefix() {
+        assert_eq!(parse_include_spec("foo.toml"), ("foo.toml", false));
+        assert_eq!(parse_include_spec("?foo.toml"), ("foo.toml", true));
+    }
+
+    /// Make a fresh temp dir for a filesystem test (no external `tempfile` dep).
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("qwertty_cfg_test_{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_from_merges_includes_with_override_and_append() {
+        let dir = scratch_dir("includes");
+        fs::write(
+            dir.join("config.toml"),
+            "theme = \"Base\"\nkeybind = [\"a=text:x\"]\nconfig-file = [\"extra.toml\"]\n",
+        )
+        .unwrap();
+        // The include is processed after the parent, so it overrides `theme`…
+        fs::write(
+            dir.join("extra.toml"),
+            "theme = \"Override\"\nkeybind = [\"b=text:y\"]\n",
+        )
+        .unwrap();
+
+        let config = load_from(&dir.join("config.toml"));
+        assert_eq!(config.theme.as_deref(), Some("Override"));
+        // …and `keybind` accumulates across both files.
+        assert_eq!(config.keybind, vec!["a=text:x", "b=text:y"]);
+    }
+
+    #[test]
+    fn load_from_breaks_include_cycles() {
+        let dir = scratch_dir("cycle");
+        fs::write(
+            dir.join("config.toml"),
+            "theme = \"A\"\nconfig-file = [\"b.toml\"]\n",
+        )
+        .unwrap();
+        fs::write(dir.join("b.toml"), "config-file = [\"config.toml\"]\n").unwrap();
+        // Must terminate (cycle detected) and still load the base.
+        let config = load_from(&dir.join("config.toml"));
+        assert_eq!(config.theme.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn load_from_optional_missing_include_is_skipped() {
+        let dir = scratch_dir("optional");
+        fs::write(
+            dir.join("config.toml"),
+            "theme = \"A\"\nconfig-file = [\"?does-not-exist.toml\"]\n",
+        )
+        .unwrap();
+        let config = load_from(&dir.join("config.toml"));
+        assert_eq!(config.theme.as_deref(), Some("A"));
     }
 }

@@ -214,7 +214,10 @@ items are `[ ]` wholesale unless noted.
       cursor + selection colors pushed into every surface's engine, forced full repaint
       via `PageList::mark_all_dirty`). Fonts/cursor-style/padding re-apply deferred
       (need font-grid/window rebuild, config-core.md §7)
-- [ ] `config-file` includes, `config-default-files`, two-location merge
+- [x] `config-file` includes — deferred breadth-first queue, cycle detection,
+      `?optional` prefix, relative-to-including-file resolution; generic TOML merge
+      (last-wins scalars, append arrays)
+- [ ] `config-default-files`, two-location (XDG + App Support) merge, CLI overrides
 - [ ] Full option surface (~200 keys) — most map to features listed elsewhere here
 
 ## Notifications, bell, progress
