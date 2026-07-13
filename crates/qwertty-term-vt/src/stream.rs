@@ -1742,6 +1742,12 @@ pub struct TerminalHandler {
     /// config (`osc-color-report-format`). Defaults to 16-bit (the xterm form
     /// the lib layer uses); `None` suppresses color-query replies entirely.
     osc_color_report_format: OscColorReportFormat,
+    /// The name reported in the XTVERSION (`CSI > q`) reply. Defaults to
+    /// `qwertty-term` (our product identity — deliberately NOT `ghostty`, per
+    /// trademark; this diverges from upstream's `libghostty`, see the SKIP on
+    /// `corpus/real_apps/tmux_session`). The app should set its full version
+    /// string (e.g. `qwertty-term 0.1.0`) via [`set_xtversion`].
+    xtversion: String,
 }
 
 /// OSC color-query reply format. Port of `configpkg.Config.OSCColorReportFormat`.
@@ -1801,6 +1807,7 @@ impl TerminalHandler {
             cell_size: None,
             enquiry_response: Vec::new(),
             osc_color_report_format: OscColorReportFormat::Bit16,
+            xtversion: String::from("qwertty-term"),
         }
     }
 
@@ -1820,6 +1827,12 @@ impl TerminalHandler {
     /// Set the OSC color-query reply format (config `osc-color-report-format`).
     pub fn set_osc_color_report_format(&mut self, format: OscColorReportFormat) {
         self.osc_color_report_format = format;
+    }
+
+    /// Set the XTVERSION (`CSI > q`) reply name. The app should pass its full
+    /// version string (e.g. `qwertty-term 0.1.0`). Must never be `ghostty`.
+    pub fn set_xtversion(&mut self, version: &str) {
+        self.xtversion = version.to_string();
     }
 
     /// Tell the terminal the current OS light/dark color scheme, so a
@@ -2595,7 +2608,8 @@ impl Handler for TerminalHandler {
         self.write_pty(reply.as_bytes());
     }
     fn xtversion(&mut self) {
-        self.write_pty(b"\x1bP>|libghostty\x1b\\");
+        let resp = format!("\x1bP>|{}\x1b\\", self.xtversion);
+        self.write_pty(resp.as_bytes());
     }
     fn size_report(&mut self, style: SizeReportStyle) {
         // Port of `stream_terminal.reportSize`. CSI 21 t (window title) is

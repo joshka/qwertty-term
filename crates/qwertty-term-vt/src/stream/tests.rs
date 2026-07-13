@@ -809,6 +809,23 @@ fn xtmodkeys_modify_other_keys_2() {
     assert!(s.handler.terminal.flags.modify_other_keys_2);
 }
 
+// XTVERSION (`CSI > q`) reports our product name by default (never `ghostty`),
+// and the app-set version string when provided.
+#[test]
+fn xtversion_reports_product_name() {
+    let mut s = term(10, 4);
+    // Default: `qwertty-term` (NOT `libghostty`/`ghostty`).
+    s.feed(b"\x1b[>q");
+    let out = s.handler.take_output();
+    assert_eq!(out, b"\x1bP>|qwertty-term\x1b\\");
+    assert!(!out.windows(7).any(|w| w == b"ghostty"));
+
+    // App-provided full version string.
+    s.handler.set_xtversion("qwertty-term 0.1.0");
+    s.feed(b"\x1b[>q");
+    assert_eq!(s.handler.take_output(), b"\x1bP>|qwertty-term 0.1.0\x1b\\");
+}
+
 // ENQ (0x05) replies the configured answerback, or nothing when unset.
 #[test]
 fn enquiry_answerback() {
