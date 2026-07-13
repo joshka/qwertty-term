@@ -18,7 +18,7 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 name = "qwertty_term_renderer"
 
 [dependencies]
-qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
 # URL/link detection (R7 links). Already in the workspace lockfile (transitive),
 # so this adds no new lock entry. Platform-agnostic (helps a future non-macOS
 # backend too).
@@ -72,12 +72,12 @@ dispatch2 = { version = "0.3.1", default-features = false, features = [
 # The font substrate the cell engine (R4) drives: shaping + glyph→atlas render
 # cache (`Grid`), and sprite dispatch for cursors/decorations/box-drawing.
 # Both are macOS-only in the reduced cut (CoreText face + rasterization).
-qwertty-term-font = { version = "0.1.0", path = "../qwertty-term-font" }
-qwertty-term-sprite = { version = "0.1.0", path = "../qwertty-term-sprite" }
+qwertty-term-font = { version = "0.2.0", path = "../qwertty-term-font" }
+qwertty-term-sprite = { version = "0.2.0", path = "../qwertty-term-sprite" }
 
 [dev-dependencies]
 # The acceptance test (R4) drives a real qwertty-term-vt Terminal through a Stream to
 # produce the snapshot the engine renders.
-qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
 # Base64-encodes kitty graphics APC payloads for the image-rendering test (R6).
 base64 = "0.22"

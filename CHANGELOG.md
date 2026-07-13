@@ -14,6 +14,12 @@ additive.
 
 ## Unreleased — 0.2.0
 
+## [0.2.0](https://github.com/joshka/qwertty-term/compare/qwertty-term-sprite-v0.1.0...qwertty-term-sprite-v0.2.0) - 2026-07-13
+
+### Other
+
+- *(sprite)* lock cursor-height regression (adjust-cursor-height) ([#158](https://github.com/joshka/qwertty-term/pull/158))
+
 The next release is **0.2.0** (not 0.1.1): it carries one small breaking change
 to a `qwertty-term-vt` snapshot type (see Breaking), so per SemVer the minor
 version bumps. Everything else is additive.
