@@ -64,6 +64,7 @@ pub mod cells;
 pub mod cursor;
 pub mod gpu;
 pub mod options;
+pub mod present_stats;
 pub mod row;
 pub mod shaders;
 pub mod size;
