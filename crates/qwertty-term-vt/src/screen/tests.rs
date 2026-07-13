@@ -442,6 +442,46 @@ fn clone_partial() {
     assert_eq!(s2.cursor.y, 0);
 }
 
+// Regression (upstream 607160657): cloning a selection whose corners fall on a
+// narrower (mid-reflow) destination page must clamp the retained columns to the
+// owning page so the cloned selection's pins stay valid.
+#[test]
+fn clone_clamps_clipped_selection_to_mixed_width_pages() {
+    use crate::pagelist::Pin;
+    use crate::screen::selection::Selection;
+
+    let mut s = init(4, 3, 0);
+    let first = s.pages.first_node();
+    s.pages.split(Pin::with(first, 2, 0)).unwrap();
+    s.pages.split(Pin::with(first, 1, 0)).unwrap();
+    let middle = unsafe { (*first).next };
+    let last = unsafe { (*middle).next };
+    unsafe { (*middle).data.size.cols = 2 }; // narrower destination page
+
+    // Linear: clip so the clone's last page is the narrower middle. The end
+    // pin (was out of range) must clamp to that page's last column (1).
+    s.select(Some(Selection::init(
+        Pin::at(first),
+        Pin::with(last, 0, 3),
+        false,
+    )));
+    let linear = s.clone(Point::screen(0, 0), Some(Point::screen(0, 1)));
+    let end = linear.selection.unwrap().end();
+    assert!(linear.pages.pin_is_valid(end));
+    assert_eq!(end.x, 1);
+
+    // Rectangle: cloning from y=1 clamps the start column to the narrower page.
+    s.select(Some(Selection::init(
+        Pin::with(first, 0, 3),
+        Pin::with(last, 0, 3),
+        true,
+    )));
+    let rect = s.clone(Point::screen(0, 1), None);
+    let start = rect.selection.unwrap().start();
+    assert!(rect.pages.pin_is_valid(start));
+    assert_eq!(start.x, 1);
+}
+
 // Port of `test "Screen: clone partial cursor out of bounds"`.
 #[test]
 fn clone_partial_cursor_out_of_bounds() {
