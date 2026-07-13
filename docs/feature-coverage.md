@@ -183,8 +183,10 @@ items are `[ ]` wholesale unless noted.
       (`default_set()` + user config) at the `keyDown:`/`performKeyEquivalent:` seam.
       macOS split/search/tab chords are now upstream's exact defaults. Scroll, font-size,
       clipboard, and window/tab-lifecycle (`new_window`/`new_tab`/`close_surface`/
-      `close_tab`/`toggle_quick_terminal`) action categories are now dispatched too.
-      Remaining: misc actions needing new behavior + `performable` menu fallthrough.
+      `close_tab`/`toggle_quick_terminal`/`toggle_fullscreen`) action categories are now
+      dispatched too (e.g. the default ctrl+Enter → fullscreen, a non-menu bind, now works).
+      Remaining: actions needing new engine/selection behavior (`clear_screen`, `select_all`,
+      `jump_to_prompt`, `write_scrollback_file`) + `performable` menu fallthrough.
 - [~] `Binding.zig` runtime: **leader-key sequences** (`ctrl+a>c`) **and `chain=`
       multi-action bindings dispatched** (`handle_key_sequence` + `resolve_actions`
       over the `Set`'s `Leader`/`Leaf`/`LeafChained` storage). Remaining: sequence
