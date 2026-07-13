@@ -141,6 +141,12 @@ pub struct SnapshotCursor {
     pub row: usize,
     pub style: CursorStyle,
     pub visible: bool,
+    /// Whether the cursor should blink (DEC private mode 12,
+    /// `CursorBlinking`). The renderer gates its own blink phase on this via
+    /// `FrameOptions.cursor_blink_visible`; when `false` the cursor is drawn
+    /// steady. Sourced from terminal mode state (screen-level snapshots leave
+    /// it `false`; the `Terminal` wrappers fill in the real mode).
+    pub blinking: bool,
 }
 
 /// The global (whole-screen) dirty signals a renderer needs to decide whether
@@ -576,6 +582,9 @@ impl Screen {
             row: self.cursor.y as usize,
             style: self.cursor.cursor_style,
             visible: true,
+            // Screen has no mode state; the `Terminal` wrappers override this
+            // from mode 12 (see `Terminal::snapshot*`), matching `visible`.
+            blinking: false,
         }
     }
 }
@@ -689,6 +698,7 @@ impl Terminal {
     pub fn snapshot(&self) -> Snapshot {
         let mut snap = self.screen().snapshot();
         snap.cursor.visible = self.modes.get(crate::modes::Mode::CursorVisible);
+        snap.cursor.blinking = self.modes.get(crate::modes::Mode::CursorBlinking);
         // A blank far-right column can drop out of Tag::Screen's bottom-right if
         // the whole active area is empty; guarantee the row count invariant.
         while snap.all_rows.len() < snap.rows {
@@ -717,6 +727,7 @@ impl Terminal {
             self.resolve_kitty_window(scrollback_offset);
         let mut snap = self.screen().snapshot_window(scrollback_offset);
         snap.cursor.visible = self.modes.get(crate::modes::Mode::CursorVisible);
+        snap.cursor.blinking = self.modes.get(crate::modes::Mode::CursorBlinking);
         snap.palette = self.colors.palette.current;
         snap.default_fg = self.colors.foreground.get();
         snap.default_bg = self.colors.background.get();
@@ -779,6 +790,7 @@ impl Terminal {
         let screen_key = self.screens.active_key();
 
         let cursor_visible = self.modes.get(crate::modes::Mode::CursorVisible);
+        let cursor_blinking = self.modes.get(crate::modes::Mode::CursorBlinking);
         let palette = self.colors.palette.current;
         let default_fg = self.colors.foreground.get();
         let default_bg = self.colors.background.get();
@@ -791,6 +803,7 @@ impl Terminal {
             .screen_mut()
             .snapshot_window_tracking(scrollback_offset);
         snap.cursor.visible = cursor_visible;
+        snap.cursor.blinking = cursor_blinking;
         snap.palette = palette;
         snap.default_fg = default_fg;
         snap.default_bg = default_bg;
@@ -850,6 +863,33 @@ mod tests {
         assert_eq!(snap.cursor.col, 5);
         assert_eq!(snap.cursor.row, 0);
         assert!(snap.cursor.visible);
+    }
+
+    #[test]
+    fn cursor_blinking_tracks_mode_12() {
+        // Default: DEC mode 12 (CursorBlinking) is off → steady cursor.
+        let term = feed(10, 3, b"x");
+        assert!(!term.snapshot().cursor.blinking, "default: not blinking");
+        assert!(!term.snapshot_window(0).cursor.blinking);
+
+        // Enable mode 12 → all three snapshot paths report blinking.
+        let mut term = feed(10, 3, b"\x1b[?12h");
+        assert!(
+            term.snapshot().cursor.blinking,
+            "snapshot() carries mode 12"
+        );
+        assert!(
+            term.snapshot_window(0).cursor.blinking,
+            "snapshot_window() carries mode 12"
+        );
+        assert!(
+            term.snapshot_window_tracking(0).cursor.blinking,
+            "snapshot_window_tracking() carries mode 12"
+        );
+
+        // Disable again (12h then 12l) → steady.
+        let term = feed(10, 3, b"\x1b[?12h\x1b[?12l");
+        assert!(!term.snapshot().cursor.blinking, "mode 12 reset → steady");
     }
 
     #[test]

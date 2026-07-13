@@ -386,11 +386,12 @@ impl Engine {
         // the snapshot cursor). Preedit isn't wired in the reduced cut.
         let cursor = snapshot.cursor();
         let cursor_style = cursor.and_then(|c| {
-            // The snapshot doesn't carry the blink *mode*; pass `blinking =
-            // false` so the cursor is always shown when visible+focused
-            // (blink gating comes from `opts.cursor_blink_visible` in a future
-            // wiring, but the reduced cut doesn't animate).
-            let state = cursor::CursorState::from_snapshot_cursor(&c, false);
+            // The snapshot carries the blink *mode* (DEC mode 12) via
+            // `SnapshotCursor.blinking` (#57); pass it through so
+            // `opts.cursor_blink_visible` actually gates the cursor's blink-off
+            // phase. When mode 12 is off, `blinking` is false and the cursor is
+            // drawn steady regardless of the blink phase.
+            let state = cursor::CursorState::from_snapshot_cursor(&c, c.blinking);
             cursor::style(
                 &state,
                 cursor::StyleOptions {
