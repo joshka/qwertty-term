@@ -162,7 +162,10 @@ items are `[ ]` wholesale unless noted.
 - [x] Byte-emitting keybinds `text:` / `esc:` / `csi:` (e.g. shift+enter, the
       default `alt+left`=esc:b word-motion) — dispatched through the ported
       `Binding.zig` `Set` (`crate::keybind::build_set` / `resolve_text_bytes`)
-- [~] Font-size binds (increase/decrease/set) — actions exist, not all wired to config
+- [x] Font-size + clipboard keybind actions (`increase`/`decrease`/`reset_font_size`,
+      `copy_to_clipboard`/`paste_from_clipboard`) dispatched through the `Set` (rebindable;
+      default cmd shortcuts still also fire via their menu items). Font-size folds the
+      point delta to a fixed step; copy is plain-text (no primary selection on macOS)
 - [~] `Binding.zig` port in `qwertty-term-input::binding`: trigger/action/flags model
       + parse layer (10-rule `Trigger::parse`, 85-action enum + `Action::parse`, flag
       prefixes, `=`-splitter, chain + sequence parsing, compat table) **and** the
@@ -175,9 +178,9 @@ items are `[ ]` wholesale unless noted.
       all four bespoke key tables are retired — the user `keybind` text seam (b1) and
       the tab/split/search chords (b2) now resolve through one unified `Set`
       (`default_set()` + user config) at the `keyDown:`/`performKeyEquivalent:` seam.
-      macOS split/search/tab chords are now upstream's exact defaults. Remaining: wire
-      the remaining action categories (font-size, scroll, clipboard, window, …) + the
-      runtime sequence/chain (leader-key) dispatch.
+      macOS split/search/tab chords are now upstream's exact defaults. Scroll, font-size,
+      and clipboard action categories are now dispatched too. Remaining: window/misc
+      action categories + `performable` menu fallthrough.
 - [~] `Binding.zig` runtime: **leader-key sequences** (`ctrl+a>c`) **and `chain=`
       multi-action bindings dispatched** (`handle_key_sequence` + `resolve_actions`
       over the `Set`'s `Leader`/`Leaf`/`LeafChained` storage). Remaining: sequence
