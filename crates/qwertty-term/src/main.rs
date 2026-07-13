@@ -108,6 +108,7 @@ fn main() {
     match mode {
         Mode::OffscreenSmoke => run_offscreen_smoke(),
         Mode::Window => run_window(),
+        Mode::ImportGhosttyConfig { path } => run_import_ghostty_config(path),
     }
 }
 
@@ -115,18 +116,70 @@ fn main() {
 enum Mode {
     Window,
     OffscreenSmoke,
+    /// Convert a Ghostty config to qwertty-term TOML on stdout. `path` is the
+    /// source file; `None` means the default Ghostty config location.
+    ImportGhosttyConfig {
+        path: Option<String>,
+    },
 }
 
-/// Parse the CLI args into a mode (only two flags; anything else → window).
+/// Parse the CLI args into a mode.
+///
+/// `+import-ghostty-config [PATH]` runs the converter (the next non-flag arg, if
+/// any, is the source file). `--offscreen-smoke` / `--window` select those modes;
+/// anything else falls through to the window.
 fn parse_mode(args: impl Iterator<Item = String>) -> Mode {
-    for arg in args {
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--offscreen-smoke" => return Mode::OffscreenSmoke,
             "--window" => return Mode::Window,
+            "+import-ghostty-config" => {
+                // An optional positional source path (skip any trailing flags).
+                let path = args.by_ref().find(|a| !a.starts_with('-'));
+                return Mode::ImportGhosttyConfig { path };
+            }
             _ => {}
         }
     }
     Mode::Window
+}
+
+/// Read a Ghostty config (from `path`, or the default location) and print the
+/// converted qwertty-term TOML to stdout. Exit `0` on success, `1` on an IO error.
+fn run_import_ghostty_config(path: Option<String>) {
+    let source = match path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match default_ghostty_config_path() {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "could not resolve the default Ghostty config path; pass one explicitly:\n  \
+                     qwertty-term +import-ghostty-config <path>"
+                );
+                std::process::exit(1);
+            }
+        },
+    };
+    match std::fs::read_to_string(&source) {
+        Ok(contents) => {
+            print!("{}", qwertty_term::import::convert(&contents));
+        }
+        Err(e) => {
+            eprintln!("could not read {}: {e}", source.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The default Ghostty config path (`$XDG_CONFIG_HOME`/`~/.config` → `ghostty/config`).
+fn default_ghostty_config_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })?;
+    Some(base.join("ghostty").join("config"))
 }
 
 #[cfg(target_os = "macos")]
