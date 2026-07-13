@@ -208,7 +208,10 @@ items are `[ ]` wholesale unless noted.
 - [x] `theme` resolution via Ghostty theme files
 - [—] Ghostty's custom config format (replaced by TOML — ADR)
 - [ ] `+import-ghostty-config` converter
-- [ ] `config-file` includes, `config-reload`, `config-default-files`
+- [~] `config-reload` action (default `cmd+shift+,`) — re-reads config and re-applies
+      the runtime-safe fields (keybinds, copy-on-select, scroll-multiplier); theme/fonts/
+      colors re-apply deferred (need per-surface re-derivation, config-core.md §7)
+- [ ] `config-file` includes, `config-default-files`, two-location merge
 - [ ] Full option surface (~200 keys) — most map to features listed elsewhere here
 
 ## Notifications, bell, progress
