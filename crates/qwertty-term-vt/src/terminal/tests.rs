@@ -4417,6 +4417,77 @@ fn index_bottom_of_primary_screen_with_scroll_region() {
     assert_eq!(t.plain_string(), "\n\nA\n\nX");
 }
 
+// Zig: "Terminal: index bottom of scroll region with top margin and background
+// SGR" (commit 77190bd02). A top-margin (non-top-anchored) region scroll takes
+// the `cursor_scroll_region_up` hot path and must preserve the SGR background on
+// the new blank row.
+#[test]
+fn index_bottom_of_scroll_region_with_top_margin_and_background_sgr() {
+    let mut t = term(5, 5);
+    t.print_string("1\n2\n3\n4\n5");
+    t.set_top_and_bottom_margin(2, 4);
+    t.set_cursor_pos(4, 1);
+    t.set_attribute(Attribute::DirectColorBg(crate::color::Rgb::new(0xFF, 0, 0)));
+    t.index();
+
+    // The region (rows 2-4) scrolled up; rows outside are unchanged.
+    assert_eq!(t.plain_string(), "1\n3\n4\n\n5");
+    // The cursor is on the new blank row.
+    assert_eq!(t.screen().cursor.y, 3);
+    // The new blank row must carry the background color.
+    for x in 0..t.cols {
+        assert_eq!(bg_rgb_at(&t, x, 3), (ContentTag::BgColorRgb, (0xFF, 0, 0)));
+    }
+}
+
+// Zig: "Terminal: index bottom of alt screen full region" (commit 77190bd02).
+// The alt screen retains no scrollback, so a full-screen scroll must discard the
+// scrolled-out row rather than push it into scrollback.
+#[test]
+fn index_bottom_of_alt_screen_full_region() {
+    let mut t = term(5, 3);
+    t.switch_screen_mode(SwitchScreenMode::M1049, true);
+    t.print_string("A\nB\nC");
+    t.index();
+    t.carriage_return();
+    t.print('D' as u32);
+
+    // Content scrolled up; the scrolled-out row is discarded, NOT scrollback.
+    assert_eq!(t.plain_string(), "B\nC\nD");
+
+    // The primary screen is untouched.
+    t.switch_screen_mode(SwitchScreenMode::M1049, false);
+    assert_eq!(t.plain_string(), "");
+}
+
+// Zig: "Terminal: index bottom of alt screen top region" (commit 77190bd02). A
+// top-anchored region on the alt screen must NOT create scrollback.
+#[test]
+fn index_bottom_of_alt_screen_top_region() {
+    let mut t = term(5, 5);
+    t.switch_screen_mode(SwitchScreenMode::M1049, true);
+    t.print_string("1\n2\n3\n4\n5");
+    t.set_top_and_bottom_margin(1, 4);
+    t.set_cursor_pos(4, 1);
+    t.index();
+    t.print('X' as u32);
+
+    assert_eq!(t.plain_string(), "2\n3\n4\nX\n5");
+}
+
+// Zig: "Terminal: scrollUp top region no scrollback" (commit 77190bd02). CSI S
+// on a top-anchored region of a non-retaining screen discards the scrolled-out
+// row instead of routing it through scrollback.
+#[test]
+fn scroll_up_top_region_no_scrollback() {
+    let mut t = term(5, 5);
+    t.print_string("A\nB\nC\nD\nE");
+    t.set_top_and_bottom_margin(1, 3);
+    t.scroll_up(1);
+
+    assert_eq!(t.plain_string(), "B\nC\n\nD\nE");
+}
+
 // Zig: "Terminal: index outside left/right margin".
 #[test]
 fn index_outside_left_right_margin() {

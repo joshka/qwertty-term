@@ -1,0 +1,1 @@
+POST-PIN DIVERGENCE (upstream 77190bd02): CSI S on a top-anchored region of a non-retaining screen no longer creates phantom scrollback. Same root cause as alt_top_region_ind.

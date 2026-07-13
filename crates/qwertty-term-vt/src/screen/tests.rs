@@ -2872,3 +2872,143 @@ fn cursor_copy_hyperlink_copy_disabled() {
     }
     assert_eq!(s2.cursor.hyperlink_id, 0);
 }
+
+// ---- cursor_scroll_region_up (commit 77190bd02) --------------------------
+
+/// Set the cursor's background to a direct RGB via the same primitives
+/// `Terminal::set_attribute` uses, without going through `Terminal`.
+fn set_cursor_bg_rgb(s: &mut Screen, r: u8, g: u8, b: u8) {
+    s.cursor.style.bg_color = crate::page::style::Color::Rgb(crate::color::Rgb::new(r, g, b));
+    s.manual_style_update().unwrap();
+}
+
+// Zig: "Screen: cursorScrollRegionUp simple".
+#[test]
+fn cursor_scroll_region_up_simple() {
+    let mut s = init(5, 5, 0);
+    s.test_write_string("1ABCD\n2EFGH\n3IJKL\n4MNOP\n5QRST");
+
+    // Scroll a region ending at row 2 up by one (region rows 0-2, cursor at the
+    // region bottom).
+    s.cursor_absolute(1, 2);
+    s.cursor_scroll_region_up(2);
+
+    // The cursor stays in place, on the new blank row.
+    assert_eq!(s.cursor.x, 1);
+    assert_eq!(s.cursor.y, 2);
+
+    // Region rows scrolled, rows below unchanged, nothing moved to scrollback.
+    assert_eq!(
+        s.dump_string(Tag::Screen, false),
+        "2EFGH\n3IJKL\n\n4MNOP\n5QRST"
+    );
+}
+
+// Zig: "Screen: cursorScrollRegionUp with styled erased row" — the erased row's
+// managed style memory must be released.
+#[test]
+fn cursor_scroll_region_up_styled_erased_row() {
+    let mut s = init(5, 3, 0);
+
+    // Write a styled row at the top so the erased row has managed memory.
+    set_cursor_bold(&mut s);
+    s.test_write_string("1ABCD");
+    s.cursor.style.flags.bold = false;
+    s.manual_style_update().unwrap();
+    s.test_write_string("\n2EFGH\n3IJKL");
+
+    s.cursor_absolute(0, 2);
+    s.cursor_scroll_region_up(2);
+
+    assert_eq!(s.dump_string(Tag::Screen, false), "2EFGH\n3IJKL");
+
+    // The style should be gone from the page: the erased row was its only user.
+    unsafe {
+        let page = s.cursor_page();
+        assert_eq!((*page).styles().count(), 0);
+    }
+}
+
+// Zig: "Screen: cursorScrollRegionUp region spans pages" — exercises the slow
+// path, and verifies the cursor style ref stays accounted on the correct page
+// even though the tracked cursor pin is kept fixed across the boundary.
+#[test]
+fn cursor_scroll_region_up_region_spans_pages() {
+    let mut s = init(10, 5, 10);
+
+    // Get the cursor onto a new page.
+    let first_page_size = unsafe { (*s.pages.first_node()).data.capacity.rows };
+    unsafe {
+        (*s.pages.first_node()).data.pause_integrity_checks(true);
+    }
+    for _ in 0..(first_page_size - 3) {
+        s.test_write_string("\n");
+    }
+    unsafe {
+        (*s.pages.first_node()).data.pause_integrity_checks(false);
+    }
+    s.test_write_string("1A\n2B\n3C\n4D\n5E");
+
+    // Move the cursor to the first row of the second page and give it a
+    // non-default style. This verifies the cursor's style ref stays accounted
+    // on the correct page even though the region spans the boundary.
+    s.cursor_absolute(0, 3);
+    set_cursor_bold(&mut s);
+    assert_eq!(unsafe { (*s.cursor.page_pin).node }, s.pages.last_node());
+    assert_eq!(unsafe { (*s.cursor.page_pin).y }, 0);
+
+    // Scroll a region of active rows 1-3, cursor at the region bottom. The
+    // region spans the page boundary so this exercises the slow path.
+    s.cursor_scroll_region_up(2);
+
+    // The cursor stays in place, on the new blank row.
+    assert_eq!(s.cursor.x, 0);
+    assert_eq!(s.cursor.y, 3);
+    assert_eq!(s.dump_string(Tag::Viewport, false), "1A\n3C\n4D\n\n5E");
+
+    // The cursor style must remain usable: write a styled cell and verify the
+    // style ref counting is intact on the cursor's page.
+    s.test_write_string("X");
+    unsafe {
+        let page = s.cursor_page();
+        assert_eq!((*page).styles().count(), 1);
+    }
+}
+
+// Zig: "Screen: cursorScrollRegionUp region spans pages with background SGR" —
+// slow path plus the background fill of the new blank row.
+#[test]
+fn cursor_scroll_region_up_region_spans_pages_background_sgr() {
+    use crate::page::ContentTag;
+    let mut s = init(10, 5, 10);
+
+    let first_page_size = unsafe { (*s.pages.first_node()).data.capacity.rows };
+    unsafe {
+        (*s.pages.first_node()).data.pause_integrity_checks(true);
+    }
+    for _ in 0..(first_page_size - 3) {
+        s.test_write_string("\n");
+    }
+    unsafe {
+        (*s.pages.first_node()).data.pause_integrity_checks(false);
+    }
+    s.test_write_string("1A\n2B\n3C\n4D\n5E");
+
+    s.cursor_absolute(0, 3);
+    set_cursor_bg_rgb(&mut s, 0xFF, 0, 0);
+    assert_eq!(unsafe { (*s.cursor.page_pin).node }, s.pages.last_node());
+    assert_eq!(unsafe { (*s.cursor.page_pin).y }, 0);
+
+    s.cursor_scroll_region_up(2);
+
+    assert_eq!(s.dump_string(Tag::Viewport, false), "1A\n3C\n4D\n\n5E");
+
+    // The new blank row must be filled with the background color.
+    for x in 0..s.pages.cols {
+        let lc = s.pages.get_cell(Point::active(x, 3)).unwrap();
+        unsafe {
+            assert_eq!((*lc.cell).content_tag(), ContentTag::BgColorRgb);
+            assert_eq!((*lc.cell).color_rgb(), (0xFF, 0, 0));
+        }
+    }
+}

@@ -1174,6 +1174,71 @@ impl Screen {
         }
     }
 
+    /// Scroll a full-width scroll region that ends at the cursor row up by one
+    /// row. The cursor must be on the bottom row of the region. `limit` is the
+    /// number of rows in the region above the cursor (region height minus one)
+    /// and must be at least 1.
+    ///
+    /// The top row of the region is discarded (NOT moved into scrollback). All
+    /// other rows in the region shift up by one and the cursor row becomes a
+    /// blank row, filled with the current background color (like `delete_lines`).
+    /// The cursor stays at the same screen position (the new blank row). Content
+    /// outside the region is unmodified.
+    ///
+    /// This is a hot path for scroll-region usage (a program on the alt screen
+    /// using DECSTBM and scrolling via LF/IND). Upstream's `cursorScrollRegionUp`
+    /// (Screen.zig, commit 77190bd02) additionally specializes the single-page
+    /// case with an in-place row rotate; we deliberately route everything through
+    /// the shared [`PageList::erase_row_bounded`] instead. That reuse is what
+    /// makes this correct: `erase_row_bounded` already handles wrapped wide-cell
+    /// spacer heads at page/row boundaries, which a bespoke rotate here got wrong
+    /// (`InvalidSpacerHeadLocation`). The structural wins over the old `index`
+    /// path — no scrollback `grow`, no `manual_style_update`/`cursor_down` dance —
+    /// are preserved.
+    pub(crate) fn cursor_scroll_region_up(&mut self, limit: usize) {
+        debug_assert!(limit >= 1);
+        debug_assert!(self.cursor.y as usize >= limit);
+
+        // `erase_row_bounded` moves our tracked cursor pin up by one row (it is
+        // inside the erased region), but we don't want that: the cursor stays
+        // put, on the new blank row at the region bottom. Keep the old pin and
+        // restore it after (like `cursor_down_scroll` does for no-scrollback).
+        //
+        // This matters beyond performance: when the cursor is on the first row
+        // of a page, `erase_row_bounded` moves the tracked pin to the previous
+        // page. Moving it back down with `cursor_down` would then cross pages
+        // via `cursor_change_pin`, migrating the cursor style refcount from a
+        // page that never held it and corrupting the style accounting.
+        // SAFETY: cursor pin live.
+        let old_pin = unsafe { *self.cursor.page_pin };
+        let top_y = self.cursor.y as usize - limit;
+
+        self.pages
+            .erase_row_bounded(Point::active(0, top_y as u32), limit);
+
+        // We aren't actually changing the pin, just keeping it the same. Since
+        // the page never changes, the cursor's style ref stays valid and no
+        // style accounting needs updating.
+        // SAFETY: cursor pin live; restore and refresh caches.
+        unsafe {
+            *self.cursor.page_pin = old_pin;
+            self.refresh_cursor_pointers();
+        }
+
+        // `erase_row_bounded` clears the new row with zero cells, so if our
+        // blank isn't zero (a background color is set) we need to fill it.
+        let blank = self.blank_cell();
+        if !blank.is_zero() {
+            // SAFETY: cursor page/row live.
+            unsafe {
+                let page = self.cursor_page();
+                let cols = (*page).size.cols as usize;
+                (*page).fill_cells(self.cursor.page_row, 0, cols, blank);
+            }
+        }
+        self.assert_integrity();
+    }
+
     /// Copy another cursor into this screen. The source cursor may be on any
     /// screen, but its x/y must be within our bounds. Port of `cursorCopy` (the
     /// `hyperlink = false` path used by alt-screen switching).
