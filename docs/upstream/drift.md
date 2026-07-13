@@ -130,16 +130,26 @@ growth-doubling class as the RefCountedSet rehash-threshold bug already found in
 (`zig-port-assert-side-effects` memo). Highest priority to check those three spots in the port
 first — it may share the latent bug.
 
-## `src/renderer/` → `qwertty-term-renderer` (T2) — 1 mirror item
+## `src/renderer/` → `qwertty-term-renderer` (T2) — 0 open (1 verified inapplicable)
 
 - `d34b54e9b` — renderer-state mutex is unfair; the termio parse thread's tight relock loop can
   starve the renderer thread in `updateFrame`. Cross-territory — call sites also live in
   `termio/Exec.zig` (T4). (`renderer/State.zig:33-108`, `generic.zig:1170`, `termio/Exec.zig:1486`)
+  → **DOES NOT STRUCTURALLY APPLY (2026-07-13, T2): no code change.** Upstream's bug needs the
+  renderer to hold the shared state mutex across the *entire* `updateFrame`; the port renders off
+  an owned `FullSnapshot` and holds the `Arc<Mutex<Engine>>` only for the microsecond
+  `snapshot_window_tracking` copy (`qwertty-term/src/app.rs:658-666`), releasing it before the
+  heavy `update_frame`/`draw_and_present`. Residual risk (unfair `std::sync::Mutex`, no
+  `parking_lot`) is theoretical and empirically absent — DOOM-fire, the exact heavy-output
+  trigger, is visibly smooth on main. Full analysis + options (do-nothing → `parking_lot`
+  eventual fairness → full `lockDemand` port) in `docs/analysis/renderer-mutex-starvation.md`.
 
-## `src/termio/` + `src/Surface.zig` → `qwertty-term-termio` (T4) — 2 mirror items
+## `src/termio/` + `src/Surface.zig` → `qwertty-term-termio` (T4) — 0 open (both mirrored/inapplicable)
 
 - `d34b54e9b` — see the renderer item above; the starvation fix's call sites also live in
-  `termio/Exec.zig:1486,1776`.
+  `termio/Exec.zig:1486,1776`. → **NO-OP for the port (2026-07-13, T2 analysis; T4 notified):**
+  the parse-loop `yieldToDemand` half is unnecessary given the render side's snapshot boundary
+  (per the renderer item). No change to `qwertty-term-termio`. See the T4 inbox note.
 - `bb0ac4c72` — the pipelined pty gather stage slept the full ~1.2ms poll timeout even after the
   parse stage went idle → doubled frame latency for request/response-style apps; fixed with a
   self-pipe wake. (`termio/Exec.zig:1363-1630`) **MIRRORED (T4): `qwertty-term-termio/src/exec.rs`
