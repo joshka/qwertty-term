@@ -359,6 +359,11 @@ impl Selection {
         br: crate::point::Coordinate,
         p: crate::point::Coordinate,
     ) -> Option<Selection> {
+        // Widths come from the row's own page (`pin`), not the pagelist — a
+        // mid-reflow page may be narrower, and a retained tl/br column or the
+        // pagelist width could fall outside it. Port of upstream a9f5b7eba.
+        let _ = pages;
+
         if p.y < tl.y || p.y > br.y {
             return None;
         }
@@ -366,13 +371,11 @@ impl Selection {
         // Rectangle: the x range is always the same for a contained row.
         if self.rectangle {
             let mut start = pin;
-            start.x = tl.x;
+            start.x = tl.x.min(pin_max_x(start));
             let mut end = pin;
-            end.x = br.x;
+            end.x = br.x.min(pin_max_x(end));
             return Some(Selection::init(start, end, true));
         }
-
-        let cols = pages.cols();
 
         if p.y == tl.y {
             // If the selection is JUST this line, return it as-is.
@@ -381,7 +384,7 @@ impl Selection {
             }
             // Selection top-left line matches only.
             let mut end = pin;
-            end.x = cols - 1;
+            end.x = pin_max_x(end);
             return Some(Selection::init(tl_pin, end, false));
         }
 
@@ -397,7 +400,7 @@ impl Selection {
         let mut start = pin;
         start.x = 0;
         let mut end = pin;
-        end.x = cols - 1;
+        end.x = pin_max_x(end);
         Some(Selection::init(start, end, false))
     }
 
@@ -1278,6 +1281,33 @@ mod tests {
             assert!(!sel.contains(&s.pages, pin(&s, Point::screen(2, 1))));
             assert!(!sel.contains(&s.pages, pin(&s, Point::screen(12, 1))));
         }
+    }
+
+    // Regression (upstream a9f5b7eba): a contained cache row clamps its columns
+    // to the row's own page, which mid-reflow may be narrower than the pagelist.
+    #[test]
+    fn contained_row_clamps_mixed_width_pages() {
+        let mut s = init(4, 3, 0);
+        let first = s.pages.first_node();
+        s.pages.split(Pin::with(first, 2, 0)).unwrap();
+        s.pages.split(Pin::with(first, 1, 0)).unwrap();
+        let middle = unsafe { (*first).next };
+        let last = unsafe { (*middle).next };
+        unsafe { (*middle).data.size.cols = 2 }; // narrower row page
+
+        // Linear: the middle row's end clamps to middle's last column (1).
+        let linear = Selection::init(Pin::with(first, 0, 1), Pin::with(last, 0, 1), false);
+        let row = linear.contained_row(&s.pages, Pin::at(middle)).unwrap();
+        assert!(s.pages.pin_is_valid(row.end()));
+        assert_eq!((row.start().node, row.start().x), (middle, 0));
+        assert_eq!((row.end().node, row.end().x), (middle, 1));
+
+        // Rectangle: br.x = 3 clamps to 1.
+        let rect = Selection::init(Pin::with(first, 0, 1), Pin::with(last, 0, 3), true);
+        let row = rect.contained_row(&s.pages, Pin::at(middle)).unwrap();
+        assert!(s.pages.pin_is_valid(row.end()));
+        assert_eq!(row.start().x, 1);
+        assert_eq!(row.end().x, 1);
     }
 
     // Port of `test "Selection: containedRow"`.
