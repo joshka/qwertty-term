@@ -1639,6 +1639,30 @@ fn compose_window_title(
     }
 }
 
+/// Write `text` to a uniquely-named temp file (`qwertty-term-<kind>-<pid>-<n>.txt`)
+/// and return its path, or `None` on an IO error (logged). Backs the
+/// `write_*_file` keybind actions. A process-lifetime counter keeps the name
+/// unique without a random dependency.
+fn write_temp_text_file(text: &str, kind: &str) -> Option<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "qwertty-term-{kind}-{}-{n}.txt",
+        std::process::id()
+    ));
+    match std::fs::write(&path, text) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            eprintln!(
+                "write_temp_text_file: cannot write {}: {err}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 fn resolve_colors(
     config: &crate::config::Config,
 ) -> (qwertty_term_vt::terminal::Colors, SelectionColors) {
@@ -2358,6 +2382,62 @@ impl Controller {
         }
     }
 
+    /// Read text from the focused pane's engine via `read` (locks the engine
+    /// under a shared borrow). `None` if there is no focused surface, or `read`
+    /// returns `None` (e.g. an empty selection).
+    fn focused_engine_text(
+        &self,
+        tab: TabId,
+        read: impl FnOnce(&Engine) -> Option<String>,
+    ) -> Option<String> {
+        let state = self.0.borrow();
+        let t = state.tabs.get(&tab)?;
+        let s = t.surfaces.get(&t.tree.focused())?;
+        read(&s.engine())
+    }
+
+    /// Write `text` to a `kind` temp file, then copy/paste/open its path per `ws`
+    /// (shared by the `write_scrollback_file`/`write_screen_file`/
+    /// `write_selection_file` keybind actions). Only plain text is produced
+    /// today; the `vt`/`html` formats fall back to plain.
+    fn write_screen_action(
+        &self,
+        tab: TabId,
+        ws: qwertty_term_input::binding::action::WriteScreen,
+        text: &str,
+        kind: &str,
+    ) {
+        use qwertty_term_input::binding::action::WriteScreenAction;
+
+        let Some(path) = write_temp_text_file(text, kind) else {
+            return;
+        };
+        let path_str = path.to_string_lossy().into_owned();
+
+        match ws.action {
+            // Copy the path to the system clipboard.
+            WriteScreenAction::Copy => {
+                crate::clipboard::write(&path_str);
+            }
+            // Type the path into the focused pane (so the user can act on it).
+            WriteScreenAction::Paste => {
+                let mut state = self.0.borrow_mut();
+                if let Some(t) = state.tabs.get_mut(&tab) {
+                    let sid = t.tree.focused();
+                    if let Some(s) = t.surfaces.get_mut(&sid) {
+                        s.io.write(path_str.as_bytes());
+                    }
+                }
+            }
+            // Open the file with the default OS handler.
+            WriteScreenAction::Open => {
+                if let Err(err) = std::process::Command::new("open").arg(&path).spawn() {
+                    eprintln!("write_{kind}_file: cannot open {}: {err}", path.display());
+                }
+            }
+        }
+    }
+
     /// Move the focused pane's scrollback viewport per a keybind scroll action
     /// (`scroll_page_up`/`scroll_to_bottom`/…).
     fn scroll_focused_surface(&self, tab: TabId, to: crate::scroll::ScrollTo) {
@@ -3013,6 +3093,27 @@ impl Controller {
             }
             A::ToggleFullscreen => {
                 self.toggle_fullscreen(tab);
+                true
+            }
+
+            // Dump the focused pane's scrollback / viewport / selection to a temp
+            // file and copy/paste/open its path.
+            A::WriteScrollbackFile(ws) => {
+                if let Some(text) = self.focused_engine_text(tab, |e| Some(e.scrollback_string())) {
+                    self.write_screen_action(tab, *ws, &text, "scrollback");
+                }
+                true
+            }
+            A::WriteScreenFile(ws) => {
+                if let Some(text) = self.focused_engine_text(tab, |e| Some(e.screen_dump())) {
+                    self.write_screen_action(tab, *ws, &text, "screen");
+                }
+                true
+            }
+            A::WriteSelectionFile(ws) => {
+                if let Some(text) = self.focused_engine_text(tab, |e| e.selection_string()) {
+                    self.write_screen_action(tab, *ws, &text, "selection");
+                }
                 true
             }
 
@@ -9536,6 +9637,17 @@ mod tests {
         // Application mode (DECCKM on): SS3 A / SS3 B.
         assert_eq!(arrow_key_bytes(true, true), b"\x1bOA");
         assert_eq!(arrow_key_bytes(false, true), b"\x1bOB");
+    }
+
+    #[test]
+    fn write_temp_text_file_round_trips_and_is_unique() {
+        let a = super::write_temp_text_file("hello scrollback\n", "test").expect("write a");
+        let b = super::write_temp_text_file("second", "test").expect("write b");
+        assert_ne!(a, b, "each call gets a unique path");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "hello scrollback\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "second");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 
     #[test]
