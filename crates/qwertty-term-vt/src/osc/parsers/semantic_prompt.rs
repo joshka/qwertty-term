@@ -242,11 +242,34 @@ mod tests {
     use crate::osc;
 
     fn run(body: &str) -> Option<Command> {
+        run_bytes(body.as_bytes())
+    }
+
+    fn run_bytes(body: &[u8]) -> Option<Command> {
         let mut p = osc::Parser::new();
-        for c in body.bytes() {
+        for &c in body {
             p.next(c);
         }
         p.end(None)
+    }
+
+    // A non-UTF-8 byte in a trailing option must NOT discard the whole command:
+    // the ASCII structure (`133;N`) still parses. Upstream treats OSC bodies as
+    // raw bytes; we dispatch on bytes + lossy-decode (issue #169). Found via the
+    // ghostty AFL corpus differential replay.
+    #[test]
+    fn new_command_survives_non_utf8_option_byte() {
+        let cmd = run_bytes(b"133;N;\x81");
+        assert!(
+            matches!(
+                cmd,
+                Some(Command::SemanticPrompt(SemanticPrompt {
+                    action: SemanticPromptAction::NewCommand,
+                    ..
+                }))
+            ),
+            "got {cmd:?}"
+        );
     }
 
     fn prompt(body: &str) -> SemanticPrompt {

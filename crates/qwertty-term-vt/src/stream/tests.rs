@@ -1122,6 +1122,31 @@ fn xtgettcap_unknown_only_is_silent() {
     assert_eq!(s.handler.take_output(), b"");
 }
 
+// VPR / CUP with a param past the grid (and past u16) must clamp to the last
+// row, not truncate to the top. `set_cursor_pos` clamps in `usize` before
+// narrowing; casting the request to CellCountInt first wrapped 65536 -> 0.
+// Found via the ghostty AFL corpus differential replay.
+#[test]
+fn vpr_and_cup_overflow_clamp_to_last_row() {
+    for param in ["65535", "65536", "400000"] {
+        let mut s = term(20, 24);
+        s.feed(format!("\x1b[{param}e").as_bytes()); // VPR
+        assert_eq!(
+            s.handler.terminal.screen().cursor.y,
+            23,
+            "VPR {param} should clamp to last row"
+        );
+
+        let mut s = term(20, 24);
+        s.feed(format!("\x1b[{param};1H").as_bytes()); // CUP
+        assert_eq!(
+            s.handler.terminal.screen().cursor.y,
+            23,
+            "CUP {param} should clamp to last row"
+        );
+    }
+}
+
 // Primary device attributes reply.
 #[test]
 fn da_primary_reply() {

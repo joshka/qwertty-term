@@ -36,78 +36,85 @@ pub(super) fn dispatch(
     terminator_ch: Option<u8>,
     allow_unbounded: bool,
 ) -> Option<Command> {
-    // The body must be valid UTF-8 for the string-oriented parsers below.
-    // Ghostty's OSC strings are raw bytes (see vt-parser.md: "OSC strings
-    // accept raw high bytes"); non-UTF-8 payloads are exceedingly rare in
-    // practice (window titles/URIs/etc. are all conventionally UTF-8) and
-    // are treated as invalid here rather than adding a byte-oriented
-    // parallel path for every sub-parser.
-    let body = std::str::from_utf8(buf).ok()?;
+    // Ghostty parses OSC bodies as raw bytes (`[]u8`) with no UTF-8 gate, so a
+    // stray non-UTF-8 byte in a trailing/opaque field must NOT discard the whole
+    // command (issue #169). The numeric prefix and structural markers are always
+    // ASCII, so we dispatch on the raw bytes and hand each sub-parser a *lossy*
+    // string (invalid bytes → U+FFFD); the ASCII structure survives intact and
+    // the only affected content is opaque value fields (titles/URIs/options),
+    // which no terminal behavior depends on. OSC 66 is the exception: it gates
+    // on `is_safe_utf8`, which rejects non-UTF-8, so it takes the strict path.
     let terminator = Terminator::init(terminator_ch);
 
     // Numeric prefix dispatch, mirroring osc.zig's trie leaf states.
     // Ordering follows osc.zig's own state list for easy diffing.
-    if let Some(rest) = strip_num_prefix(body, "0") {
+    if let Some(rest) = strip_num_prefix(buf, b"0") {
         return fixed(rest, allow_unbounded, change_window_title::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "1") {
+    if let Some(rest) = strip_num_prefix(buf, b"1") {
         return fixed(rest, allow_unbounded, change_window_icon::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "2") {
+    if let Some(rest) = strip_num_prefix(buf, b"2") {
         return fixed(rest, allow_unbounded, change_window_title::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "3008") {
+    if let Some(rest) = strip_num_prefix(buf, b"3008") {
         return fixed(rest, allow_unbounded, context_signal::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "4") {
+    if let Some(rest) = strip_num_prefix(buf, b"4") {
         return unbounded(rest, allow_unbounded, |r| {
             color::parse(color::Op::Osc4, r, terminator)
         });
     }
-    if let Some(rest) = strip_num_prefix(body, "5") {
+    if let Some(rest) = strip_num_prefix(buf, b"5") {
         return unbounded(rest, allow_unbounded, |r| {
             color::parse(color::Op::Osc5, r, terminator)
         });
     }
-    if let Some(rest) = strip_num_prefix(body, "7") {
+    if let Some(rest) = strip_num_prefix(buf, b"7") {
         return fixed(rest, allow_unbounded, report_pwd::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "8") {
+    if let Some(rest) = strip_num_prefix(buf, b"8") {
         return fixed(rest, allow_unbounded, hyperlink::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "9") {
+    if let Some(rest) = strip_num_prefix(buf, b"9") {
         return fixed(rest, allow_unbounded, osc9::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "21") {
+    if let Some(rest) = strip_num_prefix(buf, b"21") {
         return unbounded(rest, allow_unbounded, |r| kitty_color::parse(r, terminator));
     }
-    if let Some(rest) = strip_num_prefix(body, "22") {
+    if let Some(rest) = strip_num_prefix(buf, b"22") {
         return fixed(rest, allow_unbounded, mouse_shape::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "52") {
+    if let Some(rest) = strip_num_prefix(buf, b"52") {
         return unbounded(rest, allow_unbounded, clipboard_operation::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "66") {
-        return unbounded(rest, allow_unbounded, kitty_text_sizing::parse);
+    if let Some(rest) = strip_num_prefix(buf, b"66") {
+        // OSC 66 gates on `is_safe_utf8`, which requires valid UTF-8; a non-UTF-8
+        // payload is rejected upstream, so take the strict conversion here.
+        if !allow_unbounded {
+            return None;
+        }
+        let rest = std::str::from_utf8(rest).ok()?;
+        return kitty_text_sizing::parse(rest);
     }
-    if let Some(rest) = strip_num_prefix(body, "72") {
+    if let Some(rest) = strip_num_prefix(buf, b"72") {
         return unbounded(rest, allow_unbounded, |r| {
             kitty_dnd_protocol::parse(r, terminator)
         });
     }
-    if let Some(rest) = strip_num_prefix(body, "104") {
+    if let Some(rest) = strip_num_prefix(buf, b"104") {
         return fixed(rest, allow_unbounded, |r| {
             color::parse(color::Op::Osc104, r, terminator)
         });
     }
-    if let Some(rest) = strip_num_prefix(body, "105") {
+    if let Some(rest) = strip_num_prefix(buf, b"105") {
         return fixed(rest, allow_unbounded, |r| {
             color::parse(color::Op::Osc105, r, terminator)
         });
     }
     for n in 10..=19u32 {
         let tag = n.to_string();
-        if let Some(rest) = strip_num_prefix(body, &tag) {
+        if let Some(rest) = strip_num_prefix(buf, tag.as_bytes()) {
             let op = color::Op::from_osc_number(n).unwrap();
             return unbounded(rest, allow_unbounded, move |r| {
                 color::parse(op, r, terminator)
@@ -116,23 +123,23 @@ pub(super) fn dispatch(
     }
     for n in 110..=119u32 {
         let tag = n.to_string();
-        if let Some(rest) = strip_num_prefix(body, &tag) {
+        if let Some(rest) = strip_num_prefix(buf, tag.as_bytes()) {
             let op = color::Op::from_osc_number(n).unwrap();
             return fixed(rest, allow_unbounded, move |r| {
                 color::parse(op, r, terminator)
             });
         }
     }
-    if let Some(rest) = strip_num_prefix(body, "133") {
+    if let Some(rest) = strip_num_prefix(buf, b"133") {
         return fixed(rest, allow_unbounded, semantic_prompt::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "777") {
+    if let Some(rest) = strip_num_prefix(buf, b"777") {
         return fixed(rest, allow_unbounded, rxvt_extension::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "1337") {
+    if let Some(rest) = strip_num_prefix(buf, b"1337") {
         return fixed(rest, allow_unbounded, iterm2::parse);
     }
-    if let Some(rest) = strip_num_prefix(body, "5522") {
+    if let Some(rest) = strip_num_prefix(buf, b"5522") {
         return unbounded(rest, allow_unbounded, |r| {
             kitty_clipboard_protocol::parse(r, terminator)
         });
@@ -149,14 +156,23 @@ pub(super) fn dispatch(
 /// exactly like the Zig source's captured-data slicing). Returns `None` if
 /// `body` doesn't start with exactly this numeric prefix followed by a
 /// non-digit (so e.g. matching `"1"` doesn't also match `"10"`'s prefix).
-fn strip_num_prefix<'a>(body: &'a str, prefix: &str) -> Option<&'a str> {
+fn strip_num_prefix<'a>(body: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
     let rest = body.strip_prefix(prefix)?;
-    match rest.as_bytes().first() {
+    match rest.first() {
         None => Some(rest),
         Some(b';') => Some(rest),
         Some(c) if c.is_ascii_digit() => None,
         Some(_) => None,
     }
+}
+
+/// Convert an OSC body remainder (raw bytes) to a string for the string-oriented
+/// sub-parsers, replacing invalid UTF-8 with U+FFFD. The numeric prefix and
+/// structural markers a parser keys on are ASCII and survive unchanged; only
+/// opaque value fields are affected. Mirrors upstream treating OSC bodies as raw
+/// bytes rather than dropping the whole command on a stray non-UTF-8 byte.
+fn lossy(rest: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(rest)
 }
 
 /// Run `f` over the body remainder (after the prefix), enforcing the
@@ -170,29 +186,31 @@ fn strip_num_prefix<'a>(body: &'a str, prefix: &str) -> Option<&'a str> {
 /// itself (most fixed-capture commands, e.g. report_pwd/hyperlink, don't
 /// need a NUL and so don't reserve the byte).
 fn fixed(
-    rest: &str,
+    rest: &[u8],
     _allow_unbounded: bool,
     f: impl FnOnce(&str) -> Option<Command>,
 ) -> Option<Command> {
-    let body_only = rest.strip_prefix(';').unwrap_or(rest);
+    // The cap is a byte length (matches the Zig capture), so check it on the raw
+    // bytes before the lossy conversion (which can change the char count).
+    let body_only = rest.strip_prefix(b";").unwrap_or(rest);
     if body_only.len() > MAX_BUF {
         return None;
     }
-    f(rest)
+    f(&lossy(rest))
 }
 
 /// Like [`fixed`], but the command requires `allow_unbounded` (an
 /// allocator, in Zig terms) — without it, `ensureAllocator` invalidates the
 /// whole parse (`osc.zig:449-454`).
 fn unbounded(
-    rest: &str,
+    rest: &[u8],
     allow_unbounded: bool,
     f: impl FnOnce(&str) -> Option<Command>,
 ) -> Option<Command> {
     if !allow_unbounded {
         return None;
     }
-    f(rest)
+    f(&lossy(rest))
 }
 
 /// Kitty's "Escape code safe UTF-8": valid UTF-8 with no C0 escape codes
