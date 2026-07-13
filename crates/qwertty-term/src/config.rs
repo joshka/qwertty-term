@@ -243,6 +243,12 @@ pub struct Config {
     /// macOS — the standard "app stays running with no windows" behavior).
     #[serde(rename = "quit-after-last-window-closed")]
     pub quit_after_last_window_closed: bool,
+    /// A fixed window/tab title that overrides the program-set title. When set
+    /// (and non-empty), the window title is forced to this value and OSC 0/2
+    /// title changes from the running program are ignored; a blank value resets
+    /// to normal (program-driven) titling. Upstream `title` (`Config.zig:1484`).
+    /// See [`Config::forced_title`].
+    pub title: Option<String>,
     /// Initial window width in **cells** (grid columns). `0` (default) = the
     /// app's default size. Upstream `window-width` (`Config.zig:2171`); only
     /// affects the first window.
@@ -330,6 +336,7 @@ impl Default for Config {
             // macOS default: stay running after the last window closes
             // (upstream `Config.zig:2509` → false on macOS).
             quit_after_last_window_closed: false,
+            title: None,
             window_width: 0,
             window_height: 0,
             window_position_x: None,
@@ -412,6 +419,13 @@ impl Config {
         put(Key::BoxThickness, &self.adjust_box_thickness);
         put(Key::IconHeight, &self.adjust_icon_height);
         set
+    }
+
+    /// The fixed window title override (`title`), or `None` when unset or blank.
+    /// A blank value resets to program-driven titling (upstream semantics), so
+    /// it is treated the same as unset.
+    pub fn forced_title(&self) -> Option<&str> {
+        self.title.as_deref().filter(|t| !t.is_empty())
     }
 
     /// The quick-terminal drop position, defaulting to `top` when unset or the
@@ -758,6 +772,10 @@ const EXAMPLE_CONFIG: &str = r##"# qwertty-term config
 # resize-overlay = "after-first"
 # resize-overlay-position = "center"
 # resize-overlay-duration = 750
+
+# Fixed window/tab title. When set, forces the title and ignores the program's
+# OSC 0/2 title changes; a blank value ("") keeps normal program-driven titling.
+# title = "work"
 
 # Window state. quit-after-last-window-closed keeps the standard macOS behavior
 # of staying running with no windows when false (default); set true to quit.
@@ -1418,6 +1436,17 @@ mod tests {
         // An unparseable value falls back to None (theme/default cursor color).
         let bad = parse("cursor-color = \"not-a-color-zzz\"\n").unwrap();
         assert_eq!(bad.cursor_color(), None);
+    }
+
+    #[test]
+    fn forced_title_is_none_when_unset_or_blank() {
+        assert_eq!(Config::default().forced_title(), None);
+        assert_eq!(
+            parse("title = \"Build\"\n").unwrap().forced_title(),
+            Some("Build")
+        );
+        // A blank value resets to program-driven titling (treated as unset).
+        assert_eq!(parse("title = \"\"\n").unwrap().forced_title(), None);
     }
 
     #[test]
