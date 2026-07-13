@@ -180,6 +180,10 @@ pub struct Engine<B: GpuBackend = Metal> {
     /// viewport move, resize) the way upstream's `RenderState` compares against
     /// its own `self.screen`/`self.viewport_pin`/`self.rows`/`self.cols`.
     prev_frame_key: Option<crate::snapshot::FrameKey>,
+    /// The `hovered_cell` of the last frame. When it changes, the hover
+    /// underline set changes (R7) but no row dirty bit fires, so a change here
+    /// forces a full rebuild to add/remove the link underline.
+    prev_hovered_cell: Option<(usize, usize)>,
     /// GPU textures for transmitted kitty images, keyed by image id. Content
     /// (not per-slot): textures are read-only after upload. Re-uploaded only
     /// when an id's `generation` changes (upstream's staleness protocol). R6
@@ -297,6 +301,7 @@ impl<B: GpuBackend> Engine<B> {
             screen_height: 0,
             run_cache: RunCache::new(),
             prev_frame_key: None,
+            prev_hovered_cell: None,
             images: HashMap::new(),
             image_instances: Vec::new(),
             pending_placements: Vec::new(),
@@ -372,8 +377,13 @@ impl<B: GpuBackend> Engine<B> {
         // Decide full-vs-partial. Mirrors upstream `RenderState.update`'s
         // `redraw` (global flags OR screen-key OR viewport-pin OR dims changed)
         // combined with `rebuildCells`'s `grid_size_diff`.
+        // A hover-cell change moves the OSC8 link underline (R7) without
+        // dirtying any row, so force a full rebuild to re-evaluate it.
+        let hover_changed = opts.hovered_cell != self.prev_hovered_cell;
+        self.prev_hovered_cell = opts.hovered_cell;
         let full_rebuild = size_changed
             || signals.global_forces_full
+            || hover_changed
             || self.prev_frame_key != Some(signals.frame_key);
         self.prev_frame_key = Some(signals.frame_key);
 

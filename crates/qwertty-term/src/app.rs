@@ -275,6 +275,11 @@ struct Surface {
     last_mouse_cell: Option<(i64, i64)>,
     /// Whether a mouse button is currently held (for out-of-viewport motion).
     mouse_button_down: bool,
+    /// The viewport cell the mouse is currently over (`None` when outside the
+    /// grid). Drives the OSC8 hyperlink hover underline (R7): passed to the
+    /// renderer via `FrameOptions.hovered_cell`, which underlines every cell of
+    /// a hovered link.
+    hovered_cell: Option<(usize, usize)>,
     /// This pane's selection-gesture state machine (click counting, word/line
     /// behaviors, drag threshold, autoscroll) — port of upstream
     /// `SelectionGesture.zig`. See [`crate::gesture`].
@@ -695,6 +700,7 @@ impl Surface {
         let render = self.render.as_mut().expect("checked above");
         let opts = FrameOptions {
             focused,
+            hovered_cell: self.hovered_cell,
             ..FrameOptions::default()
         };
         render.update_frame(&snapshot, &mut self.font.grid, opts);
@@ -3174,6 +3180,15 @@ impl Controller {
             s.mouse_button_down = p;
         }
 
+        // R7: track which cell the mouse is over so the renderer can underline
+        // a hovered OSC8 link. On any motion, update `hovered_cell` (`None` when
+        // outside the grid); the render pace tick reads it and forces a rebuild
+        // when it changes. Independent of mouse reporting / selection.
+        if action == qwertty_term_input::mouse::Action::Motion {
+            let hovered = s.cell_at(x, y);
+            s.hovered_cell = hovered;
+        }
+
         if button == Some(qwertty_term_input::mouse::Button::Left) {
             let reporting_active =
                 s.engine().mouse_event() != qwertty_term_input::mouse_encode::MouseEvent::None;
@@ -4142,6 +4157,7 @@ impl Controller {
             rect: crate::splits::Rect::new(0.0, 0.0, 0.0, 0.0),
             last_mouse_cell: None,
             mouse_button_down: false,
+            hovered_cell: None,
             gesture: crate::gesture::SelectionGesture::new(),
             selection_colors,
             default_bg,
