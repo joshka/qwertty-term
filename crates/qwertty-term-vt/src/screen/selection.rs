@@ -68,6 +68,15 @@ pub struct Selection {
     pub rectangle: bool,
 }
 
+/// The maximum valid column index for the page owning `p` (its width minus
+/// one). Used to clamp a swapped rectangle-corner column to the corner's own
+/// page during incomplete reflow. Port of the `p.node.cols() - 1` clamp in
+/// upstream `b6f34be44`.
+fn pin_max_x(p: Pin) -> crate::page::size::CellCountInt {
+    // SAFETY: `p.node` is a live node for the selection's lifetime.
+    unsafe { (*p.node).data.size.cols }.saturating_sub(1)
+}
+
 impl Selection {
     /// A new **untracked** selection. Port of `init`.
     pub fn init(start_pin: Pin, end_pin: Pin, rect: bool) -> Selection {
@@ -245,14 +254,19 @@ impl Selection {
         match self.order(pages) {
             Order::Forward => self.start(),
             Order::Reverse => self.end(),
+            // Rectangle orientation swaps the endpoint columns. During
+            // incomplete reflow the other endpoint may live on a wider page, so
+            // clamp the swapped column to the page that owns this corner pin —
+            // otherwise the pin is out of bounds and panics when resolved. Port
+            // of upstream b6f34be44.
             Order::MirroredForward => {
                 let mut p = self.start();
-                p.x = self.end().x();
+                p.x = self.end().x().min(pin_max_x(p));
                 p
             }
             Order::MirroredReverse => {
                 let mut p = self.end();
-                p.x = self.start().x();
+                p.x = self.start().x().min(pin_max_x(p));
                 p
             }
         }
@@ -265,12 +279,12 @@ impl Selection {
             Order::Reverse => self.start(),
             Order::MirroredForward => {
                 let mut p = self.end();
-                p.x = self.start().x();
+                p.x = self.start().x().min(pin_max_x(p));
                 p
             }
             Order::MirroredReverse => {
                 let mut p = self.start();
-                p.x = self.end().x();
+                p.x = self.end().x().min(pin_max_x(p));
                 p
             }
         }
@@ -541,6 +555,28 @@ mod tests {
     fn screen_pt(s: &Screen, p: Pin) -> (CellCountInt, u32) {
         let c = s.pages.point_from_pin(Tag::Screen, p).unwrap().coord;
         (c.x, c.y)
+    }
+
+    // Regression (upstream b6f34be44): a mirrored rectangle corner must clamp
+    // its swapped column to the corner's own (possibly narrower) page, so
+    // bottom_right/top_left return valid pins even during incomplete reflow.
+    #[test]
+    fn rectangle_corners_clamp_across_mixed_width_pages() {
+        let mut s = init(4, 2, 0);
+        let first = s.pages.first_node();
+        s.pages.split(Pin::with(first, 1, 0)).unwrap();
+        let second = unsafe { (*first).next };
+        // Simulate a mid-reflow narrower destination page.
+        unsafe { (*second).data.size.cols = 2 };
+
+        let sel = Selection::init(Pin::with(first, 0, 3), Pin::with(second, 0, 1), true);
+        assert_eq!(sel.order(&s.pages), Order::MirroredForward);
+
+        // start.x = 3 is out of bounds for `second` (cols 2); it must clamp to 1.
+        let br = sel.bottom_right(&s.pages);
+        assert_eq!(br.node, second);
+        assert_eq!(br.x, 1);
+        assert!(s.pages.pin_is_valid(br)); // panicked before the fix
     }
 
     // ---- adjust ----------------------------------------------------------
