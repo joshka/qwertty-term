@@ -36,8 +36,10 @@ struct Px {
 /// Run the offscreen smoke. Returns `Ok(true)` on a verified render, `Ok(false)`
 /// when skipped (no Metal device), and `Err` on a real failure.
 pub fn run() -> Result<bool, String> {
-    // Font grid at a fixed size (no display scale in the offscreen path).
-    let fg = font::build(None, 16.0).map_err(|e| format!("font grid: {e}"))?;
+    // Font grid at a fixed size (no display scale in the offscreen path); no
+    // `adjust-*` metric nudges in the smoke.
+    let fg = font::build(None, 16.0, &qwertty_term_font::metrics::ModifierSet::new())
+        .map_err(|e| format!("font grid: {e}"))?;
     let (cw, ch) = (fg.cell_width, fg.cell_height);
     let mut grid = fg.grid;
 

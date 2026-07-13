@@ -38,6 +38,21 @@ const SUPPORTED: &[(&str, Kind)] = &[
     // Fonts & text
     ("font-family", Kind::Str),
     ("font-size", Kind::Num),
+    // Font-metric nudges (`adjust-*`) — MetricModifier strings (`2` / `-5%`),
+    // kept as strings and parsed our side (see Config::metric_modifiers).
+    ("adjust-cell-width", Kind::Str),
+    ("adjust-cell-height", Kind::Str),
+    ("adjust-font-baseline", Kind::Str),
+    ("adjust-underline-position", Kind::Str),
+    ("adjust-underline-thickness", Kind::Str),
+    ("adjust-strikethrough-position", Kind::Str),
+    ("adjust-strikethrough-thickness", Kind::Str),
+    ("adjust-overline-position", Kind::Str),
+    ("adjust-overline-thickness", Kind::Str),
+    ("adjust-cursor-thickness", Kind::Str),
+    ("adjust-cursor-height", Kind::Str),
+    ("adjust-box-thickness", Kind::Str),
+    ("adjust-icon-height", Kind::Str),
     // Colors / theme
     ("theme", Kind::Str),
     ("cursor-color", Kind::Str),

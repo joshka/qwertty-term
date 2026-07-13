@@ -51,7 +51,9 @@ items are `[ ]` wholesale unless noted.
 - [~] `font-feature` (OpenType features passthrough — shaper supports, config unwired)
 - [~] `font-variation*` (axes settable internally; config keys unwired)
 - [ ] `font-thicken` / `font-thicken-strength` (config flags; default-off path matches)
-- [ ] `adjust-*` metric overrides (cell/cursor/underline/baseline/box nudge — ~18 keys)
+- [x] `adjust-*` metric overrides (13 keys: cell width/height, font-baseline,
+      underline/strikethrough/overline pos+thickness, cursor thickness/height,
+      box-thickness, icon-height → font `Metrics::apply`; imports + live on reload)
 - [ ] `font-codepoint-map`, `font-style*` name overrides, `grapheme-width-method` config
 - [ ] FreeType/fontconfig backend (Linux), `force-autohint`, `freetype-load-flags`
 

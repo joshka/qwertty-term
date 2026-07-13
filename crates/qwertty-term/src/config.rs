@@ -42,6 +42,39 @@ pub struct Config {
     pub font_size: Option<f32>,
     #[serde(rename = "font-family")]
     pub font_family: Option<String>,
+    // Per-metric nudges applied to the computed cell metrics
+    // (`adjust-*`, upstream `Config.zig:429`+). Each value is a `MetricModifier`:
+    // a bare integer of pixels (`2`, `-1`) or a percentage delta (`10%`, `-5%`;
+    // "20%" = 20% larger, not 20% of). Parsed into a
+    // [`qwertty_term_font::metrics::ModifierSet`] by [`Config::metric_modifiers`]
+    // and applied to the font `Metrics` at grid-build time. An unparseable value
+    // is logged and skipped. See `docs/analysis/font-foundations.md` §modifiers.
+    #[serde(rename = "adjust-cell-width")]
+    pub adjust_cell_width: Option<String>,
+    #[serde(rename = "adjust-cell-height")]
+    pub adjust_cell_height: Option<String>,
+    #[serde(rename = "adjust-font-baseline")]
+    pub adjust_font_baseline: Option<String>,
+    #[serde(rename = "adjust-underline-position")]
+    pub adjust_underline_position: Option<String>,
+    #[serde(rename = "adjust-underline-thickness")]
+    pub adjust_underline_thickness: Option<String>,
+    #[serde(rename = "adjust-strikethrough-position")]
+    pub adjust_strikethrough_position: Option<String>,
+    #[serde(rename = "adjust-strikethrough-thickness")]
+    pub adjust_strikethrough_thickness: Option<String>,
+    #[serde(rename = "adjust-overline-position")]
+    pub adjust_overline_position: Option<String>,
+    #[serde(rename = "adjust-overline-thickness")]
+    pub adjust_overline_thickness: Option<String>,
+    #[serde(rename = "adjust-cursor-thickness")]
+    pub adjust_cursor_thickness: Option<String>,
+    #[serde(rename = "adjust-cursor-height")]
+    pub adjust_cursor_height: Option<String>,
+    #[serde(rename = "adjust-box-thickness")]
+    pub adjust_box_thickness: Option<String>,
+    #[serde(rename = "adjust-icon-height")]
+    pub adjust_icon_height: Option<String>,
     /// Per-axis wheel-scroll multipliers (`precision` for trackpad/pixel
     /// deltas, `discrete` for mouse-wheel ticks). Mirrors ghostty's
     /// `mouse-scroll-multiplier` (defaults precision 1.0, discrete 3.0). A TOML
@@ -239,6 +272,19 @@ impl Default for Config {
             copy_on_select: false,
             font_size: None,
             font_family: None,
+            adjust_cell_width: None,
+            adjust_cell_height: None,
+            adjust_font_baseline: None,
+            adjust_underline_position: None,
+            adjust_underline_thickness: None,
+            adjust_strikethrough_position: None,
+            adjust_strikethrough_thickness: None,
+            adjust_overline_position: None,
+            adjust_overline_thickness: None,
+            adjust_cursor_thickness: None,
+            adjust_cursor_height: None,
+            adjust_box_thickness: None,
+            adjust_icon_height: None,
             mouse_scroll_multiplier: MouseScrollMultiplier::default(),
             keybind: Vec::new(),
             unfocused_split_opacity: DEFAULT_UNFOCUSED_SPLIT_OPACITY,
@@ -318,6 +364,48 @@ impl Config {
                 None
             }
         }
+    }
+
+    /// Build the font-metric modifier set from the `adjust-*` keys, mapping each
+    /// to its [`Key`](qwertty_term_font::metrics::Key) exactly as upstream does
+    /// (`SharedGridSet.zig`). Each present value is parsed via
+    /// [`Modifier::parse`](qwertty_term_font::metrics::Modifier::parse); an
+    /// unparseable value is logged and skipped (house rule) so a typo never
+    /// breaks font loading. Applied to the computed `Metrics` at grid-build time.
+    pub fn metric_modifiers(&self) -> qwertty_term_font::metrics::ModifierSet {
+        use qwertty_term_font::metrics::{Key, Modifier, ModifierSet};
+
+        let mut set = ModifierSet::new();
+        let mut put = |key: Key, raw: &Option<String>| {
+            let Some(raw) = raw.as_deref() else { return };
+            match Modifier::parse(raw) {
+                Ok(modifier) => {
+                    set.insert(key, modifier);
+                }
+                Err(_) => eprintln!("ignoring invalid adjust-* value {raw:?} for {key:?}"),
+            }
+        };
+
+        put(Key::CellWidth, &self.adjust_cell_width);
+        put(Key::CellHeight, &self.adjust_cell_height);
+        put(Key::CellBaseline, &self.adjust_font_baseline);
+        put(Key::UnderlinePosition, &self.adjust_underline_position);
+        put(Key::UnderlineThickness, &self.adjust_underline_thickness);
+        put(
+            Key::StrikethroughPosition,
+            &self.adjust_strikethrough_position,
+        );
+        put(
+            Key::StrikethroughThickness,
+            &self.adjust_strikethrough_thickness,
+        );
+        put(Key::OverlinePosition, &self.adjust_overline_position);
+        put(Key::OverlineThickness, &self.adjust_overline_thickness);
+        put(Key::CursorThickness, &self.adjust_cursor_thickness);
+        put(Key::CursorHeight, &self.adjust_cursor_height);
+        put(Key::BoxThickness, &self.adjust_box_thickness);
+        put(Key::IconHeight, &self.adjust_icon_height);
+        set
     }
 
     /// The quick-terminal drop position, defaulting to `top` when unset or the
@@ -532,6 +620,14 @@ const EXAMPLE_CONFIG: &str = r##"# qwertty-term config
 
 # Substring to prefer when picking among discovered terminal fonts.
 # font-family = "JetBrainsMono Nerd Font Mono"
+
+# Per-metric cell nudges. Each value is a MetricModifier: an integer of pixels
+# ("2", "-1") or a percentage delta ("10%", "-5%"). Keys: adjust-cell-width,
+# -cell-height, -font-baseline, -underline-position, -underline-thickness,
+# -strikethrough-position, -strikethrough-thickness, -overline-position,
+# -overline-thickness, -cursor-thickness, -cursor-height, -box-thickness,
+# -icon-height.
+# adjust-cell-height = "10%"
 
 # Wheel-scroll multipliers. `precision` scales trackpad (pixel) deltas;
 # `discrete` scales mouse-wheel ticks (rows per detent).
@@ -1252,6 +1348,38 @@ mod tests {
         // An unparseable value falls back to None (theme/default cursor color).
         let bad = parse("cursor-color = \"not-a-color-zzz\"\n").unwrap();
         assert_eq!(bad.cursor_color(), None);
+    }
+
+    #[test]
+    fn metric_modifiers_maps_adjust_keys_and_skips_garbage() {
+        use qwertty_term_font::metrics::{Key, Modifier};
+
+        // Default config → no modifiers.
+        assert!(Config::default().metric_modifiers().is_empty());
+
+        let config = parse(
+            "adjust-cell-width = \"2\"\n\
+             adjust-cell-height = \"10%\"\n\
+             adjust-font-baseline = \"-1\"\n\
+             adjust-cursor-thickness = \"3\"\n\
+             adjust-box-thickness = \"not-a-number\"\n",
+        )
+        .unwrap();
+        let mods = config.metric_modifiers();
+
+        // Mapped to the right Key with the right parsed Modifier.
+        assert_eq!(mods.get(&Key::CellWidth), Some(&Modifier::Absolute(2)));
+        assert_eq!(mods.get(&Key::CellHeight), Some(&Modifier::Percent(1.1)));
+        // `adjust-font-baseline` targets the cell_baseline metric.
+        assert_eq!(mods.get(&Key::CellBaseline), Some(&Modifier::Absolute(-1)));
+        assert_eq!(
+            mods.get(&Key::CursorThickness),
+            Some(&Modifier::Absolute(3))
+        );
+        // The garbage value is skipped, not fatal — its key is absent.
+        assert_eq!(mods.get(&Key::BoxThickness), None);
+        // Only the four valid keys made it in.
+        assert_eq!(mods.len(), 4);
     }
 
     #[test]

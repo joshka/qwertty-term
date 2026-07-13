@@ -51,8 +51,14 @@ pub struct FontGrid {
 /// otherwise use the embedded JetBrains Mono.
 ///
 /// `size_px` should already account for the display's backing scale
-/// (`contentsScale`) so glyphs are rasterized at native resolution.
-pub fn build(family: Option<&str>, size_px: f64) -> Result<FontGrid, FontError> {
+/// (`contentsScale`) so glyphs are rasterized at native resolution. `mods` are
+/// the user's `adjust-*` metric nudges (from [`crate::config::Config::metric_modifiers`]);
+/// pass an empty set for no adjustments.
+pub fn build(
+    family: Option<&str>,
+    size_px: f64,
+    mods: &qwertty_term_font::metrics::ModifierSet,
+) -> Result<FontGrid, FontError> {
     // Whether the primary face actually resolved to the configured family (vs.
     // `load_by_name` silently falling back to the embedded JetBrains Mono on a
     // miss). Only a real match takes the named-family styled-completion path;
@@ -63,7 +69,10 @@ pub fn build(family: Option<&str>, size_px: f64) -> Result<FontGrid, FontError> 
         None => Face::load_embedded(size_px),
     }
     .map_err(FontError::Face)?;
-    let metrics = Metrics::calc(face.face_metrics());
+    let mut metrics = Metrics::calc(face.face_metrics());
+    // Apply the user's `adjust-*` nudges to the computed cell metrics before the
+    // grid is sized (mirrors upstream `SharedGridSet.reload` → `Metrics.apply`).
+    metrics.apply(mods);
     let (cell_width, cell_height) = (metrics.cell_width, metrics.cell_height);
 
     // A configured family whose primary really resolved gets its *own* styled
@@ -91,4 +100,24 @@ pub fn build(family: Option<&str>, size_px: f64) -> Result<FontGrid, FontError> 
         cell_width,
         cell_height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qwertty_term_font::metrics::{Key, Modifier, ModifierSet};
+
+    /// An `adjust-*` modifier reaches the built grid: a `+4px` cell-width nudge
+    /// widens the embedded-font cell by exactly 4, leaving the height untouched.
+    #[test]
+    fn adjust_cell_width_shifts_the_embedded_grid_cell() {
+        let base = build(None, 16.0, &ModifierSet::new()).expect("embedded grid");
+
+        let mut mods = ModifierSet::new();
+        mods.insert(Key::CellWidth, Modifier::Absolute(4));
+        let widened = build(None, 16.0, &mods).expect("embedded grid");
+
+        assert_eq!(widened.cell_width, base.cell_width + 4);
+        assert_eq!(widened.cell_height, base.cell_height);
+    }
 }
