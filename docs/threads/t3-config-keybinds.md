@@ -34,7 +34,10 @@ translates mechanically.
    (matching upstream's two-location merge on macOS), **`config-reload`** (keybind action
    + live re-apply: fonts/theme/keybinds swap safely at runtime — design note needed for
    what's reload-safe, mirror upstream's surface reload), CLI `--flag=value` overrides.
-3. **Option surface wiring** (M each batch, Sonnet sub-agents): batches by group, each
+3. **Option surface wiring** — **PRIORITY (Josh, 2026-07-13): the felt config gaps first —
+   cursor color/opacity, `adjust-*` metrics, `window-save-state` (session restore), and
+   window-title templates — ahead of the long tail.** (M each batch, Sonnet sub-agents):
+   batches by group, each
    batch = parse + plumb + effect + test + feature-coverage flip:
    `adjust-*` metrics (~18 keys, plumb to font Metrics), font-feature/-variation/-style/
    -synthetic-style/-codepoint-map, cursor group (color/opacity/blink timer/style),

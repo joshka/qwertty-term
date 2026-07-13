@@ -34,7 +34,8 @@ freeze).
       with a known image (icat-style), dirty-equality extended to image scenarios,
       differential corpus untouched (engine side is done — if you need engine data not
       exposed, file-claim a minimal accessor, don't fork logic).
-- [ ] **Link/URL detection + overlay — R7** (M): upstream uses an OSC8 layer plus regex
+- [ ] **Link/URL detection + overlay — R7** (M) — **PRIORITY (Josh, 2026-07-13): the top
+      everyday gap; do this next now that kitty R6 is complete.** upstream uses an OSC8 layer plus regex
       detection over rows with hover underline + cmd+click open. Engine has OSC8
       hyperlinks stored. Slices: (1) render underline-on-hover for OSC8 links (app sends
       hover cell via existing mouse plumbing — file-claim the small hook); (2) regex
