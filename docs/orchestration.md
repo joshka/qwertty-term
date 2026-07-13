@@ -47,10 +47,12 @@ Every chunk prompt MUST contain, in this order:
   `jj workspace forget <name> && jj workspace add work/<name>` from work/default.
 - Agents that find their assigned workspace missing must report BLOCKED, not repair it —
   put that in the prompt for chunks launched near other lifecycle churn.
-- `jj workspace update-stale` in work/default can DISCARD un-snapshotted file edits (it
-  resets to the last recorded tree). After any update-stale, re-verify your in-progress
-  edits are still on disk before describing/committing — and prefer running a trivial jj
-  command (e.g. `jj st`) immediately after editing files so they get snapshotted early.
+- `jj workspace update-stale` snapshots the working copy **first**, so it does NOT lose
+  un-snapshotted edits — they are preserved in a saved commit, recoverable via `jj op
+  log` / `jj evolog` / `jj restore --from <saved>` (see README "jj discipline" rule 3).
+  (Correction: earlier text here claimed it discards edits — it does not.) The real
+  safeguard is still to run `jj st` immediately after an edit burst so your tree is in
+  the object store before any long non-jj command (cargo/npx/git don't snapshot).
 
 ## Integration recipe (run from work/default, NEVER from the repo root)
 
@@ -73,9 +75,9 @@ markdownlint-cli2 "**/*.md" "!target"          # when docs changed
 # cwd silently resets between commands (harness resets, cd in subshells). A jj command
 # from the repo ROOT hits the wrong working copy — empty commits, relative-path reads of
 # ancient root files. EVERY command block that runs jj or reads repo files MUST begin
-# with an explicit `cd .../work/<workspace> &&`. Before update-stale, back up any
-# un-snapshotted edits (update-stale discards them); use `command cp` (cp/rm are
-# interactive-aliased).
+# with an explicit `cd .../work/<workspace> &&`. Before update-stale, `command cp` any
+# un-snapshotted edits as belt-and-suspenders (cp/rm are interactive-aliased) — though
+# update-stale snapshots first and does NOT discard them; recover via README rule 3.
 # FINAL HANDOVER CHECK (added 2026-07-08 after a stale-checkout shipped conflict
 # markers to the user): after the LAST jj op of the integration, re-run
 #   jj st && grep -rn '<<<<<<<' crates/ --include='*.rs' | head
