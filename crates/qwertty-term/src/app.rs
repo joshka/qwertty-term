@@ -1517,6 +1517,9 @@ pub struct ControllerState {
     clipboard_trim_trailing_spaces: bool,
     /// Clear the selection when the user types (`selection-clear-on-typing`).
     selection_clear_on_typing: bool,
+    /// Clear the selection after an explicit copy (`selection-clear-on-copy`);
+    /// does not apply to copy-on-select.
+    selection_clear_on_copy: bool,
     /// Smoke/test override for the unsafe-paste confirmation: `Some(answer)`
     /// short-circuits the modal alert (which a headless smoke can't drive).
     /// `None` in normal operation. See [`Controller::set_paste_confirm_hook`].
@@ -1816,6 +1819,7 @@ impl Controller {
             paste_protection: config.paste_protection(),
             clipboard_trim_trailing_spaces: config.clipboard_trim_trailing_spaces,
             selection_clear_on_typing: config.selection_clear_on_typing,
+            selection_clear_on_copy: config.selection_clear_on_copy,
             paste_confirm_hook: None,
             quit_after_last_window_closed: config.quit_after_last_window_closed,
             initial_window_cells: config.initial_window_cells(),
@@ -3968,12 +3972,33 @@ impl Controller {
     /// Copy `surface`'s selection to the system clipboard (no-op without one),
     /// honoring `clipboard-trim-trailing-spaces`.
     fn copy_surface_selection(&self, tab: TabId, surface: SurfaceId) {
-        let trim = self.0.borrow().clipboard_trim_trailing_spaces;
+        let (trim, clear_on_copy) = {
+            let state = self.0.borrow();
+            (
+                state.clipboard_trim_trailing_spaces,
+                state.selection_clear_on_copy,
+            )
+        };
         let state = self.0.borrow();
-        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface))
-            && let Some(text) = s.engine().selection_string_opt(trim)
-        {
-            crate::clipboard::write(&text);
+        let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) else {
+            return;
+        };
+        // Read + copy under a scoped engine lock, then release it before the
+        // clear (`engine()` returns a `MutexGuard` — re-locking it while the
+        // first guard is live would deadlock).
+        let copied = {
+            if let Some(text) = s.engine().selection_string_opt(trim) {
+                crate::clipboard::write(&text);
+                true
+            } else {
+                false
+            }
+        };
+        // `selection-clear-on-copy`: drop the selection after an explicit copy
+        // (this path is the `copy_to_clipboard` action only, never
+        // copy-on-select — that goes through `selection_release`).
+        if copied && clear_on_copy {
+            s.engine().clear_selection();
         }
     }
 
@@ -5673,6 +5698,10 @@ pub struct DelegateIvars {
     /// `mouse-shift-capture` gates the shift-over-reporting selection override.
     /// See [`AppDelegate::run_mouseshift_smoke`].
     smoke_mouseshift: bool,
+    /// Clear-copy smoke (`QWERTTY_TERM_SMOKE_CLEARCOPY`): assert
+    /// `selection-clear-on-copy` clears on explicit copy but not copy-on-select.
+    /// See [`AppDelegate::run_clearcopy_smoke`].
+    smoke_clearcopy: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -5755,6 +5784,7 @@ define_class!(
             let has_session = self.ivars().smoke_session;
             let has_wordchars = self.ivars().smoke_wordchars;
             let has_mouseshift = self.ivars().smoke_mouseshift;
+            let has_clearcopy = self.ivars().smoke_clearcopy;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -5800,6 +5830,8 @@ define_class!(
                 self.schedule_wordchars_smoke();
             } else if has_mouseshift {
                 self.schedule_mouseshift_smoke();
+            } else if has_clearcopy {
+                self.schedule_clearcopy_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -6107,6 +6139,12 @@ define_class!(
         fn mouseshift_smoke(&self, _timer: &AnyObject) {
             self.run_mouseshift_smoke();
         }
+
+        /// Clear-copy smoke: assert selection-clear-on-copy, exit 0/1.
+        #[unsafe(method(ghosttyClearCopySmoke:))]
+        fn clearcopy_smoke(&self, _timer: &AnyObject) {
+            self.run_clearcopy_smoke();
+        }
     }
 );
 
@@ -6141,6 +6179,7 @@ impl AppDelegate {
         smoke_session: bool,
         smoke_wordchars: bool,
         smoke_mouseshift: bool,
+        smoke_clearcopy: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -6172,6 +6211,7 @@ impl AppDelegate {
             smoke_session,
             smoke_wordchars,
             smoke_mouseshift,
+            smoke_clearcopy,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -8114,6 +8154,85 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_clearcopy_smoke(&self) {
+        self.schedule_selector(0.5, sel!(ghosttyClearCopySmoke:));
+    }
+
+    /// `selection-clear-on-copy` config smoke. Launched with `copy-on-select =
+    /// true` + `selection-clear-on-copy = true`: a drag selection (copied via
+    /// copy-on-select) stays visible — clear-on-copy excludes copy-on-select —
+    /// but an explicit Copy (`copy_to_clipboard` / menu) then clears it. Exits
+    /// 0/1.
+    fn run_clearcopy_smoke(&self) {
+        let mtm = self.mtm();
+        let controller = &self.ivars().controller;
+        let fail = clearcopy_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at clear-copy smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at clear-copy smoke start".into());
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let win_num: isize = app
+            .keyWindow()
+            .or_else(|| controller.active_window())
+            .map(|w| w.windowNumber())
+            .unwrap_or(0);
+        let view = controller
+            .surface_view(tab, surface)
+            .unwrap_or_else(|| fail("no view for the focused surface".into()));
+        let view = &*view;
+        let pt = |col: f64, row: f64| {
+            controller
+                .surface_cell_window_point(tab, surface, col, row)
+                .unwrap_or_else(|| fail("cell → window point mapping failed".into()))
+        };
+        let none = NSEventModifierFlags::empty();
+
+        controller.feed_surface_output(tab, surface, b"\x1b[2J\x1b[HSELECTME");
+        Self::spin(0.15);
+
+        // 1. Copy-on-select drag: selects + copies, but the selection stays
+        //    (clear-on-copy does not apply to copy-on-select).
+        Self::send_mouse(
+            view,
+            win_num,
+            NSEventType::LeftMouseDown,
+            pt(0.2, 0.5),
+            none,
+        );
+        Self::send_mouse(
+            view,
+            win_num,
+            NSEventType::LeftMouseDragged,
+            pt(7.8, 0.5),
+            none,
+        );
+        Self::send_mouse(view, win_num, NSEventType::LeftMouseUp, pt(7.8, 0.5), none);
+        if !controller.surface_has_selection(tab, surface) {
+            fail("copy-on-select drag should leave the selection visible".into());
+        }
+
+        // 2. Explicit Copy (the `copy_to_clipboard` action) clears it.
+        controller.handle_action(crate::menu::MenuAction::Copy);
+        Self::spin(0.1);
+        if controller.surface_has_selection(tab, surface) {
+            fail(
+                "selection-clear-on-copy should clear the selection after an \
+                  explicit copy"
+                    .into(),
+            );
+        }
+
+        println!(
+            "OK: clear-copy smoke — copy-on-select kept the selection, and an \
+             explicit copy cleared it (selection-clear-on-copy=true)."
+        );
+        std::process::exit(0);
+    }
+
     /// Schedule the title smoke: let the first shell settle, then run.
     fn schedule_title_smoke(&self) {
         self.schedule_selector(0.7, sel!(ghosttyTitleSmoke:));
@@ -9420,6 +9539,12 @@ fn mouseshift_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a clear-copy smoke failure and exit non-zero.
+fn clearcopy_fail(msg: String) -> ! {
+    eprintln!("FAIL: clear-copy smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -9543,6 +9668,7 @@ pub fn run(
     smoke_session: bool,
     smoke_wordchars: bool,
     smoke_mouseshift: bool,
+    smoke_clearcopy: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -9577,6 +9703,7 @@ pub fn run(
         smoke_session,
         smoke_wordchars,
         smoke_mouseshift,
+        smoke_clearcopy,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
