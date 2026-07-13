@@ -1,5 +1,11 @@
 # Changelog
 
+<!-- Release sections below are generated/updated by release-plz. Disable
+markdownlint on this file — machine-generated changelog content routinely trips
+line-length, bare-url, list-style, and duplicate-heading rules, and shouldn't
+block CI. -->
+<!-- markdownlint-disable -->
+
 All notable changes to the qwertty-term crate family. The crates share one
 workspace version and release together. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0, a minor
