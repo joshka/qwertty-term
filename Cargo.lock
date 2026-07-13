@@ -2983,7 +2983,6 @@ dependencies = [
  "qwertty-term-font",
  "qwertty-term-sprite",
  "qwertty-term-vt",
- "regex",
 ]
 
 [[package]]

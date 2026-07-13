@@ -21,11 +21,16 @@
 //! shape a recorder like [betamax](https://github.com/joshka/betamax) embeds;
 //! `examples/frame-capture` is the same flow wired to a PNG encoder.
 //!
+//! This example uses the platform-free [`Software`](crate::software::Software)
+//! backend, so it renders the same way on macOS and headless Linux — no GPU, no
+//! window. `Face` is the cfg-selected platform face (CoreText on macOS, FreeType
+//! on Linux); the flow below is identical either way.
+//!
 //! ```no_run
-//! use qwertty_term_font::coretext::Face;
-//! use qwertty_term_font::{CodepointResolver, Collection, Grid, Metrics};
+//! use qwertty_term_font::{CodepointResolver, Collection, Face, Grid, Metrics};
 //! use qwertty_term_renderer::engine::{Engine, FrameOptions};
 //! use qwertty_term_renderer::snapshot::FullSnapshot;
+//! use qwertty_term_renderer::software::Software;
 //! use qwertty_term_vt::stream::{Stream, TerminalHandler};
 //! use qwertty_term_vt::terminal::{Options, Terminal};
 //!
@@ -41,8 +46,8 @@
 //! let mut stream = Stream::new(TerminalHandler::new(terminal));
 //! stream.feed(b"\x1b[1;32mhello\x1b[0m");
 //!
-//! // 3. Engine reads its cell geometry straight from the grid — no desync.
-//! let mut engine = Engine::for_grid(&grid)?;
+//! // 3. Engine over the headless CPU backend, cell geometry read from the grid.
+//! let mut engine = Engine::with_backend_for_grid(Software::new(), &grid)?;
 //!
 //! // 4. Snapshot the live screen and render one frame in a single call.
 //! let snapshot = FullSnapshot::capture_live(stream.terminal());
@@ -70,6 +75,7 @@ use crate::gpu::{
     Attachment, Draw, GpuBackend, GpuBuffer, GpuFrame, GpuRenderPass, GpuTarget, GpuTexture,
     Primitive, ShaderSource, Step,
 };
+#[cfg(target_os = "macos")]
 use crate::metal::{Buffer, Metal, MetalError, Pipeline};
 use crate::shaders;
 use crate::snapshot::{KittyImage, KittyPlacement, RenderSnapshot};
@@ -136,9 +142,20 @@ struct RunKey {
 /// `[]font.shape.Cell` keyed by the run hash; this is the same idea.
 type RunCache = HashMap<RunKey, Vec<ShapedCell>>;
 
+/// The default render backend for an unparameterized [`Engine`]: `Metal` on
+/// macOS (the GPU path), the platform-free [`Software`](crate::software::Software)
+/// CPU compositor everywhere else (the headless render path, ADR 003). Keeping
+/// this as a cfg-selected alias means plain `Engine` resolves to `Engine<Metal>`
+/// on macOS (so the app crate + macOS tests are unchanged) and to
+/// `Engine<Software>` on Linux (so headless callers get the CPU backend for free).
+#[cfg(target_os = "macos")]
+pub type DefaultBackend = Metal;
+#[cfg(not(target_os = "macos"))]
+pub type DefaultBackend = crate::software::Software;
+
 /// The cell engine. Owns the CPU-side [`Contents`], the [`Uniforms`], the
 /// [`SwapChain`], and the three first-pixels pipelines.
-pub struct Engine<B: GpuBackend = Metal> {
+pub struct Engine<B: GpuBackend = DefaultBackend> {
     /// The GPU backend (device/queue + resource factory).
     backend: B,
     /// Per-frame GPU-slot pool (targets + instance buffers + atlas textures).
@@ -218,11 +235,12 @@ pub struct Engine<B: GpuBackend = Metal> {
 
 /// A GPU-resident kitty image: its texture plus the `generation` it was
 /// uploaded at, so a re-upload is skipped while the content is unchanged.
-pub(crate) struct ImageEntry<B: GpuBackend = Metal> {
+pub(crate) struct ImageEntry<B: GpuBackend = DefaultBackend> {
     generation: u64,
     texture: B::Texture,
 }
 
+#[cfg(target_os = "macos")]
 impl Engine<Metal> {
     /// Build the engine over a fresh Metal context, compiling the three
     /// first-pixels pipelines from the embedded R3 shader source.
@@ -1554,7 +1572,9 @@ impl<B: GpuBackend> Engine<B> {
 /// Accessors used by the additive presentation path (`crate::present`, R5).
 /// These expose the per-frame CPU data and the disjoint field borrows the
 /// on-screen draw needs, without duplicating the private field layout or
-/// changing any R4 behavior.
+/// changing any R4 behavior. Metal-only: the presentation path is macOS
+/// IOSurface (`present.rs`), so these accessors have no non-macOS caller.
+#[cfg(target_os = "macos")]
 impl Engine<Metal> {
     /// Current render-target pixel width (0 until the first `update_frame`).
     pub(crate) fn screen_width(&self) -> usize {

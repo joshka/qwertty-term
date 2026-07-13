@@ -19,10 +19,10 @@ name = "qwertty_term_renderer"
 
 [dependencies]
 qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
-# URL/link detection (R7 links). Already in the workspace lockfile (transitive),
-# so this adds no new lock entry. Platform-agnostic (helps a future non-macOS
-# backend too).
-regex = "1"
+# Sprite dispatch (cursors / decorations / box-drawing) is platform-agnostic
+# (pure Rust), so the cell engine can use it on every target — including the
+# headless Linux software-render path (ADR 003).
+qwertty-term-sprite = { version = "0.1.0", path = "../qwertty-term-sprite" }
 
 # Metal backend (chunk R1). All versions already present in the workspace
 # lockfile (transitively via eframe/winit), so these add no new lock entries.
@@ -70,10 +70,17 @@ dispatch2 = { version = "0.3.1", default-features = false, features = [
     "objc2",
 ] }
 # The font substrate the cell engine (R4) drives: shaping + glyph→atlas render
-# cache (`Grid`), and sprite dispatch for cursors/decorations/box-drawing.
-# Both are macOS-only in the reduced cut (CoreText face + rasterization).
+# cache (`Grid`). On macOS the default (CoreText) face backend is used.
 qwertty-term-font = { version = "0.1.0", path = "../qwertty-term-font" }
-qwertty-term-sprite = { version = "0.1.0", path = "../qwertty-term-sprite" }
+
+# On non-macOS targets the cell engine renders headless over the Software
+# backend (ADR 003 P1), so it needs the FreeType face backend — enable the
+# font crate's `freetype` feature by default there. This is what makes
+# `Engine<Software>` build and render on Linux CI with no CoreText / no GPU.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+qwertty-term-font = { version = "0.1.0", path = "../qwertty-term-font", features = [
+    "freetype",
+] }
 
 [dev-dependencies]
 # The acceptance test (R4) drives a real qwertty-term-vt Terminal through a Stream to
