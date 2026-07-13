@@ -1,17 +1,18 @@
 # Stream throughput: qwertty-term-vt vs upstream Zig (2026-07-07)
 
-> **SUPERSEDED (2026-07-13).** These are the *pre-optimization* engine numbers,
-> taken before the M1 perf levers (`docs/analysis/perf.md`) and the later
-> wide-class `printSliceFill`, dispatch, and clear_cells work landed. The large
-> gaps recorded below — ASCII ~2.3× and CJK ~7× behind Zig — have since been
-> closed: the CJK/wide path in particular went from a ~7× deficit to a *lead*
-> vs Ghostty main (`unicode` 0.50×, `dense_cells` 0.64× in
-> `docs/benchmarks/vtebench-baseline.md`; engine MiB/s in `docs/analysis/perf.md`
-> and `docs/threads/status/t1.md`). This doc is retained only as the historical
-> starting point; do not cite its ratios as current. It has **not** been re-run
-> against upstream Zig (that needs a fresh `ghostty-bench` build); the current
-> vs-upstream comparison lives in the vtebench three-way and the in-process
-> engine bench.
+> **PARTIALLY SUPERSEDED (2026-07-13).** These are the *pre-optimization* engine
+> numbers, taken before the M1 perf levers (`docs/analysis/perf.md`) and the
+> later wide-class `printSliceFill` work landed. The wide fill **narrowed** the
+> CJK/wide gap substantially, but did **not** flip it to a lead. Spot re-measured
+> engine-only on 2026-07-13 (`ghostty-bench +terminal-stream` at `38e49a232`,
+> ReleaseFast, vs our engine, one pass of the vtebench `unicode` wide payload at
+> 80×24): **Ghostty ~790 MiB/s vs qwertty-term ~300 MiB/s — upstream's wide
+> engine is still ~2.6× faster.** The `unicode` 0.50× *whole-app* win in
+> `docs/benchmarks/vtebench-baseline.md` is a render-pipeline artifact (our
+> renderer is decoupled from the pty drain; Ghostty's backpressures it), **not**
+> an engine lead. So the direction of these old ratios still holds — upstream's
+> wide engine leads — the magnitude just shrank from ~7× to ~2.6×. The remaining
+> gap (SIMD UTF-8 decode, tighter wide-print) is a real T1 opportunity.
 
 Apples-to-apples comparison of full stream→terminal-state throughput
 (`Stream<TerminalHandler>::feed` vs upstream's `ghostty-bench terminal-stream`,

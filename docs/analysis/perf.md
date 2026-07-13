@@ -187,12 +187,14 @@ Gate status: **PASS — every stream >= 0.5x.** All four moved from 0.15-0.31x t
 ### Deferred (not landed this pass)
 
 > **Update 2026-07-13:** the two "deferred" items below were scoped to *this M1
-> pass*; the wide fill has since shipped as its own package (see below). The
-> `utf8-mixed` 0.57× figure in "Final result" is therefore the *pre-wide-fill*
-> number — current engine throughput on the wide/CJK path now *leads* Ghostty
-> main (`unicode` 0.50×, `dense_cells` 0.64× in
-> `docs/benchmarks/vtebench-baseline.md`). Later dispatch/clear_cells work also
-> moved `sgr` and `cursor` further than the numbers here.
+> pass*; the wide fill has since shipped as its own package (see below), and it
+> closed a large chunk of the wide/CJK engine gap. But do **not** read the
+> `unicode` 0.50× in `docs/benchmarks/vtebench-baseline.md` as an engine lead —
+> that is a *whole-app* number dominated by render pipeline, and measured
+> engine-only Ghostty's wide path is still ~2.6× faster than ours (~790 vs ~300
+> MiB/s on the vtebench unicode payload). A real engine gap remains (SIMD UTF-8
+> decode + tighter wide-print). Later dispatch/clear_cells work did move `sgr`
+> and `cursor` further than the numbers here.
 
 - **SIMD `utf8DecodeUntilControlSeq`** — the scalar decode-until-control-seq scan
   is ported; the SIMD bulk decoder (std::simd / simdutf) is a later item and was
