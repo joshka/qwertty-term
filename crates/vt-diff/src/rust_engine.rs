@@ -111,10 +111,13 @@ impl Oracle for RustTerminal {
         use qwertty_term_vt::modes::Mode;
         use qwertty_term_vt::terminal::ScreenKey;
         let t = self.terminal();
+        let pages = &t.screen().pages;
         crate::TermState {
             pending_wrap: t.screen().cursor.pending_wrap,
             alt_screen: t.screens.active_key() == ScreenKey::Alternate,
             cursor_visible: t.modes.get(Mode::CursorVisible),
+            // "total rows minus the viewport" — mirror of ghostty SCROLLBACK_ROWS.
+            scrollback_rows: pages.total_rows().saturating_sub(pages.rows() as usize),
         }
     }
 }
