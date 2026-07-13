@@ -1629,6 +1629,11 @@ fn resolve_colors(
     if let Some(fg) = config.foreground() {
         startup_colors.foreground.set(fg);
     }
+    // Per-index `palette` overrides sit on top of the theme's palette; OSC 4
+    // from the program still overrides at runtime through the dynamic palette.
+    for (idx, rgb) in config.palette_overrides() {
+        startup_colors.palette.set(idx, rgb);
+    }
     // Selection colors: a config `selection-*` overrides the theme's, per
     // channel. Explicit only when both resolve; otherwise invert the cell.
     let sel_bg = config
@@ -8768,6 +8773,19 @@ mod tests {
             }
             super::SelectionColors::Inverse => panic!("expected explicit selection colors"),
         }
+    }
+
+    /// `palette` entries override specific indices of the startup palette.
+    #[test]
+    fn palette_config_overrides_startup_palette_entries() {
+        use qwertty_term_vt::color::Rgb;
+        let config = crate::config::Config {
+            palette: vec!["0=#1e1e2e".to_string(), "15=#ffffff".to_string()],
+            ..Default::default()
+        };
+        let (colors, _) = super::resolve_colors(&config);
+        assert_eq!(colors.palette.current[0], Rgb::new(0x1e, 0x1e, 0x2e));
+        assert_eq!(colors.palette.current[15], Rgb::new(0xff, 0xff, 0xff));
     }
 
     /// Poison resilience (app-hardening): reproduce the field-observed cascade —

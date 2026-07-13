@@ -84,6 +84,7 @@ items are `[ ]` wholesale unless noted.
 - [x] `selection-background`/`-foreground` (theme + config override, per-channel);
       `cursor-text` (theme only — no Colors slot yet)
 - [x] `split-divider` (implicit), search highlight colors
+- [x] `palette` per-index overrides (`N=color`, on top of theme; OSC 4 still wins; imports)
 - [~] `bold-color`, `cursor-opacity`, `faint-opacity` (some wired, some not)
 - [ ] `palette-generate`/`palette-harmonious`, `window-theme` auto light/dark
 - [ ] `cell-foreground`/`cell-background`, `background-opacity-cells`
