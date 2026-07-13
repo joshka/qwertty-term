@@ -327,6 +327,10 @@ struct Surface {
     /// [`Surface::render`] when the pane is an unfocused member of a multi-pane
     /// tab. See [`crate::selection::dim_window`].
     dim_colors: crate::selection::DimColors,
+    /// When the current command's output started (`OSC 133 ; C`), for
+    /// `notify-on-command-finish` timing. `Some` between a `C` mark and the
+    /// matching `D`; `None` otherwise. Set/cleared in [`Surface::pump`].
+    command_started_at: Option<std::time::Instant>,
 }
 
 /// Lock an engine mutex, recovering a poisoned lock instead of panicking.
@@ -356,6 +360,9 @@ struct PumpResult {
     /// The most recent OSC 9 / OSC 777 desktop notification `(title, body)`
     /// observed this tick, if any (latest-wins per frame).
     notification: Option<(String, String)>,
+    /// A command that finished this tick (OSC 133 `C`→`D`) as
+    /// `(exit_code, elapsed)`, for `notify-on-command-finish`.
+    command_finished: Option<(Option<i32>, std::time::Duration)>,
 }
 
 impl Surface {
@@ -460,12 +467,13 @@ impl Surface {
         // `take_output`/`take_bell` lock the engine; if the parse thread poisoned
         // the lock, `engine()` recovers it and flips `dead`, so re-check before
         // touching io. Drain both under one lock.
-        let (out, bell, notification) = {
+        let (out, bell, notification, boundaries) = {
             let mut engine = self.engine();
             (
                 engine.take_output(),
                 engine.take_bell(),
                 engine.take_notification(),
+                engine.take_command_boundaries(),
             )
         };
         if self.is_dead() {
@@ -473,6 +481,23 @@ impl Surface {
         }
         if !out.is_empty() {
             self.io.write(&out);
+        }
+        // Pair OSC 133 `C` (output start) with the following `D` (command end)
+        // to time each command for `notify-on-command-finish`. Multiple
+        // commands finishing in one ~16ms tick is vanishingly rare; keep the
+        // most recent finish for this tick.
+        let mut command_finished: Option<(Option<i32>, std::time::Duration)> = None;
+        for boundary in boundaries {
+            match boundary {
+                qwertty_term_vt::stream::CommandBoundary::OutputStart => {
+                    self.command_started_at = Some(std::time::Instant::now());
+                }
+                qwertty_term_vt::stream::CommandBoundary::End { exit_code } => {
+                    if let Some(start) = self.command_started_at.take() {
+                        command_finished = Some((exit_code, start.elapsed()));
+                    }
+                }
+            }
         }
         let mut exited = false;
         let mut password: Option<bool> = None;
@@ -494,6 +519,7 @@ impl Surface {
             password,
             bell,
             notification,
+            command_finished,
         }
     }
 
@@ -1336,6 +1362,13 @@ pub struct ControllerState {
     /// The last desktop notification actually delivered (post-throttle), for
     /// the windowed smoke to observe. `None` until one is delivered.
     last_delivered_notification: RefCell<Option<(String, String)>>,
+    /// `notify-on-command-finish` mode (never/unfocused/always). Default
+    /// `Never` (the feature is off unless configured).
+    notify_on_command_finish: crate::notify::NotifyOnCommandFinish,
+    /// Which effects fire on command finish (`bell`/`notify`).
+    notify_on_command_finish_action: crate::notify::CommandFinishAction,
+    /// Minimum command duration before a finish notifies.
+    notify_on_command_finish_after: std::time::Duration,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1432,6 +1465,9 @@ impl Controller {
             desktop_notifications: config.desktop_notifications,
             notification_throttle: RefCell::new(crate::notify::NotificationThrottle::new()),
             last_delivered_notification: RefCell::new(None),
+            notify_on_command_finish: config.notify_on_command_finish(),
+            notify_on_command_finish_action: config.notify_on_command_finish_action(),
+            notify_on_command_finish_after: config.notify_on_command_finish_after(),
         })))
     }
 
@@ -3356,7 +3392,14 @@ impl Controller {
         // title/password state, under one borrow. Render every pane.
         let bell_features = self.0.borrow().bell_features;
         let desktop_notifications = self.0.borrow().desktop_notifications;
-        let (exited, bell_rang, notifications) = {
+        let notify_mode = self.0.borrow().notify_on_command_finish;
+        // Whether the app is frontmost — the `unfocused` gate needs real user
+        // focus (key window + active app), not just a tab's focused pane.
+        let app_active = {
+            let mtm = self.0.borrow().mtm;
+            NSApplication::sharedApplication(mtm).isActive()
+        };
+        let (exited, bell_rang, notifications, command_finishes) = {
             let mut state = self.0.borrow_mut();
             let mut dead: Vec<(TabId, SurfaceId)> = Vec::new();
             // Whether any pane rang this tick — drives the once-per-tick
@@ -3365,6 +3408,11 @@ impl Controller {
             // OSC 9/777 desktop notifications observed this tick (across all
             // panes); throttled + delivered after the borrow drops.
             let mut notifications: Vec<(String, String)> = Vec::new();
+            // Commands that finished this tick (OSC 133), with per-surface
+            // focus, decided + delivered after the borrow drops. `(tab,
+            // exit_code, elapsed, focused)`.
+            let mut command_finishes: Vec<(TabId, Option<i32>, std::time::Duration, bool)> =
+                Vec::new();
             for (tid, tab) in state.tabs.iter_mut() {
                 let focused = tab.tree.focused();
                 // Whether this tab has more than one pane — the gate for
@@ -3407,6 +3455,15 @@ impl Controller {
                     if desktop_notifications && let Some(n) = result.notification {
                         notifications.push(n);
                     }
+                    // Collect a finished command (OSC 133) for command-finish
+                    // notification, unless the feature is off.
+                    if notify_mode != crate::notify::NotifyOnCommandFinish::Never
+                        && let Some((exit_code, elapsed)) = result.command_finished
+                    {
+                        let focused_here =
+                            app_active && tab.window.isKeyWindow() && *sid == focused;
+                        command_finishes.push((*tid, exit_code, elapsed, focused_here));
+                    }
                     if *sid == focused
                         && let Some(active) = result.password
                     {
@@ -3415,7 +3472,7 @@ impl Controller {
                 }
                 tab.update_window_title(password_focused);
             }
-            (dead, any_bell, notifications)
+            (dead, any_bell, notifications, command_finishes)
         };
         // Fire the once-per-tick audible/attention bell effects with no
         // controller borrow held (these are AppKit calls). The per-tab title
@@ -3455,6 +3512,45 @@ impl Controller {
             };
             for (title, body) in admitted {
                 self.deliver_notification(&title, &body);
+            }
+        }
+        // Command-finish notifications (OSC 133): apply the mode/threshold gate,
+        // then fire the configured effect(s) with no borrow held.
+        for (tid, exit_code, elapsed, focused) in command_finishes {
+            let (action, after) = {
+                let s = self.0.borrow();
+                (
+                    s.notify_on_command_finish_action,
+                    s.notify_on_command_finish_after,
+                )
+            };
+            if !crate::notify::should_notify_command_finish(notify_mode, focused, elapsed, after) {
+                continue;
+            }
+            if action.bell {
+                // Mark the tab title + beep + dock attention (the bell path).
+                let mtm = {
+                    let s = self.0.borrow();
+                    if let Some(t) = s.tabs.get(&tid) {
+                        t.bell_ringing.set(true);
+                    }
+                    s.mtm
+                };
+                objc2_app_kit::NSBeep();
+                NSApplication::sharedApplication(mtm).requestUserAttention(
+                    objc2_app_kit::NSRequestUserAttentionType::InformationalRequest,
+                );
+            }
+            if action.notify {
+                let notif = crate::notify::command_finish_notification(exit_code, elapsed);
+                let admit = {
+                    let s = self.0.borrow();
+                    let mut throttle = s.notification_throttle.borrow_mut();
+                    throttle.admit(&notif, std::time::Instant::now())
+                };
+                if admit {
+                    self.deliver_notification(&notif.title, &notif.body);
+                }
             }
         }
         for (tab, surface) in exited {
@@ -3567,6 +3663,7 @@ impl Controller {
                     default_bg.2,
                 ),
             },
+            command_started_at: None,
         })
     }
 
@@ -4361,6 +4458,10 @@ pub struct DelegateIvars {
     /// notifications reach the delivery seam. See
     /// [`AppDelegate::run_notify_smoke`].
     smoke_notify: bool,
+    /// Command-finish smoke (`QWERTTY_TERM_SMOKE_NOTIFYCMD`): assert OSC 133
+    /// command-finish notifications fire. See
+    /// [`AppDelegate::run_notifycmd_smoke`].
+    smoke_notifycmd: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -4412,6 +4513,7 @@ define_class!(
             let has_clipboard = self.ivars().smoke_clipboard;
             let has_windowstate = self.ivars().smoke_windowstate;
             let has_notify = self.ivars().smoke_notify;
+            let has_notifycmd = self.ivars().smoke_notifycmd;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -4439,6 +4541,8 @@ define_class!(
                 self.schedule_windowstate_smoke();
             } else if has_notify {
                 self.schedule_notify_smoke();
+            } else if has_notifycmd {
+                self.schedule_notifycmd_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -4632,6 +4736,12 @@ define_class!(
         fn notify_smoke(&self, _timer: &AnyObject) {
             self.run_notify_smoke();
         }
+
+        /// Command-finish smoke: assert OSC 133 command-finish notifies, exit 0/1.
+        #[unsafe(method(ghosttyNotifyCmdSmoke:))]
+        fn notifycmd_smoke(&self, _timer: &AnyObject) {
+            self.run_notifycmd_smoke();
+        }
     }
 );
 
@@ -4657,6 +4767,7 @@ impl AppDelegate {
         smoke_clipboard: bool,
         smoke_windowstate: bool,
         smoke_notify: bool,
+        smoke_notifycmd: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -4679,6 +4790,7 @@ impl AppDelegate {
             smoke_clipboard,
             smoke_windowstate,
             smoke_notify,
+            smoke_notifycmd,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -6998,6 +7110,60 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_notifycmd_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyNotifyCmdSmoke:));
+    }
+
+    /// Command-finish smoke (`notify-on-command-finish`): feed OSC 133 `C`/`D`
+    /// marks and assert the app times the command and delivers the right
+    /// finish notification (title by exit status). The harness configures
+    /// `always` + `notify` action + `after = 0` so focus/threshold don't gate.
+    /// Exits 0/1.
+    fn run_notifycmd_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = notifycmd_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at notifycmd smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at notifycmd smoke start".into());
+        };
+
+        // A successful command: C … (time passes) … D;0.
+        controller.feed_surface_output(tab, surface, b"\x1b]133;C\x07");
+        Self::spin(0.3);
+        controller.feed_surface_output(tab, surface, b"\x1b]133;D;0\x07");
+        Self::spin(0.4);
+        match controller.last_delivered_notification() {
+            Some((title, body)) if title == "Command Succeeded" && body.contains("code 0") => {}
+            other => fail(format!(
+                "a finished (exit 0) command did not deliver a \"Command Succeeded\" \
+                 notification; got {other:?}"
+            )),
+        }
+
+        // A failed command after the 1s throttle window: C … D;3.
+        Self::spin(1.1);
+        controller.feed_surface_output(tab, surface, b"\x1b]133;C\x07");
+        Self::spin(0.3);
+        controller.feed_surface_output(tab, surface, b"\x1b]133;D;3\x07");
+        Self::spin(0.4);
+        match controller.last_delivered_notification() {
+            Some((title, body)) if title == "Command Failed" && body.contains("code 3") => {}
+            other => fail(format!(
+                "a finished (exit 3) command did not deliver a \"Command Failed\" \
+                 notification; got {other:?}"
+            )),
+        }
+
+        println!(
+            "OK: notifycmd smoke — OSC 133 command boundaries timed a command and \
+             delivered the exit-status finish notification (succeeded + failed)."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -7174,6 +7340,12 @@ fn notify_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a command-finish smoke failure and exit non-zero.
+fn notifycmd_fail(msg: String) -> ! {
+    eprintln!("FAIL: notifycmd smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -7288,6 +7460,7 @@ pub fn run(
     smoke_clipboard: bool,
     smoke_windowstate: bool,
     smoke_notify: bool,
+    smoke_notifycmd: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -7313,6 +7486,7 @@ pub fn run(
         smoke_clipboard,
         smoke_windowstate,
         smoke_notify,
+        smoke_notifycmd,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

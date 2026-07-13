@@ -86,6 +86,10 @@
 //!   OSC 9 and OSC 777 to the focused surface and assert each is parsed,
 //!   drained, gated, throttled, and delivered to the notification seam, then
 //!   exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_NOTIFYCMD=1` — run the command-finish smoke: feed
+//!   OSC 133 `C`/`D` marks and assert the app times the command and delivers
+//!   the exit-status finish notification (`notify-on-command-finish`), then
+//!   exit 0/1. Needs a temp config with `notify-on-command-finish = always`.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -197,6 +201,8 @@ fn run_window() {
     let smoke_windowstate = std::env::var_os("QWERTTY_TERM_SMOKE_WINDOWSTATE").is_some();
     // Notify smoke: assert OSC 9/777 desktop notifications reach the delivery seam.
     let smoke_notify = std::env::var_os("QWERTTY_TERM_SMOKE_NOTIFY").is_some();
+    // Command-finish smoke: assert OSC 133 command-finish notifications fire.
+    let smoke_notifycmd = std::env::var_os("QWERTTY_TERM_SMOKE_NOTIFYCMD").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -215,6 +221,7 @@ fn run_window() {
         smoke_clipboard,
         smoke_windowstate,
         smoke_notify,
+        smoke_notifycmd,
     );
 }
 

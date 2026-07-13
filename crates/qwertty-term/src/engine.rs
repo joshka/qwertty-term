@@ -106,6 +106,13 @@ impl Engine {
         self.stream.handler.take_notification()
     }
 
+    /// Drain the OSC 133 command boundaries (`C`/`D`) observed since the last
+    /// drain, in order. The app pairs each `OutputStart` with the following
+    /// `End` to time a command for `notify-on-command-finish`.
+    pub fn take_command_boundaries(&mut self) -> Vec<qwertty_term_vt::stream::CommandBoundary> {
+        self.stream.handler.take_command_boundaries()
+    }
+
     /// Resize the grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.terminal_mut().resize(clamp_dim(cols), clamp_dim(rows));
