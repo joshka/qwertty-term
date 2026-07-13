@@ -202,7 +202,14 @@ fn run_offscreen_smoke() {
 
 #[cfg(target_os = "macos")]
 fn run_window() {
-    let mut config = qwertty_term::config::load();
+    // `--key=value` args are config overrides (highest precedence, and replayed
+    // on reload); the bare mode flags (`--window`, `--offscreen-smoke`) have no
+    // `=` and are skipped.
+    let cli_overrides: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a.starts_with("--") && a.contains('='))
+        .collect();
+    let mut config = qwertty_term::config::load_with_cli(cli_overrides);
     let smoke_ms = std::env::var("QWERTTY_TERM_SMOKE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
