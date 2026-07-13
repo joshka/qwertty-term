@@ -77,41 +77,30 @@ target's status file (append-only; the owner triages into their backlog).
 
 ### jj discipline — working-copy safety in parallel workspaces (hard-won)
 
-You're one of several threads editing in parallel `work/<id>` workspaces. A sibling's
-`jj git fetch`/`rebase` can make your working copy stale; the next jj command reconciles it
-to a "fresh commit," overwriting your on-disk edits. **This looks like data loss but isn't** —
-jj snapshots un-committed changes into a saved commit *first* (it just doesn't tell you where,
-pre jj#9786). Adopt, in priority order:
+You share one `.jj` store with sibling thread workspaces, so your working copy can go stale
+whenever another thread commits. Follow this and you never lose work:
 
-1. **`jj st` after every edit burst, before any long non-jj command.** THE habit — it's the
-   single rule that prevents loss. The unsafe window is between "files edited" and "next jj
-   command"; `cargo`/`npx`/`git` do NOT snapshot. So right after an Edit/Write burst run
-   `cd .../work/<id> && jj st`, *then* run your build/test gate. This puts your tree in the
-   object store so a concurrent rebase carries it losslessly.
-2. **Commit incrementally on multi-step work.** `jj describe`/`commit` in stages; never
-   edit-then-run-a-multi-minute-gate in one un-snapshotted block. Prefer working on a
-   *described* commit (`jj new main@origin -m "<msg> [WIP]"` before editing) and pushing to a
-   bookmark early — pushed work survives any local reconcile.
-3. **If edits "vanish" or you see `Updated working copy to fresh commit <X>`: RECOVER, don't
-   redo.** The changes were preserved. Find the saved commit and restore:
-   - `jj op log` — find the `reconcile divergent operations` / `snapshot working copy` op
-     around the loss; `jj log --at-op <snapshot-op> -r @` shows the (non-empty) commit it saved.
-   - `jj evolog -r <change_id>` — prior versions of the change you were on.
-   - `jj log -r 'all()'` + grep a unique token from your edit (a symbol/const name).
-   - Then `jj restore --from <saved-commit> <files>`, or `jj rebase -r <saved-commit> -d
-     main@origin` to replay your delta onto current main (3-way merge). Only redo from scratch
-     if a real search turns up nothing. `jj undo` won't help after a stale reconcile
-     ("Cannot undo a merge operation") — use `jj restore` / `jj op restore`.
-4. **One writer per checkout.** Never run jj at the repo root or touch a sibling workspace /
-   `work/josh`; every command block starts with `cd .../work/<id> &&` (shell cwd resets between
-   commands). Before `jj workspace update-stale`, back up un-snapshotted edits (`command cp` —
-   cp/rm are interactive-aliased) as belt-and-suspenders.
-5. Verify commits are NON-empty after describe (`jj log -r @ -T 'if(empty,...)'`) — empty commits
-   have silently shipped. Verify lint/gate BEFORE describing, not after.
+1. **Snapshot after every batch of edits.** Run any jj command (`jj st` suffices; `jj
+   describe -m "…"` is better) so your edits are captured into the working-copy commit. Once
+   snapshotted, jj retains them across other threads' concurrent operations. The unsafe
+   window is only between "files edited" and "next jj command" — `cargo`/`npx`/`git` do NOT
+   snapshot, so run `jj st` right after an Edit/Write burst, *before* your long build/test
+   gate.
+2. **Don't panic on `working copy is stale`.** `jj workspace update-stale` snapshots your
+   current working copy *before* replacing it — your edits are preserved in a commit, not
+   discarded. Just run it. (Any older note claiming update-stale *discards* edits is wrong.)
+3. **Recover via the op log, staying in jj.** If files look reverted after a reset, run `jj
+   op log` to find the `snapshot working copy` operation just before the stale-update; restore
+   from its commit (`jj restore --from <commit> <paths>`, or `jj op restore <op-id>` to roll
+   the repo back to that point). `jj log --at-op <op> -r @` / `jj evolog -r <change>` help
+   locate it; grep a unique token from your edit if needed. **Do NOT fall back to git plumbing
+   or scratchpad copies — the state is already in jj.**
+4. **Stay in your own workspace.** Only run jj inside your `work/<id>`; never at the repo root
+   or against a sibling workspace / `work/josh`. Run jj mutations one at a time; every command
+   block starts with `cd .../work/<id> &&` (shell cwd resets between commands).
 
-**Correction:** any note claiming `jj workspace update-stale` *discards* un-snapshotted edits
-(e.g. current `docs/orchestration.md`) is wrong — update-stale snapshots first; the edits are
-recoverable via rule 3.
+Also verify commits are NON-empty after `describe` (`jj log -r @ -T 'if(empty,...)'`) and
+verify lint/gate BEFORE describing, not after.
 
 ### Ship pipeline (jj → GitHub PR)
 

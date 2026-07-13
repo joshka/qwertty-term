@@ -75,9 +75,9 @@ markdownlint-cli2 "**/*.md" "!target"          # when docs changed
 # cwd silently resets between commands (harness resets, cd in subshells). A jj command
 # from the repo ROOT hits the wrong working copy — empty commits, relative-path reads of
 # ancient root files. EVERY command block that runs jj or reads repo files MUST begin
-# with an explicit `cd .../work/<workspace> &&`. Before update-stale, `command cp` any
-# un-snapshotted edits as belt-and-suspenders (cp/rm are interactive-aliased) — though
-# update-stale snapshots first and does NOT discard them; recover via README rule 3.
+# with an explicit `cd .../work/<workspace> &&`. `jj workspace update-stale` snapshots
+# first and does NOT discard edits — just run it; recover via op log if needed (README
+# rule 3). Stay in jj: do NOT back up to git plumbing or scratchpad copies.
 # FINAL HANDOVER CHECK (added 2026-07-08 after a stale-checkout shipped conflict
 # markers to the user): after the LAST jj op of the integration, re-run
 #   jj st && grep -rn '<<<<<<<' crates/ --include='*.rs' | head
