@@ -1346,6 +1346,17 @@ impl Screen {
                     self.clear_unprotected_cells_page(page, row, 0, cols);
                 } else {
                     (*page).fill_cells(row, 0, cols, blank);
+                    // Reset the row's layout/semantic metadata to default — port
+                    // of ghostty `clearRows`' `row.* = .{ .cells = cells_offset }`.
+                    // `fill_cells`/`clear_cells` already released the cell contents
+                    // and recomputed the content flags (grapheme/styled/hyperlink);
+                    // this clears the remaining bits. Leaving a stale `wrap` bit
+                    // made reverse-wrap (mode 45) climb a row that ED had erased.
+                    use crate::page::SemanticPrompt;
+                    (*row).set_wrap(false);
+                    (*row).set_wrap_continuation(false);
+                    (*row).set_semantic_prompt(SemanticPrompt::None);
+                    (*row).set_kitty_virtual_placeholder(false);
                 }
                 (*row).set_dirty(true);
             }
