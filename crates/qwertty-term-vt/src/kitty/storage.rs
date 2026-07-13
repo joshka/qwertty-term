@@ -183,8 +183,11 @@ impl Placement {
             image.height
         };
 
-        // No specified cols/rows: native size, no re-scaling.
-        if self.columns == 0 && self.rows == 0 {
+        // No specified cols/rows: native size, no re-scaling. Also fall back to
+        // native size if the geometry has zero cols/rows — a live `Terminal`
+        // never does (construction underflows `cols - 1` first), but `geo` is a
+        // plain param, so guard the divisors below explicitly.
+        if (self.columns == 0 && self.rows == 0) || geo.cols == 0 || geo.rows == 0 {
             return (width, height);
         }
 
@@ -879,6 +882,23 @@ mod tests {
         height_px: u32,
     ) -> TerminalGeometry {
         TerminalGeometry::new(cols, rows, width_px, height_px)
+    }
+
+    #[test]
+    fn pixel_size_guards_zero_geometry() {
+        // A live `Terminal` never has zero cols/rows, but `pixel_size` takes
+        // `geo` as a plain param, so a zero divisor must fall back to native
+        // size rather than divide-by-zero panic. `columns`/`rows` are set so we
+        // get past the "no specified cols/rows → native" early return and reach
+        // the guarded division path.
+        let mut p = Placement::new(Location::Virtual);
+        p.columns = 2;
+        p.rows = 2;
+        let img = image(1, 40, 20);
+        assert_eq!(p.pixel_size(&img, &geo(0, 0, 0, 0)), (40, 20));
+        // A single zero divisor is enough to trip the guard.
+        assert_eq!(p.pixel_size(&img, &geo(0, 10, 0, 100)), (40, 20));
+        assert_eq!(p.pixel_size(&img, &geo(10, 0, 100, 0)), (40, 20));
     }
 
     #[test]

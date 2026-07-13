@@ -312,6 +312,14 @@ fn resolve_virtual(
     scrollback_offset: usize,
     out: &mut Vec<RenderImagePlacement>,
 ) {
+    // Guard the divisors first (a live `Terminal` never has zero cols/rows —
+    // construction underflows `cols - 1` before that — but `geo` is a plain
+    // param, so guard explicitly rather than relying on the caller). Then guard
+    // the quotient: a sub-cell-sized viewport yields a zero cell and nothing to
+    // place.
+    if geo.cols == 0 || geo.rows == 0 {
+        return;
+    }
     let cell_width = geo.width_px / u32::from(geo.cols);
     let cell_height = geo.height_px / u32::from(geo.rows);
     if cell_width == 0 || cell_height == 0 {
