@@ -75,6 +75,14 @@ pub struct Config {
     /// back to background).
     #[serde(rename = "unfocused-split-fill")]
     pub unfocused_split_fill: Option<String>,
+    /// The text-cursor color, as `#RRGGBB`/`RRGGBB` or an X11 color name (parsed
+    /// via [`qwertty_term_vt::color::Rgb::parse`]). Overrides the theme's
+    /// `cursor-color`; when unset the theme value (or the built-in default) is
+    /// used. Mirrors upstream `cursor-color` (`Config.zig:600`). A running
+    /// program's OSC 12 still overrides this at runtime. An unparseable value is
+    /// ignored (falls back to the theme/default). See [`Config::cursor_color`].
+    #[serde(rename = "cursor-color")]
+    pub cursor_color: Option<String>,
     /// Which screen edge the quick-terminal dropdown animates from:
     /// `top`/`bottom`/`left`/`right`/`center` (upstream `quick-terminal-position`,
     /// `Config.zig:2624`, default `top`). Unknown values fall back to the
@@ -235,6 +243,7 @@ impl Default for Config {
             keybind: Vec::new(),
             unfocused_split_opacity: DEFAULT_UNFOCUSED_SPLIT_OPACITY,
             unfocused_split_fill: None,
+            cursor_color: None,
             quick_terminal_position: None,
             quick_terminal_size: None,
             quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
@@ -293,6 +302,19 @@ impl Config {
             Ok(rgb) => Some(rgb),
             Err(_) => {
                 eprintln!("ignoring invalid unfocused-split-fill: {raw:?}");
+                None
+            }
+        }
+    }
+
+    /// The configured text-cursor color (`cursor-color`), or `None` when unset or
+    /// unparseable (logged and skipped, so a bad value never breaks startup).
+    pub fn cursor_color(&self) -> Option<qwertty_term_vt::color::Rgb> {
+        let raw = self.cursor_color.as_deref()?;
+        match qwertty_term_vt::color::Rgb::parse(raw) {
+            Ok(rgb) => Some(rgb),
+            Err(_) => {
+                eprintln!("ignoring invalid cursor-color: {raw:?}");
                 None
             }
         }
@@ -488,7 +510,7 @@ impl MiddleClickAction {
     }
 }
 
-const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
+const EXAMPLE_CONFIG: &str = r##"# qwertty-term config
 #
 # This file is created automatically on first run. Uncomment and edit any of
 # the lines below; unknown keys are ignored.
@@ -497,6 +519,10 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # ~/.config/ghostty/themes/ directory, then the shared ghostty themes directory
 # (or an absolute path to a theme file).
 # theme = "GruvboxDarkHard"
+
+# Text-cursor color (#RRGGBB, RRGGBB, or an X11 color name). Overrides the
+# theme's cursor color; a running program's OSC 12 still wins at runtime.
+# cursor-color = "#ff8800"
 
 # Copy the mouse selection to the clipboard as soon as the drag finishes.
 # copy-on-select = false
@@ -603,7 +629,7 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # window-height = 0
 # window-position-x = 100
 # window-position-y = 50
-"#;
+"##;
 
 /// CLI `--key=value` overrides captured once at startup and replayed on every
 /// [`load`] — including live reloads — so a flag like `--font-size=20` survives a
@@ -1196,6 +1222,36 @@ mod tests {
         // An unparseable value falls back to None (background).
         let bad = parse("unfocused-split-fill = \"not-a-color-zzz\"\n").unwrap();
         assert_eq!(bad.unfocused_split_fill(), None);
+    }
+
+    #[test]
+    fn example_config_template_parses_to_defaults() {
+        // The commented first-run template must always be valid TOML that parses
+        // to the defaults (every setting commented out). Guards template edits —
+        // e.g. a `"#…"` value that would need the `r##"…"##` raw-string delimiter.
+        let config = parse(EXAMPLE_CONFIG).expect("EXAMPLE_CONFIG must parse");
+        assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn cursor_color_parses_hex_and_x11_and_ignores_garbage() {
+        let default = Config::default();
+        assert_eq!(default.cursor_color, None);
+        assert_eq!(default.cursor_color(), None);
+
+        let hex = parse("cursor-color = \"#ff8800\"\n").unwrap();
+        assert_eq!(
+            hex.cursor_color(),
+            Some(qwertty_term_vt::color::Rgb::new(0xff, 0x88, 0x00))
+        );
+        let named = parse("cursor-color = \"red\"\n").unwrap();
+        assert_eq!(
+            named.cursor_color(),
+            Some(qwertty_term_vt::color::Rgb::new(0xff, 0, 0))
+        );
+        // An unparseable value falls back to None (theme/default cursor color).
+        let bad = parse("cursor-color = \"not-a-color-zzz\"\n").unwrap();
+        assert_eq!(bad.cursor_color(), None);
     }
 
     #[test]

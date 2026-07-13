@@ -89,7 +89,8 @@ items are `[ ]` wholesale unless noted.
 - [x] Bar-at-prompt via shell integration (DECSCUSR)
 - [x] Hidden when scrolled into history
 - [~] `cursor-style-blink` (style set; blink timer not implemented)
-- [ ] `cursor-click-to-move`, `cursor-opacity`, `cursor-color` config override
+- [x] `cursor-color` config override (seeds startup `Colors.cursor`, live on reload; imports)
+- [ ] `cursor-click-to-move`, `cursor-opacity`
 
 ## Window & app chrome
 

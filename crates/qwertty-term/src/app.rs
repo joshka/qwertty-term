@@ -1571,6 +1571,36 @@ struct QuickTerminal {
 #[derive(Clone)]
 pub struct Controller(Rc<RefCell<ControllerState>>);
 
+/// Resolve the engine startup [`Colors`](qwertty_term_vt::terminal::Colors) and
+/// selection-highlight colors implied by `config`: the theme's palette + fg/bg/
+/// cursor, with the user's `cursor-color` override (if set) applied on top of the
+/// theme cursor. Shared by [`Controller::new`] and
+/// [`Controller::reload_config`] so both derive colors identically. Mirrors the
+/// reference spike's `WindowTerminal::new` theme lookup
+/// (`crates/spike/src/window/mod.rs`).
+fn resolve_colors(
+    config: &crate::config::Config,
+) -> (qwertty_term_vt::terminal::Colors, SelectionColors) {
+    let theme = config.theme.as_deref().and_then(crate::theme::load_theme);
+    let mut startup_colors = theme
+        .as_ref()
+        .map(crate::theme::ThemeColors::to_colors)
+        .unwrap_or_default();
+    // `cursor-color` overrides the theme's cursor; a running program's OSC 12
+    // still overrides this later through the same dynamic-color path.
+    if let Some(cursor) = config.cursor_color() {
+        startup_colors.cursor.set(cursor);
+    }
+    let selection_colors = match theme
+        .as_ref()
+        .and_then(|t| t.selection_background.zip(t.selection_foreground))
+    {
+        Some((bg, fg)) => SelectionColors::Explicit { bg, fg },
+        None => SelectionColors::Inverse,
+    };
+    (startup_colors, selection_colors)
+}
+
 impl Controller {
     /// Build a controller from loaded config.
     pub fn new(config: &crate::config::Config, mtm: MainThreadMarker) -> Self {
@@ -1578,21 +1608,7 @@ impl Controller {
             .font_size
             .unwrap_or(crate::font_size::DEFAULT_FONT_SIZE);
 
-        // Resolve the configured theme (if any) into engine startup colors +
-        // selection highlight colors. Mirrors the reference spike's
-        // `WindowTerminal::new` theme lookup (`crates/spike/src/window/mod.rs`).
-        let theme = config.theme.as_deref().and_then(crate::theme::load_theme);
-        let startup_colors = theme
-            .as_ref()
-            .map(crate::theme::ThemeColors::to_colors)
-            .unwrap_or_default();
-        let selection_colors = match theme
-            .as_ref()
-            .and_then(|t| t.selection_background.zip(t.selection_foreground))
-        {
-            Some((bg, fg)) => SelectionColors::Explicit { bg, fg },
-            None => SelectionColors::Inverse,
-        };
+        let (startup_colors, selection_colors) = resolve_colors(config);
 
         Controller(Rc::new(RefCell::new(ControllerState {
             registry: TabRegistry::new(),
@@ -2764,19 +2780,9 @@ impl Controller {
     pub fn reload_config(&self) {
         let config = crate::config::load();
 
-        // Re-resolve the theme (same derivation as `Controller::new`).
-        let theme = config.theme.as_deref().and_then(crate::theme::load_theme);
-        let startup_colors = theme
-            .as_ref()
-            .map(crate::theme::ThemeColors::to_colors)
-            .unwrap_or_default();
-        let selection_colors = match theme
-            .as_ref()
-            .and_then(|t| t.selection_background.zip(t.selection_foreground))
-        {
-            Some((bg, fg)) => SelectionColors::Explicit { bg, fg },
-            None => SelectionColors::Inverse,
-        };
+        // Re-resolve the theme + cursor-color override (same derivation as
+        // `Controller::new`).
+        let (startup_colors, selection_colors) = resolve_colors(&config);
 
         let mut state = self.0.borrow_mut();
         state.keybinds = crate::keybind::build_set(&config.keybind);
@@ -8387,6 +8393,23 @@ mod tests {
         // Application mode (DECCKM on): SS3 A / SS3 B.
         assert_eq!(arrow_key_bytes(true, true), b"\x1bOA");
         assert_eq!(arrow_key_bytes(false, true), b"\x1bOB");
+    }
+
+    /// `cursor-color` seeds the engine's startup cursor color, overriding the
+    /// theme's (here: no theme, so it overrides the default UNSET). A later OSC 12
+    /// from the running program still wins through the same dynamic-color path.
+    #[test]
+    fn cursor_color_config_seeds_startup_colors() {
+        let mut config = crate::config::Config::default();
+        // No theme → default colors; without the override the cursor is UNSET.
+        assert!(super::resolve_colors(&config).0.cursor.get().is_none());
+
+        config.cursor_color = Some("#ff8800".to_string());
+        let (colors, _) = super::resolve_colors(&config);
+        assert_eq!(
+            colors.cursor.get(),
+            Some(qwertty_term_vt::color::Rgb::new(0xff, 0x88, 0x00))
+        );
     }
 
     /// Poison resilience (app-hardening): reproduce the field-observed cascade —

@@ -40,6 +40,7 @@ const SUPPORTED: &[(&str, Kind)] = &[
     ("font-size", Kind::Num),
     // Colors / theme
     ("theme", Kind::Str),
+    ("cursor-color", Kind::Str),
     // Mouse & clipboard
     ("mouse-hide-while-typing", Kind::Bool),
     ("clipboard-paste-protection", Kind::Bool),
