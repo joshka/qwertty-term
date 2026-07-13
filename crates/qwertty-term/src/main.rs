@@ -108,6 +108,10 @@
 //! - `QWERTTY_TERM_SMOKE_SAVESTATE=1` — run the window-save-state smoke: with
 //!   `window-save-state = never` configured, assert the window is non-restorable
 //!   and `NSQuitAlwaysKeepsWindows` was set false, then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_SESSION=1` — run the window-session smoke: capture a
+//!   tab's split tree + per-pane cwd, round-trip the JSON, capture a split as
+//!   two leaves, and restore a single-pane session into a fresh tab, then exit
+//!   0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -291,6 +295,8 @@ fn run_window() {
     let smoke_mouse2 = std::env::var_os("QWERTTY_TERM_SMOKE_MOUSE2").is_some();
     // Save-state smoke: assert window-save-state wiring.
     let smoke_savestate = std::env::var_os("QWERTTY_TERM_SMOKE_SAVESTATE").is_some();
+    // Session smoke: capture/round-trip/restore the window-session tree.
+    let smoke_session = std::env::var_os("QWERTTY_TERM_SMOKE_SESSION").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -315,6 +321,7 @@ fn run_window() {
         smoke_resize,
         smoke_mouse2,
         smoke_savestate,
+        smoke_session,
     );
 }
 

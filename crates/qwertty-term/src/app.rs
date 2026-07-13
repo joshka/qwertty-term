@@ -4340,6 +4340,28 @@ impl Controller {
         }
     }
 
+    /// Capture `tab`'s restorable session: its split tree with each pane's
+    /// working directory (OSC 7). Serializable via [`crate::session`] for
+    /// `window-save-state`. Returns `None` if the tab is gone.
+    pub fn capture_window_session(&self, tab: TabId) -> Option<crate::session::WindowSession> {
+        let state = self.0.borrow();
+        let t = state.tabs.get(&tab)?;
+        Some(crate::session::WindowSession::new(node_to_session(
+            t.tree.root(),
+            t,
+        )))
+    }
+
+    /// Restore a captured [`WindowSession`](crate::session::WindowSession) into a
+    /// new tab. Slice 2a restores a single-pane session (spawn a shell in the
+    /// saved cwd); a multi-pane tree is rebuilt as a single pane at its leftmost
+    /// cwd for now (structure/ratio rebuild + the OS restoration wiring are
+    /// slice 2b). Returns the new tab id.
+    pub fn restore_window_session(&self, session: &crate::session::WindowSession) -> Option<TabId> {
+        let cwd = leftmost_cwd(&session.tree).map(std::path::PathBuf::from);
+        self.spawn_tab(cwd, None)
+    }
+
     /// Move focus to the spatially-adjacent pane of `tab` in `direction`, if one
     /// exists. No-op otherwise (mirrors upstream's performable check).
     pub fn goto_split(&self, tab: TabId, direction: Direction) {
@@ -4569,6 +4591,37 @@ enum FontStep {
     Up,
     Down,
     Reset,
+}
+
+/// Map a live split-tree node to its serializable session form, resolving each
+/// leaf's working directory from its surface's engine (OSC 7).
+fn node_to_session(node: &crate::splits::Node, t: &Tab) -> crate::session::SessionNode {
+    use crate::session::{SessionAxis, SessionNode};
+    use crate::splits::{Axis, Node};
+    match node {
+        Node::Leaf(sid) => SessionNode::Leaf {
+            cwd: t.surfaces.get(sid).and_then(|s| s.engine().pwd()),
+        },
+        Node::Split(split) => SessionNode::Split {
+            axis: match split.axis {
+                Axis::Horizontal => SessionAxis::Horizontal,
+                Axis::Vertical => SessionAxis::Vertical,
+            },
+            ratio: split.ratio,
+            first: Box::new(node_to_session(&split.first, t)),
+            second: Box::new(node_to_session(&split.second, t)),
+        },
+    }
+}
+
+/// The working directory of a session tree's leftmost leaf — the cwd a
+/// single-pane restore spawns the shell in.
+fn leftmost_cwd(node: &crate::session::SessionNode) -> Option<String> {
+    use crate::session::SessionNode;
+    match node {
+        SessionNode::Leaf { cwd } => cwd.clone(),
+        SessionNode::Split { first, .. } => leftmost_cwd(first),
+    }
 }
 
 /// Apply `window-save-state` to the `NSQuitAlwaysKeepsWindows` standard user
@@ -5030,6 +5083,9 @@ pub struct DelegateIvars {
     /// Save-state smoke (`QWERTTY_TERM_SMOKE_SAVESTATE`): assert window-save-state
     /// wiring. See [`AppDelegate::run_savestate_smoke`].
     smoke_savestate: bool,
+    /// Session smoke (`QWERTTY_TERM_SMOKE_SESSION`): capture/round-trip/restore
+    /// the window-session tree. See [`AppDelegate::run_session_smoke`].
+    smoke_session: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -5109,6 +5165,7 @@ define_class!(
             let has_resize = self.ivars().smoke_resize;
             let has_mouse2 = self.ivars().smoke_mouse2;
             let has_savestate = self.ivars().smoke_savestate;
+            let has_session = self.ivars().smoke_session;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -5148,6 +5205,8 @@ define_class!(
                 self.schedule_mouse2_smoke();
             } else if has_savestate {
                 self.schedule_savestate_smoke();
+            } else if has_session {
+                self.schedule_session_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -5390,6 +5449,13 @@ define_class!(
         fn savestate_smoke(&self, _timer: &AnyObject) {
             self.run_savestate_smoke();
         }
+
+        /// Session smoke: capture/round-trip/restore the window-session tree,
+        /// exit 0/1.
+        #[unsafe(method(ghosttySessionSmoke:))]
+        fn session_smoke(&self, _timer: &AnyObject) {
+            self.run_session_smoke();
+        }
     }
 );
 
@@ -5421,6 +5487,7 @@ impl AppDelegate {
         smoke_resize: bool,
         smoke_mouse2: bool,
         smoke_savestate: bool,
+        smoke_session: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -5449,6 +5516,7 @@ impl AppDelegate {
             smoke_resize,
             smoke_mouse2,
             smoke_savestate,
+            smoke_session,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -8091,6 +8159,78 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_session_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttySessionSmoke:));
+    }
+
+    /// Window-session smoke (window-save-state slice 2 core): capture a live
+    /// tab's tree + per-pane cwd, round-trip the JSON, capture a split, and
+    /// restore a single-pane session into a fresh tab. Exits 0/1.
+    fn run_session_smoke(&self) {
+        use crate::context_menu::ContextAction;
+        use crate::session::{SessionNode, WindowSession};
+        let controller = &self.ivars().controller;
+        let fail = session_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at session smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at session smoke start".into());
+        };
+
+        // 1. Set a cwd via OSC 7, then capture — the single leaf carries it.
+        controller.feed_surface_output(tab, surface, b"\x1b]7;file:///tmp\x07");
+        Self::spin(0.2);
+        let Some(captured) = controller.capture_window_session(tab) else {
+            fail("capture_window_session returned None".into());
+        };
+        match &captured.tree {
+            SessionNode::Leaf { cwd } if cwd.as_deref() == Some("/tmp") => {}
+            other => fail(format!("captured leaf cwd should be /tmp; got {other:?}")),
+        }
+
+        // 2. JSON round-trips.
+        let json = captured.to_json();
+        match WindowSession::from_json(&json) {
+            Some(back) if back == captured => {}
+            other => fail(format!("session JSON did not round-trip; got {other:?}")),
+        }
+
+        // 3. A split is captured as a two-leaf tree.
+        controller.context_menu_action(tab, surface, ContextAction::SplitRight);
+        Self::spin(0.3);
+        let Some(split_session) = controller.capture_window_session(tab) else {
+            fail("capture after split returned None".into());
+        };
+        if split_session.tree.leaf_count() != 2 {
+            fail(format!(
+                "a split should capture two leaves; got {}",
+                split_session.tree.leaf_count()
+            ));
+        }
+
+        // 4. Restore a single-pane session → a fresh tab is spawned.
+        let session = WindowSession::new(SessionNode::Leaf {
+            cwd: Some("/tmp".into()),
+        });
+        let before = controller.tab_count();
+        let Some(new_tab) = controller.restore_window_session(&session) else {
+            fail("restore_window_session returned None".into());
+        };
+        Self::spin(0.3);
+        if new_tab == tab || controller.tab_count() != before + 1 {
+            fail("restore did not spawn a distinct new tab".into());
+        }
+
+        println!(
+            "OK: session smoke — captured a tab's tree + cwd, round-tripped the JSON, \
+             captured a split as two leaves, and restored a single-pane session into a \
+             fresh tab."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -8358,6 +8498,12 @@ fn savestate_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a session smoke failure and exit non-zero.
+fn session_fail(msg: String) -> ! {
+    eprintln!("FAIL: session smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -8478,6 +8624,7 @@ pub fn run(
     smoke_resize: bool,
     smoke_mouse2: bool,
     smoke_savestate: bool,
+    smoke_session: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -8509,6 +8656,7 @@ pub fn run(
         smoke_resize,
         smoke_mouse2,
         smoke_savestate,
+        smoke_session,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

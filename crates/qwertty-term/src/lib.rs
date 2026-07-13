@@ -31,6 +31,7 @@ pub mod scroll;
 pub mod search;
 pub mod searchkeys;
 pub mod selection;
+pub mod session;
 pub mod splitkeys;
 pub mod splits;
 pub mod tabkeys;

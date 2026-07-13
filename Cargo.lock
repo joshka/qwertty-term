@@ -2934,6 +2934,7 @@ dependencies = [
  "qwertty-term-termio",
  "qwertty-term-vt",
  "serde",
+ "serde_json",
  "toml",
 ]
 
