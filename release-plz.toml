@@ -12,10 +12,11 @@ changelog_path = "./CHANGELOG.md"
 # Only release when a release PR merges (not on every push to main).
 release_always = false
 
-# Don't run cargo-semver-checks in the release PR (the action image doesn't ship
-# it). Recommended follow-up: install it + enable this, given the family already
-# hit one semver-breaking change (#57 → 0.2.0).
-semver_check = false
+# `semver_check` is left at its default (enabled): the release-pr job installs
+# cargo-semver-checks (see the workflow), so release-plz detects API-breaking
+# changes and bumps the version accordingly — e.g. the `SnapshotCursor` field
+# addition (#57) is a break, so it lands 0.2.0 rather than 0.1.1. The binary
+# `qwertty-term` crate is auto-skipped (no library).
 
 # NOTE: ratatui's sibling setup drives the changelog via a `changelog_config =
 # "cliff.toml"` (git-cliff). Not adopted here yet to avoid reformatting the
