@@ -257,6 +257,9 @@ struct Surface {
     font: FontGrid,
     /// The current font size (drives font grid rebuilds).
     font_size: FontSize,
+    /// The user's `adjust-*` metric nudges, applied on every font-grid (re)build
+    /// so a font-size change keeps the configured cell/underline/cursor overrides.
+    metric_modifiers: qwertty_term_font::metrics::ModifierSet,
     /// This pane's own terminal view (its layer is the presented IOSurface).
     view: Retained<TerminalView>,
     /// Current grid dimensions (fit to this pane's rect, not the whole window).
@@ -458,10 +461,11 @@ impl Surface {
         geometry::grid_size(w, h, self.font.cell_width, self.font.cell_height)
     }
 
-    /// Rebuild the font grid at this pane's current font size × backing scale.
+    /// Rebuild the font grid at this pane's current font size × backing scale,
+    /// re-applying the configured `adjust-*` metric nudges.
     fn rebuild_font(&mut self, family: Option<&str>) {
         let px = (self.font_size.get() as f64) * self.scale;
-        if let Ok(fg) = font::build(family, px) {
+        if let Ok(fg) = font::build(family, px, &self.metric_modifiers) {
             self.font = fg;
             self.reflow();
         }
@@ -1425,6 +1429,9 @@ pub struct ControllerState {
     input_config: InputConfig,
     font_family: Option<String>,
     default_font_size: f32,
+    /// The user's `adjust-*` font-metric nudges, applied to every surface's font
+    /// grid at build time (`config.metric_modifiers()`).
+    metric_modifiers: qwertty_term_font::metrics::ModifierSet,
     mtm: MainThreadMarker,
     /// The engine startup colors resolved from `config.theme` (palette +
     /// default fg/bg/cursor), applied to every new tab's engine. Falls back
@@ -1616,6 +1623,7 @@ impl Controller {
             input_config: InputConfig::default(),
             font_family: config.font_family.clone(),
             default_font_size,
+            metric_modifiers: config.metric_modifiers(),
             mtm,
             startup_colors,
             selection_colors,
@@ -2798,9 +2806,16 @@ impl Controller {
         // screen dirty so the palette swap repaints immediately).
         state.startup_colors = startup_colors.clone();
         state.selection_colors = selection_colors;
+        // Refresh the `adjust-*` metric nudges for future surfaces; existing
+        // surfaces pick up any change on their next font rebuild (a font-size
+        // change), so stash them per-surface too. (A live re-metric of existing
+        // panes needs the font-reload path — still a restart today.)
+        let metric_modifiers = config.metric_modifiers();
+        state.metric_modifiers = metric_modifiers.clone();
         for tab in state.tabs.values_mut() {
             for surface in tab.surfaces.values_mut() {
                 surface.selection_colors = selection_colors;
+                surface.metric_modifiers = metric_modifiers.clone();
                 let (mut engine, _recovered) = lock_or_recover(&surface.engine);
                 engine.set_colors(startup_colors.clone());
             }
@@ -4012,7 +4027,7 @@ impl Controller {
         scale: f64,
         cwd: Option<&std::path::Path>,
     ) -> Option<Surface> {
-        let (family, default_size, startup_colors, selection_colors, dim_alpha, dim_fill) = {
+        let (family, default_size, startup_colors, selection_colors, dim_alpha, dim_fill, mods) = {
             let s = self.0.borrow();
             (
                 s.font_family.clone(),
@@ -4021,11 +4036,12 @@ impl Controller {
                 s.selection_colors,
                 s.unfocused_dim_alpha,
                 s.unfocused_dim_fill,
+                s.metric_modifiers.clone(),
             )
         };
 
         let font_size = FontSize::new(default_size);
-        let fg = font::build(family.as_deref(), (font_size.get() as f64) * scale).ok()?;
+        let fg = font::build(family.as_deref(), (font_size.get() as f64) * scale, &mods).ok()?;
         let (cw, ch) = (fg.cell_width, fg.cell_height);
         let init_w = (INITIAL_WIDTH * scale) as usize;
         let init_h = (INITIAL_HEIGHT * scale) as usize;
@@ -4056,6 +4072,7 @@ impl Controller {
             render,
             font: fg,
             font_size,
+            metric_modifiers: mods,
             view,
             cols,
             rows,
