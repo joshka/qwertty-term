@@ -299,8 +299,9 @@ items are `[ ]` wholesale unless noted.
       `Frame`, `FullSnapshot::capture_live`, `Engine::for_grid`)
 - [x] MB4: betamax's offscreen render path (via `qwertty-term-renderer`) is exercised by
       `examples/frame-capture`; betamax's own adoption tracked in the betamax repo
-- [~] Injectable clock (deterministic render proven; cursor-blink phase injected via
-      `FrameOptions`, but the blink *mode* isn't threaded through the snapshot yet — #57)
+- [x] Injectable clock: deterministic render proven; cursor-blink *phase* injected via
+      `FrameOptions.cursor_blink_visible`, and the blink *mode* (DEC 12) now threads through
+      `SnapshotCursor.blinking` (#57, T2)
 - [x] **crates.io publish — all 8 crates, latest 0.2.0** (`qwertty-term` + `-vt`/`-font`/
       `-renderer`/`-termio`/`-input`/`-sprite`/`-ffi`; 0.1.0 published 2026-07-08, 0.2.0
       2026-07-13 via release-plz + Trusted Publishing, docs.rs built)
