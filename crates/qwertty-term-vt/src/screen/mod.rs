@@ -322,12 +322,17 @@ impl Screen {
                             return None;
                         }
                     }
-                    // Move the top pin back in bounds to the top row.
-                    // SAFETY: tl pin pointer live.
+                    // Move the top pin back in bounds to the top row. During
+                    // incomplete reflow the destination page may be narrower, so
+                    // clamp the retained rectangle column to it. Port of
+                    // upstream 607160657.
+                    // SAFETY: tl pin pointer live; head node live.
                     let tl_x = unsafe { (*tl).x };
-                    let mut p = Pin::at(pages.head_node());
+                    let head = pages.head_node();
+                    let mut p = Pin::at(head);
                     if sel.rectangle {
-                        p.x = tl_x;
+                        let head_cols = unsafe { pages.node_data(head).size.cols };
+                        p.x = tl_x.min(head_cols - 1);
                     }
                     pages.track_pin(p)
                 }
@@ -340,13 +345,17 @@ impl Screen {
                     // SAFETY: br pin pointer live; last node live.
                     let br_x = unsafe { (*br).x };
                     let last = pages.last_node();
-                    let last_rows = unsafe { pages.node_data(last).size.rows };
+                    // Use the LAST NODE's width, not the pagelist's: mid-reflow
+                    // the owning page may be narrower, and a retained br.x could
+                    // fall outside it. Port of upstream 607160657.
+                    let last_size = unsafe { pages.node_data(last).size };
+                    let last_cols = last_size.cols;
                     let x = if sel.rectangle {
-                        br_x
+                        br_x.min(last_cols - 1)
                     } else {
-                        pages.cols() - 1
+                        last_cols - 1
                     };
-                    let p = Pin::with(last, last_rows - 1, x);
+                    let p = Pin::with(last, last_size.rows - 1, x);
                     pages.track_pin(p)
                 }
             };
