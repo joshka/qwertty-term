@@ -8,10 +8,12 @@
 //! bindings) is deliberately NOT ported — the `objc2-metal` crate provides
 //! the same bindings, generated from the headers.
 //!
-//! Chunk R2 adds the frame lifecycle and presentation: [`Frame`] (command
-//! buffer + completion → present → health), [`RenderPass`] (encoder +
-//! instanced draws), [`Pipeline`] (runtime-compiled shader library + vertex
-//! descriptor + premultiplied-alpha blending), and [`IOSurfaceLayer`] (the
+//! Chunk R2 adds the frame lifecycle and presentation: [`Frame`](crate::metal::Frame)
+//! (command buffer + completion → present → health),
+//! [`RenderPass`](crate::metal::RenderPass) (encoder + instanced draws),
+//! [`Pipeline`](crate::metal::Pipeline) (runtime-compiled shader library + vertex
+//! descriptor + premultiplied-alpha blending), and
+//! [`IOSurfaceLayer`](crate::metal::IOSurfaceLayer) (the
 //! `CALayer` subclass presentation target). The R1 placeholder enums for
 //! `Frame`/`RenderPass`/`Pipeline` are replaced by these real types.
 //!
@@ -19,7 +21,8 @@
 //! (R3, lives with the shaders), the cell engine that drives rebuild/draw
 //! (R4), and the view-attachment/`contentsScale` wiring in upstream
 //! `Metal.init` (R5, needs a window). The `contentsScale` half of that R5 item
-//! is now wired: [`IOSurfaceLayer::set_contents_scale`] lets the window host
+//! is now wired: [`IOSurfaceLayer::set_contents_scale`](crate::metal::IOSurfaceLayer::set_contents_scale)
+//! lets the window host
 //! match the layer's scale to the display's backing scale so the device-pixel
 //! surface isn't shown at the wrong magnification (the Retina "blank window"
 //! fix).

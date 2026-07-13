@@ -8,8 +8,10 @@
 //! `drawFrame` (the three first-pixels pipelines encoded into an R2 `Frame`
 //! against the swap chain, minus image / overlay / post passes).
 //!
-//! The engine owns a [`Contents`], the [`Uniforms`], and a [`SwapChain`]; each
-//! frame it consumes a [`RenderSnapshot`] and a `qwertty-term-font` [`Grid`] to
+//! The engine owns a [`Contents`](crate::cells::Contents), the
+//! [`Uniforms`](crate::wire::Uniforms), and a [`SwapChain`](crate::swap_chain::SwapChain);
+//! each frame it consumes a [`RenderSnapshot`](crate::snapshot::RenderSnapshot) and a
+//! `qwertty-term-font` [`Grid`](qwertty_term_font::grid::Grid) to
 //! rebuild the buffers, then draws. See `docs/analysis/renderer-r4.md`.
 //!
 //! # Embeddability quickstart

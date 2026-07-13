@@ -328,7 +328,8 @@ impl FullSnapshot {
         FullSnapshot::from_window(terminal.snapshot_window_tracking(scrollback_offset))
     }
 
-    /// Wrap an already-captured [`SnapshotWindow`], converting the kitty image
+    /// Wrap an already-captured [`SnapshotWindow`](qwertty_term_vt::snapshot::SnapshotWindow),
+    /// converting the kitty image
     /// data vt resolved into it (R6 slice 5: `Terminal::snapshot_window[_tracking]`
     /// fills the window's `kitty_*` fields) into the renderer's GPU-ready
     /// [`KittyPlacement`]/[`KittyImage`] shapes. **Every** capture path funnels

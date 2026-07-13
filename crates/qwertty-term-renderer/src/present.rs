@@ -6,9 +6,10 @@
 //! wants those pixels on screen instead. This module adds the on-screen path
 //! without touching the R4 draw core:
 //!
-//! - [`Engine::draw_and_present`]: draw one frame (identical GPU work to
-//!   `draw_frame`) and assign the drawn target's IOSurface to an
-//!   [`IOSurfaceLayer`]'s `contents`, presenting it. Sync mode: the frame is
+//! - [`Engine::draw_and_present`](crate::engine::Engine::draw_and_present): draw one
+//!   frame (identical GPU work to `draw_frame`) and assign the drawn target's IOSurface
+//!   to an [`IOSurfaceLayer`](crate::metal::IOSurfaceLayer)'s `contents`, presenting it.
+//!   Sync mode: the frame is
 //!   completed with `waitUntilCompleted` before the surface is attached, so the
 //!   layer never shows a half-drawn surface.
 //!
