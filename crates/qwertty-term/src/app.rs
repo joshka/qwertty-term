@@ -2465,15 +2465,32 @@ impl Controller {
 
     /// Re-read the user config from disk and re-apply the settings that are safe
     /// to change without rebuilding surfaces: the keybind `Set`, copy-on-select,
-    /// and the scroll multiplier. Bound to the `reload_config` action (default
+    /// the scroll multiplier, and the **theme** (palette + default fg/bg/cursor +
+    /// selection colors, pushed live into every surface's engine with an
+    /// immediate repaint). Bound to the `reload_config` action (default
     /// `cmd+shift+,`).
     ///
-    /// Not yet re-applied here (they need per-surface / engine re-derivation —
-    /// follow-up slices, see `docs/analysis/config-core.md` §7): theme + palette,
-    /// fonts, colors, cursor, and window padding. Those take effect on restart or
+    /// Not yet re-applied here (need the font grid / window rebuild —
+    /// follow-up slices, see `docs/analysis/config-core.md` §7): fonts (family/
+    /// size), cursor style, and window padding. Those take effect on restart or
     /// for new surfaces until wired.
     pub fn reload_config(&self) {
         let config = crate::config::load();
+
+        // Re-resolve the theme (same derivation as `Controller::new`).
+        let theme = config.theme.as_deref().and_then(crate::theme::load_theme);
+        let startup_colors = theme
+            .as_ref()
+            .map(crate::theme::ThemeColors::to_colors)
+            .unwrap_or_default();
+        let selection_colors = match theme
+            .as_ref()
+            .and_then(|t| t.selection_background.zip(t.selection_foreground))
+        {
+            Some((bg, fg)) => SelectionColors::Explicit { bg, fg },
+            None => SelectionColors::Inverse,
+        };
+
         let mut state = self.0.borrow_mut();
         state.keybinds = crate::keybind::build_set(&config.keybind);
         state.copy_on_select = config.copy_on_select;
@@ -2482,9 +2499,23 @@ impl Controller {
             discrete: config.mouse_scroll_multiplier.discrete,
         }
         .clamped();
+
+        // Apply the theme colors to the controller defaults (used by future
+        // surfaces) and live to every existing surface's engine (which marks the
+        // screen dirty so the palette swap repaints immediately).
+        state.startup_colors = startup_colors.clone();
+        state.selection_colors = selection_colors;
+        for tab in state.tabs.values_mut() {
+            for surface in tab.surfaces.values_mut() {
+                surface.selection_colors = selection_colors;
+                let (mut engine, _recovered) = lock_or_recover(&surface.engine);
+                engine.set_colors(startup_colors.clone());
+            }
+        }
+
         eprintln!(
-            "qwertty-term: config reloaded (keybinds, copy-on-select, scroll-multiplier; \
-             theme/fonts/colors need a restart until wired)"
+            "qwertty-term: config reloaded (keybinds, copy-on-select, scroll-multiplier, \
+             theme/colors; fonts still need a restart until wired)"
         );
     }
 

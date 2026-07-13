@@ -869,6 +869,19 @@ fn increase_capacity_preserves_dirty_flag() {
     assert!(unsafe { (*new_node).data.dirty });
 }
 
+#[test]
+fn mark_all_dirty_is_the_inverse_of_clear_dirty() {
+    let mut s = PageList::init(80, 24, None);
+    s.clear_dirty();
+    let node = s.first_node();
+    assert!(!unsafe { (*node).data.dirty });
+    assert!(!unsafe { (*(*node).data.get_row(0)).dirty() });
+
+    s.mark_all_dirty();
+    assert!(unsafe { (*node).data.dirty });
+    assert!(unsafe { (*(*node).data.get_row(0)).dirty() });
+}
+
 // ---- split pin tracking ----
 
 #[test]

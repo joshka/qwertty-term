@@ -615,6 +615,24 @@ impl PageList {
         }
     }
 
+    /// Mark every page and every row dirty (the inverse of [`clear_dirty`]),
+    /// forcing the renderer's next incremental snapshot to repaint the whole
+    /// screen. Used when something invisible to per-cell mutation changes the
+    /// rendered output — e.g. a live palette / theme swap.
+    pub fn mark_all_dirty(&mut self) {
+        let mut node = self.pages.first;
+        while !node.is_null() {
+            unsafe {
+                (*node).data.dirty = true;
+                let rows = (*node).data.size.rows as usize;
+                for y in 0..rows {
+                    (*(*node).data.get_row(y)).set_dirty(true);
+                }
+                node = (*node).next;
+            }
+        }
+    }
+
     /// Clear every page's page-level dirty flag, leaving per-row dirty bits
     /// untouched. Used by the renderer snapshot's incremental capture path
     /// after it has consumed the page dirty state (upstream `render.zig`'s
