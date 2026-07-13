@@ -69,6 +69,11 @@ pub mod row;
 pub mod shaders;
 pub mod size;
 pub mod snapshot;
+/// The software (CPU) render backend: a platform-free implementation of the
+/// [`gpu::GpuBackend`] trait that composites the frozen wire structs into a BGRA
+/// framebuffer — the headless render path (ADR 003 P1, PR-2). Available on all
+/// targets (no GPU / `objc2`), so it builds and tests on macOS and Linux.
+pub mod software;
 pub mod swap_chain;
 pub mod wire;
 
