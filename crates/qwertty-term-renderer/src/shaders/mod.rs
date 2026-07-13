@@ -64,7 +64,7 @@ pub enum VertexFormat {
 /// `autoAttribute`'s per-field `(format, offset, bufferIndex)` triple;
 /// `buffer_index` is always 0 per the frozen convention (vertex/instance
 /// data), so it's not repeated per-attribute here — see
-/// [`PipelineDescription::vertex_buffer_index`].
+/// [`VERTEX_BUFFER_INDEX`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexAttribute {
     /// Shader-side attribute index (`[[attribute(N)]]`).
