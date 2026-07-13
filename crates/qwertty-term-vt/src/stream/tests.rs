@@ -1370,6 +1370,30 @@ fn fastpath_incomplete_utf8_across_chunks() {
 }
 
 #[test]
+fn fastpath_malformed_utf8_defers_to_dfa() {
+    // The bulk multibyte fast path only accepts Unicode Table 3-7 well-formed
+    // sequences; every ill-formed case must fall back to the DFA and produce
+    // the identical replacement output as the byte-at-a-time path. Covers:
+    // over-long 2/3/4-byte encodings, a UTF-16 surrogate encoding
+    // (ED A0 80), an out-of-range 4-byte (F4 90 80 80 > U+10FFFF), stray
+    // continuation bytes, C0/C1 and F5..FF lead bytes, and sequences truncated
+    // by an ESC or a valid lead mid-run — all interleaved with valid wide CJK.
+    let input: &[u8] = b"ok\xC0\xAF\xE0\x80\xAF\xF0\x80\x80\xAF\
+\xED\xA0\x80\xF4\x90\x80\x80mid\x80\x81\xFE\xFF\xC2tail\xE4\xB8\x80\x1bMz\xF0\x9F\x99\x82";
+    assert_fastpath_equiv(16, 6, input);
+}
+
+#[test]
+fn fastpath_wide_cjk_and_emoji_bulk() {
+    // A long run of 3-byte CJK and 4-byte emoji with no ASCII — the pure
+    // multibyte fast path, crossing soft-wrap boundaries and the pending-wrap
+    // column so the wide (wide, spacer_tail) fill re-enters repeatedly.
+    let input =
+        "你好世界这是宽字符吞吐测试文本一二三四🙂👍🎉三四五六七八九十\r\n再来一遍".as_bytes();
+    assert_fastpath_equiv(10, 6, input);
+}
+
+#[test]
 fn fastpath_esc_at_run_boundary() {
     // ESC immediately after a printable run (the common case): scan stops on
     // ESC without consuming it, feed drives the escape via the scalar path.
