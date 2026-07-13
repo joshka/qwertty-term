@@ -172,6 +172,94 @@ pub enum MouseFormat {
     SgrPixels,
 }
 
+/// The mouse cursor shape, set via OSC 22. The variants are the W3C/CSS
+/// cursor shapes so the set is cross-platform (the apprt maps them to native
+/// cursors). Default is [`MouseShape::Text`]. Port of `mouse.Shape`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseShape {
+    Default,
+    ContextMenu,
+    Help,
+    Pointer,
+    Progress,
+    Wait,
+    Cell,
+    Crosshair,
+    #[default]
+    Text,
+    VerticalText,
+    Alias,
+    Copy,
+    Move,
+    NoDrop,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    AllScroll,
+    ColResize,
+    RowResize,
+    NResize,
+    EResize,
+    SResize,
+    WResize,
+    NeResize,
+    NwResize,
+    SeResize,
+    SwResize,
+    EwResize,
+    NsResize,
+    NeswResize,
+    NwseResize,
+    ZoomIn,
+    ZoomOut,
+}
+
+impl MouseShape {
+    /// Parse an OSC 22 shape name. Accepts the CSS names plus the X11/legacy
+    /// aliases upstream recognizes. Port of `mouse.Shape.fromString` +
+    /// `string_map`. Returns `None` for an unknown name.
+    pub fn from_name(v: &str) -> Option<MouseShape> {
+        use MouseShape as S;
+        Some(match v {
+            "default" | "left_ptr" => S::Default,
+            "context-menu" => S::ContextMenu,
+            "help" | "question_arrow" => S::Help,
+            "pointer" | "hand" => S::Pointer,
+            "progress" | "left_ptr_watch" => S::Progress,
+            "wait" | "watch" => S::Wait,
+            "cell" => S::Cell,
+            "crosshair" | "cross" => S::Crosshair,
+            "text" | "xterm" => S::Text,
+            "vertical-text" => S::VerticalText,
+            "alias" | "dnd-link" => S::Alias,
+            "copy" | "dnd-copy" => S::Copy,
+            "move" | "dnd-move" => S::Move,
+            "no-drop" | "dnd-no-drop" => S::NoDrop,
+            "not-allowed" | "crossed_circle" => S::NotAllowed,
+            "grab" | "hand1" => S::Grab,
+            "grabbing" => S::Grabbing,
+            "all-scroll" | "fleur" => S::AllScroll,
+            "col-resize" => S::ColResize,
+            "row-resize" => S::RowResize,
+            "n-resize" | "top_side" => S::NResize,
+            "e-resize" | "right_side" => S::EResize,
+            "s-resize" | "bottom_side" => S::SResize,
+            "w-resize" | "left_side" => S::WResize,
+            "ne-resize" | "top_right_corner" => S::NeResize,
+            "nw-resize" | "top_left_corner" => S::NwResize,
+            "se-resize" | "bottom_right_corner" => S::SeResize,
+            "sw-resize" | "bottom_left_corner" => S::SwResize,
+            "ew-resize" => S::EwResize,
+            "ns-resize" => S::NsResize,
+            "nesw-resize" => S::NeswResize,
+            "nwse-resize" => S::NwseResize,
+            "zoom-in" => S::ZoomIn,
+            "zoom-out" => S::ZoomOut,
+            _ => return None,
+        })
+    }
+}
+
 /// Packed terminal flags. Port of `Terminal.flags`.
 #[derive(Debug, Clone, Copy)]
 pub struct Flags {
@@ -269,6 +357,10 @@ pub struct Terminal {
 
     /// Packed terminal flags.
     pub flags: Flags,
+
+    /// The mouse cursor shape requested via OSC 22. Default [`MouseShape::Text`];
+    /// the apprt reads this and applies the native cursor.
+    pub mouse_shape: MouseShape,
 }
 
 impl Terminal {
@@ -303,6 +395,7 @@ impl Terminal {
             previous_char: None,
             modes: ModeState::new(),
             flags: Flags::default(),
+            mouse_shape: MouseShape::Text,
         }
     }
 
@@ -1713,6 +1806,7 @@ impl Terminal {
         self.pwd.clear();
         self.title.clear();
         self.status_display = StatusDisplay::Main;
+        self.mouse_shape = MouseShape::Text;
         self.scrolling_region = ScrollingRegion {
             top: 0,
             bottom: self.rows - 1,

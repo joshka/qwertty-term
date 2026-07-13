@@ -644,6 +644,34 @@ fn full_reset_clears_mouse_flags() {
     assert_eq!(s.handler.terminal.flags.mouse_format, MouseFormat::X10);
 }
 
+// OSC 22 sets the mouse cursor shape (default Text). Recognizes CSS names and
+// X11/legacy aliases; unknown names are ignored. Port of setMouseShape.
+#[test]
+fn osc22_sets_mouse_shape() {
+    use crate::terminal::MouseShape;
+    let mut s = term(10, 10);
+    assert_eq!(s.handler.terminal.mouse_shape, MouseShape::Text);
+
+    s.feed(b"\x1b]22;pointer\x1b\\");
+    assert_eq!(s.handler.terminal.mouse_shape, MouseShape::Pointer);
+
+    // X11/legacy aliases map to the same CSS shapes.
+    s.feed(b"\x1b]22;xterm\x1b\\"); // -> text
+    assert_eq!(s.handler.terminal.mouse_shape, MouseShape::Text);
+    s.feed(b"\x1b]22;hand\x1b\\"); // -> pointer
+    assert_eq!(s.handler.terminal.mouse_shape, MouseShape::Pointer);
+    s.feed(b"\x1b]22;top_left_corner\x1b\\"); // -> nw-resize
+    assert_eq!(s.handler.terminal.mouse_shape, MouseShape::NwResize);
+
+    // Unknown shape name is ignored (shape unchanged).
+    s.feed(b"\x1b]22;definitely-not-a-shape\x1b\\");
+    assert_eq!(s.handler.terminal.mouse_shape, MouseShape::NwResize);
+
+    // RIS resets the shape to the default.
+    s.feed(b"\x1bc");
+    assert_eq!(s.handler.terminal.mouse_shape, MouseShape::Text);
+}
+
 // OSC 8 hyperlink start/end wire through to Screen hyperlink attribution.
 // Regression for the previously-dropped `osc_dispatch` arm (#26): the Screen
 // implemented hyperlinks all along, but the stream handler ignored the parsed
