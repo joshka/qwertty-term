@@ -167,6 +167,11 @@ impl<T: Copy + 'static> Buffer<T> {
 
 impl<T: Copy + 'static> GpuBuffer<T> for Buffer<T> {
     type Error = MetalError;
+    type Handle = ProtocolObject<dyn MTLBuffer>;
+
+    fn handle(&self) -> &ProtocolObject<dyn MTLBuffer> {
+        &self.buffer
+    }
 
     fn len(&self) -> usize {
         self.len

@@ -43,17 +43,19 @@ use objc2_metal::{
 };
 
 pub use self::buffer::Buffer;
-pub use self::frame::{Frame, FrameCompletion, Health, Primitive};
+pub use self::frame::Frame;
 pub use self::layer::{DisplayCallback, IOSurfaceLayer};
 pub use self::pipeline::{
     ColorAttachment, Options as PipelineOptions, Pipeline, VertexAttribute, VertexFormat,
     VertexLayout, VertexStep, library_from_source,
 };
-pub use self::render_pass::{Attachment, Draw, RenderPass, Step};
+pub use self::render_pass::RenderPass;
 pub use self::sampler::Sampler;
 pub use self::target::Target;
 pub use self::texture::Texture;
-use crate::gpu::{GpuBackend, SamplerOptions, TextureFormat, TextureOptions};
+use crate::gpu::{
+    FrameCompletion, GpuBackend, SamplerOptions, ShaderSource, TextureFormat, TextureOptions,
+};
 
 /// Errors from the Metal backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,13 +210,6 @@ impl Metal {
         }
     }
 
-    /// Begin encoding a frame on this context's command queue. Port of
-    /// `Metal.beginFrame` / `Frame.begin`. The `completion` hook runs once the
-    /// frame finishes (present + health report); the swap chain supplies it.
-    pub fn begin_frame(&self, completion: FrameCompletion) -> Result<Frame, MetalError> {
-        Frame::begin(&self.queue, completion)
-    }
-
     /// Compile a render pipeline against this device. Port of `Pipeline.init`
     /// dispatched through `Metal`. R3 owns the production shader source +
     /// pipeline table; this is the device-bound entry point they call.
@@ -246,6 +241,7 @@ impl GpuBackend for Metal {
     type Buffer<T: Copy + 'static> = Buffer<T>;
     type Texture = Texture;
     type Sampler = Sampler;
+    type BufferHandle = ProtocolObject<dyn objc2_metal::MTLBuffer>;
 
     fn max_texture_size(&self) -> u32 {
         self.max_texture_size
@@ -298,6 +294,76 @@ impl GpuBackend for Metal {
     /// Upstream `Sampler.init` with `Metal.samplerOptions`.
     fn new_sampler(&self, options: SamplerOptions) -> Result<Sampler, MetalError> {
         Sampler::new(&self.device, options)
+    }
+
+    /// Begin encoding a frame on this context's command queue. Port of
+    /// `Metal.beginFrame` / `Frame.begin`.
+    fn begin_frame(&self, completion: FrameCompletion) -> Result<Frame, MetalError> {
+        Frame::begin(&self.queue, completion)
+    }
+
+    /// Compile one pipeline from the backend-agnostic description + MSL source:
+    /// build the shader library, translate the R3 vertex-attribute table into a
+    /// Metal `VertexLayout`, and create the pipeline against this device's
+    /// target pixel format. Folds the shader library + pixel format that used
+    /// to leak into the engine's pipeline-build helper.
+    fn build_pipeline(
+        &self,
+        desc: &crate::shaders::PipelineDescription,
+        source: ShaderSource<'_>,
+    ) -> Result<Pipeline, MetalError> {
+        let src = match source {
+            ShaderSource::Msl(s) => s,
+            ShaderSource::None => return Err(MetalError::MetalFailed),
+        };
+        let library = library_from_source(&self.device, src)?;
+        let pixel_format = self.target_pixel_format();
+
+        let attrs: Vec<VertexAttribute> = desc
+            .vertex_attributes
+            .unwrap_or(&[])
+            .iter()
+            .map(|a| VertexAttribute {
+                format: map_vertex_format(a.format),
+                offset: a.offset,
+            })
+            .collect();
+        let vertex_layout = desc.vertex_attributes.map(|_| VertexLayout {
+            stride: desc.stride,
+            attributes: &attrs,
+            step: match desc.step_fn {
+                crate::shaders::StepFunction::PerVertex => VertexStep::PerVertex,
+                crate::shaders::StepFunction::PerInstance => VertexStep::PerInstance,
+            },
+        });
+
+        Pipeline::new(
+            &self.device,
+            &PipelineOptions {
+                vertex_fn: desc.vertex_fn,
+                fragment_fn: desc.fragment_fn,
+                vertex_library: &library,
+                fragment_library: &library,
+                vertex_layout,
+                attachments: &[ColorAttachment {
+                    pixel_format,
+                    blending_enabled: desc.blending.enabled,
+                }],
+            },
+        )
+    }
+}
+
+/// Map an R3 (backend-agnostic) vertex format onto the Metal backend's format.
+fn map_vertex_format(f: crate::shaders::VertexFormat) -> VertexFormat {
+    match f {
+        crate::shaders::VertexFormat::UChar4 => VertexFormat::UChar4,
+        crate::shaders::VertexFormat::UShort2 => VertexFormat::UShort2,
+        crate::shaders::VertexFormat::Short2 => VertexFormat::Short2,
+        crate::shaders::VertexFormat::UInt2 => VertexFormat::UInt2,
+        crate::shaders::VertexFormat::UChar => VertexFormat::UChar,
+        crate::shaders::VertexFormat::Float2 => VertexFormat::Float2,
+        crate::shaders::VertexFormat::Float4 => VertexFormat::Float4,
     }
 }
 

@@ -24,8 +24,10 @@
 #![cfg(target_os = "macos")]
 
 use crate::engine::Engine;
-use crate::gpu::GpuBuffer;
-use crate::metal::{Attachment, Draw, IOSurfaceLayer, MetalError, Primitive, Step};
+use crate::gpu::{
+    Attachment, Draw, GpuBackend, GpuBuffer, GpuFrame, GpuRenderPass, Primitive, Step,
+};
+use crate::metal::{IOSurfaceLayer, MetalError};
 
 impl Engine {
     /// Draw one frame and present it by attaching the drawn target's IOSurface
@@ -116,15 +118,15 @@ impl Engine {
         let mut frame = backend.begin_frame(Box::new(|_health, _sync| {}))?;
         {
             let pass = frame.render_pass(&[Attachment {
-                texture: slot.target.texture(),
+                texture: &slot.target,
                 clear_color: Some([0.0, 0.0, 0.0, 0.0]),
             }])?;
 
             pass.step(&Step {
-                pipeline_state: bg_pipe.state(),
+                pipeline: bg_pipe,
                 vertex: None,
-                uniforms: Some(slot.uniforms.buffer()),
-                extras: &[Some(slot.cells_bg.buffer())],
+                uniforms: Some(slot.uniforms.handle()),
+                extras: &[Some(slot.cells_bg.handle())],
                 textures: &[],
                 samplers: &[],
                 draw: Draw::vertices(Primitive::Triangle, 3),
@@ -133,17 +135,17 @@ impl Engine {
             crate::engine::encode_image_steps(
                 &pass,
                 image_pipe,
-                slot.uniforms.buffer(),
+                slot.uniforms.handle(),
                 images,
                 image_instances,
                 placements,
                 0..img_bg_end,
             );
             pass.step(&Step {
-                pipeline_state: cell_bg_pipe.state(),
+                pipeline: cell_bg_pipe,
                 vertex: None,
-                uniforms: Some(slot.uniforms.buffer()),
-                extras: &[Some(slot.cells_bg.buffer())],
+                uniforms: Some(slot.uniforms.handle()),
+                extras: &[Some(slot.cells_bg.handle())],
                 textures: &[],
                 samplers: &[],
                 draw: Draw::vertices(Primitive::Triangle, 3),
@@ -152,18 +154,18 @@ impl Engine {
             crate::engine::encode_image_steps(
                 &pass,
                 image_pipe,
-                slot.uniforms.buffer(),
+                slot.uniforms.handle(),
                 images,
                 image_instances,
                 placements,
                 img_bg_end..img_text_end,
             );
             pass.step(&Step {
-                pipeline_state: cell_text_pipe.state(),
-                vertex: Some(slot.cells.buffer()),
-                uniforms: Some(slot.uniforms.buffer()),
-                extras: &[Some(slot.cells_bg.buffer())],
-                textures: &[Some(slot.grayscale.texture()), Some(slot.color.texture())],
+                pipeline: cell_text_pipe,
+                vertex: Some(slot.cells.handle()),
+                uniforms: Some(slot.uniforms.handle()),
+                extras: &[Some(slot.cells_bg.handle())],
+                textures: &[Some(&slot.grayscale), Some(&slot.color)],
                 samplers: &[],
                 draw: Draw {
                     primitive: Primitive::TriangleStrip,
@@ -176,7 +178,7 @@ impl Engine {
             crate::engine::encode_image_steps(
                 &pass,
                 image_pipe,
-                slot.uniforms.buffer(),
+                slot.uniforms.handle(),
                 images,
                 image_instances,
                 placements,

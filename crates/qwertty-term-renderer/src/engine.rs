@@ -64,11 +64,11 @@ use qwertty_term_vt::snapshot::{CellStyle, SnapshotCell, SnapshotColor, Snapshot
 
 use crate::cells::{self, Contents, Key};
 use crate::cursor::{self, Style as CursorStyle};
-use crate::gpu::{GpuBackend, GpuBuffer, GpuTexture};
-use crate::metal::{
-    Attachment, Buffer, Draw, Metal, MetalError, Pipeline, PipelineOptions, Primitive, RenderPass,
-    Step, Texture, VertexAttribute, VertexFormat, VertexLayout, VertexStep, library_from_source,
+use crate::gpu::{
+    Attachment, Draw, GpuBackend, GpuBuffer, GpuFrame, GpuRenderPass, GpuTexture, Primitive,
+    ShaderSource, Step,
 };
+use crate::metal::{Buffer, Metal, MetalError, Pipeline, RenderPass, Texture};
 use crate::shaders;
 use crate::snapshot::{KittyImage, KittyPlacement, RenderSnapshot};
 use crate::swap_chain::{SwapChain, SwapChainMode};
@@ -248,13 +248,23 @@ impl Engine {
         let swap_chain = SwapChain::new(&backend, SwapChainMode::Sync)?;
         let slot_count = swap_chain.slot_count();
 
-        let library = library_from_source(backend.device(), shaders::SOURCE)?;
-        let pixel_format = backend.target_pixel_format();
-
-        let bg_color_pipeline = build_pipeline(&backend, &library, pixel_format, "bg_color")?;
-        let cell_bg_pipeline = build_pipeline(&backend, &library, pixel_format, "cell_bg")?;
-        let cell_text_pipeline = build_pipeline(&backend, &library, pixel_format, "cell_text")?;
-        let image_pipeline = build_pipeline(&backend, &library, pixel_format, "image")?;
+        // The backend compiles each pipeline from the backend-agnostic
+        // description + MSL source (Metal builds the shader library + reads its
+        // target pixel format internally — no longer leaked here).
+        let desc = |name: &str| {
+            shaders::PIPELINE_DESCRIPTIONS
+                .iter()
+                .find(|d| d.name == name)
+                .expect("pipeline description exists")
+        };
+        let bg_color_pipeline =
+            backend.build_pipeline(desc("bg_color"), ShaderSource::Msl(shaders::SOURCE))?;
+        let cell_bg_pipeline =
+            backend.build_pipeline(desc("cell_bg"), ShaderSource::Msl(shaders::SOURCE))?;
+        let cell_text_pipeline =
+            backend.build_pipeline(desc("cell_text"), ShaderSource::Msl(shaders::SOURCE))?;
+        let image_pipeline =
+            backend.build_pipeline(desc("image"), ShaderSource::Msl(shaders::SOURCE))?;
 
         Ok(Engine {
             backend,
@@ -1287,7 +1297,7 @@ impl Engine {
         let mut frame = backend.begin_frame(Box::new(|_health, _sync| {}))?;
         {
             let pass = frame.render_pass(&[Attachment {
-                texture: slot.target.texture(),
+                texture: &slot.target,
                 clear_color: Some([0.0, 0.0, 0.0, 0.0]),
             }])?;
 
@@ -1295,10 +1305,10 @@ impl Engine {
             //    buffer index 2 for padding-extend, but primarily fills the
             //    surface bg from the uniform). No vertex buffer.
             pass.step(&Step {
-                pipeline_state: bg_color_pipeline.state(),
+                pipeline: bg_color_pipeline,
                 vertex: None,
-                uniforms: Some(slot.uniforms.buffer()),
-                extras: &[Some(slot.cells_bg.buffer())],
+                uniforms: Some(slot.uniforms.handle()),
+                extras: &[Some(slot.cells_bg.handle())],
                 textures: &[],
                 samplers: &[],
                 draw: Draw::vertices(Primitive::Triangle, 3),
@@ -1308,7 +1318,7 @@ impl Engine {
             encode_image_steps(
                 &pass,
                 image_pipeline,
-                slot.uniforms.buffer(),
+                slot.uniforms.handle(),
                 images,
                 image_instances,
                 pending_placements,
@@ -1317,10 +1327,10 @@ impl Engine {
 
             // 2. Per-cell backgrounds (full-screen triangle sampling bg_cells).
             pass.step(&Step {
-                pipeline_state: cell_bg_pipeline.state(),
+                pipeline: cell_bg_pipeline,
                 vertex: None,
-                uniforms: Some(slot.uniforms.buffer()),
-                extras: &[Some(slot.cells_bg.buffer())],
+                uniforms: Some(slot.uniforms.handle()),
+                extras: &[Some(slot.cells_bg.handle())],
                 textures: &[],
                 samplers: &[],
                 draw: Draw::vertices(Primitive::Triangle, 3),
@@ -1330,7 +1340,7 @@ impl Engine {
             encode_image_steps(
                 &pass,
                 image_pipeline,
-                slot.uniforms.buffer(),
+                slot.uniforms.handle(),
                 images,
                 image_instances,
                 pending_placements,
@@ -1341,11 +1351,11 @@ impl Engine {
             //    instances; extras[0] (buffer 2) = bg_cells (for min-contrast);
             //    textures 0/1 = grayscale/color atlas.
             pass.step(&Step {
-                pipeline_state: cell_text_pipeline.state(),
-                vertex: Some(slot.cells.buffer()),
-                uniforms: Some(slot.uniforms.buffer()),
-                extras: &[Some(slot.cells_bg.buffer())],
-                textures: &[Some(slot.grayscale.texture()), Some(slot.color.texture())],
+                pipeline: cell_text_pipeline,
+                vertex: Some(slot.cells.handle()),
+                uniforms: Some(slot.uniforms.handle()),
+                extras: &[Some(slot.cells_bg.handle())],
+                textures: &[Some(&slot.grayscale), Some(&slot.color)],
                 samplers: &[],
                 draw: Draw {
                     primitive: Primitive::TriangleStrip,
@@ -1360,7 +1370,7 @@ impl Engine {
             encode_image_steps(
                 &pass,
                 image_pipeline,
-                slot.uniforms.buffer(),
+                slot.uniforms.handle(),
                 images,
                 image_instances,
                 pending_placements,
@@ -1613,11 +1623,11 @@ pub(crate) fn encode_image_steps(
             continue;
         };
         pass.step(&Step {
-            pipeline_state: pipeline.state(),
-            vertex: Some(instance.buffer()),
+            pipeline,
+            vertex: Some(instance.handle()),
             uniforms: Some(uniforms),
             extras: &[],
-            textures: &[Some(entry.texture.texture())],
+            textures: &[Some(&entry.texture)],
             samplers: &[],
             draw: Draw {
                 primitive: Primitive::TriangleStrip,
@@ -1625,65 +1635,6 @@ pub(crate) fn encode_image_steps(
                 instance_count: 1,
             },
         });
-    }
-}
-
-/// Build one of the four ported pipelines by name from the R3/R6 table.
-fn build_pipeline(
-    backend: &Metal,
-    library: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLLibrary>,
-    pixel_format: objc2_metal::MTLPixelFormat,
-    name: &str,
-) -> Result<Pipeline, MetalError> {
-    let desc = shaders::PIPELINE_DESCRIPTIONS
-        .iter()
-        .find(|d| d.name == name)
-        .expect("pipeline description exists");
-
-    // Translate the R3 vertex-attribute table (if any) into the Metal
-    // backend's VertexLayout.
-    let attrs: Vec<VertexAttribute> = desc
-        .vertex_attributes
-        .unwrap_or(&[])
-        .iter()
-        .map(|a| VertexAttribute {
-            format: map_vertex_format(a.format),
-            offset: a.offset,
-        })
-        .collect();
-
-    let vertex_layout = desc.vertex_attributes.map(|_| VertexLayout {
-        stride: desc.stride,
-        attributes: &attrs,
-        step: match desc.step_fn {
-            shaders::StepFunction::PerVertex => VertexStep::PerVertex,
-            shaders::StepFunction::PerInstance => VertexStep::PerInstance,
-        },
-    });
-
-    backend.new_pipeline(&PipelineOptions {
-        vertex_fn: desc.vertex_fn,
-        fragment_fn: desc.fragment_fn,
-        vertex_library: library,
-        fragment_library: library,
-        vertex_layout,
-        attachments: &[crate::metal::ColorAttachment {
-            pixel_format,
-            blending_enabled: desc.blending.enabled,
-        }],
-    })
-}
-
-/// Map an R3 (backend-agnostic) vertex format onto the Metal backend's format.
-fn map_vertex_format(f: shaders::VertexFormat) -> VertexFormat {
-    match f {
-        shaders::VertexFormat::UChar4 => VertexFormat::UChar4,
-        shaders::VertexFormat::UShort2 => VertexFormat::UShort2,
-        shaders::VertexFormat::Short2 => VertexFormat::Short2,
-        shaders::VertexFormat::UInt2 => VertexFormat::UInt2,
-        shaders::VertexFormat::UChar => VertexFormat::UChar,
-        shaders::VertexFormat::Float2 => VertexFormat::Float2,
-        shaders::VertexFormat::Float4 => VertexFormat::Float4,
     }
 }
 

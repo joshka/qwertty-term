@@ -41,27 +41,32 @@ pub trait GpuBackend: Sized {
     type Error: Error + Send + Sync + 'static;
 
     /// A presentable render target (upstream `metal/Target.zig`: an
-    /// IOSurface-backed `MTLTexture`).
-    type Target;
+    /// IOSurface-backed `MTLTexture`). Drawn into via [`Attachment`] and read
+    /// back via [`GpuTarget`].
+    type Target: GpuTarget;
 
     /// One in-flight frame's encoding context (upstream `metal/Frame.zig`).
-    /// Declared for trait-shape completeness; methods land in chunk R2.
-    type Frame;
+    type Frame: GpuFrame<Backend = Self>;
 
-    /// A single render pass within a frame (upstream
-    /// `metal/RenderPass.zig`). Methods land in chunk R2.
-    type RenderPass;
+    /// A single render pass within a frame (upstream `metal/RenderPass.zig`).
+    type RenderPass: GpuRenderPass<Backend = Self>;
 
-    /// A compiled render pipeline (upstream `metal/Pipeline.zig`). Methods
-    /// land in chunks R2/R3 together with the shader library.
+    /// A compiled render pipeline (upstream `metal/Pipeline.zig`).
     type Pipeline;
+
+    /// A backend-neutral, *untyped* GPU buffer handle for binding in a
+    /// [`Step`]. Buffers bind to shader slots regardless of their element type
+    /// `T`, so a [`Step`] references this handle (obtained via
+    /// [`GpuBuffer::handle`]) rather than the typed [`GpuBackend::Buffer`].
+    /// Metal: `ProtocolObject<dyn MTLBuffer>`.
+    type BufferHandle: ?Sized;
 
     /// A typed, growable GPU buffer (upstream `metal/buffer.zig`
     /// `Buffer(T)`).
     ///
     /// `T: Copy + 'static` — plain bytes-copyable instance/uniform data; in
     /// practice the frozen wire structs from [`crate::wire`].
-    type Buffer<T: Copy + 'static>: GpuBuffer<T, Error = Self::Error>;
+    type Buffer<T: Copy + 'static>: GpuBuffer<T, Error = Self::Error, Handle = Self::BufferHandle>;
 
     /// A sampled texture (upstream `metal/Texture.zig`).
     type Texture: GpuTexture<Error = Self::Error>;
@@ -100,6 +105,137 @@ pub trait GpuBackend: Sized {
 
     /// Create a sampler (upstream `Sampler.init`).
     fn new_sampler(&self, options: SamplerOptions) -> Result<Self::Sampler, Self::Error>;
+
+    /// Begin encoding one in-flight frame. `completion` is invoked when the
+    /// frame's GPU work finishes (health + whether it was a sync present),
+    /// upstream `beginFrame` + the completion handler on `metal/Frame.zig`.
+    fn begin_frame(&self, completion: FrameCompletion) -> Result<Self::Frame, Self::Error>;
+
+    /// Compile a pipeline from a backend-agnostic [`shaders::PipelineDescription`]
+    /// and backend-chosen [`ShaderSource`] (Metal compiles the MSL; a CPU
+    /// backend keys off `desc.name`). Folds upstream's `initShaders` +
+    /// per-pipeline `Pipeline.init`, hiding the shader library / pixel format.
+    fn build_pipeline(
+        &self,
+        desc: &crate::shaders::PipelineDescription,
+        source: ShaderSource<'_>,
+    ) -> Result<Self::Pipeline, Self::Error>;
+}
+
+/// One in-flight frame (upstream `metal/Frame.zig`): opens render passes and
+/// completes (submits) the frame.
+pub trait GpuFrame {
+    /// The backend this frame belongs to.
+    type Backend: GpuBackend<Frame = Self>;
+
+    /// Open a render pass targeting `attachments` (upstream `Frame.renderPass`).
+    fn render_pass(
+        &self,
+        attachments: &[Attachment<'_, Self::Backend>],
+    ) -> Result<<Self::Backend as GpuBackend>::RenderPass, <Self::Backend as GpuBackend>::Error>;
+
+    /// Submit the frame. `sync` blocks until GPU completion (upstream
+    /// `Frame.complete`); async returns immediately and fires the completion
+    /// handler later.
+    fn complete(&mut self, sync: bool);
+}
+
+/// A render pass within a frame (upstream `metal/RenderPass.zig`): encodes
+/// draw [`Step`]s, then completes (ends encoding).
+pub trait GpuRenderPass {
+    /// The backend this pass belongs to.
+    type Backend: GpuBackend<RenderPass = Self>;
+
+    /// Encode one draw step (upstream `RenderPass.step`).
+    fn step(&self, step: &Step<'_, Self::Backend>);
+
+    /// End encoding for this pass (upstream `RenderPass.complete`).
+    fn complete(self);
+}
+
+/// A render target that can be drawn into and read back to CPU memory
+/// (upstream `metal/Target.zig`; the readback is the offscreen/headless path).
+pub trait GpuTarget {
+    fn width(&self) -> usize;
+    fn height(&self) -> usize;
+    /// Read the target's pixels back to a tightly-packed BGRA `Vec<u8>`
+    /// (upstream `Target.read_pixels`).
+    fn read_pixels(&self) -> Vec<u8>;
+}
+
+/// GPU health reported to a frame's completion handler (upstream
+/// `metal/Frame.zig` `Health`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Healthy,
+    Unhealthy,
+}
+
+/// A frame-completion callback: `(health, was_sync_present)`. Boxed so it can
+/// be handed to the GPU driver's completion mechanism (upstream Metal
+/// `addCompletedHandler:`).
+pub type FrameCompletion = Box<dyn Fn(Health, bool) + Send + 'static>;
+
+/// The draw primitive topology for a [`Draw`] (upstream `Primitive`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Primitive {
+    Triangle,
+    TriangleStrip,
+}
+
+/// A draw call within a [`Step`]: topology + vertex/instance counts (upstream
+/// the `draw` field of `RenderPass.Step`).
+#[derive(Debug, Clone, Copy)]
+pub struct Draw {
+    pub primitive: Primitive,
+    pub vertex_count: usize,
+    pub instance_count: usize,
+}
+
+impl Draw {
+    /// A non-instanced draw of `vertex_count` vertices (`instance_count = 1`).
+    #[must_use]
+    pub fn vertices(primitive: Primitive, vertex_count: usize) -> Self {
+        Draw {
+            primitive,
+            vertex_count,
+            instance_count: 1,
+        }
+    }
+}
+
+/// Backend-chosen shader source for [`GpuBackend::build_pipeline`]. Metal takes
+/// MSL text (`shaders::SOURCE`) and compiles it; a CPU/software backend needs
+/// no source and keys the pipeline off `desc.name`.
+#[derive(Debug, Clone, Copy)]
+pub enum ShaderSource<'a> {
+    /// Metal Shading Language source text.
+    Msl(&'a str),
+    /// No source (software backend selects behavior from the description).
+    None,
+}
+
+/// A single color attachment for a render pass (upstream `RenderPass.Attachment`),
+/// bound to a backend render [`GpuBackend::Target`].
+pub struct Attachment<'a, B: GpuBackend> {
+    /// The render destination.
+    pub texture: &'a B::Target,
+    /// Clear color (RGBA, 0..1) applied at pass start, or `None` to load.
+    pub clear_color: Option<[f64; 4]>,
+}
+
+/// One encoded draw step (upstream `RenderPass.Step`), rebound to the backend's
+/// own resource types instead of raw GPU-API handles: the pipeline, optional
+/// vertex/uniform buffers (by untyped [`GpuBackend::BufferHandle`]), extra
+/// buffers, textures, samplers, and the [`Draw`] call.
+pub struct Step<'a, B: GpuBackend> {
+    pub pipeline: &'a B::Pipeline,
+    pub vertex: Option<&'a B::BufferHandle>,
+    pub uniforms: Option<&'a B::BufferHandle>,
+    pub extras: &'a [Option<&'a B::BufferHandle>],
+    pub textures: &'a [Option<&'a B::Texture>],
+    pub samplers: &'a [Option<&'a B::Sampler>],
+    pub draw: Draw,
 }
 
 /// Typed GPU data storage that can be preallocated, grown, and synced from
@@ -107,6 +243,15 @@ pub trait GpuBackend: Sized {
 /// `metal/buffer.zig`.
 pub trait GpuBuffer<T: Copy> {
     type Error: Error + Send + Sync + 'static;
+
+    /// The backend-neutral untyped handle for binding this buffer in a
+    /// [`Step`] (upstream: the raw `MTLBuffer` a `Step` field points at). The
+    /// associated type lives on [`GpuBackend::BufferHandle`]; this returns a
+    /// borrow of it so a `Step` can reference buffers regardless of `T`.
+    type Handle: ?Sized;
+
+    /// Borrow this buffer's untyped bindable handle.
+    fn handle(&self) -> &Self::Handle;
 
     /// Allocated capacity, in number of `T`s (upstream field `len`; kept
     /// up to date across reallocation — see the Metal impl's divergence
