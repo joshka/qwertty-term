@@ -128,7 +128,9 @@ first — it may share the latent bug.
   `termio/Exec.zig:1486,1776`.
 - `bb0ac4c72` — the pipelined pty gather stage slept the full ~1.2ms poll timeout even after the
   parse stage went idle → doubled frame latency for request/response-style apps; fixed with a
-  self-pipe wake. (`termio/Exec.zig:1363-1630`)
+  self-pipe wake. (`termio/Exec.zig:1363-1630`) **MIRRORED (T4): `qwertty-term-termio/src/exec.rs`
+  `Pipeline.idle_read`/`idle_write` + `bridging`, parse-idle early-deliver + self-pipe wake in
+  `gather_main`, wake-write in the parse loop.**
 
 Note the `bed47168c` → `bb0ac4c72` → `60121a039` sequence: `bed47168c` shrank non-Darwin pty
 read-ahead but was reverted by `60121a039` (~20% Linux throughput regression), net zero change.

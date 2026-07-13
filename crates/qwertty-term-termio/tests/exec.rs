@@ -558,3 +558,86 @@ fn throughput_cat_10mib() {
          starving parse"
     );
 }
+
+/// Request/response delivery through the saturated gather bridge — the
+/// `fps -fire` pattern that upstream `bb0ac4c72` (the parse-idle self-pipe wake)
+/// targets. The shell replies to each line with a ≥1 KiB blob (so the gather
+/// stage treats the reply as saturated and enters its bridge) followed by a
+/// unique marker. Because the writer is blocked on this very reply, no refill
+/// ever comes — so the batch holding the marker is delivered *only* via the
+/// bridge's parse-idle early-deliver / self-pipe wake (or, pre-fix, after the
+/// full ~1 ms poll timeout). This exercises that path across many round trips
+/// and asserts every reply is delivered in order.
+///
+/// The latency win itself (upstream's benchmark: `fps -fire 80x24` 1.435 ms →
+/// 0.234 ms) is not asserted with a tight threshold — the manual single-thread
+/// pump used by these tests can't resolve a sub-ms bridge effect (its own poll
+/// granularity dominates on macOS), so a hermetic latency bound would be noise.
+/// The measured avg is printed for local eyeballing; the assertion is delivery
+/// correctness plus a loose regression ceiling. `#[ignore]`d (spawns a shell +
+/// runs 200 round trips), like the app's windowed smokes.
+#[test]
+#[ignore = "request/response bridge coverage: run locally with --ignored --nocapture"]
+fn request_response_round_trip_latency() {
+    // Each input line → a 2100-byte blob (saturates the 1 KiB bridge threshold)
+    // then a unique `R:<line>` marker. Pure printf: no per-iteration subprocess.
+    let mut started = start_shell(sh_c(
+        "while IFS= read -r n; do printf '%2100s\\n' ''; printf 'R:%s\\n' \"$n\"; done",
+    ));
+
+    let iters = 200usize;
+    let mut total = Duration::ZERO;
+    let mut measured = 0usize;
+
+    for i in 0..iters {
+        // The pty's ONLCR maps the reply's LF to CRLF, so match on the CR
+        // terminator — which also keeps `L1` from matching `L10`.
+        let marker = format!("R:L{i}\r");
+        started
+            .tx
+            .send(Message::write_req(format!("L{i}\n").as_bytes()))
+            .unwrap();
+        let t0 = Instant::now();
+        // Tight poll (no coarse sleep) so we actually measure the round trip.
+        loop {
+            started.writer.drain(&started.rx);
+            started.writer.tick_timers();
+            if started.capture.contains(marker.as_bytes()) {
+                break;
+            }
+            if t0.elapsed() > Duration::from_secs(2) {
+                panic!("no reply for {marker:?} within 2s (round trip {i})");
+            }
+            // A short sleep yields the CPU to the gather/parse threads without
+            // parking for a whole scheduler quantum (which `yield_now` can do on
+            // macOS) or starving them (which a busy-spin does).
+            std::thread::sleep(Duration::from_micros(150));
+        }
+        // Skip the first few (shell startup / banner) from the average.
+        if i >= 5 {
+            total += t0.elapsed();
+            measured += 1;
+        }
+    }
+
+    let avg = total / measured as u32;
+    eprintln!(
+        "request/response round-trip through the saturated bridge: avg {avg:?} \
+         over {measured} iters (all replies delivered)"
+    );
+
+    started.tx.send(Message::write_req(b"\x04")).unwrap();
+    started.writer.shutdown();
+
+    // Delivery correctness is enforced by the loop: reaching here means all 200
+    // saturated replies came back in order (a lost/indefinitely-stalled batch
+    // would have hit the 2s per-round-trip timeout). The bound below only guards
+    // against a catastrophic regression (e.g. the bridge waiting on a refill
+    // that never arrives); it is intentionally loose to stay robust under load.
+    assert_eq!(measured, iters - 5, "not every round trip was measured");
+    assert!(
+        avg < Duration::from_millis(50),
+        "avg round trip {avg:?} is implausibly high — the gather bridge may be \
+         stalling on a refill that never comes"
+    );
+}
