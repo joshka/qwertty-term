@@ -1519,6 +1519,32 @@ impl Page {
         }
     }
 
+    /// The owned, page-independent [`hyperlink::LinkKey`] for a cell, if it
+    /// carries a hyperlink. Resolves the cell's page-local id through the
+    /// hyperlink set and copies the id/URI bytes out, so the result can be
+    /// compared across pages by value (mirroring `PageEntry::eql`). Used to
+    /// carry hyperlink identity through the snapshot boundary (R7 links).
+    ///
+    /// # Safety
+    ///
+    /// `cell` valid for this page.
+    pub unsafe fn hyperlink_key(&self, cell: *const Cell) -> Option<hyperlink::LinkKey> {
+        // SAFETY: cell valid per caller; the resolved entry's string offsets are
+        // valid against this page's base (`self.mem`), same as `writeAtlas`'s
+        // capacity pass reads them.
+        unsafe {
+            let id = self.lookup_hyperlink(cell)?;
+            let entry = &*self.hyperlink_set_get(id);
+            let uri = entry.uri.slice(self.mem).to_vec();
+            Some(match entry.id {
+                hyperlink::EntryId::Implicit(counter) => hyperlink::LinkKey::Implicit(counter, uri),
+                hyperlink::EntryId::Explicit(slice) => {
+                    hyperlink::LinkKey::Explicit(slice.slice(self.mem).to_vec(), uri)
+                }
+            })
+        }
+    }
+
     /// Clear a cell's hyperlink. Port of `clearHyperlink`.
     ///
     /// # Safety

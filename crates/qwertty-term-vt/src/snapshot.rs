@@ -93,6 +93,10 @@ pub struct SnapshotCell {
     pub combining: Vec<char>,
     pub width: CellWidth,
     pub style: CellStyle,
+    /// The owned identity of this cell's OSC8 hyperlink, if any. Cells sharing
+    /// one hyperlink compare equal here, so a renderer can find every cell of a
+    /// hovered link (R7). `None` for cells with no hyperlink.
+    pub link: Option<crate::page::hyperlink::LinkKey>,
 }
 
 impl SnapshotCell {
@@ -102,6 +106,7 @@ impl SnapshotCell {
             combining: Vec::new(),
             width: CellWidth::Narrow,
             style: CellStyle::default(),
+            link: None,
         }
     }
 
@@ -681,11 +686,21 @@ unsafe fn snapshot_cell(
         _ => {}
     }
 
+    // Carry the cell's hyperlink identity (R7) so a renderer can match every
+    // cell of a hovered link. Only cells with the hyperlink bit set have one.
+    let link = if cell.hyperlink() {
+        // SAFETY: `cell_ptr` addresses this cell in this page (caller contract).
+        unsafe { page.hyperlink_key(cell_ptr) }
+    } else {
+        None
+    };
+
     SnapshotCell {
         ch,
         combining,
         width,
         style,
+        link,
     }
 }
 
@@ -890,6 +905,48 @@ mod tests {
         // Disable again (12h then 12l) → steady.
         let term = feed(10, 3, b"\x1b[?12h\x1b[?12l");
         assert!(!term.snapshot().cursor.blinking, "mode 12 reset → steady");
+    }
+
+    #[test]
+    fn snapshot_carries_hyperlink_identity() {
+        use crate::page::hyperlink::LinkKey;
+        // OSC8 open (implicit id, uri) → "ab" → close → "c".
+        let term = feed(10, 3, b"\x1b]8;;http://example.com\x1b\\ab\x1b]8;;\x1b\\c");
+        let snap = term.snapshot();
+        let row = &snap.all_rows[snap.active_start];
+
+        let a = row.cells[0].link.clone();
+        let b = row.cells[1].link.clone();
+        assert!(a.is_some(), "a linked cell carries a LinkKey");
+        assert_eq!(a, b, "the two cells of one hyperlink share identity");
+        assert_eq!(row.cells[2].link, None, "the non-link cell has no key");
+
+        // The URI bytes are captured on the key.
+        let uri = match a.unwrap() {
+            LinkKey::Implicit(_, uri) | LinkKey::Explicit(_, uri) => uri,
+        };
+        assert_eq!(uri, b"http://example.com");
+    }
+
+    #[test]
+    fn distinct_hyperlinks_do_not_share_identity() {
+        use crate::page::hyperlink::LinkKey;
+        // Two separate implicit links to *different* URIs on one row.
+        let term = feed(
+            12,
+            3,
+            b"\x1b]8;;http://a.test\x1b\\a\x1b]8;;\x1b\\\x1b]8;;http://b.test\x1b\\b\x1b]8;;\x1b\\",
+        );
+        let snap = term.snapshot();
+        let row = &snap.all_rows[snap.active_start];
+        let a = row.cells[0].link.clone().expect("cell a linked");
+        let b = row.cells[1].link.clone().expect("cell b linked");
+        assert_ne!(a, b, "different URIs are different links");
+        let uri = |k: LinkKey| match k {
+            LinkKey::Implicit(_, u) | LinkKey::Explicit(_, u) => u,
+        };
+        assert_eq!(uri(a), b"http://a.test");
+        assert_eq!(uri(b), b"http://b.test");
     }
 
     #[test]
