@@ -54,7 +54,38 @@ Under flood, `judder_cv ≈ 3.7–5.6` (high = chunky) while cadence `±` stays 
 per T2's `renderer-present-backpressure.md`, is the signature of uneven *sampling*: the
 parse thread applies the pty flood in bursts, so consecutive vsync presents advance the
 animation by 1/3/1 steps. This is real, but it is **not** a mutex-starvation problem and
-`d34b54e9b` does not address it. Closing it means applying engine state on an even cadence
-(a fixed apply-interval / io-coalescing change) and/or T2's present-backpressure work, which
-T2's doc argues are intertwined and best done together with a metric — a larger, coordinated
-item, deliberately not taken on blind here.
+`d34b54e9b` does not address it.
+
+### io-coalescing / draw-split — the T4 half is already done (#139); batch size is the wrong lever
+
+The T1 handoff's T4 ask was "split render from draw with a fixed draw interval and coalesce
+io wakeups." **#139 already did this:** render fires only from `tick_render` on the vsync
+`CADisplayLink` (a fixed-cadence timer), io runs on the separate `tick_service`, and the
+render is *not* triggered by io wakeups at all (it's timer-driven), so there is nothing left
+to coalesce on the render path.
+
+The only remaining T4-side lever is the pty **batch granularity** — the gather stage packs up
+to `BUFFER_CAPACITY` (64 KiB) per batch, so the parse applies multi-frame chunks at once and
+the engine jumps in steps. Measured (yes-flood, `judder_cv` at frame 720 / `throughput_cat`):
+
+```text
+BUFFER_CAPACITY   judder_cv   throughput
+  64 KiB (ship)     ~3.75       105 MiB/s
+  16 KiB            ~4.0         43 MiB/s   (worse-of-both)
+   4 KiB            ~2.64        39 MiB/s   (fails the >40 floor)
+```
+
+Only a *very* small batch (4 KiB) meaningfully lowers judder, and it craters bulk throughput
+~2.7× (below the CI floor) — and even then judder_cv ~2.6 is still chunky. **Decisive point:
+upstream uses the same 64 KiB `buffer_capacity` yet is visibly smoother** — so upstream's
+smoothness does *not* come from batch size. Shrinking ours would trade a large, real
+throughput regression for a partial, still-chunky smoothness gain that doesn't match how
+upstream gets there.
+
+**Decision:** do not change the batch size. The residual uneven-sampling judder is the
+**render/present path** — T2's present-backpressure work (`Async` triple-buffering aligned to
+the display link, or a Metal drawable-present ADR; see `renderer-present-backpressure.md`),
+which keeps a complete recent frame available to the compositor at an even cadence. T4's io
+half (the draw/render split) is complete; the ball is in T2's court, and the batch-size lever
+is a dead end. Re-measure with a real DOOM-fire run (needs Zig 0.14) once T2's present change
+lands.
