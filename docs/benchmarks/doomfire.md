@@ -92,3 +92,12 @@ exercise on an idle machine if ever wanted.
 Definition-of-done note for the spec's "DOOM-fire ≥ 820 fps": restated as **≥ the
 0-pre-lig baseline at a matched, recorded grid**. At 228×60 that bar is ~692 (median
 of clean pre-lig runs); main clears it at ~739.
+
+## Smoothness ≠ fps
+
+fps here is *throughput*; it does not capture *smoothness*. DOOM-fire can report
+~1100 fps and still visibly judder because the frames that reach the screen are
+sampled unevenly in animation time. That gap (and its T2/T4 handoff) is diagnosed
+separately in [`docs/analysis/doomfire-smoothness.md`](../analysis/doomfire-smoothness.md).
+Present pacing — the first piece — landed in #139 (vsync `CADisplayLink`); the
+renderer present-backpressure and io-coalescing pieces are open.
