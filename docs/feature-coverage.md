@@ -195,9 +195,12 @@ items are `[ ]` wholesale unless noted.
 - [x] Scroll keybind actions: `scroll_to_top`/`_to_bottom`/`_page_up`/`_page_down`/
       `_page_lines`/`_page_fractional` move the focused pane's scrollback viewport
       (default Cmd/Shift + Home/End/PageUp/PageDown); `config-reload` wired
-- [ ] Keybind *actions* still needing new behavior: `jump_to_prompt`,
-      `write_scrollback_file`, `inspector`, `adjust_selection`, `select_all`,
-      `clear_screen`, `scroll_to_selection`/`_to_row`, `crash`
+- [x] `write_scrollback_file` (copy/paste/open): dumps the focused pane's full
+      scrollback (`Tag::Screen` plain text) to a temp file, then copies/pastes/opens
+      the path (plain format only; `vt`/`html` fall back to plain)
+- [ ] Keybind *actions* still needing new behavior: `jump_to_prompt`, `inspector`,
+      `adjust_selection`, `select_all`, `clear_screen`, `scroll_to_selection`/`_to_row`,
+      `write_screen_file`/`write_selection_file`, `crash`
 - [x] `keybind` config parsing — the full trigger/action grammar (not just `text:`)
       parses and, for the wired action categories, dispatches
 - [ ] `key-remap` (`RemapSet` ported but unwired — issue #23)
@@ -303,5 +306,6 @@ items are `[ ]` wholesale unless noted.
 - [x] Differential testing vs `libghostty-vt`, resize-interleaved fuzzing, Miri
 - [x] vtebench lane (ahead of Ghostty 1.3.1 on most suites; behind Ghostty `main` — see
       `docs/benchmarks/`; no dedicated perf tuning done yet, that's the T1 thread)
-- [ ] Inspector / debug overlay, `write_screen_file`/`write_scrollback_file` actions
+- [x] `write_scrollback_file` action (copy/paste/open the dumped scrollback path)
+- [ ] Inspector / debug overlay, `write_screen_file`/`write_selection_file` actions
 - [ ] `command-palette`, `resize-overlay`, glyph APC protocol, animation

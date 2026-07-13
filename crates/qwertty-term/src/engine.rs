@@ -200,6 +200,14 @@ impl Engine {
         self.terminal().plain_string()
     }
 
+    /// A plain-text dump of the **full scrollback + active screen** (soft-wrap
+    /// boundaries kept as newlines). Backs the `write_scrollback_file` keybind.
+    pub fn scrollback_string(&self) -> String {
+        self.terminal()
+            .screen()
+            .dump_string(qwertty_term_vt::point::Tag::Screen, false)
+    }
+
     // -- selection -------------------------------------------------------
 
     /// Resolve a `(col, row)` cell coordinate in the currently-rendered
@@ -870,6 +878,27 @@ mod tests {
         engine.write(b"MARKER-bot\r\n");
         assert_eq!(engine.search_all(b"MARKER-top").len(), 1);
         assert_eq!(engine.search_all(b"MARKER-bot").len(), 1);
+    }
+
+    #[test]
+    fn scrollback_string_includes_history_beyond_the_viewport() {
+        // A 3-row viewport pushes the top line into scrollback; `scrollback_string`
+        // (Tag::Screen) must include it, unlike `screen_dump` (viewport only).
+        let mut engine = Engine::new(20, 3);
+        engine.write(b"MARKER-top\r\n");
+        for _ in 0..20 {
+            engine.write(b"filler\r\n");
+        }
+        engine.write(b"MARKER-bot\r\n");
+
+        let full = engine.scrollback_string();
+        assert!(
+            full.contains("MARKER-top"),
+            "scrollback missing top: {full:?}"
+        );
+        assert!(full.contains("MARKER-bot"), "scrollback missing bottom");
+        // The viewport dump only has the last few rows, not the scrolled-off top.
+        assert!(!engine.screen_dump().contains("MARKER-top"));
     }
 
     /// Timing probe for the synchronous-vs-thread decision (slice 1). Fills a

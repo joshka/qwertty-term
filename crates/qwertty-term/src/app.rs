@@ -1626,6 +1626,30 @@ fn compose_window_title(
     }
 }
 
+/// Write `text` to a uniquely-named temp file (`qwertty-term-<kind>-<pid>-<n>.txt`)
+/// and return its path, or `None` on an IO error (logged). Backs the
+/// `write_*_file` keybind actions. A process-lifetime counter keeps the name
+/// unique without a random dependency.
+fn write_temp_text_file(text: &str, kind: &str) -> Option<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "qwertty-term-{kind}-{}-{n}.txt",
+        std::process::id()
+    ));
+    match std::fs::write(&path, text) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            eprintln!(
+                "write_temp_text_file: cannot write {}: {err}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 fn resolve_colors(
     config: &crate::config::Config,
 ) -> (qwertty_term_vt::terminal::Colors, SelectionColors) {
@@ -2286,6 +2310,60 @@ impl Controller {
         }
     }
 
+    /// Dump the focused pane's full scrollback to a temp file, then copy/paste/
+    /// open its path per `ws` (the `write_scrollback_file` keybind action). Only
+    /// plain text is produced today; the `vt`/`html` formats fall back to plain.
+    fn write_scrollback_file(
+        &self,
+        tab: TabId,
+        ws: qwertty_term_input::binding::action::WriteScreen,
+    ) {
+        use qwertty_term_input::binding::action::WriteScreenAction;
+
+        // Gather the scrollback text from the focused pane.
+        let text = {
+            let state = self.0.borrow();
+            let Some(t) = state.tabs.get(&tab) else {
+                return;
+            };
+            let sid = t.tree.focused();
+            let Some(s) = t.surfaces.get(&sid) else {
+                return;
+            };
+            s.engine().scrollback_string()
+        };
+        let Some(path) = write_temp_text_file(&text, "scrollback") else {
+            return;
+        };
+        let path_str = path.to_string_lossy().into_owned();
+
+        match ws.action {
+            // Copy the path to the system clipboard.
+            WriteScreenAction::Copy => {
+                crate::clipboard::write(&path_str);
+            }
+            // Type the path into the focused pane (so the user can act on it).
+            WriteScreenAction::Paste => {
+                let mut state = self.0.borrow_mut();
+                if let Some(t) = state.tabs.get_mut(&tab) {
+                    let sid = t.tree.focused();
+                    if let Some(s) = t.surfaces.get_mut(&sid) {
+                        s.io.write(path_str.as_bytes());
+                    }
+                }
+            }
+            // Open the file with the default OS handler.
+            WriteScreenAction::Open => {
+                if let Err(err) = std::process::Command::new("open").arg(&path).spawn() {
+                    eprintln!(
+                        "write_scrollback_file: cannot open {}: {err}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
     /// Move the focused pane's scrollback viewport per a keybind scroll action
     /// (`scroll_page_up`/`scroll_to_bottom`/…).
     fn scroll_focused_surface(&self, tab: TabId, to: crate::scroll::ScrollTo) {
@@ -2941,6 +3019,13 @@ impl Controller {
             }
             A::ToggleFullscreen => {
                 self.toggle_fullscreen(tab);
+                true
+            }
+
+            // Dump the focused pane's scrollback to a temp file and copy/paste/
+            // open its path.
+            A::WriteScrollbackFile(ws) => {
+                self.write_scrollback_file(tab, *ws);
                 true
             }
 
@@ -9190,6 +9275,17 @@ mod tests {
         // Application mode (DECCKM on): SS3 A / SS3 B.
         assert_eq!(arrow_key_bytes(true, true), b"\x1bOA");
         assert_eq!(arrow_key_bytes(false, true), b"\x1bOB");
+    }
+
+    #[test]
+    fn write_temp_text_file_round_trips_and_is_unique() {
+        let a = super::write_temp_text_file("hello scrollback\n", "test").expect("write a");
+        let b = super::write_temp_text_file("second", "test").expect("write b");
+        assert_ne!(a, b, "each call gets a unique path");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "hello scrollback\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "second");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 
     #[test]
