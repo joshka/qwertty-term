@@ -223,6 +223,12 @@ pub struct SplitTree {
 }
 
 impl SplitTree {
+    /// The root node — read access for walking the tree (e.g. capturing a
+    /// window session for `window-save-state`).
+    pub fn root(&self) -> &Node {
+        &self.root
+    }
+
     /// A fresh single-leaf tree — the one-surface tab, behaviourally identical
     /// to the pre-splits `Tab`.
     pub fn leaf(id: SurfaceId) -> Self {

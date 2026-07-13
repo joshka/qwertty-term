@@ -103,7 +103,10 @@ items are `[ ]` wholesale unless noted.
 - [x] `title` (fixed window/tab title override; forces over OSC 0/2, live on reload; imports)
 - [~] `window-save-state` (default/never/always): config-gates macOS native restoration
       (`NSQuitAlwaysKeepsWindows` + per-window `isRestorable`; savestate smoke). Content restore
-      (tabs/splits/cwd via NSWindowRestoration + NSSecureCoding) is a follow-up
+      core landed — a live tab's split tree + per-pane cwd captures to a serializable
+      `WindowSession`, round-trips through JSON, and rebuilds a single-pane session into a fresh
+      tab (session unit tests + smoke). Remaining slice-2b: multi-pane tree rebuild + the
+      `NSWindowRestoration`/`NSCoder` OS wiring (only exercisable by a genuine quit+relaunch)
 - [ ] `window-step-resize`, `window-subtitle`
 - [ ] `window-titlebar-background`/`-foreground`, `window-new-tab-position`
 - [x] `resize-overlay` (+ `-position`, `-duration`): `cols ⨯ rows` HUD (NSTextField overlay)

@@ -28,6 +28,7 @@ qwertty-term-termio = { version = "0.1.0", path = "../qwertty-term-termio" }
 # spike's config module (the spike's is `pub(crate)`, so it can't be reused via
 # a path dep without modifying the spike).
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.9"
 base64 = "0.22.1"
 
