@@ -2,7 +2,7 @@
 //! vocabulary of well-defined *state-changing* sequences and assert the pure-
 //! Rust engine and the Zig reference reach an identical full dump — plain text,
 //! styled (VT) text, cursor, and scalar state (pending-wrap / alt-screen /
-//! cursor-visible).
+//! cursor-visible / mouse-tracking / scrollback-rows).
 //!
 //! Deterministic (fixed seeds), so a divergence is reproducible from its printed
 //! input. Reply bytes are never compared, so the known termio-layer reply
@@ -43,7 +43,7 @@ impl Rng {
 /// to bias coordinates toward — and just past — the edges).
 fn gen_op(rng: &mut Rng, out: &mut Vec<u8>, cols: u16, rows: u16) {
     // Weighted by the roll below; printing dominates so the grid fills.
-    match rng.below(160) {
+    match rng.below(168) {
         // --- printing (0..40): mostly ASCII, some wide/combining UTF-8 ---
         0..=33 => {
             let c = 0x21 + rng.below(0x5e) as u8; // printable ASCII
@@ -166,6 +166,13 @@ fn gen_op(rng: &mut Rng, out: &mut Vec<u8>, cols: u16, rows: u16) {
         // --- DECIC / DECDC: insert / delete column at the cursor ---
         135 => out.extend_from_slice(format!("\x1b[{}'}}", rng.param(3)).as_bytes()),
         136 => out.extend_from_slice(format!("\x1b[{}'~", rng.param(3)).as_bytes()),
+        // --- mouse tracking modes (mouse_tracking state; reports not compared) ---
+        137 => out.extend_from_slice(b"\x1b[?9h"), // X10
+        138 => out.extend_from_slice(b"\x1b[?1000h"), // normal
+        139 => out.extend_from_slice(b"\x1b[?1002h"), // button-event
+        140 => out.extend_from_slice(b"\x1b[?1003h"), // any-event
+        141 => out.extend_from_slice(b"\x1b[?1000l"), // disable (normal)
+        142 => out.extend_from_slice(b"\x1b[?1003l"), // disable (any-event)
         // --- richer SGR to exercise the styled diff: italic/dim/strike/
         //     overline, 256-color and truecolor fg/bg ---
         115..=119 => {
