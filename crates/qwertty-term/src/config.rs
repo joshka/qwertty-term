@@ -122,6 +122,14 @@ pub struct Config {
     /// `selection-clear-on-typing`, `Config.zig:724`, default true).
     #[serde(rename = "selection-clear-on-typing")]
     pub selection_clear_on_typing: bool,
+    /// Allow applications to post desktop notifications via OSC 9 / OSC 777
+    /// (upstream `desktop-notifications`, `Config.zig:3690`, default true).
+    /// Gated in the core drain (matching upstream `Surface.zig:1080`): when
+    /// false, OSC 9/777 notifications are dropped before delivery. Note real
+    /// macOS delivery needs a signed app bundle (see ADR 0003); unbundled the
+    /// app falls back to a dock attention request.
+    #[serde(rename = "desktop-notifications")]
+    pub desktop_notifications: bool,
     /// Whether to quit the app after the last window/surface closes (upstream
     /// `quit-after-last-window-closed`, `Config.zig:2509`, default **false** on
     /// macOS — the standard "app stays running with no windows" behavior).
@@ -178,6 +186,9 @@ impl Default for Config {
             clipboard_paste_bracketed_safe: true,
             clipboard_trim_trailing_spaces: true,
             selection_clear_on_typing: true,
+            // Applications may post OSC 9/777 desktop notifications by default
+            // (upstream `Config.zig:3690`).
+            desktop_notifications: true,
             // macOS default: stay running after the last window closes
             // (upstream `Config.zig:2509` → false on macOS).
             quit_after_last_window_closed: false,
@@ -364,6 +375,11 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # clipboard-trim-trailing-spaces = true
 # selection-clear-on-typing = true
 
+# Allow apps to post desktop notifications via OSC 9 / OSC 777 (default true).
+# Real macOS notifications require a signed app bundle (see ADR 0003); when
+# unbundled the app falls back to a dock attention request.
+# desktop-notifications = true
+
 # Window state. quit-after-last-window-closed keeps the standard macOS behavior
 # of staying running with no windows when false (default); set true to quit.
 # window-width/height are the initial size in cells (0 = default). Both
@@ -479,6 +495,8 @@ mod tests {
         );
         assert!(config.clipboard_trim_trailing_spaces);
         assert!(config.selection_clear_on_typing);
+        // Desktop notifications: allowed by default (upstream).
+        assert!(config.desktop_notifications);
         // Window state: macOS default doesn't quit after last window; no
         // configured geometry.
         assert!(!config.quit_after_last_window_closed);
@@ -533,6 +551,14 @@ mod tests {
         );
         assert!(!config.clipboard_trim_trailing_spaces);
         assert!(!config.selection_clear_on_typing);
+    }
+
+    #[test]
+    fn parses_desktop_notifications_key() {
+        let off = parse("desktop-notifications = false\n").unwrap();
+        assert!(!off.desktop_notifications);
+        // Absent → upstream default (allowed).
+        assert!(parse("").unwrap().desktop_notifications);
     }
 
     #[test]

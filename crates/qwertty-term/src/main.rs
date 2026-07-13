@@ -82,6 +82,10 @@
 //!   `window-width`/`window-height` cells configured, assert the first window's
 //!   content size matches the requested cell grid (later windows keep the
 //!   default), then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_NOTIFY=1` — run the desktop-notification smoke: feed
+//!   OSC 9 and OSC 777 to the focused surface and assert each is parsed,
+//!   drained, gated, throttled, and delivered to the notification seam, then
+//!   exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -191,6 +195,8 @@ fn run_window() {
     // Window-state smoke: assert the first window honors configured initial
     // geometry (window-width/-height cells + window-position).
     let smoke_windowstate = std::env::var_os("QWERTTY_TERM_SMOKE_WINDOWSTATE").is_some();
+    // Notify smoke: assert OSC 9/777 desktop notifications reach the delivery seam.
+    let smoke_notify = std::env::var_os("QWERTTY_TERM_SMOKE_NOTIFY").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -208,6 +214,7 @@ fn run_window() {
         smoke_mouse,
         smoke_clipboard,
         smoke_windowstate,
+        smoke_notify,
     );
 }
 
