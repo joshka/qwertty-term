@@ -55,18 +55,21 @@ must be added consciously:
 
 ## Known CI-only skips
 
-- `qwertty-term-termio::clean_exit_captures_code_and_runtime` is skipped on **both** test
-  steps (Linux core-crate tests and the macOS job). It asserts a process runtime `>= 50ms`
-  after a 100ms shell sleep, but the exit watcher reports ~21ms on the macOS runner and
-  ~2ms on the Linux runner (the test passes reliably on local hardware). A runtime *below*
-  the sleep duration on every shared runner points at a real measurement bug — the runtime
-  accounting isn't bracketing the full child lifetime, not just runner slowness. Filed to
-  T4's Inbox (`docs/threads/status/t4.md`). Remove both `--skip`s once fixed.
-- `qwertty-term-termio::throughput_cat_10mib` is skipped on both test steps. It asserts a
-  pipe throughput of `> 40 MiB/s` (a deliberately loose floor), which still dips below 40 on
-  a loaded shared runner while passing reliably on local hardware. Unlike the runtime test
-  this is plain timing noise, not a suspected logic bug — a CI-appropriate fix is to gate the
-  throughput floor behind an env flag (or `#[ignore]` it under CI). Filed to T4's Inbox.
+None — the two former load-sensitive termio skips were resolved (T4, mirroring how the
+macOS exit-code check is gated):
+
+- `qwertty-term-termio::clean_exit_captures_code_and_runtime` now runs on both steps. The
+  short CI runtimes were a *test-harness* issue, not a runtime-accounting bug: the child
+  used a bare `sleep 0.1`, which isn't in a login shell's restricted PATH on the runners, so
+  the shell exited "not found" in ~2ms (Linux) instead of living 100ms. It now uses
+  `/bin/sleep 0.1` (present on both platforms) so the child reliably lives ~100ms, and the
+  runtime *magnitude* is asserted only where there's no `/usr/bin/login` wrapper (i.e. not
+  macOS — login's lifetime need not bracket the shell's, the same reason the exit code is
+  gated by `LOGIN_SWALLOWS_EXIT_CODE`). Linux keeps the real `>= 50ms` assertion.
+- `qwertty-term-termio::throughput_cat_10mib` now runs on both steps. It still asserts
+  delivery + no-hang (90%+ of the file moved), but the noisy absolute `> 40 MiB/s` *floor*
+  is asserted only off-CI (`CI` env unset); under a loaded shared runner the number is
+  printed but not asserted.
 
 ## Toolchain pin
 
