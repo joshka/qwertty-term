@@ -207,3 +207,98 @@ pub fn render(codepoint: u32, metrics: &Metrics) -> Option<Glyph> {
 
     Some(canvas.into_glyph(metrics, height))
 }
+
+#[cfg(test)]
+mod cursor_height_tests {
+    //! Regression coverage for `adjust-cursor-height` (upstream `dac341cad`,
+    //! mirrored in `render` + `Canvas::into_glyph`). The full-height cursor
+    //! sprites (rect / hollow rect / bar) must be sized by `cursor_height`, not
+    //! `cell_height`, and re-centered in the cell when the two differ. This is
+    //! the exact regression that went unnoticed upstream for a long time, so we
+    //! lock both halves — height selection and re-centering — with asserts a
+    //! future draw-path refactor can't silently break.
+    use super::*;
+
+    /// Shrinking `cursor_height` shrinks the rendered cursor glyph — proof that
+    /// `adjust-cursor-height` actually reaches the sprite.
+    #[test]
+    fn cursor_rect_height_tracks_cursor_height() {
+        let cp = Sprite::CursorRect.codepoint();
+        let full = Metrics::simple(10, 24); // cursor_height defaults to cell_height (24)
+        let mut shrunk = Metrics::simple(10, 24);
+        shrunk.cursor_height = 12;
+
+        let g_full = render(cp, &full).expect("cursor sprite");
+        let g_shrunk = render(cp, &shrunk).expect("cursor sprite");
+
+        assert!(
+            g_full.height > g_shrunk.height,
+            "cursor glyph must shrink with cursor_height (full={}, shrunk={})",
+            g_full.height,
+            g_shrunk.height,
+        );
+    }
+
+    /// The re-centering term isolated: with an identical drawn cursor
+    /// (`cursor_height` fixed) but different `cell_height`, the *only* thing that
+    /// may change is `offset_y`, by exactly `(cell_height - cursor_height)/2`.
+    /// The glyph bitmap itself must be byte-identical.
+    #[test]
+    fn cursor_rect_recenters_by_cell_height_delta() {
+        let cp = Sprite::CursorRect.codepoint();
+        let mut small_cell = Metrics::simple(10, 24);
+        small_cell.cursor_height = 12;
+        let mut big_cell = Metrics::simple(10, 36);
+        big_cell.cursor_height = 12;
+
+        let g_small = render(cp, &small_cell).expect("cursor sprite");
+        let g_big = render(cp, &big_cell).expect("cursor sprite");
+
+        // Same cursor_height + cell_width → identical rasterization.
+        assert_eq!(g_small.width, g_big.width);
+        assert_eq!(g_small.height, g_big.height);
+        assert_eq!(g_small.alpha, g_big.alpha);
+
+        // Only the re-centering offset differs: (36-12)/2 - (24-12)/2 == 6.
+        let expected = (36 - 12) / 2 - (24 - 12) / 2;
+        assert_eq!(g_big.offset_y - g_small.offset_y, expected);
+    }
+
+    /// Non-cursor sprites (here a plain underline) ignore `cursor_height`
+    /// entirely: same height, same offset, same bitmap — the height branch is
+    /// cursor-only.
+    #[test]
+    fn non_cursor_sprite_ignores_cursor_height() {
+        let cp = Sprite::Underline.codepoint();
+        let base = Metrics::simple(10, 24);
+        let mut tweaked = Metrics::simple(10, 24);
+        tweaked.cursor_height = 8;
+
+        let g_base = render(cp, &base).expect("underline sprite");
+        let g_tweaked = render(cp, &tweaked).expect("underline sprite");
+
+        assert_eq!(g_base.height, g_tweaked.height);
+        assert_eq!(g_base.offset_y, g_tweaked.offset_y);
+        assert_eq!(g_base.alpha, g_tweaked.alpha);
+    }
+
+    /// The underline *cursor* is a cursor by name but excluded from the
+    /// cursor-height branch upstream (it sits at the cell bottom), so it must
+    /// stay cell-sized and unaffected by `cursor_height`.
+    #[test]
+    fn underline_cursor_uses_cell_height() {
+        let cp = Sprite::CursorUnderline.codepoint();
+        let base = Metrics::simple(10, 24);
+        let mut tweaked = Metrics::simple(10, 24);
+        tweaked.cursor_height = 8;
+
+        let g_base = render(cp, &base).expect("underline cursor sprite");
+        let g_tweaked = render(cp, &tweaked).expect("underline cursor sprite");
+
+        assert_eq!(
+            g_base.height, g_tweaked.height,
+            "underline cursor uses cell_height, not cursor_height",
+        );
+        assert_eq!(g_base.offset_y, g_tweaked.offset_y);
+    }
+}
