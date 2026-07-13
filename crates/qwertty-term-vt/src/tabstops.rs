@@ -70,14 +70,20 @@ impl Tabstops {
 
     /// Unset the tabstop at a certain column. The columns are 0-indexed.
     /// Port of `Tabstops.zig` `unset`.
+    ///
+    /// NOTE: upstream implements this as `stops ^= mask` — an XOR *toggle*, not
+    /// a clear. So unsetting a column that has no tabstop *creates* one. This is
+    /// observable (e.g. `CSI 0 g` — TBC "clear at cursor" — at a non-tabstop
+    /// column then makes a later HT stop there), so we replicate the XOR exactly
+    /// rather than doing a plain clear.
     pub fn unset(&mut self, col: usize) {
         if col < PREALLOC_COLUMNS {
-            self.prealloc_stops[col] = false;
+            self.prealloc_stops[col] ^= true;
             return;
         }
         let dynamic_i = col - PREALLOC_COLUMNS;
         assert!(dynamic_i < self.dynamic_stops.len());
-        self.dynamic_stops[dynamic_i] = false;
+        self.dynamic_stops[dynamic_i] ^= true;
     }
 
     /// Get the value of a tabstop at a specific column. The columns are
@@ -164,6 +170,26 @@ mod tests {
         assert!(t.get(4));
         t.unset(4);
         assert!(!t.get(4));
+    }
+
+    // `unset` is an XOR *toggle* in upstream, not a clear: unsetting a column
+    // that has no tabstop CREATES one. This is observable via `CSI 0 g` (TBC
+    // "clear at cursor") at a non-tabstop column, so it must be replicated.
+    #[test]
+    fn unset_toggles_a_missing_stop_on() {
+        let mut t = Tabstops::default();
+        assert!(!t.get(1)); // no default stop at col 1
+        t.unset(1);
+        assert!(t.get(1), "unset on an empty column must toggle it ON (XOR)");
+        t.unset(1);
+        assert!(!t.get(1), "a second unset toggles it back OFF");
+
+        // Same in the dynamically-allocated region (beyond prealloc).
+        let far = PREALLOC_COLUMNS + 3;
+        t.resize(far + 1);
+        assert!(!t.get(far));
+        t.unset(far);
+        assert!(t.get(far));
     }
 
     // Port of Tabstops.zig "Tabstops: dynamic allocations".

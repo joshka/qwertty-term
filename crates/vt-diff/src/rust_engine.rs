@@ -75,7 +75,13 @@ impl Oracle for RustTerminal {
     }
 
     fn text(&self) -> String {
-        normalize_screen_text(&self.terminal().plain_string())
+        // Mirror `ReferenceTerminal::text` exactly: dump through the (ported)
+        // plain-text formatter over the whole screen, INCLUDING scrollback —
+        // not the viewport-only `plain_string`. The trait contract says `text`
+        // includes retained scrollback, and the reference side does; using the
+        // viewport here made the oracle blind to scrolled-off content (it could
+        // not observe divergences above the active area).
+        normalize_screen_text(&self.formatter_raw_text())
     }
 
     fn cursor(&self) -> CursorPos {
