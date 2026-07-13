@@ -79,7 +79,10 @@ items are `[ ]` wholesale unless noted.
 ## Colors & theming
 
 - [x] `theme` (Ghostty theme-file format loaded), 256-color palette + dynamic palette
-- [x] `selection-background`/`-foreground`, `cursor-color`/`cursor-text`
+- [x] `background`/`foreground`/`cursor-color` config overrides (seed startup Colors,
+      live on reload; program OSC 10/11/12 still win); imports
+- [x] `selection-background`/`-foreground` (theme + config override, per-channel);
+      `cursor-text` (theme only — no Colors slot yet)
 - [x] `split-divider` (implicit), search highlight colors
 - [~] `bold-color`, `cursor-opacity`, `faint-opacity` (some wired, some not)
 - [ ] `palette-generate`/`palette-harmonious`, `window-theme` auto light/dark

@@ -56,6 +56,10 @@ const SUPPORTED: &[(&str, Kind)] = &[
     // Colors / theme
     ("theme", Kind::Str),
     ("cursor-color", Kind::Str),
+    ("background", Kind::Str),
+    ("foreground", Kind::Str),
+    ("selection-background", Kind::Str),
+    ("selection-foreground", Kind::Str),
     // Mouse & clipboard
     ("mouse-hide-while-typing", Kind::Bool),
     ("clipboard-paste-protection", Kind::Bool),

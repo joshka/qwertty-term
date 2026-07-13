@@ -1617,17 +1617,29 @@ fn resolve_colors(
         .as_ref()
         .map(crate::theme::ThemeColors::to_colors)
         .unwrap_or_default();
-    // `cursor-color` overrides the theme's cursor; a running program's OSC 12
-    // still overrides this later through the same dynamic-color path.
+    // `cursor-color`/`background`/`foreground` override the theme's values; a
+    // running program's OSC 10/11/12 still wins later through the same
+    // dynamic-color path.
     if let Some(cursor) = config.cursor_color() {
         startup_colors.cursor.set(cursor);
     }
-    let selection_colors = match theme
-        .as_ref()
-        .and_then(|t| t.selection_background.zip(t.selection_foreground))
-    {
-        Some((bg, fg)) => SelectionColors::Explicit { bg, fg },
-        None => SelectionColors::Inverse,
+    if let Some(bg) = config.background() {
+        startup_colors.background.set(bg);
+    }
+    if let Some(fg) = config.foreground() {
+        startup_colors.foreground.set(fg);
+    }
+    // Selection colors: a config `selection-*` overrides the theme's, per
+    // channel. Explicit only when both resolve; otherwise invert the cell.
+    let sel_bg = config
+        .selection_background()
+        .or_else(|| theme.as_ref().and_then(|t| t.selection_background));
+    let sel_fg = config
+        .selection_foreground()
+        .or_else(|| theme.as_ref().and_then(|t| t.selection_foreground));
+    let selection_colors = match (sel_bg, sel_fg) {
+        (Some(bg), Some(fg)) => SelectionColors::Explicit { bg, fg },
+        _ => SelectionColors::Inverse,
     };
     (startup_colors, selection_colors)
 }
@@ -8728,6 +8740,34 @@ mod tests {
             colors.cursor.get(),
             Some(qwertty_term_vt::color::Rgb::new(0xff, 0x88, 0x00))
         );
+    }
+
+    /// `background`/`foreground` seed the startup colors, and a pair of
+    /// `selection-*` overrides produces explicit selection colors.
+    #[test]
+    fn color_config_seeds_startup_and_selection_colors() {
+        use qwertty_term_vt::color::Rgb;
+        let mut config = crate::config::Config::default();
+        // No theme, no overrides → bg/fg UNSET and selection inverts.
+        let (colors, selection) = super::resolve_colors(&config);
+        assert!(colors.background.get().is_none());
+        assert!(colors.foreground.get().is_none());
+        assert!(matches!(selection, super::SelectionColors::Inverse));
+
+        config.background = Some("#101010".to_string());
+        config.foreground = Some("#eeeeee".to_string());
+        config.selection_background = Some("#334455".to_string());
+        config.selection_foreground = Some("#ffffff".to_string());
+        let (colors, selection) = super::resolve_colors(&config);
+        assert_eq!(colors.background.get(), Some(Rgb::new(0x10, 0x10, 0x10)));
+        assert_eq!(colors.foreground.get(), Some(Rgb::new(0xee, 0xee, 0xee)));
+        match selection {
+            super::SelectionColors::Explicit { bg, fg } => {
+                assert_eq!(bg, Rgb::new(0x33, 0x44, 0x55));
+                assert_eq!(fg, Rgb::new(0xff, 0xff, 0xff));
+            }
+            super::SelectionColors::Inverse => panic!("expected explicit selection colors"),
+        }
     }
 
     /// Poison resilience (app-hardening): reproduce the field-observed cascade —
