@@ -9,6 +9,18 @@ pub struct CursorPos {
     pub col: u16,
 }
 
+/// Scalar terminal state beyond the grid contents — cheap flags the plain-text
+/// dump can't express, compared alongside the screen in a differential test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TermState {
+    /// The cursor has a pending soft-wrap (next print wraps first).
+    pub pending_wrap: bool,
+    /// The alternate screen is active (vs. the primary screen).
+    pub alt_screen: bool,
+    /// The cursor is visible (DECTCEM / mode 25).
+    pub cursor_visible: bool,
+}
+
 /// Observable terminal state captured from an oracle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenDump {
@@ -16,8 +28,15 @@ pub struct ScreenDump {
     /// no trailing whitespace on any line, no trailing blank lines, no
     /// trailing newline.
     pub text: String,
+    /// Styled screen contents: the screen re-emitted as VT sequences including
+    /// SGR attributes (the VT formatter). Compared raw — both engines' VT
+    /// formatters agree byte-for-byte — so it catches color/bold/underline/
+    /// hyperlink divergences the plain `text` discards.
+    pub styled: String,
     /// Cursor position in the active area.
     pub cursor: CursorPos,
+    /// Scalar flags (wrap/screen/cursor) compared alongside the grid.
+    pub state: TermState,
 }
 
 /// A terminal implementation that can serve as one side of a differential
@@ -35,14 +54,23 @@ pub trait Oracle {
     /// [`normalize_screen_text`].
     fn text(&self) -> String;
 
+    /// The styled contents of the active screen (VT formatter output, including
+    /// scrollback), compared raw.
+    fn styled_text(&self) -> String;
+
     /// Cursor position in the active area, 0-indexed.
     fn cursor(&self) -> CursorPos;
 
-    /// Capture text and cursor together.
+    /// Scalar terminal flags (wrap/screen/cursor).
+    fn term_state(&self) -> TermState;
+
+    /// Capture all observable state together.
     fn dump(&self) -> ScreenDump {
         ScreenDump {
             text: self.text(),
+            styled: self.styled_text(),
             cursor: self.cursor(),
+            state: self.term_state(),
         }
     }
 }

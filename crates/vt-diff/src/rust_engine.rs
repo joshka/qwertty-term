@@ -67,6 +67,17 @@ impl RustTerminal {
         self.terminal()
             .format(&Options::plain(), &TerminalExtra::none())
     }
+
+    /// Styled dump via the ported **VT** formatter (`Options::vt`) — re-emits the
+    /// screen as VT sequences INCLUDING SGR attributes, the Rust mirror of
+    /// [`ReferenceTerminal::raw_text_vt`](crate::ReferenceTerminal::raw_text_vt).
+    /// Used by the differential oracle to compare cell attributes, which the
+    /// plain-text dump discards.
+    pub fn formatter_vt_text(&self) -> String {
+        use qwertty_term_vt::formatter::{Options, TerminalExtra};
+        self.terminal()
+            .format(&Options::vt(), &TerminalExtra::none())
+    }
 }
 
 impl Oracle for RustTerminal {
@@ -84,11 +95,26 @@ impl Oracle for RustTerminal {
         normalize_screen_text(&self.formatter_raw_text())
     }
 
+    fn styled_text(&self) -> String {
+        self.formatter_vt_text()
+    }
+
     fn cursor(&self) -> CursorPos {
         let cursor = &self.terminal().screen().cursor;
         CursorPos {
             row: cursor.y,
             col: cursor.x,
+        }
+    }
+
+    fn term_state(&self) -> crate::TermState {
+        use qwertty_term_vt::modes::Mode;
+        use qwertty_term_vt::terminal::ScreenKey;
+        let t = self.terminal();
+        crate::TermState {
+            pending_wrap: t.screen().cursor.pending_wrap,
+            alt_screen: t.screens.active_key() == ScreenKey::Alternate,
+            cursor_visible: t.modes.get(Mode::CursorVisible),
         }
     }
 }

@@ -1,11 +1,13 @@
 //! Generative differential sweep: build structured-random VT streams from a
 //! vocabulary of well-defined *state-changing* sequences and assert the pure-
-//! Rust engine and the Zig reference reach identical screen text + cursor.
+//! Rust engine and the Zig reference reach an identical full dump — plain text,
+//! styled (VT) text, cursor, and scalar state (pending-wrap / alt-screen /
+//! cursor-visible).
 //!
 //! Deterministic (fixed seeds), so a divergence is reproducible from its printed
-//! input. Only screen text + cursor are compared — never reply bytes — so the
-//! known termio-layer reply divergences (DSR/DA/DECRQSS/XTGETTCAP/color queries)
-//! are out of scope by construction.
+//! input. Reply bytes are never compared, so the known termio-layer reply
+//! divergences (DSR/DA/DECRQSS/XTGETTCAP/color queries) are out of scope by
+//! construction.
 //!
 //! `cargo test -p vt-diff --features reference --test generative_sweep`
 
@@ -158,11 +160,23 @@ fn run_sweep(iterations: u32, grids: &[(u16, u16)]) -> Vec<(u64, u16, u16, Vec<u
         let rd = reference.dump();
         let ud = rust.dump();
 
-        if rd.text != ud.text || rd.cursor != ud.cursor {
-            let detail = format!(
-                "cursor ref={:?} rust={:?}\n--- ref text ---\n{}\n--- rust text ---\n{}",
-                rd.cursor, ud.cursor, rd.text, ud.text
-            );
+        if rd != ud {
+            let mut detail = format!("cursor ref={:?} rust={:?}\n", rd.cursor, ud.cursor);
+            if rd.state != ud.state {
+                detail.push_str(&format!("state ref={:?} rust={:?}\n", rd.state, ud.state));
+            }
+            if rd.text != ud.text {
+                detail.push_str(&format!(
+                    "--- ref text ---\n{}\n--- rust text ---\n{}\n",
+                    rd.text, ud.text
+                ));
+            }
+            if rd.styled != ud.styled {
+                detail.push_str(&format!(
+                    "--- ref styled ---\n{:?}\n--- rust styled ---\n{:?}\n",
+                    rd.styled, ud.styled
+                ));
+            }
             divergences.push((seed, cols, rows, input, detail));
         }
     }
