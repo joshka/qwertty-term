@@ -51,8 +51,10 @@ use objc2_app_kit::{
     NSWindowDelegate, NSWindowLevel, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSString,
 };
+use objc2_quartz_core::CADisplayLink;
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::engine::Engine;
@@ -3604,7 +3606,40 @@ impl Controller {
     /// Pump + render every pane of every live tab. Called each pace tick. A
     /// tab is closed when its *last* pane's shell exits; individual pane exits
     /// collapse the split (handled here via `close_surface`).
+    /// The combined pace tick (io-service + render). Used by the fallback
+    /// `NSTimer` when there is no `CADisplayLink` (GUI smokes, no screen-backed
+    /// window). Behaviorally identical to the historical single tick.
     pub fn tick(&self) {
+        self.tick_impl(true);
+    }
+
+    /// io-service only — pump each pane (drain the engine's reply bytes to the
+    /// pty, service lifecycle/bell/notifications/progress/titles) but do NOT
+    /// render. Driven by the steady service timer so it runs regardless of
+    /// window visibility: a `CADisplayLink` pauses for occluded/background
+    /// windows, but a background terminal must still answer pty queries (DSR/DA)
+    /// and service its io. See [`AppDelegate::start_display_link`].
+    pub fn tick_service(&self) {
+        self.tick_impl(false);
+    }
+
+    /// Render/present every pane. Driven by the `CADisplayLink` (vsync). Reads
+    /// the engine state that [`Controller::tick_service`] and the io-reader
+    /// thread maintain, and presents it at the display refresh — so high-fps
+    /// content is subsampled evenly (smooth) instead of on a drifting timer.
+    pub fn tick_render(&self) {
+        let mut state = self.0.borrow_mut();
+        for tab in state.tabs.values_mut() {
+            let focused = tab.tree.focused();
+            let is_split = tab.tree.len() > 1;
+            for (sid, surface) in tab.surfaces.iter_mut() {
+                surface.render(*sid == focused, is_split);
+                surface.sync_progress_layer();
+            }
+        }
+    }
+
+    fn tick_impl(&self, render_panes: bool) {
         // Collect (tab, surface) pairs whose shell exited, plus per-tab focused
         // title/password state, under one borrow. Render every pane.
         let bell_features = self.0.borrow().bell_features;
@@ -3665,8 +3700,12 @@ impl Controller {
                             surface.set_progress(report, now_tick);
                         }
                         surface.tick_progress_autoclear(now_tick);
-                        surface.render(*sid == focused, is_split);
-                        surface.sync_progress_layer();
+                        // Render only on the combined tick; when a display link
+                        // drives presentation, `tick_render` does this at vsync.
+                        if render_panes {
+                            surface.render(*sid == focused, is_split);
+                            surface.sync_progress_layer();
+                        }
                     }
                     // A BEL from any pane marks this tab's title (until the tab
                     // is next focused) and triggers the once-per-tick audible/
@@ -4707,6 +4746,12 @@ pub struct DelegateIvars {
     /// Confirm-close smoke (`QWERTTY_TERM_SMOKE_CONFIRMCLOSE`): assert
     /// confirm-close-surface gating. See [`AppDelegate::run_confirmclose_smoke`].
     smoke_confirmclose: bool,
+    /// The vsync-synced present clock (a `CADisplayLink` bound to the first
+    /// window's display) when running interactively. Retained here so it isn't
+    /// deallocated; `None` when the fallback combined `NSTimer` tick is used
+    /// (GUI smokes, or no screen-backed window). See
+    /// [`AppDelegate::start_display_link`].
+    display_link: RefCell<Option<Retained<CADisplayLink>>>,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -4737,8 +4782,24 @@ define_class!(
             // First window.
             self.ivars().controller.new_window();
 
-            // Pace timer (~60Hz) on the main run loop.
-            self.start_pace_timer();
+            // Present pacing. Interactive runs split the tick: io-service on a
+            // steady ~60Hz timer (background-safe: a background terminal must
+            // keep answering pty queries), and render on a vsync-synced
+            // CADisplayLink (smooth present, no judder on high-fps content). The
+            // GUI smokes keep the deterministic combined ~60Hz NSTimer tick, as
+            // does the fallback when there's no screen-backed window. (The
+            // headless --offscreen-smoke never reaches this delegate.)
+            let gui_smoke = self.ivars().smoke_geometry
+                || self.ivars().smoke_tabkeys
+                || self.ivars().smoke_splits
+                || self.ivars().smoke_keybind
+                || self.ivars().smoke_focus
+                || !self.ivars().smoke_type.borrow().is_empty();
+            if !gui_smoke && self.start_display_link() {
+                    self.start_service_timer();
+            } else {
+                self.start_pace_timer();
+            }
 
             // Geometry smoke: dump + assert window geometry across the
             // 1-tab→2-tab→1-tab transition, then exit. Takes precedence over the
@@ -4836,10 +4897,23 @@ define_class!(
             }
         }
 
-        /// Pace-timer callback: pump + render every tab.
+        /// Pace-timer callback (fallback): pump + render every tab.
         #[unsafe(method(ghosttyPaceTick:))]
         fn pace_tick(&self, _timer: &AnyObject) {
             self.ivars().controller.tick();
+        }
+
+        /// Service-timer callback: io-service only (no render). Paired with the
+        /// display link, which renders. Runs regardless of window visibility.
+        #[unsafe(method(ghosttyServiceTick:))]
+        fn service_tick(&self, _timer: &AnyObject) {
+            self.ivars().controller.tick_service();
+        }
+
+        /// Display-link callback: render/present every tab at vsync.
+        #[unsafe(method(ghosttyRenderTick:))]
+        fn render_tick(&self, _link: &AnyObject) {
+            self.ivars().controller.tick_render();
         }
 
         /// Smoke auto-exit callback.
@@ -5058,6 +5132,7 @@ impl AppDelegate {
             smoke_notifycmd,
             smoke_progress,
             smoke_confirmclose,
+            display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -7590,6 +7665,61 @@ impl AppDelegate {
                 true,
             );
         }
+    }
+
+    /// Start the ~60 Hz service timer (io-service only, no render), paired with
+    /// the display link. Repeating, on the main run loop.
+    fn start_service_timer(&self) {
+        let interval = 1.0 / 60.0;
+        let target: &AnyObject = self.as_ref();
+        // SAFETY: the delegate outlives the timer; the selector is implemented
+        // on this class; main-thread call.
+        unsafe {
+            let _ = objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                interval,
+                target,
+                sel!(ghosttyServiceTick:),
+                None,
+                true,
+            );
+        }
+    }
+
+    /// Start a `CADisplayLink` render clock, synced to the first window's
+    /// display refresh, firing `ghosttyRenderTick:`. Returns `false` (caller
+    /// should fall back to the combined `NSTimer` pace tick) when there's no
+    /// screen-backed content view to bind to.
+    ///
+    /// An `NSTimer` isn't phase-locked to the display, so on a 120 Hz ProMotion
+    /// panel its presents land at drifting, uneven times relative to vsync and
+    /// high-fps content (e.g. a full-screen animation) judders. A display link
+    /// is a vsync callback, so presents land on refresh boundaries and the
+    /// subsampling of fast content stays even and smooth. `NSView.displayLink`
+    /// (macOS 14+) gives a main-thread `CADisplayLink`, so the AppKit/Metal
+    /// present needs no cross-thread marshaling (unlike classic `CVDisplayLink`).
+    /// Render is split onto the link while io-service stays on the steady
+    /// [`start_service_timer`](Self::start_service_timer) — the link pauses for
+    /// occluded windows, but a background terminal must still service its io.
+    fn start_display_link(&self) -> bool {
+        let Some(window) = self.ivars().controller.active_window() else {
+            return false;
+        };
+        let Some(view) = window.contentView() else {
+            return false;
+        };
+        // SAFETY: main thread; `self` (the target) outlives the link, retained
+        // in `display_link` below; `ghosttyRenderTick:` is implemented on this
+        // class. The link auto-associates with the view's display and re-tracks
+        // if the view moves to another screen.
+        let link = unsafe { view.displayLinkWithTarget_selector(self, sel!(ghosttyRenderTick:)) };
+        // SAFETY: main run loop; common modes keep it firing during modal /
+        // event-tracking loops (window resize, menus).
+        unsafe {
+            let run_loop = NSRunLoop::mainRunLoop();
+            link.addToRunLoop_forMode(&run_loop, NSRunLoopCommonModes);
+        }
+        *self.ivars().display_link.borrow_mut() = Some(link);
+        true
     }
 
     /// Schedule a one-shot auto-exit `ms` milliseconds out (smoke mode).
