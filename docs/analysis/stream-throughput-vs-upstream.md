@@ -1,5 +1,18 @@
 # Stream throughput: qwertty-term-vt vs upstream Zig (2026-07-07)
 
+> **SUPERSEDED (2026-07-13).** These are the *pre-optimization* engine numbers,
+> taken before the M1 perf levers (`docs/analysis/perf.md`) and the later
+> wide-class `printSliceFill`, dispatch, and clear_cells work landed. The large
+> gaps recorded below — ASCII ~2.3× and CJK ~7× behind Zig — have since been
+> closed: the CJK/wide path in particular went from a ~7× deficit to a *lead*
+> vs Ghostty main (`unicode` 0.50×, `dense_cells` 0.64× in
+> `docs/benchmarks/vtebench-baseline.md`; engine MiB/s in `docs/analysis/perf.md`
+> and `docs/threads/status/t1.md`). This doc is retained only as the historical
+> starting point; do not cite its ratios as current. It has **not** been re-run
+> against upstream Zig (that needs a fresh `ghostty-bench` build); the current
+> vs-upstream comparison lives in the vtebench three-way and the in-process
+> engine bench.
+
 Apples-to-apples comparison of full stream→terminal-state throughput
 (`Stream<TerminalHandler>::feed` vs upstream's `ghostty-bench terminal-stream`,
 which is the model for our harness: read the data file in 64 KiB chunks, feed
@@ -22,11 +35,11 @@ every chunk through the full VT stream handler into real terminal state).
 
 ## Results
 
-| Workload            | upstream Zig (ReleaseFast) | qwertty-term (release) | ratio      |
-| ------------------- | -------------------------- | -------------------- | ---------- |
-| ASCII `a`           | ~0.07 s (~900 MB/s)        | ~0.165 s (~406 MB/s) | Zig ~2.3×  |
-| CJK `中`            | ~0.07 s (~950 MB/s)        | ~0.515 s (~130 MB/s) | Zig ~7×    |
-| NFD `a`+U+0301      | ~11.6 s (~5.7 MB/s)        | ~11.5 s (~5.8 MB/s)  | parity     |
+| Workload       | upstream Zig (ReleaseFast) | qwertty-term (release) | ratio     |
+| -------------- | -------------------------- | ---------------------- | --------- |
+| ASCII `a`      | ~0.07 s (~900 MB/s)        | ~0.165 s (~406 MB/s)   | Zig ~2.3x |
+| CJK `U+4E2D`   | ~0.07 s (~950 MB/s)        | ~0.515 s (~130 MB/s)   | Zig ~7x   |
+| NFD `a`+U+0301 | ~11.6 s (~5.7 MB/s)        | ~11.5 s (~5.8 MB/s)    | parity    |
 
 Interpretation:
 
