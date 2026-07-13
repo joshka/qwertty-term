@@ -72,12 +72,10 @@ jobs:
       - name: vt tests (release lane — never skipped)
         run: cargo test -p qwertty-term-vt --release --all-targets
 
-      # Two load-sensitive termio tests are skipped (both filed to T4's Inbox;
-      # see docs/ci.md → Known CI-only skips):
-      #   clean_exit_captures_code_and_runtime — runtime accounting reports
-      #     ~2ms on this runner for a 100ms sleep.
-      #   throughput_cat_10mib — asserts >40 MiB/s pipe throughput, which dips
-      #     below that under shared-runner load (passes locally).
+      # (The two former load-sensitive termio skips are gone: the runtime
+      # assertion now only fires where there's no /usr/bin/login wrapper — i.e.
+      # Linux, where it's reliable — and the throughput floor only asserts
+      # off-CI. See docs/ci.md.)
       - name: core crate tests (vt-diff non-reference, input, sprite, termio, ffi)
         run: >
           cargo test
@@ -86,8 +84,6 @@ jobs:
           -p qwertty-term-sprite
           -p qwertty-term-termio
           -p qwertty-term-ffi
-          -- --skip clean_exit_captures_code_and_runtime
-          --skip throughput_cat_10mib
 
   # Modest macOS job: lint + build + unit tests for the macOS-only surface
   # (renderer, font, app). GPU-dependent tests skip themselves when no Metal
@@ -106,16 +102,11 @@ jobs:
       - name: clippy (full workspace)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Same two load-sensitive termio tests skipped as the Linux job (both
-      # filed to T4's Inbox; see docs/ci.md → Known CI-only skips):
-      # clean_exit_captures_code_and_runtime (runtime accounting reads ~21ms on
-      # this runner for a 100ms sleep) and throughput_cat_10mib (>40 MiB/s
-      # throughput floor dips under shared-runner load). Both pass locally.
+      # (The two former load-sensitive termio skips are gone — the runtime
+      # assertion is gated off the macOS login wrapper and the throughput floor
+      # off-CI; see docs/ci.md.)
       - name: unit tests (debug)
-        run: >
-          cargo test --workspace --
-          --skip clean_exit_captures_code_and_runtime
-          --skip throughput_cat_10mib
+        run: cargo test --workspace
 
   # Lint only the Markdown files touched by this push/PR — matching the
   # local gate ("markdownlint the touched .md"). The repo has pre-existing
