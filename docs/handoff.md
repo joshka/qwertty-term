@@ -13,7 +13,8 @@ The port's completion is now organized as parallel Claude threads — see
 protocol) and `docs/threads/t1..t8-*.md` (per-thread specs with model tiers + backlogs).
 Wave 1: T1 perf (Opus), T2 renderer (Opus), T4 app polish (Opus), T8 ops (Sonnet).
 Wave 2: T3 config/keybinds, T5 vt-complete, T6 library/publish. T7 Linux parked behind an
-ADR. Launch recipe is in the README. Crates are PUBLISHED (0.1.0, all 8, 2026-07-08).
+ADR. Launch recipe is in the README. Crates are PUBLISHED (latest 0.2.0, all 8, 2026-07-13;
+0.1.0 was 2026-07-08).
 Open items folded into thread backlogs: DOOM-fire regression -> T1 first item; three-way
 bench (agent in work/bench3) -> T1 inherits; upstream findings filing -> T8.
 
