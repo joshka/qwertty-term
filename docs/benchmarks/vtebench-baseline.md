@@ -4,12 +4,18 @@ Three-way comparison on the canonical terminal benchmark lane —
 [vtebench](https://github.com/alacritty/vtebench), the tool upstream Ghostty uses for terminal
 comparisons. Three columns: qwertty-term, Ghostty 1.3.1 (stable), and Ghostty **main** (the moving
 upstream target). **Refreshed 2026-07-13** after the scroll-region optimization (#204) landed;
-qwertty-term now wins or ties Ghostty main on 6/10 suites (leading outright on `dense_cells`,
-`medium_cells` and `unicode`) and wins every suite vs 1.3.1. The four region-scroll variants — the
-previous "only remaining loss" at 1.27–1.47× — are now **materially closed to 1.13–1.20×** by #204;
-they are the last suite family where main still edges us. Both Ghostty columns were re-measured in
-the same session and match the prior baseline within ±1–2 ms (a control confirming the run is
-uncontaminated). Superseded numbers are preserved in the history notes at the end.
+qwertty-term now wins or ties Ghostty main on 6/10 suites and wins every suite vs 1.3.1. The four
+region-scroll variants — the previous "only remaining loss" at 1.27–1.47× — are now **materially
+closed to 1.13–1.20×** by #204; they are the last suite family where main still edges us. Both
+Ghostty columns were re-measured in the same session and match the prior baseline within ±1–2 ms
+(a control confirming the run is uncontaminated).
+
+**Important interpretation caveat:** vtebench measures *whole-app pty-drain throughput*, which
+conflates engine (parse/apply) with render. The biggest apparent win, `unicode` 0.50×, is a
+**render-pipeline artifact, not an engine lead** — measured engine-only, Ghostty's wide-character
+engine is ~2.6× faster than ours; our decoupled no-backpressure renderer just lets vtebench measure
+our engine while it measures Ghostty's (render-bound) pipeline on that 40K-distinct-glyph payload.
+See the `unicode` bullet in the analysis. Superseded numbers are in the history notes at the end.
 
 ## Re-running
 
@@ -85,10 +91,22 @@ only** — no frame rate, no latency, no rendering-quality signal.
   our own median held at 7 ms both times) — read them as "we lead or tie," not to two decimals. The
   suites that were our worst embarrassment are now our best showing.
 
-- **`unicode` is now our biggest win.** It was 1.33x *slower* than main; the wide-class
-  `print_slice` fill (wide + spacer_tail pair batching, replacing the per-codepoint fallback) took
-  it to **0.50 — twice as fast as main**, and 0.30x vs 1.3.1. Wide-character throughput went from a
-  gap to a lead.
+- **`unicode` is our biggest whole-app number (0.50), but read it carefully — it is a
+  render-pipeline artifact, not an engine lead.** The suite is ~87% distinct wide glyphs (40K
+  unique CJK/emoji codepoints), which is a pathological glyph-atlas/rasterization load. Measured
+  engine-only (one pass of the same wide payload at 80×24, both release), **Ghostty's engine is
+  ~2.6× *faster* than ours — ~790 vs ~300 MiB/s.** But vtebench measures whole-app pty-drain
+  throughput, and the two terminals couple render to that drain very differently: *our* whole-app
+  number (~333 MiB/s) ≈ our engine (~300) because our renderer is decoupled (IOSurface swap, no
+  vsync backpressure — the drain never waits on render), whereas Ghostty's whole-app (~167) is only
+  ~⅕ of its engine because its render thread backpressures the drain and the 40K-distinct-glyph
+  atlas load is the bottleneck. So the 0.50 is real (we *do* drain the pty ~2× faster here) but it
+  reflects the render *architecture*, not wide-character engine throughput — where we are actually
+  behind. (This is the same no-backpressure render decoupling that costs us DOOM-fire smoothness;
+  see `docs/analysis/doomfire-smoothness.md`.) The wide-class `print_slice` fill did close a large
+  chunk of the engine gap (from a ~7× deficit historically), but not to a lead — a real ~2.6×
+  engine opportunity remains (SIMD UTF-8 decode + tighter wide-print; see `docs/analysis/perf.md`
+  deferred items).
 
 - **The region-scroll suites are now mostly closed (#204), but still the last gap.** `scrolling`
   and `scrolling_fullscreen` are ties (1.07 / 1.05); the four scroll-*region* variants
@@ -144,13 +162,15 @@ qwertty-term *behind* main on every cell and unicode suite — the gap this refr
 | dense_cells          | 2.29          | 0.78        | loss → win (~1.3x faster)    |
 | medium_cells         | 1.67          | 0.88        | loss → win                   |
 | sync_medium_cells    | 1.83          | 1.00        | loss → tie                   |
-| unicode              | 1.33          | 0.50        | loss → 2x win                |
+| unicode              | 1.33          | 0.50        | whole-app win (render-bound) |
 | scrolling            | 1.00          | 1.07        | tie (noise)                  |
 | scrolling_fullscreen | 1.00          | 1.05        | tie                          |
 | region scrolls ×4    | 1.20–1.47     | 1.13–1.20   | closed by #204 (`77190bd02`) |
 
 The cell-suite wins came from the CSI/SGR dispatch fast paths, `clear_cells` per-run style
-release, and the bulk style-only `print_slice` fill; the unicode win from the wide-class
-`print_slice` fill. The region scrolls were the "one remaining gap" through the 2026-07-12 refresh
-(qt/main 1.27–1.47, path untouched); porting upstream `77190bd02` as **#204** (2026-07-13) brought
-them to 1.13–1.20 — the last family where main still edges us, now narrowly.
+release, and the bulk style-only `print_slice` fill. The `unicode` 0.50 is a whole-app
+render-pipeline effect, **not** an engine lead — our wide engine is still ~2.6× behind Ghostty's
+(engine-only ~300 vs ~790 MiB/s); see the `unicode` analysis bullet. The region scrolls were the
+"one remaining gap" through the 2026-07-12 refresh (qt/main 1.27–1.47, path untouched); porting
+upstream `77190bd02` as **#204** (2026-07-13) brought them to 1.13–1.20 — the last family where
+main still edges us, now narrowly.

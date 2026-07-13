@@ -36,12 +36,15 @@ The T1 engine items from the table above have now largely landed; this section
 tracks which and where the numbers live:
 
 - **Dense/medium/sync package** (`47e26df60`, `cb2d78587`, `cee35cabf`,
-  `8d663a76e`) — **SHIPPED.** Drove `dense_cells` from a 2.29× loss to a 0.64×
-  *lead* vs Ghostty main (see `docs/benchmarks/vtebench-baseline.md`).
+  `8d663a76e`) — **SHIPPED.** Drove `dense_cells` from a 2.29× loss to a 0.64–0.78×
+  whole-app win vs Ghostty main (see `docs/benchmarks/vtebench-baseline.md`).
 - **CSI/SGR dispatch package** (`253e4f9c3`, `1a88f3622`, `300f42c7a`) —
   **SHIPPED.**
 - **Wide-class `printSliceFill`** (the `.wide` path of `47e26df60`) — **SHIPPED.**
-  Drove the `unicode` (0.50× lead) and CJK engine wins.
+  Narrowed the wide/CJK *engine* gap from ~7× to ~2.6× (not to a lead — engine-only
+  Ghostty is still ~790 vs our ~300 MiB/s). The `unicode` 0.50× whole-app number is
+  a render-pipeline artifact, not an engine win — see
+  `docs/analysis/stream-throughput-vs-upstream.md`.
 - **Scroll-region optimizations** (`77190bd02`, #13231) — **SHIPPED as #204**
   (`b01b02e`). Closes the region-scroll losses this doc flagged; in-process
   engine bench: `scroll-region` +29%, `scrolling` +7% (no regression). The
