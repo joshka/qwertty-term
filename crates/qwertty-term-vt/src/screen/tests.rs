@@ -1809,6 +1809,43 @@ fn select_line_disabled_whitespace_trimming() {
     assert_eq!(sel_screen_pt(&s, sel.end()), (4, 3));
 }
 
+// Regression (upstream fa8cae88b): selectLine's semantic-boundary end pin must
+// use the PREVIOUS row's page width, not the current row's — mid-reflow the
+// previous page can be narrower, so `p.node.cols() - 1` would be out of bounds.
+#[test]
+fn select_line_semantic_boundary_across_mixed_width_pages() {
+    use crate::screen::SemanticContentSet;
+
+    let mut s = init(4, 2, 0);
+    s.cursor_set_semantic_content(SemanticContentSet::Input { clear_eol: true });
+    s.test_write_string("ABCD");
+    s.cursor_set_semantic_content(SemanticContentSet::Output);
+    s.test_write_string("E");
+
+    let first = s.pages.first_node();
+    s.pages.split(Pin::with(first, 1, 0)).unwrap();
+    // Make the first page narrower than the second (whose row holds "E").
+    unsafe {
+        (*first).data.size.cols = 2;
+        (*first).data.pause_integrity_checks(true);
+    }
+
+    // Selecting the "ABCD" (Input) line ends at the Input→Output boundary; the
+    // end pin lands on the narrower `first` page and must clamp to its last
+    // column (1), not the wider page's cols-1 (3).
+    let sel = s
+        .select_line(SelectLine {
+            pin: Pin::with(first, 0, 1),
+            whitespace: None,
+            semantic_prompt_boundary: true,
+        })
+        .unwrap();
+    assert!(s.pages.pin_is_valid(sel.end()));
+    assert_eq!((sel.start().node, sel.start().x), (first, 0));
+    assert_eq!((sel.end().node, sel.end().x), (first, 1));
+    unsafe { (*first).data.pause_integrity_checks(false) };
+}
+
 // Port of `test "Screen: selectLine with scrollback"`.
 #[test]
 fn select_line_with_scrollback() {

@@ -1809,7 +1809,11 @@ impl Screen {
                         && cells[0].semantic_content() != v
                         && let Some(mut prev) = p.up(1)
                     {
-                        prev.x = (*p.node).data.size.cols - 1;
+                        // End at the prior row's last column, using THAT row's
+                        // page width — `prev` may live on a narrower page than
+                        // `p` mid-reflow, so `p.node.cols()` could be out of
+                        // bounds. Port of upstream fa8cae88b.
+                        prev.x = (*prev.node).data.size.cols - 1;
                         result = Some(prev);
                         break 'walk;
                     }
