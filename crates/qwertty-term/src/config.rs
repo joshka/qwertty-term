@@ -116,6 +116,26 @@ pub struct Config {
     /// ignored (falls back to the theme/default). See [`Config::cursor_color`].
     #[serde(rename = "cursor-color")]
     pub cursor_color: Option<String>,
+    /// Default terminal background color, as `#RRGGBB`/`RRGGBB` or an X11 color
+    /// name. Overrides the theme's `background`; a running program's OSC 11 still
+    /// overrides it at runtime. Upstream `background` (`Config.zig:585`). An
+    /// unparseable value is ignored. See [`Config::background`].
+    pub background: Option<String>,
+    /// Default terminal foreground (text) color, same format as `background`.
+    /// Overrides the theme's `foreground`; OSC 10 still wins at runtime. Upstream
+    /// `foreground` (`Config.zig:580`). See [`Config::foreground`].
+    pub foreground: Option<String>,
+    /// Selection highlight background, same format as `background`. Overrides the
+    /// theme's `selection-background`. When both selection colors resolve
+    /// (config or theme) the selection uses them; otherwise it inverts the cell.
+    /// Upstream `selection-background` (`Config.zig:625`).
+    #[serde(rename = "selection-background")]
+    pub selection_background: Option<String>,
+    /// Selection highlight foreground (text) color, same format as `background`.
+    /// Overrides the theme's `selection-foreground`. Upstream
+    /// `selection-foreground` (`Config.zig:620`).
+    #[serde(rename = "selection-foreground")]
+    pub selection_foreground: Option<String>,
     /// Which screen edge the quick-terminal dropdown animates from:
     /// `top`/`bottom`/`left`/`right`/`center` (upstream `quick-terminal-position`,
     /// `Config.zig:2624`, default `top`). Unknown values fall back to the
@@ -301,6 +321,10 @@ impl Default for Config {
             unfocused_split_opacity: DEFAULT_UNFOCUSED_SPLIT_OPACITY,
             unfocused_split_fill: None,
             cursor_color: None,
+            background: None,
+            foreground: None,
+            selection_background: None,
+            selection_foreground: None,
             quick_terminal_position: None,
             quick_terminal_size: None,
             quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
@@ -369,14 +393,27 @@ impl Config {
     /// The configured text-cursor color (`cursor-color`), or `None` when unset or
     /// unparseable (logged and skipped, so a bad value never breaks startup).
     pub fn cursor_color(&self) -> Option<qwertty_term_vt::color::Rgb> {
-        let raw = self.cursor_color.as_deref()?;
-        match qwertty_term_vt::color::Rgb::parse(raw) {
-            Ok(rgb) => Some(rgb),
-            Err(_) => {
-                eprintln!("ignoring invalid cursor-color: {raw:?}");
-                None
-            }
-        }
+        parse_color(self.cursor_color.as_deref(), "cursor-color")
+    }
+
+    /// The configured default `background` color, or `None` when unset/invalid.
+    pub fn background(&self) -> Option<qwertty_term_vt::color::Rgb> {
+        parse_color(self.background.as_deref(), "background")
+    }
+
+    /// The configured default `foreground` color, or `None` when unset/invalid.
+    pub fn foreground(&self) -> Option<qwertty_term_vt::color::Rgb> {
+        parse_color(self.foreground.as_deref(), "foreground")
+    }
+
+    /// The configured `selection-background`, or `None` when unset/invalid.
+    pub fn selection_background(&self) -> Option<qwertty_term_vt::color::Rgb> {
+        parse_color(self.selection_background.as_deref(), "selection-background")
+    }
+
+    /// The configured `selection-foreground`, or `None` when unset/invalid.
+    pub fn selection_foreground(&self) -> Option<qwertty_term_vt::color::Rgb> {
+        parse_color(self.selection_foreground.as_deref(), "selection-foreground")
     }
 
     /// Build the font-metric modifier set from the `adjust-*` keys, mapping each
@@ -664,6 +701,13 @@ const EXAMPLE_CONFIG: &str = r##"# qwertty-term config
 # Text-cursor color (#RRGGBB, RRGGBB, or an X11 color name). Overrides the
 # theme's cursor color; a running program's OSC 12 still wins at runtime.
 # cursor-color = "#ff8800"
+
+# Default background/foreground and selection colors (same color format as
+# cursor-color). Each overrides the theme; the program's OSC 10/11 still win.
+# background = "#101010"
+# foreground = "#e0e0e0"
+# selection-background = "#334455"
+# selection-foreground = "#ffffff"
 
 # Copy the mouse selection to the clipboard as soon as the drag finishes.
 # copy-on-select = false
@@ -1034,6 +1078,21 @@ fn merge_tables(base: &mut toml::Table, other: toml::Table) {
             (_, value) => {
                 base.insert(key, value);
             }
+        }
+    }
+}
+
+/// Parse a color config value (`#RRGGBB`/`RRGGBB`/X11 name) via
+/// [`qwertty_term_vt::color::Rgb::parse`], logging and skipping an unparseable
+/// value (so a typo'd color never breaks startup). `key` names the setting for
+/// the warning. Returns `None` for an unset (`None`) or invalid value.
+fn parse_color(raw: Option<&str>, key: &str) -> Option<qwertty_term_vt::color::Rgb> {
+    let raw = raw?;
+    match qwertty_term_vt::color::Rgb::parse(raw) {
+        Ok(rgb) => Some(rgb),
+        Err(_) => {
+            eprintln!("ignoring invalid {key}: {raw:?}");
+            None
         }
     }
 }
@@ -1436,6 +1495,29 @@ mod tests {
         // An unparseable value falls back to None (theme/default cursor color).
         let bad = parse("cursor-color = \"not-a-color-zzz\"\n").unwrap();
         assert_eq!(bad.cursor_color(), None);
+    }
+
+    #[test]
+    fn color_overrides_parse_and_default_to_none() {
+        use qwertty_term_vt::color::Rgb;
+        let d = Config::default();
+        assert_eq!(d.background(), None);
+        assert_eq!(d.foreground(), None);
+        assert_eq!(d.selection_background(), None);
+        assert_eq!(d.selection_foreground(), None);
+
+        let c = parse(
+            "background = \"#101010\"\n\
+             foreground = \"white\"\n\
+             selection-background = \"#334455\"\n\
+             selection-foreground = \"not-a-color\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.background(), Some(Rgb::new(0x10, 0x10, 0x10)));
+        assert_eq!(c.foreground(), Some(Rgb::new(0xff, 0xff, 0xff)));
+        assert_eq!(c.selection_background(), Some(Rgb::new(0x33, 0x44, 0x55)));
+        // Garbage → None (skipped).
+        assert_eq!(c.selection_foreground(), None);
     }
 
     #[test]
