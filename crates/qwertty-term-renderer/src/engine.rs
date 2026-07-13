@@ -95,6 +95,11 @@ pub struct FrameOptions {
     /// Minimum WCAG contrast ratio for text (`> 1.0` enables the shader's
     /// min-contrast step). Upstream `config.minimum-contrast`.
     pub min_contrast: f32,
+    /// The viewport cell `(col, row)` the mouse is hovering, if any. When it
+    /// lands on an OSC8 hyperlink, every visible cell of that link gets a
+    /// forced underline (R7). `None` disables the hover underline. The host
+    /// supplies this from its mouse plumbing.
+    pub hovered_cell: Option<(usize, usize)>,
 }
 
 impl Default for FrameOptions {
@@ -107,6 +112,7 @@ impl Default for FrameOptions {
             default_fg: Rgb::new(0xd8, 0xd8, 0xd8),
             default_bg: Rgb::new(0x18, 0x18, 0x18),
             min_contrast: 1.0,
+            hovered_cell: None,
         }
     }
 }
@@ -382,6 +388,16 @@ impl Engine {
         // Uniforms: screen/cell/grid geometry + projection + bg color.
         self.build_uniforms(cols, rows, default_bg, opts.min_contrast);
 
+        // R7: resolve which OSC8 hyperlink the mouse is hovering, if any, so
+        // every visible cell sharing that link gets a forced underline. The
+        // hovered cell's `LinkKey` identifies the link; cells match by value.
+        let hovered_link = opts.hovered_cell.and_then(|(hc, hr)| {
+            (hr < rows)
+                .then(|| snapshot.row(hr))
+                .and_then(|r| r.get(hc))
+                .and_then(|c| c.link.clone())
+        });
+
         // Cursor style resolution (renderer-local focus/blink/preedit on top of
         // the snapshot cursor). Preedit isn't wired in the reduced cut.
         let cursor = snapshot.cursor();
@@ -429,7 +445,16 @@ impl Engine {
             }
             let row = snapshot.row(y);
             let cursor_x = cursor_row_col.and_then(|(cr, cc)| (cr == y).then_some(cc));
-            self.rebuild_row(y, row, grid, palette, default_fg, default_bg, cursor_x);
+            self.rebuild_row(
+                y,
+                row,
+                grid,
+                palette,
+                default_fg,
+                default_bg,
+                cursor_x,
+                hovered_link.as_ref(),
+            );
         }
 
         // Cursor.
@@ -513,6 +538,7 @@ impl Engine {
         default_fg: Rgb,
         default_bg: Rgb,
         cursor_x: Option<usize>,
+        hovered_link: Option<&qwertty_term_vt::page::hyperlink::LinkKey>,
     ) {
         let cols = self.contents.cols();
 
@@ -547,8 +573,22 @@ impl Engine {
 
             let alpha: u8 = if style.faint { 128 } else { 255 };
 
+            // R7 hover: a cell of the hovered OSC8 link gets a *forced*
+            // underline — single normally, double if the cell already draws a
+            // single (so it stays visible), mirroring upstream `rebuildCells`.
+            let is_hovered_link = hovered_link.is_some() && cell.link.as_ref() == hovered_link;
+            let effective_underline = if is_hovered_link {
+                if style.underline == SnapshotUnderline::Single {
+                    SnapshotUnderline::Double
+                } else {
+                    SnapshotUnderline::Single
+                }
+            } else {
+                style.underline
+            };
+
             // Underlines draw first (underneath text).
-            if style.underline != SnapshotUnderline::None {
+            if effective_underline != SnapshotUnderline::None {
                 let underline_color = match style.underline_color {
                     SnapshotColor::Default => fg,
                     other => resolve_color(other, palette, default_fg),
@@ -556,7 +596,7 @@ impl Engine {
                 self.add_decoration(
                     x,
                     y,
-                    underline_sprite(style.underline),
+                    underline_sprite(effective_underline),
                     underline_color,
                     alpha,
                     grid,
