@@ -429,6 +429,7 @@ pub trait Handler {
     fn request_mode_unknown(&mut self, mode_raw: u16, ansi: bool) {}
     fn decrqss(&mut self, setting: dcs::Decrqss) {}
     fn xtversion(&mut self) {}
+    fn xtgettcap(&mut self, cmd: &mut dcs::XtGetTcap) {}
 
     // ---- APC ------------------------------------------------------------
     fn apc_start(&mut self) {}
@@ -938,11 +939,14 @@ impl<H: Handler> Stream<H> {
     }
 
     fn dcs_command(&mut self, cmd: dcs::Command) {
-        // Only DECRQSS produces a terminal-visible reply. XTGETTCAP / tmux
-        // are seams (no terminal-modifying effect), matching upstream, which
-        // ignores dcs_hook/put/unhook for terminal state.
-        if let dcs::Command::Decrqss(setting) = cmd {
-            self.handler.decrqss(setting);
+        // DECRQSS and XTGETTCAP both produce a reply but no terminal-state
+        // change. Upstream answers XTGETTCAP only at the app/termio layer (the
+        // lib core ignores dcs_hook/put/unhook), so this has no differential
+        // oracle coverage — it is verified by unit tests.
+        match cmd {
+            dcs::Command::Decrqss(setting) => self.handler.decrqss(setting),
+            dcs::Command::XtGetTcap(mut cmd) => self.handler.xtgettcap(&mut cmd),
+            _ => {}
         }
     }
 
@@ -2635,6 +2639,21 @@ impl Handler for TerminalHandler {
     fn xtversion(&mut self) {
         let resp = format!("\x1bP>|{}\x1b\\", self.xtversion);
         self.write_pty(resp.as_bytes());
+    }
+    fn xtgettcap(&mut self, cmd: &mut dcs::XtGetTcap) {
+        // Reply to each requested terminfo capability we know, concatenating
+        // the individual `\eP1+r...\e\\` replies. Unknown caps are skipped with
+        // no reply (matching upstream). Accumulate into a local buffer so the
+        // request iterator's borrow doesn't overlap `write_pty`.
+        let mut out: Vec<u8> = Vec::new();
+        while let Some(key) = cmd.next_key() {
+            if let Some(resp) = crate::terminfo::xtgettcap_response(key) {
+                out.extend_from_slice(&resp);
+            }
+        }
+        if !out.is_empty() {
+            self.write_pty(&out);
+        }
     }
     fn size_report(&mut self, style: SizeReportStyle) {
         // Port of `stream_terminal.reportSize`. CSI 21 t (window title) is
