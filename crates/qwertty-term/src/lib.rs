@@ -25,6 +25,7 @@ pub mod notify;
 pub mod paste;
 pub mod progress;
 pub mod quickterm;
+pub mod resize_overlay;
 pub mod scroll;
 pub mod search;
 pub mod searchkeys;

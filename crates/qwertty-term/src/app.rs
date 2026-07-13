@@ -1221,6 +1221,12 @@ struct Tab {
     /// `bell-features = title`); cleared when the tab becomes key. `Cell` for
     /// the `&self` tick/title accessors.
     bell_ringing: Cell<bool>,
+    /// The lazily-created resize-overlay HUD (`cols ⨯ rows`) shown over this
+    /// window during a live resize. `None` until the first time it's shown.
+    resize_overlay: RefCell<Option<Retained<objc2_app_kit::NSTextField>>>,
+    /// When the resize overlay auto-hides if no further resize arrives (upstream
+    /// 750ms). `None` when the overlay is hidden. `Cell` for the `&self` tick.
+    resize_overlay_deadline: Cell<Option<std::time::Instant>>,
 }
 
 impl Tab {
@@ -1229,6 +1235,65 @@ impl Tab {
         let id = crate::splits::SurfaceId(self.next_surface);
         self.next_surface += 1;
         id
+    }
+
+    /// Show the resize-overlay HUD with `cols ⨯ rows`, positioned per
+    /// `resize-overlay-position`, and (re)arm its auto-hide deadline. Lazily
+    /// creates the `NSTextField` on first use and adds it over the window's
+    /// content view.
+    fn show_resize_overlay(
+        &self,
+        mtm: MainThreadMarker,
+        cols: usize,
+        rows: usize,
+        position: crate::resize_overlay::ResizeOverlayPosition,
+        now: std::time::Instant,
+        duration: std::time::Duration,
+    ) {
+        let Some(content) = self.window.contentView() else {
+            return;
+        };
+        let mut slot = self.resize_overlay.borrow_mut();
+        let field = slot.get_or_insert_with(|| {
+            let f = make_resize_overlay_field(mtm);
+            content.addSubview(&f);
+            f
+        });
+        field.setStringValue(&NSString::from_str(&crate::resize_overlay::overlay_text(
+            cols, rows,
+        )));
+        field.sizeToFit();
+        // Pad the fit size for a HUD look; center the text within.
+        let fit = field.frame().size;
+        let hud = (fit.width + 20.0, fit.height + 10.0);
+        let container = content.frame().size;
+        let (x, y) = position.origin((container.width, container.height), hud);
+        field.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(hud.0, hud.1)));
+        field.setHidden(false);
+        self.resize_overlay_deadline.set(Some(now + duration));
+    }
+
+    /// Hide the resize overlay if its auto-hide deadline has passed.
+    fn tick_resize_overlay(&self, now: std::time::Instant) {
+        if let Some(deadline) = self.resize_overlay_deadline.get()
+            && now >= deadline
+        {
+            if let Some(field) = self.resize_overlay.borrow().as_ref() {
+                field.setHidden(true);
+            }
+            self.resize_overlay_deadline.set(None);
+        }
+    }
+
+    /// The resize overlay's current text while it is shown (deadline in the
+    /// future), else `None` (smoke/test).
+    fn resize_overlay_text(&self) -> Option<String> {
+        self.resize_overlay_deadline.get()?;
+        self.resize_overlay
+            .borrow()
+            .as_ref()
+            .filter(|f| !f.isHidden())
+            .map(|f| f.stringValue().to_string())
     }
 
     /// The focused surface's bundle.
@@ -1465,6 +1530,13 @@ pub struct ControllerState {
     /// short-circuits the alert (which a headless smoke can't drive). `None` in
     /// normal operation. See [`Controller::set_close_confirm_hook`].
     close_confirm_hook: Option<bool>,
+    /// When to show the resize overlay (`resize-overlay`).
+    resize_overlay_mode: crate::resize_overlay::ResizeOverlayMode,
+    /// Where the resize overlay sits (`resize-overlay-position`).
+    resize_overlay_position: crate::resize_overlay::ResizeOverlayPosition,
+    /// How long the resize overlay lingers after the last resize
+    /// (`resize-overlay-duration`).
+    resize_overlay_duration: std::time::Duration,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1567,6 +1639,9 @@ impl Controller {
             progress_style: config.progress_style,
             confirm_close_surface: config.confirm_close_surface(),
             close_confirm_hook: None,
+            resize_overlay_mode: config.resize_overlay(),
+            resize_overlay_position: config.resize_overlay_position(),
+            resize_overlay_duration: config.resize_overlay_duration(),
         })))
     }
 
@@ -1713,6 +1788,8 @@ impl Controller {
             created: std::time::Instant::now(),
             last_title: RefCell::new(String::new()),
             bell_ringing: Cell::new(false),
+            resize_overlay: RefCell::new(None),
+            resize_overlay_deadline: Cell::new(None),
         };
 
         // Size the window to the configured dropdown size on the target screen,
@@ -1899,6 +1976,9 @@ impl Controller {
         let mut state = self.0.borrow_mut();
         let family = state.font_family.clone();
         let mtm = state.mtm;
+        let overlay_mode = state.resize_overlay_mode;
+        let overlay_position = state.resize_overlay_position;
+        let overlay_duration = state.resize_overlay_duration;
         if let Some(t) = state.tabs.get_mut(&tab) {
             let new_scale = t.window.backingScaleFactor();
             // The container is the window's content view, so AppKit has already
@@ -1916,6 +1996,20 @@ impl Controller {
                 }
             }
             t.relayout(controller_ptr, tab, mtm);
+            // Resize overlay: flash the new `cols ⨯ rows` over the pane. A 500ms
+            // startup gate suppresses the window-open resize storm for the
+            // default `after-first`; `always` shows immediately.
+            use crate::resize_overlay::ResizeOverlayMode;
+            if overlay_mode != ResizeOverlayMode::Never {
+                let now = std::time::Instant::now();
+                let past_startup =
+                    now.duration_since(t.created) >= std::time::Duration::from_millis(500);
+                if (overlay_mode == ResizeOverlayMode::Always || past_startup)
+                    && let Some((cols, rows)) = t.focused_surface().map(|s| (s.cols, s.rows))
+                {
+                    t.show_resize_overlay(mtm, cols, rows, overlay_position, now, overlay_duration);
+                }
+            }
         }
     }
 
@@ -2261,6 +2355,42 @@ impl Controller {
             .get(&tab)
             .and_then(|t| t.surfaces.get(&surface))
             .map(|s| (s.cols, s.rows))
+    }
+
+    /// Smoke/test: resize the active tab's window content by `(dw, dh)` points
+    /// and re-sync geometry (as a live window resize would), returning the tab
+    /// and its focused pane's new `(cols, rows)`.
+    pub fn smoke_resize_active_window(&self, dw: f64, dh: f64) -> Option<(TabId, usize, usize)> {
+        let (window, tab) = {
+            let state = self.0.borrow();
+            let tab = self.active_tab()?;
+            let window = state.tabs.get(&tab)?.window.clone();
+            (window, tab)
+        };
+        let size = window.contentView().map(|cv| cv.frame().size)?;
+        window.setContentSize(NSSize::new(
+            (size.width + dw).max(120.0),
+            (size.height + dh).max(80.0),
+        ));
+        self.resync_tab_geometry(tab);
+        let state = self.0.borrow();
+        let (cols, rows) = state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .map(|s| (s.cols, s.rows))?;
+        Some((tab, cols, rows))
+    }
+
+    /// A tab's currently-shown resize-overlay text (or `None` when hidden) —
+    /// the resize smoke reads this to assert the `cols ⨯ rows` HUD shows on
+    /// resize and clears after its duration (smoke/test).
+    pub fn tab_resize_overlay_text(&self, tab: TabId) -> Option<String> {
+        self.0
+            .borrow()
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.resize_overlay_text())
     }
 
     /// A specific surface's current OSC 9;4 progress-bar display state (or
@@ -3737,6 +3867,8 @@ impl Controller {
                     }
                 }
                 tab.update_window_title(password_focused);
+                // Expire the resize overlay once its lifetime elapses.
+                tab.tick_resize_overlay(now_tick);
             }
             (dead, any_bell, notifications, command_finishes)
         };
@@ -4010,6 +4142,8 @@ impl Controller {
             created: std::time::Instant::now(),
             last_title: RefCell::new(String::new()),
             bell_ringing: Cell::new(false),
+            resize_overlay: RefCell::new(None),
+            resize_overlay_deadline: Cell::new(None),
         };
         // Lay out the single pane to the container's (AppKit-sized) bounds.
         tab.relayout(controller_ptr, id, mtm);
@@ -4332,6 +4466,29 @@ enum FontStep {
     Up,
     Down,
     Reset,
+}
+
+/// Build the resize-overlay HUD label: a rounded, semi-transparent dark badge
+/// with centered white text, hidden until first shown. Non-interactive.
+fn make_resize_overlay_field(mtm: MainThreadMarker) -> Retained<objc2_app_kit::NSTextField> {
+    let field = objc2_app_kit::NSTextField::new(mtm);
+    field.setEditable(false);
+    field.setSelectable(false);
+    field.setBezeled(false);
+    field.setBordered(false);
+    field.setDrawsBackground(true);
+    field.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+        0.0, 0.0, 0.0, 0.72,
+    )));
+    field.setTextColor(Some(&NSColor::whiteColor()));
+    field.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+    field.setHidden(true);
+    field.setWantsLayer(true);
+    if let Some(layer) = field.layer() {
+        layer.setCornerRadius(5.0);
+        layer.setMasksToBounds(true);
+    }
+    field
 }
 
 /// Build an `NSWindow` sized to the initial content, tabbing-enabled, hosting
@@ -4746,6 +4903,9 @@ pub struct DelegateIvars {
     /// Confirm-close smoke (`QWERTTY_TERM_SMOKE_CONFIRMCLOSE`): assert
     /// confirm-close-surface gating. See [`AppDelegate::run_confirmclose_smoke`].
     smoke_confirmclose: bool,
+    /// Resize smoke (`QWERTTY_TERM_SMOKE_RESIZE`): assert the resize overlay HUD.
+    /// See [`AppDelegate::run_resize_smoke`].
+    smoke_resize: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -4822,6 +4982,7 @@ define_class!(
             let has_notifycmd = self.ivars().smoke_notifycmd;
             let has_progress = self.ivars().smoke_progress;
             let has_confirmclose = self.ivars().smoke_confirmclose;
+            let has_resize = self.ivars().smoke_resize;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -4855,6 +5016,8 @@ define_class!(
                 self.schedule_progress_smoke();
             } else if has_confirmclose {
                 self.schedule_confirmclose_smoke();
+            } else if has_resize {
+                self.schedule_resize_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -5079,6 +5242,12 @@ define_class!(
         fn confirmclose_smoke(&self, _timer: &AnyObject) {
             self.run_confirmclose_smoke();
         }
+
+        /// Resize smoke: assert the resize overlay HUD, exit 0/1.
+        #[unsafe(method(ghosttyResizeSmoke:))]
+        fn resize_smoke(&self, _timer: &AnyObject) {
+            self.run_resize_smoke();
+        }
     }
 );
 
@@ -5107,6 +5276,7 @@ impl AppDelegate {
         smoke_notifycmd: bool,
         smoke_progress: bool,
         smoke_confirmclose: bool,
+        smoke_resize: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -5132,6 +5302,7 @@ impl AppDelegate {
             smoke_notifycmd,
             smoke_progress,
             smoke_confirmclose,
+            smoke_resize,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -7621,6 +7792,54 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_resize_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyResizeSmoke:));
+    }
+
+    /// Resize-overlay smoke: with `resize-overlay = always` + a short duration
+    /// configured, resize the window and assert the `cols ⨯ rows` HUD shows the
+    /// new grid, then auto-clears after its duration. Exits 0/1.
+    fn run_resize_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = resize_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at resize smoke start".into());
+        };
+
+        // No overlay before any resize.
+        if controller.tab_resize_overlay_text(tab).is_some() {
+            fail("the overlay should not be shown before any resize".into());
+        }
+
+        // Resize the window; the HUD should show the new grid.
+        let Some((_tab, cols, rows)) = controller.smoke_resize_active_window(-80.0, -60.0) else {
+            fail("failed to resize the active window".into());
+        };
+        Self::spin(0.1);
+        let want = crate::resize_overlay::overlay_text(cols, rows);
+        match controller.tab_resize_overlay_text(tab) {
+            Some(text) if text == want => {}
+            other => fail(format!(
+                "after a resize the overlay should read {want:?}; got {other:?}"
+            )),
+        }
+
+        // After the (short, 400ms configured) duration elapses, it clears.
+        Self::spin(0.7);
+        if let Some(text) = controller.tab_resize_overlay_text(tab) {
+            fail(format!(
+                "the overlay should auto-clear after its duration; still showing {text:?}"
+            ));
+        }
+
+        println!(
+            "OK: resize smoke — the resize overlay showed the new cols ⨯ rows grid and \
+             auto-cleared after its duration."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -7870,6 +8089,12 @@ fn confirmclose_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a resize-overlay smoke failure and exit non-zero.
+fn resize_fail(msg: String) -> ! {
+    eprintln!("FAIL: resize smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -7987,6 +8212,7 @@ pub fn run(
     smoke_notifycmd: bool,
     smoke_progress: bool,
     smoke_confirmclose: bool,
+    smoke_resize: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -8015,6 +8241,7 @@ pub fn run(
         smoke_notifycmd,
         smoke_progress,
         smoke_confirmclose,
+        smoke_resize,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

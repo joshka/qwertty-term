@@ -163,6 +163,21 @@ pub struct Config {
     /// Parsed by [`Config::confirm_close_surface`].
     #[serde(rename = "confirm-close-surface")]
     pub confirm_close_surface: Option<String>,
+    /// When to show the `cols ⨯ rows` resize overlay: `always` / `never` /
+    /// `after-first` (default, upstream `resize-overlay`, `Config.zig:2292`).
+    /// Parsed by [`Config::resize_overlay`].
+    #[serde(rename = "resize-overlay")]
+    pub resize_overlay: Option<String>,
+    /// Where the resize overlay sits: `center` (default) / `top-left` /
+    /// `top-center` / `top-right` / `bottom-left` / `bottom-center` /
+    /// `bottom-right` (upstream `resize-overlay-position`, `Config.zig:2306`).
+    /// Parsed by [`Config::resize_overlay_position`].
+    #[serde(rename = "resize-overlay-position")]
+    pub resize_overlay_position: Option<String>,
+    /// How long the resize overlay stays after the last resize, in milliseconds
+    /// (upstream `resize-overlay-duration`, `Config.zig:2340`, default 750ms).
+    #[serde(rename = "resize-overlay-duration")]
+    pub resize_overlay_duration: f64,
     /// Whether to quit the app after the last window/surface closes (upstream
     /// `quit-after-last-window-closed`, `Config.zig:2509`, default **false** on
     /// macOS — the standard "app stays running with no windows" behavior).
@@ -231,6 +246,10 @@ impl Default for Config {
             // Confirm before closing a surface with a running process (upstream
             // default `true`).
             confirm_close_surface: None,
+            // Resize overlay: after-first / center / 750ms (upstream defaults).
+            resize_overlay: None,
+            resize_overlay_position: None,
+            resize_overlay_duration: crate::resize_overlay::DEFAULT_DURATION_MS,
             // macOS default: stay running after the last window closes
             // (upstream `Config.zig:2509` → false on macOS).
             quit_after_last_window_closed: false,
@@ -317,6 +336,27 @@ impl Config {
             .as_deref()
             .map(ConfirmCloseSurface::parse)
             .unwrap_or_default()
+    }
+
+    /// The parsed `resize-overlay` mode (default `AfterFirst`).
+    pub fn resize_overlay(&self) -> crate::resize_overlay::ResizeOverlayMode {
+        self.resize_overlay
+            .as_deref()
+            .map(crate::resize_overlay::ResizeOverlayMode::parse)
+            .unwrap_or_default()
+    }
+
+    /// The parsed `resize-overlay-position` (default `Center`).
+    pub fn resize_overlay_position(&self) -> crate::resize_overlay::ResizeOverlayPosition {
+        self.resize_overlay_position
+            .as_deref()
+            .map(crate::resize_overlay::ResizeOverlayPosition::parse)
+            .unwrap_or_default()
+    }
+
+    /// The `resize-overlay-duration` as a `Duration` (default 750ms).
+    pub fn resize_overlay_duration(&self) -> std::time::Duration {
+        crate::resize_overlay::duration_from_ms(self.resize_overlay_duration)
     }
 
     /// The parsed `right-click-action` (defaults to `context-menu`).
@@ -496,6 +536,14 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # integration), or "always". Without shell integration this errs toward
 # confirming.
 # confirm-close-surface = "true"
+
+# The cols x rows resize overlay shown during a live window resize:
+# resize-overlay = "always" / "never" / "after-first" (default; not on the
+# initial size). Position is center (default) or a corner/edge; duration is how
+# long it lingers after the last resize, in milliseconds.
+# resize-overlay = "after-first"
+# resize-overlay-position = "center"
+# resize-overlay-duration = 750
 
 # Window state. quit-after-last-window-closed keeps the standard macOS behavior
 # of staying running with no windows when false (default); set true to quit.
@@ -735,6 +783,19 @@ mod tests {
             config.confirm_close_surface(),
             crate::config::ConfirmCloseSurface::OnRunning
         );
+        // Resize overlay defaults: after-first, center, 750ms.
+        assert_eq!(
+            config.resize_overlay(),
+            crate::resize_overlay::ResizeOverlayMode::AfterFirst
+        );
+        assert_eq!(
+            config.resize_overlay_position(),
+            crate::resize_overlay::ResizeOverlayPosition::Center
+        );
+        assert_eq!(
+            config.resize_overlay_duration(),
+            std::time::Duration::from_millis(750)
+        );
         // Window state: macOS default doesn't quit after last window; no
         // configured geometry.
         assert!(!config.quit_after_last_window_closed);
@@ -828,6 +889,28 @@ mod tests {
     fn parses_progress_style_key() {
         assert!(!parse("progress-style = false\n").unwrap().progress_style);
         assert!(parse("").unwrap().progress_style);
+    }
+
+    #[test]
+    fn parses_resize_overlay_keys() {
+        let config = parse(
+            "resize-overlay = \"always\"\n\
+             resize-overlay-position = \"top-right\"\n\
+             resize-overlay-duration = 300\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.resize_overlay(),
+            crate::resize_overlay::ResizeOverlayMode::Always
+        );
+        assert_eq!(
+            config.resize_overlay_position(),
+            crate::resize_overlay::ResizeOverlayPosition::TopRight
+        );
+        assert_eq!(
+            config.resize_overlay_duration(),
+            std::time::Duration::from_millis(300)
+        );
     }
 
     #[test]
