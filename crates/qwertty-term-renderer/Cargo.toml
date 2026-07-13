@@ -23,6 +23,8 @@ qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
 # (pure Rust), so the cell engine can use it on every target — including the
 # headless Linux software-render path (ADR 003).
 qwertty-term-sprite = { version = "0.2.0", path = "../qwertty-term-sprite" }
+# Regex URL detection for R7 clickable links (src/link.rs).
+regex = "1"
 
 # Metal backend (chunk R1). All versions already present in the workspace
 # lockfile (transitively via eframe/winit), so these add no new lock entries.
