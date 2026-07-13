@@ -132,12 +132,12 @@ fn afl_corpus_agrees() {
     );
 
     // The small `-initial` seeds must agree exactly. The large `-cmin` corpora
-    // currently surface a known cluster of divergences, all one root cause —
-    // OSC bodies with non-UTF-8 bytes are dropped wholesale (issue #169). Until
-    // that's fixed, tolerate up to that baseline in full mode but still fail on
-    // any *regression* beyond it. Drop `CMIN_KNOWN_DIVERGENCES` to 0 once #169
-    // lands.
-    const CMIN_KNOWN_DIVERGENCES: usize = 14;
+    // still surface a known cluster — DECCOLM (mode 3/40) clearing scrolled
+    // content upstream preserves (issue #178). Tolerate up to that baseline in
+    // full mode but still fail on any *regression* beyond it. Drop to 0 once
+    // #178 lands. (Was 14; the OSC non-UTF-8 cluster #169 and a VPR/CUP param
+    // overflow are now fixed.)
+    const CMIN_KNOWN_DIVERGENCES: usize = 5;
     let budget = if full { CMIN_KNOWN_DIVERGENCES } else { 0 };
 
     if divergences.len() > budget {

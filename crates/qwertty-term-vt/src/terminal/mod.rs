@@ -871,8 +871,18 @@ impl Terminal {
 
         let row = if row_req == 0 { 1 } else { row_req };
         let col = if col_req == 0 { 1 } else { col_req };
-        let x = (x_max.min((col as CellCountInt).saturating_add(x_offset))).saturating_sub(1);
-        let y = (y_max.min((row as CellCountInt).saturating_add(y_offset))).saturating_sub(1);
+        // Clamp in `usize` BEFORE narrowing to `CellCountInt`: upstream computes
+        // `@min(max, req + offset) -| 1` in the wide request type, so a request
+        // past the grid (e.g. VPR/CUP with a param ≥ 65536) clamps to the edge.
+        // Casting `req` to `CellCountInt` first would truncate (65536 → 0) and
+        // wrongly move to the top/left. The result is ≤ `*_max`, so the final
+        // narrowing is lossless. (Found via the ghostty AFL corpus replay.)
+        let x = (x_max as usize)
+            .min(col.saturating_add(x_offset as usize))
+            .saturating_sub(1) as CellCountInt;
+        let y = (y_max as usize)
+            .min(row.saturating_add(y_offset as usize))
+            .saturating_sub(1) as CellCountInt;
 
         let cur_x = self.screen().cursor.x;
         let cur_y = self.screen().cursor.y;
