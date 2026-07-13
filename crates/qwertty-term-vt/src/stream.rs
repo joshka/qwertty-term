@@ -1711,6 +1711,26 @@ pub struct TerminalHandler {
     /// XTWINOPS size reports; `None` until set, in which case those reports
     /// stay silent (mirroring the lib layer's null `size` effect).
     cell_size: Option<CellSize>,
+    /// The ENQ (0x05) answerback string, set via config (`enquiry-response`).
+    /// Empty by default, in which case ENQ produces no reply (matching the lib
+    /// layer's null `enquiry` effect).
+    enquiry_response: Vec<u8>,
+    /// The format for OSC color-query replies (`none`/`8-bit`/`16-bit`), set via
+    /// config (`osc-color-report-format`). Defaults to 16-bit (the xterm form
+    /// the lib layer uses); `None` suppresses color-query replies entirely.
+    osc_color_report_format: OscColorReportFormat,
+}
+
+/// OSC color-query reply format. Port of `configpkg.Config.OSCColorReportFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OscColorReportFormat {
+    /// Suppress color-query replies.
+    None,
+    /// `rgb:RR/GG/BB` (8 bits per channel).
+    Bit8,
+    /// `rgb:RRRR/GGGG/BBBB` (16 bits per channel) — the default.
+    #[default]
+    Bit16,
 }
 
 /// Convenience accessors for the common `Stream<TerminalHandler>` pairing, so
@@ -1755,6 +1775,8 @@ impl TerminalHandler {
             apc_handler: apc::Handler::new(),
             color_scheme: None,
             cell_size: None,
+            enquiry_response: Vec::new(),
+            osc_color_report_format: OscColorReportFormat::Bit16,
         }
     }
 
@@ -1763,6 +1785,17 @@ impl TerminalHandler {
     /// should set this on startup and on font-size / DPI changes).
     pub fn set_cell_size(&mut self, width: u32, height: u32) {
         self.cell_size = Some(CellSize { width, height });
+    }
+
+    /// Set the ENQ (0x05) answerback string (config `enquiry-response`). An
+    /// empty response (the default) makes ENQ produce no reply.
+    pub fn set_enquiry_response(&mut self, response: &[u8]) {
+        self.enquiry_response = response.to_vec();
+    }
+
+    /// Set the OSC color-query reply format (config `osc-color-report-format`).
+    pub fn set_osc_color_report_format(&mut self, format: OscColorReportFormat) {
+        self.osc_color_report_format = format;
     }
 
     /// Tell the terminal the current OS light/dark color scheme, so a
@@ -1985,7 +2018,15 @@ impl Handler for TerminalHandler {
         // deliver. No terminal-state effect.
         self.pending_notification = Some((title.to_owned(), body.to_owned()));
     }
-    fn enquiry(&mut self) {}
+    fn enquiry(&mut self) {
+        // ENQ (0x05) answerback: reply the configured response, or nothing if
+        // none is set. Port of `stream_handler.enquiry` / the lib `enquiry`
+        // effect.
+        if !self.enquiry_response.is_empty() {
+            let resp = self.enquiry_response.clone();
+            self.write_pty(&resp);
+        }
+    }
 
     fn cursor_up(&mut self, count: u16) {
         self.terminal.cursor_up(count as usize);
@@ -2245,16 +2286,26 @@ impl Handler for TerminalHandler {
                 // + `colorForXterm` (14c829883). Unsupported targets / unset
                 // dynamics resolve to `None` and are skipped.
                 ColorRequest::Query(target) => {
-                    let Some(color) = self.color_for_xterm(*target) else {
+                    // The report format is config-driven; `None` suppresses the
+                    // reply entirely.
+                    let encoded = match self.osc_color_report_format {
+                        OscColorReportFormat::None => continue,
+                        OscColorReportFormat::Bit8 => {
+                            self.color_for_xterm(*target).map(|c| c.encode_rgb8())
+                        }
+                        OscColorReportFormat::Bit16 => {
+                            self.color_for_xterm(*target).map(|c| c.encode_rgb16())
+                        }
+                    };
+                    let Some(encoded) = encoded else {
                         continue;
                     };
                     match target {
                         ColorTarget::Palette(i) => {
-                            let _ = write!(reply, "\x1b]4;{i};{}", color.encode_rgb16());
+                            let _ = write!(reply, "\x1b]4;{i};{encoded}");
                         }
                         ColorTarget::Dynamic(dynamic) => {
-                            let _ =
-                                write!(reply, "\x1b]{};{}", *dynamic as u16, color.encode_rgb16());
+                            let _ = write!(reply, "\x1b]{};{encoded}", *dynamic as u16);
                         }
                         ColorTarget::Special(_) => {}
                     }
