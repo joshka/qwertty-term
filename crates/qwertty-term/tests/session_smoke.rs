@@ -1,13 +1,13 @@
 //! Windowed window-session smoke: proves the `window-save-state` content-restore
-//! core (slice 2). The app can capture a live tab's split tree + per-pane cwd
-//! into a serializable [`WindowSession`], round-trip it through JSON, and rebuild
-//! a single-pane session into a fresh tab.
+//! path. The app can capture a live tab's split tree + per-pane cwd into a
+//! serializable `WindowSession`, round-trip it through JSON, and rebuild it into
+//! a fresh tab — both a single pane and a full multi-pane tree (structure +
+//! per-split ratios).
 //!
-//! This is the app-visible half of slice 2 — the serializable model is unit-
-//! tested in `session.rs`, and this smoke drives the live capture/restore path.
-//! Wiring the JSON into macOS's `NSWindowRestoration` `NSCoder` (so a genuine
-//! quit+relaunch restores content) is the remaining slice-2b OS step, only
-//! exercisable by a real relaunch.
+//! This is the app-visible restore path — the serializable model is unit-tested
+//! in `session.rs`, and this smoke drives the live capture/restore. Wiring the
+//! JSON into macOS's `NSWindowRestoration` `NSCoder` (so a genuine quit+relaunch
+//! replays it) is the remaining OS step, only exercisable by a real relaunch.
 //!
 //! Like the other windowed smokes this needs a real GUI (windowserver) session,
 //! so it is `#[ignore]`d by default:

@@ -4297,36 +4297,56 @@ impl Controller {
     /// (its own shell, inheriting the focused pane's pwd) at a 50/50 ratio, then
     /// re-lay-out. The new pane becomes focused (first responder).
     pub fn new_split(&self, tab: TabId, direction: Direction) {
-        let mtm = self.0.borrow().mtm;
-        let controller_ptr: *const Controller = self;
-
-        // Resolve the inherited pwd + a fresh surface id under a scoped borrow.
-        let (surface_id, cwd, scale) = {
-            let mut state = self.0.borrow_mut();
-            let Some(t) = state.tabs.get_mut(&tab) else {
+        let (anchor, cwd) = {
+            let state = self.0.borrow();
+            let Some(t) = state.tabs.get(&tab) else {
                 return;
             };
+            let anchor = t.tree.focused();
             let cwd = t
                 .focused_surface()
                 .and_then(|s| s.engine().pwd())
                 .and_then(|p| tabs::inherit_pwd(Some(&p)));
+            (anchor, cwd)
+        };
+        self.spawn_split(tab, anchor, direction, cwd);
+    }
+
+    /// Split `anchor`'s pane of `tab` in `direction`, spawning a new surface
+    /// whose shell starts in `cwd`, at a 50/50 ratio; re-lay-out and focus the
+    /// new pane. Returns the new surface id, or `None` if the tab/anchor is gone
+    /// or the surface fails to build. This is the shared core of interactive
+    /// [`new_split`](Self::new_split) and session restore
+    /// ([`rebuild_session_tree`](Self::rebuild_session_tree)).
+    fn spawn_split(
+        &self,
+        tab: TabId,
+        anchor: SurfaceId,
+        direction: Direction,
+        cwd: Option<PathBuf>,
+    ) -> Option<SurfaceId> {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+
+        // Focus the anchor (so `split` targets its leaf) + mint a fresh id.
+        let (surface_id, scale) = {
+            let mut state = self.0.borrow_mut();
+            let t = state.tabs.get_mut(&tab)?;
+            if !t.tree.focus(anchor) {
+                return None;
+            }
             let scale = t.window.backingScaleFactor();
-            let sid = t.mint_surface_id();
-            (sid, cwd, scale)
+            (t.mint_surface_id(), scale)
         };
 
         // Build the new surface outside the borrow (spawning a shell is heavy).
-        let Some(surface) = self.build_surface(mtm, tab, surface_id, scale, cwd.as_deref()) else {
-            return;
-        };
+        let surface = self.build_surface(mtm, tab, surface_id, scale, cwd.as_deref())?;
         let view = surface.view.clone();
 
         // Insert into the tree + container + surface map, then re-lay-out.
         {
             let mut state = self.0.borrow_mut();
-            let Some(t) = state.tabs.get_mut(&tab) else {
-                return;
-            };
+            let t = state.tabs.get_mut(&tab)?;
             // The pane that was focused before this split loses focus to the new
             // pane (per-pane focus reporting): send it focus-OUT.
             let previous = t.tree.focused();
@@ -4350,6 +4370,7 @@ impl Controller {
         if let Some(window) = view.window() {
             window.makeFirstResponder(Some(&view));
         }
+        Some(surface_id)
     }
 
     /// Capture `tab`'s restorable session: its split tree with each pane's
@@ -4365,13 +4386,94 @@ impl Controller {
     }
 
     /// Restore a captured [`WindowSession`](crate::session::WindowSession) into a
-    /// new tab. Slice 2a restores a single-pane session (spawn a shell in the
-    /// saved cwd); a multi-pane tree is rebuilt as a single pane at its leftmost
-    /// cwd for now (structure/ratio rebuild + the OS restoration wiring are
-    /// slice 2b). Returns the new tab id.
+    /// new tab: spawn the tab in the tree's leftmost cwd, rebuild the full split
+    /// structure (one shell per leaf, in its saved cwd), and re-apply each
+    /// split's ratio. Returns the new tab id, or `None` if the tab can't spawn.
+    ///
+    /// The OS side — handing this session to macOS's `NSWindowRestoration`
+    /// `NSCoder` so a genuine quit+relaunch replays it — is the remaining
+    /// slice-2b wiring; this method is what that (and the in-app path) drives.
     pub fn restore_window_session(&self, session: &crate::session::WindowSession) -> Option<TabId> {
-        let cwd = leftmost_cwd(&session.tree).map(std::path::PathBuf::from);
-        self.spawn_tab(cwd, None)
+        let cwd = leftmost_cwd(&session.tree).and_then(|c| tabs::inherit_pwd(Some(&c)));
+        let tab = self.spawn_tab(cwd, None)?;
+        // The tab's single leaf is the tree's leftmost leaf; grow the rest.
+        let anchor = {
+            let state = self.0.borrow();
+            state.tabs.get(&tab)?.tree.focused()
+        };
+        self.rebuild_session_tree(tab, &session.tree, anchor);
+        self.apply_session_ratios(tab, &session.tree, &mut Vec::new());
+        Some(tab)
+    }
+
+    /// Recursively grow `tab`'s split tree to match `node`. `anchor` is the
+    /// surface already occupying `node`'s whole slot (its leftmost leaf, spawned
+    /// by the parent). For a split, `anchor` stays in the first slot and a new
+    /// surface (its own shell in the second subtree's leftmost cwd) fills the
+    /// second, then both subtrees recurse. Splits at 0.5; ratios are applied
+    /// afterward by [`apply_session_ratios`](Self::apply_session_ratios).
+    fn rebuild_session_tree(
+        &self,
+        tab: TabId,
+        node: &crate::session::SessionNode,
+        anchor: SurfaceId,
+    ) {
+        use crate::session::{SessionAxis, SessionNode};
+        let SessionNode::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = node
+        else {
+            return; // Leaf: `anchor` already represents it.
+        };
+        // The direction that keeps `anchor` in the first slot and puts the new
+        // surface second — matching how capture reads first/second.
+        let direction = match axis {
+            SessionAxis::Horizontal => Direction::Right,
+            SessionAxis::Vertical => Direction::Down,
+        };
+        let cwd = leftmost_cwd(second).and_then(|c| tabs::inherit_pwd(Some(&c)));
+        let Some(new) = self.spawn_split(tab, anchor, direction, cwd) else {
+            return; // Surface failed to build; leave the partial tree as-is.
+        };
+        self.rebuild_session_tree(tab, first, anchor);
+        self.rebuild_session_tree(tab, second, new);
+    }
+
+    /// Walk the rebuilt tree in lockstep with `node`, setting each split's ratio.
+    /// The live tree's first/second orientation matches the session's (see
+    /// [`rebuild_session_tree`](Self::rebuild_session_tree)), so the `false=first
+    /// / true=second` `path` addresses the same split in both.
+    fn apply_session_ratios(
+        &self,
+        tab: TabId,
+        node: &crate::session::SessionNode,
+        path: &mut Vec<bool>,
+    ) {
+        use crate::session::SessionNode;
+        let SessionNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = node
+        else {
+            return;
+        };
+        {
+            let mut state = self.0.borrow_mut();
+            if let Some(t) = state.tabs.get_mut(&tab) {
+                t.tree.set_ratio(path, *ratio);
+            }
+        }
+        path.push(false);
+        self.apply_session_ratios(tab, first, path);
+        path.pop();
+        path.push(true);
+        self.apply_session_ratios(tab, second, path);
+        path.pop();
     }
 
     /// Move focus to the spatially-adjacent pane of `tab` in `direction`, if one
@@ -8180,9 +8282,34 @@ impl AppDelegate {
     /// restore a single-pane session into a fresh tab. Exits 0/1.
     fn run_session_smoke(&self) {
         use crate::context_menu::ContextAction;
-        use crate::session::{SessionNode, WindowSession};
+        use crate::session::{SessionAxis, SessionNode, WindowSession};
         let controller = &self.ivars().controller;
         let fail = session_fail;
+
+        // Structural equality ignoring cwd (restored shells run `sleep`, so they
+        // never emit OSC 7 — only the tree shape + ratios round-trip live).
+        fn shape_eq(a: &SessionNode, b: &SessionNode) -> bool {
+            match (a, b) {
+                (SessionNode::Leaf { .. }, SessionNode::Leaf { .. }) => true,
+                (
+                    SessionNode::Split {
+                        axis: aax,
+                        ratio: ar,
+                        first: af,
+                        second: asec,
+                    },
+                    SessionNode::Split {
+                        axis: bax,
+                        ratio: br,
+                        first: bf,
+                        second: bsec,
+                    },
+                ) => {
+                    aax == bax && (ar - br).abs() < 0.02 && shape_eq(af, bf) && shape_eq(asec, bsec)
+                }
+                _ => false,
+            }
+        }
 
         let Some(tab) = controller.active_tab() else {
             fail("no active tab at session smoke start".into());
@@ -8222,12 +8349,12 @@ impl AppDelegate {
             ));
         }
 
-        // 4. Restore a single-pane session → a fresh tab is spawned.
-        let session = WindowSession::new(SessionNode::Leaf {
+        // 4. Restore a single-pane session → a fresh, distinct tab is spawned.
+        let single = WindowSession::new(SessionNode::Leaf {
             cwd: Some("/tmp".into()),
         });
         let before = controller.tab_count();
-        let Some(new_tab) = controller.restore_window_session(&session) else {
+        let Some(new_tab) = controller.restore_window_session(&single) else {
             fail("restore_window_session returned None".into());
         };
         Self::spin(0.3);
@@ -8235,10 +8362,43 @@ impl AppDelegate {
             fail("restore did not spawn a distinct new tab".into());
         }
 
+        // 5. Restore a multi-pane session (0 | (1 / 2) with non-even ratios) and
+        //    re-capture the rebuilt tab: the structure + ratios must match.
+        let multi = WindowSession::new(SessionNode::Split {
+            axis: SessionAxis::Horizontal,
+            ratio: 0.7,
+            first: Box::new(SessionNode::Leaf { cwd: None }),
+            second: Box::new(SessionNode::Split {
+                axis: SessionAxis::Vertical,
+                ratio: 0.3,
+                first: Box::new(SessionNode::Leaf { cwd: None }),
+                second: Box::new(SessionNode::Leaf { cwd: None }),
+            }),
+        });
+        let Some(rebuilt_tab) = controller.restore_window_session(&multi) else {
+            fail("restore of a multi-pane session returned None".into());
+        };
+        Self::spin(0.5);
+        let Some(rebuilt) = controller.capture_window_session(rebuilt_tab) else {
+            fail("capture of the rebuilt tab returned None".into());
+        };
+        if rebuilt.tree.leaf_count() != 3 {
+            fail(format!(
+                "rebuilt tree should have three panes; got {}",
+                rebuilt.tree.leaf_count()
+            ));
+        }
+        if !shape_eq(&rebuilt.tree, &multi.tree) {
+            fail(format!(
+                "rebuilt tree shape/ratios did not match the session; got {:?}",
+                rebuilt.tree
+            ));
+        }
+
         println!(
             "OK: session smoke — captured a tab's tree + cwd, round-tripped the JSON, \
-             captured a split as two leaves, and restored a single-pane session into a \
-             fresh tab."
+             captured a split as two leaves, restored a single-pane session into a fresh \
+             tab, and rebuilt a 3-pane session (structure + ratios) into another."
         );
         std::process::exit(0);
     }
