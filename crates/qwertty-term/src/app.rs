@@ -2411,11 +2411,43 @@ impl Controller {
                 true
             }
 
+            // Re-read the config from disk and re-apply the runtime-safe settings
+            // (default `cmd+shift+,`).
+            A::ReloadConfig => {
+                self.reload_config();
+                true
+            }
+
             // Everything else (menu actions, byte actions, inactive end_search,
             // unhandled) falls through so the menu / keyDown-encoder path handles
             // it.
             _ => false,
         }
+    }
+
+    /// Re-read the user config from disk and re-apply the settings that are safe
+    /// to change without rebuilding surfaces: the keybind `Set`, copy-on-select,
+    /// and the scroll multiplier. Bound to the `reload_config` action (default
+    /// `cmd+shift+,`).
+    ///
+    /// Not yet re-applied here (they need per-surface / engine re-derivation —
+    /// follow-up slices, see `docs/analysis/config-core.md` §7): theme + palette,
+    /// fonts, colors, cursor, and window padding. Those take effect on restart or
+    /// for new surfaces until wired.
+    pub fn reload_config(&self) {
+        let config = crate::config::load();
+        let mut state = self.0.borrow_mut();
+        state.keybinds = crate::keybind::build_set(&config.keybind);
+        state.copy_on_select = config.copy_on_select;
+        state.scroll_multiplier = crate::scroll::ScrollMultiplier {
+            precision: config.mouse_scroll_multiplier.precision,
+            discrete: config.mouse_scroll_multiplier.discrete,
+        }
+        .clamped();
+        eprintln!(
+            "qwertty-term: config reloaded (keybinds, copy-on-select, scroll-multiplier; \
+             theme/fonts/colors need a restart until wired)"
+        );
     }
 
     /// Feed a key to the leader-key sequence state machine (`ctrl+a>c`-style
