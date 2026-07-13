@@ -136,10 +136,18 @@ Note the `bed47168c` → `bb0ac4c72` → `60121a039` sequence: `bed47168c` shran
 read-ahead but was reverted by `60121a039` (~20% Linux throughput regression), net zero change.
 `bb0ac4c72` is a separate, surviving fix (the mirror item above).
 
-## `src/font/` → `qwertty-term-font` (T2) — 1 mirror item
+## `src/font/` → `qwertty-term-font` (T2) — 0 open (1 verified already-mirrored)
 
 - `dac341cad` — cursor sprites used `cell_height` instead of `cursor_height` → the
   `adjust-cursor-height` config had no effect. (`font/sprite/Face.zig:205-260`)
+  → **ALREADY MIRRORED (2026-07-13, T2): no code change needed.** The port applies *both*
+  halves of the upstream fix: height selection (`cursor_height` for rect/hollow-rect/bar,
+  `cell_height` otherwise) in `qwertty-term-sprite/src/lib.rs::render` and the
+  `(cell_height − draw_height)/2` re-centering in `canvas.rs::into_glyph`. This crate was
+  ported from a post-`dac341cad` upstream, so it never carried the regression. Added
+  regression tests (`cursor_height_tests` in `lib.rs`) to lock both halves — the exact
+  case that "went unnoticed for so long" upstream now fails loudly if a draw-path refactor
+  reverts it.
 
 ## `src/input*` → `qwertty-term-input` (T3)
 
