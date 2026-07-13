@@ -67,10 +67,10 @@ use qwertty_term_vt::snapshot::{CellStyle, SnapshotCell, SnapshotColor, Snapshot
 use crate::cells::{self, Contents, Key};
 use crate::cursor::{self, Style as CursorStyle};
 use crate::gpu::{
-    Attachment, Draw, GpuBackend, GpuBuffer, GpuFrame, GpuRenderPass, GpuTexture, Primitive,
-    ShaderSource, Step,
+    Attachment, Draw, GpuBackend, GpuBuffer, GpuFrame, GpuRenderPass, GpuTarget, GpuTexture,
+    Primitive, ShaderSource, Step,
 };
-use crate::metal::{Buffer, Metal, MetalError, Pipeline, RenderPass, Texture};
+use crate::metal::{Buffer, Metal, MetalError, Pipeline};
 use crate::shaders;
 use crate::snapshot::{KittyImage, KittyPlacement, RenderSnapshot};
 use crate::swap_chain::{SwapChain, SwapChainMode};
@@ -138,24 +138,24 @@ type RunCache = HashMap<RunKey, Vec<ShapedCell>>;
 
 /// The cell engine. Owns the CPU-side [`Contents`], the [`Uniforms`], the
 /// [`SwapChain`], and the three first-pixels pipelines.
-pub struct Engine {
+pub struct Engine<B: GpuBackend = Metal> {
     /// The GPU backend (device/queue + resource factory).
-    backend: Metal,
+    backend: B,
     /// Per-frame GPU-slot pool (targets + instance buffers + atlas textures).
-    swap_chain: SwapChain<Metal>,
+    swap_chain: SwapChain<B>,
     /// CPU-side cell contents, rebuilt each `update_frame`.
     contents: Contents,
     /// Shader uniforms, rebuilt each `update_frame`.
     uniforms: Uniforms,
     /// `bg_color`: solid background fill (full-screen triangle).
-    bg_color_pipeline: Pipeline,
+    bg_color_pipeline: B::Pipeline,
     /// `cell_bg`: per-cell background color (full-screen triangle sampling the
     /// bg_cells buffer).
-    cell_bg_pipeline: Pipeline,
+    cell_bg_pipeline: B::Pipeline,
     /// `cell_text`: instanced glyph quads.
-    cell_text_pipeline: Pipeline,
+    cell_text_pipeline: B::Pipeline,
     /// `image`: kitty graphics image quads (R6 slice 1).
-    image_pipeline: Pipeline,
+    image_pipeline: B::Pipeline,
     /// Cell metrics (from the font grid), cached for geometry.
     cell_width: u32,
     cell_height: u32,
@@ -184,12 +184,12 @@ pub struct Engine {
     /// (not per-slot): textures are read-only after upload. Re-uploaded only
     /// when an id's `generation` changes (upstream's staleness protocol). R6
     /// slice 3 adds eviction; slice 1 keeps referenced images cached.
-    images: HashMap<u32, ImageEntry>,
+    images: HashMap<u32, ImageEntry<B>>,
     /// Per-placement instance buffers (one `Image` quad each), grown on demand
     /// and reused across frames. Engine-level (not per-slot): correct under the
     /// day-one `Sync` swap-chain mode (one live frame); moves per-slot when
     /// async pacing lands.
-    image_instances: Vec<Buffer<Image>>,
+    image_instances: Vec<B::Buffer<Image>>,
     /// Resolved kitty placements for the current frame (set by `update_frame`,
     /// drawn by `draw_frame`/present). Drawn in resolve order; z-bucketing is
     /// R6 slice 4.
@@ -214,12 +214,12 @@ pub struct Engine {
 
 /// A GPU-resident kitty image: its texture plus the `generation` it was
 /// uploaded at, so a re-upload is skipped while the content is unchanged.
-pub(crate) struct ImageEntry {
+pub(crate) struct ImageEntry<B: GpuBackend = Metal> {
     generation: u64,
-    texture: Texture,
+    texture: B::Texture,
 }
 
-impl Engine {
+impl Engine<Metal> {
     /// Build the engine over a fresh Metal context, compiling the three
     /// first-pixels pipelines from the embedded R3 shader source.
     ///
@@ -239,21 +239,24 @@ impl Engine {
         let backend = Metal::new()?;
         Engine::with_backend_for_grid(backend, grid)
     }
+}
 
-    /// [`Engine::for_grid`] over an existing Metal context (shared backends,
-    /// graceful no-device skip paths).
-    pub fn with_backend_for_grid(backend: Metal, grid: &Grid) -> Result<Engine, MetalError> {
+impl<B: GpuBackend> Engine<B> {
+    /// [`Engine::for_grid`] over an existing backend context (shared backends,
+    /// graceful no-device skip paths). Generic over the backend, so a headless
+    /// `Engine<Software>` is built the same way as an `Engine<Metal>`.
+    pub fn with_backend_for_grid(backend: B, grid: &Grid) -> Result<Engine<B>, B::Error> {
         let metrics = grid.metrics();
         Engine::with_backend(backend, metrics.cell_width, metrics.cell_height)
     }
 
-    /// Build the engine over an existing Metal context. Used by tests that
+    /// Build the engine over an existing backend context. Used by tests that
     /// share a backend or need to skip gracefully when no device is present.
     pub fn with_backend(
-        backend: Metal,
+        backend: B,
         cell_width: u32,
         cell_height: u32,
-    ) -> Result<Engine, MetalError> {
+    ) -> Result<Engine<B>, B::Error> {
         // Day-one degenerate pacing (plan decision 3): one live slot, each frame
         // completed with `waitUntilCompleted`.
         let swap_chain = SwapChain::new(&backend, SwapChainMode::Sync)?;
@@ -314,8 +317,8 @@ impl Engine {
         }
     }
 
-    /// The Metal backend (for tests / inspection).
-    pub fn backend(&self) -> &Metal {
+    /// The GPU backend (for tests / inspection).
+    pub fn backend(&self) -> &B {
         &self.backend
     }
 
@@ -1186,7 +1189,7 @@ impl Engine {
         snapshot: &S,
         grid: &mut Grid,
         opts: FrameOptions,
-    ) -> Result<Frame, MetalError> {
+    ) -> Result<Frame, B::Error> {
         self.update_frame(snapshot, grid, opts);
         self.sync_atlas(grid)?;
         let bgra = self.draw_frame()?;
@@ -1216,7 +1219,7 @@ impl Engine {
     /// the GPU still reads it (tearing / use-after-free). Guard it so enabling
     /// async can't make this path silently unsafe; moving image state per-slot
     /// is the fix when async lands.
-    pub(crate) fn prepare_image_frame(&mut self) -> Result<(), MetalError> {
+    pub(crate) fn prepare_image_frame(&mut self) -> Result<(), B::Error> {
         debug_assert_eq!(
             self.swap_chain.mode(),
             SwapChainMode::Sync,
@@ -1294,7 +1297,7 @@ impl Engine {
     /// the caller (offscreen tests / a future window host reading the surface)
     /// can inspect them. In sync mode this is coherent after
     /// `waitUntilCompleted`.
-    pub fn draw_frame(&mut self) -> Result<Vec<u8>, MetalError> {
+    pub fn draw_frame(&mut self) -> Result<Vec<u8>, B::Error> {
         if self.screen_width == 0 || self.screen_height == 0 {
             return Ok(Vec::new());
         }
@@ -1335,8 +1338,14 @@ impl Engine {
             ..
         } = self;
 
-        // Acquire a slot (sync mode: one live permit).
-        let mut guard = swap_chain.next_frame().ok_or(MetalError::MetalFailed)?;
+        // Acquire a slot (sync mode: one live permit). The chain is only marked
+        // defunct by `deinit`, which never runs during a live `draw_frame`, so
+        // `next_frame` always yields here (the swap-chain tests rely on the same
+        // invariant). Generic code can't mint a `B::Error`, and there is no real
+        // error to report, so this is an internal invariant, not a fallible path.
+        let mut guard = swap_chain
+            .next_frame()
+            .expect("swap chain is live during draw_frame");
         let slot = guard.slot();
 
         // Ensure the slot's target matches the current size.
@@ -1453,7 +1462,7 @@ impl Engine {
     /// `R8Unorm`); the color atlas holds emoji / color glyphs (4-byte
     /// premultiplied BGRA texels, `Bgra8Unorm`). Each glyph instance's
     /// `CellText.atlas` selects which texture the shader samples.
-    pub fn sync_atlas(&mut self, grid: &Grid) -> Result<(), MetalError> {
+    pub fn sync_atlas(&mut self, grid: &Grid) -> Result<(), B::Error> {
         // The slot draw_frame will use next is (frame_index + 1) % count. We
         // sync the slot that next_frame will hand out; peek it without
         // consuming a permit.
@@ -1466,7 +1475,7 @@ impl Engine {
 
     /// Sync the grayscale atlas (`R8Unorm`, 1 byte/texel) into slot
     /// `next_index`. Port of `syncAtlasTexture` for the grayscale atlas.
-    fn sync_grayscale(&mut self, grid: &Grid, next_index: usize) -> Result<(), MetalError> {
+    fn sync_grayscale(&mut self, grid: &Grid, next_index: usize) -> Result<(), B::Error> {
         let atlas = grid.atlas();
         let size = atlas.size() as usize;
         let modified = atlas.modified();
@@ -1501,7 +1510,7 @@ impl Engine {
     /// to the grayscale path except the pixel format is BGRA and the texel is
     /// 4 bytes wide (the atlas's `data()` is already the tightly-packed BGRA
     /// buffer `replace_region` expects).
-    fn sync_color(&mut self, grid: &Grid, next_index: usize) -> Result<(), MetalError> {
+    fn sync_color(&mut self, grid: &Grid, next_index: usize) -> Result<(), B::Error> {
         let atlas = grid.color_atlas();
         let size = atlas.size() as usize;
         let modified = atlas.modified();
@@ -1536,7 +1545,7 @@ impl Engine {
 /// These expose the per-frame CPU data and the disjoint field borrows the
 /// on-screen draw needs, without duplicating the private field layout or
 /// changing any R4 behavior.
-impl Engine {
+impl Engine<Metal> {
     /// Current render-target pixel width (0 until the first `update_frame`).
     pub(crate) fn screen_width(&self) -> usize {
         self.screen_width
@@ -1659,12 +1668,12 @@ impl Frame {
 /// image's texture (port of upstream `image.zig`'s per-image `pass.step`).
 /// Placements whose image isn't uploaded yet, or that lack an instance buffer,
 /// are skipped.
-pub(crate) fn encode_image_steps(
-    pass: &RenderPass,
-    pipeline: &Pipeline,
-    uniforms: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>,
-    images: &HashMap<u32, ImageEntry>,
-    image_instances: &[Buffer<Image>],
+pub(crate) fn encode_image_steps<B: GpuBackend>(
+    pass: &B::RenderPass,
+    pipeline: &B::Pipeline,
+    uniforms: &B::BufferHandle,
+    images: &HashMap<u32, ImageEntry<B>>,
+    image_instances: &[B::Buffer<Image>],
     placements: &[KittyPlacement],
     range: std::ops::Range<usize>,
 ) {
