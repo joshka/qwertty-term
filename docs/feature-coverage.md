@@ -133,8 +133,9 @@ items are `[ ]` wholesale unless noted.
 - [x] `working-directory` / cwd inheritance (OSC 7)
 - [~] `command` / `-e` initial command (env-override path exists; full `-e` CLI parse partial)
 - [ ] `initial-command`, `initial-window`, `wait-after-command`
-- [~] `quit-after-last-window-closed` (wired; default false on macOS);
-      `confirm-close-surface` (+ delay) still open (needs a running-process signal)
+- [x] `quit-after-last-window-closed` (default false on macOS) + `confirm-close-surface`
+      (false/true/always; running-process decided by OSC 133 prompt state, confirm modal on
+      Cmd-W / context-menu Close Pane / windowShouldClose — confirmclose smoke)
 - [ ] `abnormal-command-exit-runtime`, `window-inherit-working-directory`/`-font-size`
 
 ## Input & keybindings (`src/input`, ~78% encoders / ~10% bind system)

@@ -156,6 +156,13 @@ pub struct Config {
     /// a plain on/off toggle.
     #[serde(rename = "progress-style")]
     pub progress_style: bool,
+    /// When to confirm before closing a surface with a running process:
+    /// `false` / `true` (default) / `always` (upstream `confirm-close-surface`,
+    /// `Config.zig:2498`). "Running" is decided by shell-integration prompt
+    /// state (OSC 133); with no shell integration it errs toward confirming.
+    /// Parsed by [`Config::confirm_close_surface`].
+    #[serde(rename = "confirm-close-surface")]
+    pub confirm_close_surface: Option<String>,
     /// Whether to quit the app after the last window/surface closes (upstream
     /// `quit-after-last-window-closed`, `Config.zig:2509`, default **false** on
     /// macOS — the standard "app stays running with no windows" behavior).
@@ -221,6 +228,9 @@ impl Default for Config {
             notify_on_command_finish_after: 5.0,
             // The OSC 9;4 progress bar is shown by default (upstream).
             progress_style: true,
+            // Confirm before closing a surface with a running process (upstream
+            // default `true`).
+            confirm_close_surface: None,
             // macOS default: stay running after the last window closes
             // (upstream `Config.zig:2509` → false on macOS).
             quit_after_last_window_closed: false,
@@ -301,6 +311,14 @@ impl Config {
         std::time::Duration::from_secs_f64(self.notify_on_command_finish_after.max(0.0))
     }
 
+    /// The parsed `confirm-close-surface` mode (default `OnRunning`).
+    pub fn confirm_close_surface(&self) -> ConfirmCloseSurface {
+        self.confirm_close_surface
+            .as_deref()
+            .map(ConfirmCloseSurface::parse)
+            .unwrap_or_default()
+    }
+
     /// The parsed `right-click-action` (defaults to `context-menu`).
     pub fn right_click_action(&self) -> crate::context_menu::RightClickAction {
         self.right_click_action
@@ -354,6 +372,33 @@ impl Default for MouseScrollMultiplier {
         MouseScrollMultiplier {
             precision: 1.0,
             discrete: 3.0,
+        }
+    }
+}
+
+/// When to confirm before closing a surface/tab/window with a running process
+/// (`confirm-close-surface`, upstream `ConfirmCloseSurface`, `Config.zig:5242`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfirmCloseSurface {
+    /// Never confirm — close immediately.
+    Never,
+    /// Confirm only when a process is running (the cursor is not at a shell
+    /// prompt). The default.
+    #[default]
+    OnRunning,
+    /// Always confirm, even at a prompt.
+    Always,
+}
+
+impl ConfirmCloseSurface {
+    /// Parse the config value (`false`/`true`/`always`, matching upstream's
+    /// tri-state enum spelled with the bool-looking words). Unknown values fall
+    /// back to the default `OnRunning` (`true`).
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "false" | "never" => Self::Never,
+            "always" => Self::Always,
+            _ => Self::OnRunning,
         }
     }
 }
@@ -445,6 +490,12 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # Show the in-surface OSC 9;4 progress bar (default true; set false to ignore
 # progress reports).
 # progress-style = true
+
+# Confirm before closing a surface/tab/window that has a running process:
+# "false" (never), "true" (default; only when a command is running per shell
+# integration), or "always". Without shell integration this errs toward
+# confirming.
+# confirm-close-surface = "true"
 
 # Window state. quit-after-last-window-closed keeps the standard macOS behavior
 # of staying running with no windows when false (default); set true to quit.
@@ -679,6 +730,11 @@ mod tests {
         );
         // The progress bar is shown by default.
         assert!(config.progress_style);
+        // Confirm-close defaults to on-running (upstream `true`).
+        assert_eq!(
+            config.confirm_close_surface(),
+            crate::config::ConfirmCloseSurface::OnRunning
+        );
         // Window state: macOS default doesn't quit after last window; no
         // configured geometry.
         assert!(!config.quit_after_last_window_closed);
@@ -772,6 +828,28 @@ mod tests {
     fn parses_progress_style_key() {
         assert!(!parse("progress-style = false\n").unwrap().progress_style);
         assert!(parse("").unwrap().progress_style);
+    }
+
+    #[test]
+    fn parses_confirm_close_surface_key() {
+        use crate::config::ConfirmCloseSurface;
+        assert_eq!(
+            parse("confirm-close-surface = \"false\"\n")
+                .unwrap()
+                .confirm_close_surface(),
+            ConfirmCloseSurface::Never
+        );
+        assert_eq!(
+            parse("confirm-close-surface = \"always\"\n")
+                .unwrap()
+                .confirm_close_surface(),
+            ConfirmCloseSurface::Always
+        );
+        // Absent + unknown → default (on-running).
+        assert_eq!(
+            parse("").unwrap().confirm_close_surface(),
+            ConfirmCloseSurface::OnRunning
+        );
     }
 
     #[test]

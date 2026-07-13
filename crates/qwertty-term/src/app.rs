@@ -1456,6 +1456,13 @@ pub struct ControllerState {
     notify_on_command_finish_after: std::time::Duration,
     /// Whether to show the in-surface OSC 9;4 progress bar (`progress-style`).
     progress_style: bool,
+    /// When to confirm before closing a surface with a running process
+    /// (`confirm-close-surface`).
+    confirm_close_surface: crate::config::ConfirmCloseSurface,
+    /// Smoke/test override for the close-confirmation modal: `Some(answer)`
+    /// short-circuits the alert (which a headless smoke can't drive). `None` in
+    /// normal operation. See [`Controller::set_close_confirm_hook`].
+    close_confirm_hook: Option<bool>,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1556,6 +1563,8 @@ impl Controller {
             notify_on_command_finish_action: config.notify_on_command_finish_action(),
             notify_on_command_finish_after: config.notify_on_command_finish_after(),
             progress_style: config.progress_style,
+            confirm_close_surface: config.confirm_close_surface(),
+            close_confirm_hook: None,
         })))
     }
 
@@ -3099,9 +3108,12 @@ impl Controller {
             MenuAction::CloseTab => {
                 // cmd+w closes the *focused pane*; the last pane collapse closes
                 // the tab (today's behaviour, preserved for single-pane tabs).
+                // Gated by `confirm-close-surface` when a process is running.
                 if let Some(active) = self.active_tab() {
                     let focused = self.0.borrow().tabs.get(&active).map(|t| t.tree.focused());
-                    if let Some(surface) = focused {
+                    if let Some(surface) = focused
+                        && self.confirm_close_surface(active, surface)
+                    {
                         self.close_surface(active, surface);
                     }
                 }
@@ -3353,7 +3365,12 @@ impl Controller {
                     self.handle_split_action(tab, SplitAction::NewSplit(dir));
                 }
             }
-            CA::ClosePane => self.close_surface(tab, surface),
+            CA::ClosePane => {
+                // Gated by `confirm-close-surface` when a process is running.
+                if self.confirm_close_surface(tab, surface) {
+                    self.close_surface(tab, surface);
+                }
+            }
         }
     }
 
@@ -3457,6 +3474,102 @@ impl Controller {
         // NSAlertFirstButtonReturn == 1000 ("Paste").
         let response = alert.runModal();
         response == objc2_app_kit::NSAlertFirstButtonReturn
+    }
+
+    /// Smoke/test hook: force the next close-confirmation modal to a fixed
+    /// answer (`Some(true)` = Close, `Some(false)` = Cancel) instead of showing
+    /// the alert. `None` restores normal modal behavior.
+    pub fn set_close_confirm_hook(&self, answer: Option<bool>) {
+        self.0.borrow_mut().close_confirm_hook = answer;
+    }
+
+    /// Whether closing `surface` needs a confirmation per `confirm-close-surface`
+    /// and the surface's shell-integration prompt state. A dead (exited) surface
+    /// never confirms; `always` confirms even at a prompt; `true` (`OnRunning`)
+    /// confirms only when the cursor is not at a prompt (a command is running,
+    /// or there's no shell integration to say otherwise).
+    fn surface_needs_confirm_close(&self, tab: TabId, surface: SurfaceId) -> bool {
+        use crate::config::ConfirmCloseSurface as C;
+        let state = self.0.borrow();
+        let mode = state.confirm_close_surface;
+        if mode == C::Never {
+            return false;
+        }
+        let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) else {
+            return false;
+        };
+        if s.is_dead() {
+            return false;
+        }
+        match mode {
+            C::Never => false,
+            C::Always => true,
+            C::OnRunning => !s.engine().cursor_is_at_prompt(),
+        }
+    }
+
+    /// Whether closing the whole tab/window needs confirmation — true if *any*
+    /// of its panes has a running process (upstream OR-reduces the per-surface
+    /// predicate for window/tab closes).
+    pub fn tab_needs_confirm_close(&self, tab: TabId) -> bool {
+        let surfaces: Vec<SurfaceId> = {
+            let state = self.0.borrow();
+            match state.tabs.get(&tab) {
+                Some(t) => t.surfaces.keys().copied().collect(),
+                None => return false,
+            }
+        };
+        surfaces
+            .into_iter()
+            .any(|sid| self.surface_needs_confirm_close(tab, sid))
+    }
+
+    /// Run the close-confirmation modal (or the smoke hook). Returns whether the
+    /// user chose to close.
+    fn run_close_confirm_alert(&self, message: &str, informative: &str) -> bool {
+        if let Some(answer) = self.0.borrow().close_confirm_hook {
+            return answer;
+        }
+        let mtm = self.0.borrow().mtm;
+        let alert = objc2_app_kit::NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(message));
+        alert.setInformativeText(&NSString::from_str(informative));
+        alert.addButtonWithTitle(&NSString::from_str("Close"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
+    }
+
+    /// Confirm closing a single surface (split/pane), if it needs it. Returns
+    /// whether to proceed with the close.
+    fn confirm_close_surface(&self, tab: TabId, surface: SurfaceId) -> bool {
+        if !self.surface_needs_confirm_close(tab, surface) {
+            return true;
+        }
+        self.run_close_confirm_alert(
+            "Close Terminal?",
+            "The terminal still has a running process. If you close the terminal \
+             the process will be killed.",
+        )
+    }
+
+    /// Smoke/test: run the full close-confirmation decision for a surface
+    /// (needs-confirm predicate + the modal, short-circuited by the close hook)
+    /// **without** actually closing it. Returns whether the close would proceed.
+    pub fn would_confirm_close_surface(&self, tab: TabId, surface: SurfaceId) -> bool {
+        self.confirm_close_surface(tab, surface)
+    }
+
+    /// Confirm closing a whole window (all its panes/tabs), if any pane has a
+    /// running process. Returns whether to proceed. Called from
+    /// `windowShouldClose:`.
+    fn confirm_close_window(&self, tab: TabId) -> bool {
+        if !self.tab_needs_confirm_close(tab) {
+            return true;
+        }
+        self.run_close_confirm_alert(
+            "Close Window?",
+            "This window still has running processes. Closing it will terminate them.",
+        )
     }
 
     /// Apply a font-size step to *every* pane in the active tab and rebuild
@@ -4357,6 +4470,15 @@ define_class!(
     unsafe impl NSObjectProtocol for WindowDelegate {}
 
     unsafe impl NSWindowDelegate for WindowDelegate {
+        /// The window's close button (or Cmd-W routed to the window) was hit:
+        /// gate on `confirm-close-surface`. Returning `false` vetoes the close
+        /// (the user cancelled the confirmation); `true` lets it proceed.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSObject) -> bool {
+            let ivars = self.ivars();
+            ivars.controller.confirm_close_window(ivars.tab)
+        }
+
         /// The window (tab) became key: mark its tab active in the controller and
         /// route focus-IN to its focused pane (per-pane mode-1004 reporting +
         /// password poll). A focused-pane 1004 app sees `CSI I` on window focus.
@@ -4582,6 +4704,9 @@ pub struct DelegateIvars {
     /// Progress smoke (`QWERTTY_TERM_SMOKE_PROGRESS`): assert OSC 9;4 progress-
     /// bar state tracking. See [`AppDelegate::run_progress_smoke`].
     smoke_progress: bool,
+    /// Confirm-close smoke (`QWERTTY_TERM_SMOKE_CONFIRMCLOSE`): assert
+    /// confirm-close-surface gating. See [`AppDelegate::run_confirmclose_smoke`].
+    smoke_confirmclose: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -4635,6 +4760,7 @@ define_class!(
             let has_notify = self.ivars().smoke_notify;
             let has_notifycmd = self.ivars().smoke_notifycmd;
             let has_progress = self.ivars().smoke_progress;
+            let has_confirmclose = self.ivars().smoke_confirmclose;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -4666,6 +4792,8 @@ define_class!(
                 self.schedule_notifycmd_smoke();
             } else if has_progress {
                 self.schedule_progress_smoke();
+            } else if has_confirmclose {
+                self.schedule_confirmclose_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -4871,6 +4999,12 @@ define_class!(
         fn progress_smoke(&self, _timer: &AnyObject) {
             self.run_progress_smoke();
         }
+
+        /// Confirm-close smoke: assert confirm-close-surface gating, exit 0/1.
+        #[unsafe(method(ghosttyConfirmCloseSmoke:))]
+        fn confirmclose_smoke(&self, _timer: &AnyObject) {
+            self.run_confirmclose_smoke();
+        }
     }
 );
 
@@ -4898,6 +5032,7 @@ impl AppDelegate {
         smoke_notify: bool,
         smoke_notifycmd: bool,
         smoke_progress: bool,
+        smoke_confirmclose: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -4922,6 +5057,7 @@ impl AppDelegate {
             smoke_notify,
             smoke_notifycmd,
             smoke_progress,
+            smoke_confirmclose,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -7352,6 +7488,64 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_confirmclose_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyConfirmCloseSmoke:));
+    }
+
+    /// Confirm-close smoke: drive the OSC 133 prompt state and assert
+    /// `confirm-close-surface` (default `true`) needs confirmation only when a
+    /// process is running (or shell integration is absent), and that the modal
+    /// answer gates the close. Exits 0/1.
+    fn run_confirmclose_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = confirmclose_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at confirm-close smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at confirm-close smoke start".into());
+        };
+
+        // 1. No shell integration yet → cursor is in the `output` state, so the
+        //    default (`true`) errs toward confirming.
+        if !controller.tab_needs_confirm_close(tab) {
+            fail("with no shell integration the default should need confirmation".into());
+        }
+
+        // 2. Mark a prompt (OSC 133 A then B) → at a prompt → no confirmation.
+        controller.feed_surface_output(tab, surface, b"\x1b]133;A\x07\x1b]133;B\x07");
+        Self::spin(0.2);
+        if controller.tab_needs_confirm_close(tab) {
+            fail("at a shell prompt, closing should not need confirmation".into());
+        }
+
+        // 3. A command starts producing output (OSC 133 C) → running → confirm.
+        controller.feed_surface_output(tab, surface, b"\x1b]133;C\x07");
+        Self::spin(0.2);
+        if !controller.tab_needs_confirm_close(tab) {
+            fail("a running command should need close confirmation".into());
+        }
+
+        // 4. The modal answer gates the close (non-destructive check): "Cancel"
+        //    vetoes, "Close" proceeds.
+        controller.set_close_confirm_hook(Some(false));
+        if controller.would_confirm_close_surface(tab, surface) {
+            fail("cancelling the confirmation should veto the close".into());
+        }
+        controller.set_close_confirm_hook(Some(true));
+        if !controller.would_confirm_close_surface(tab, surface) {
+            fail("confirming should let the close proceed".into());
+        }
+
+        println!(
+            "OK: confirm-close smoke — confirm-close-surface needs confirmation only when a \
+             process is running (or shell integration is absent), and the modal answer \
+             gates the close."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -7540,6 +7734,12 @@ fn progress_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a confirm-close smoke failure and exit non-zero.
+fn confirmclose_fail(msg: String) -> ! {
+    eprintln!("FAIL: confirm-close smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -7656,6 +7856,7 @@ pub fn run(
     smoke_notify: bool,
     smoke_notifycmd: bool,
     smoke_progress: bool,
+    smoke_confirmclose: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -7683,6 +7884,7 @@ pub fn run(
         smoke_notify,
         smoke_notifycmd,
         smoke_progress,
+        smoke_confirmclose,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
