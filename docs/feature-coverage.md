@@ -183,9 +183,12 @@ items are `[ ]` wholesale unless noted.
       over the `Set`'s `Leader`/`Leaf`/`LeafChained` storage). Remaining: sequence
       idle-timeout + flush-on-abort, key tables, `global` binds, `performable`
       fallthrough.
-- [ ] Most keybind *actions* that need new behavior: `jump_to_prompt`,
-      `write_scrollback_file`, `inspector`, `scroll_page_*`, `adjust_selection`,
-      `select_all`, `clear_screen`, `crash`, config-reload
+- [x] Scroll keybind actions: `scroll_to_top`/`_to_bottom`/`_page_up`/`_page_down`/
+      `_page_lines`/`_page_fractional` move the focused pane's scrollback viewport
+      (default Cmd/Shift + Home/End/PageUp/PageDown); `config-reload` wired
+- [ ] Keybind *actions* still needing new behavior: `jump_to_prompt`,
+      `write_scrollback_file`, `inspector`, `adjust_selection`, `select_all`,
+      `clear_screen`, `scroll_to_selection`/`_to_row`, `crash`
 - [x] `keybind` config parsing — the full trigger/action grammar (not just `text:`)
       parses and, for the wired action categories, dispatches
 - [ ] `key-remap` (`RemapSet` ported but unwired — issue #23)

@@ -1067,6 +1067,16 @@ impl Surface {
         self.scrollback_offset = offset.min(scrollback_len);
     }
 
+    /// Move this pane's scrollback viewport per a keybind scroll action
+    /// (`scroll_page_up`/`scroll_to_top`/…). Uses the same `scrollback_offset`
+    /// the wheel path drives, so the next rendered frame reflects the move.
+    fn scroll_viewport(&mut self, to: crate::scroll::ScrollTo) {
+        let max = self.engine().scrollback_len();
+        let page = self.rows.max(1);
+        self.scrollback_offset =
+            crate::scroll::scrolled_offset(to, self.scrollback_offset, max, page);
+    }
+
     /// Whether this pane's search bar is currently open (smoke/test).
     fn search_is_active(&self) -> bool {
         self.search.is_active()
@@ -2253,6 +2263,19 @@ impl Controller {
         }
     }
 
+    /// Move the focused pane's scrollback viewport per a keybind scroll action
+    /// (`scroll_page_up`/`scroll_to_bottom`/…).
+    fn scroll_focused_surface(&self, tab: TabId, to: crate::scroll::ScrollTo) {
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab) else {
+            return;
+        };
+        let sid = t.tree.focused();
+        if let Some(s) = t.surfaces.get_mut(&sid) {
+            s.scroll_viewport(to);
+        }
+    }
+
     /// Whether the focused pane of the active tab has its search bar open
     /// (smoke/test, and used by the view to gate the Escape chord so a plain
     /// Escape still reaches the PTY when not searching).
@@ -2812,6 +2835,33 @@ impl Controller {
             // when no search is open this falls through to the `_` arm below.
             A::EndSearch if self.active_search_is_active() => {
                 self.handle_search_action(tab, SearchAction::End);
+                true
+            }
+
+            // Scrollback viewport moves (default `cmd`/`shift` + Home/PageUp/
+            // PageDown/End). Route to the focused pane's `scrollback_offset`.
+            A::ScrollToTop => {
+                self.scroll_focused_surface(tab, crate::scroll::ScrollTo::Top);
+                true
+            }
+            A::ScrollToBottom => {
+                self.scroll_focused_surface(tab, crate::scroll::ScrollTo::Bottom);
+                true
+            }
+            A::ScrollPageUp => {
+                self.scroll_focused_surface(tab, crate::scroll::ScrollTo::PageUp);
+                true
+            }
+            A::ScrollPageDown => {
+                self.scroll_focused_surface(tab, crate::scroll::ScrollTo::PageDown);
+                true
+            }
+            A::ScrollPageLines(n) => {
+                self.scroll_focused_surface(tab, crate::scroll::ScrollTo::Lines(*n as i32));
+                true
+            }
+            A::ScrollPageFractional(f) => {
+                self.scroll_focused_surface(tab, crate::scroll::ScrollTo::Fraction(*f));
                 true
             }
 

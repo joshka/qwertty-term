@@ -170,6 +170,43 @@ pub fn decide(
     WheelOutcome::Viewport { rows_up: delta }
 }
 
+/// A scrollback-viewport move requested by a keybind scroll action (port of the
+/// `scroll_*` [`Action`](qwertty_term_input::binding::Action) variants).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrollTo {
+    /// The top of the scrollback (oldest history).
+    Top,
+    /// The live bottom (active screen).
+    Bottom,
+    /// Up one page (screen height).
+    PageUp,
+    /// Down one page.
+    PageDown,
+    /// By a number of lines. Upstream sign: **positive scrolls down**.
+    Lines(i32),
+    /// By a fraction of a page. Upstream sign: **positive scrolls down**.
+    Fraction(f32),
+}
+
+/// The new scrollback viewport offset (rows *up* from the live bottom, clamped to
+/// `[0, max]`) after applying `to`, given the current offset and the viewport
+/// `page` height in rows.
+///
+/// Our offset increases *upward* into history, but upstream's `ScrollPageLines`/
+/// `ScrollPageFractional` count *positive = down*; we negate so a positive line/
+/// fraction count scrolls toward the live bottom.
+pub fn scrolled_offset(to: ScrollTo, current: usize, max: usize, page: usize) -> usize {
+    let up = |delta: isize| (current as isize + delta).clamp(0, max as isize) as usize;
+    match to {
+        ScrollTo::Top => max,
+        ScrollTo::Bottom => 0,
+        ScrollTo::PageUp => up(page as isize),
+        ScrollTo::PageDown => up(-(page as isize)),
+        ScrollTo::Lines(n) => up(-(n as isize)),
+        ScrollTo::Fraction(f) => up(-((f as f64 * page as f64).round() as isize)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +320,25 @@ mod tests {
         .clamped();
         assert_eq!(m.precision, 0.01);
         assert_eq!(m.discrete, 10_000.0);
+    }
+
+    #[test]
+    fn scrolled_offset_moves_and_clamps() {
+        // page = 24 rows, max scrollback = 100 rows up.
+        let (max, page) = (100, 24);
+        // Absolute targets.
+        assert_eq!(scrolled_offset(ScrollTo::Top, 10, max, page), 100);
+        assert_eq!(scrolled_offset(ScrollTo::Bottom, 40, max, page), 0);
+        // Page up/down move by the page height and clamp at the ends.
+        assert_eq!(scrolled_offset(ScrollTo::PageUp, 10, max, page), 34);
+        assert_eq!(scrolled_offset(ScrollTo::PageUp, 90, max, page), 100); // clamp top
+        assert_eq!(scrolled_offset(ScrollTo::PageDown, 30, max, page), 6);
+        assert_eq!(scrolled_offset(ScrollTo::PageDown, 10, max, page), 0); // clamp bottom
+        // Lines: upstream positive = down (decreases the up-offset), negative = up.
+        assert_eq!(scrolled_offset(ScrollTo::Lines(5), 40, max, page), 35);
+        assert_eq!(scrolled_offset(ScrollTo::Lines(-5), 40, max, page), 45);
+        // Fraction of a page, same sign convention (+0.5 page = down 12).
+        assert_eq!(scrolled_offset(ScrollTo::Fraction(0.5), 40, max, page), 28);
+        assert_eq!(scrolled_offset(ScrollTo::Fraction(-1.0), 40, max, page), 64);
     }
 }
