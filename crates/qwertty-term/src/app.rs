@@ -2277,6 +2277,15 @@ impl Controller {
         }
     }
 
+    /// Toggle native macOS full-screen for `tab`'s window (the `toggle_fullscreen`
+    /// keybind / View menu "Enter Full Screen", NSWindow's own animation).
+    fn toggle_fullscreen(&self, tab: TabId) {
+        let window = self.0.borrow().tabs.get(&tab).map(|t| t.window.clone());
+        if let Some(window) = window {
+            window.toggleFullScreen(None);
+        }
+    }
+
     /// Move the focused pane's scrollback viewport per a keybind scroll action
     /// (`scroll_page_up`/`scroll_to_bottom`/…).
     fn scroll_focused_surface(&self, tab: TabId, to: crate::scroll::ScrollTo) {
@@ -2928,6 +2937,10 @@ impl Controller {
             }
             A::ToggleQuickTerminal => {
                 self.toggle_quick_terminal();
+                true
+            }
+            A::ToggleFullscreen => {
+                self.toggle_fullscreen(tab);
                 true
             }
 
