@@ -173,6 +173,80 @@ fn ascii_non_esc_run(input: &[u8]) -> usize {
     i
 }
 
+/// True if `b` is a UTF-8 continuation byte (`10xxxxxx`).
+#[inline(always)]
+fn is_cont(b: u8) -> bool {
+    (b & 0xC0) == 0x80
+}
+
+/// Decode one *complete, well-formed* multi-byte UTF-8 sequence at the start of
+/// `input` (`input[0]` is already known to be `>= 0x80`). Returns
+/// `Some((codepoint, byte_len))` for a valid 2/3/4-byte sequence, or `None` for
+/// anything the strict [`Utf8Decoder`] must handle instead: a stray
+/// continuation byte, an over-long/out-of-range/surrogate encoding, an ill-
+/// formed continuation, or a sequence truncated by the end of `input`.
+///
+/// The accepted byte patterns are exactly Unicode Table 3-7 (the same
+/// well-formedness the Hoehrmann DFA enforces), so for every sequence this
+/// returns `Some` for, `Utf8Decoder::next` fed the same bytes yields the
+/// identical codepoint — this is a pure fast path, semantics unchanged. Every
+/// rejected case falls back to the DFA, which owns error-replacement and the
+/// cross-chunk partial-sequence state. Scalar analogue of the bulk decode in
+/// upstream's `simd.vt.utf8DecodeUntilControlSeq`.
+#[inline]
+fn decode_wellformed_multibyte(input: &[u8]) -> Option<(u32, usize)> {
+    let b0 = *input.first()?;
+    match b0 {
+        // 2-byte: C2..=DF 80..=BF. (C0/C1 are always over-long -> reject.)
+        0xC2..=0xDF => {
+            let b1 = *input.get(1)?;
+            if !is_cont(b1) {
+                return None;
+            }
+            let cp = ((b0 as u32 & 0x1F) << 6) | (b1 as u32 & 0x3F);
+            Some((cp, 2))
+        }
+        // 3-byte: E0..=EF, with the E0/ED lead-specific second-byte ranges
+        // that exclude over-longs and UTF-16 surrogates.
+        0xE0..=0xEF => {
+            let b1 = *input.get(1)?;
+            let b2 = *input.get(2)?;
+            let b1_ok = match b0 {
+                0xE0 => (0xA0..=0xBF).contains(&b1),
+                0xED => (0x80..=0x9F).contains(&b1),
+                _ => is_cont(b1),
+            };
+            if !b1_ok || !is_cont(b2) {
+                return None;
+            }
+            let cp = ((b0 as u32 & 0x0F) << 12) | ((b1 as u32 & 0x3F) << 6) | (b2 as u32 & 0x3F);
+            Some((cp, 3))
+        }
+        // 4-byte: F0..=F4, with the F0/F4 lead-specific second-byte ranges that
+        // exclude over-longs and code points above U+10FFFF.
+        0xF0..=0xF4 => {
+            let b1 = *input.get(1)?;
+            let b2 = *input.get(2)?;
+            let b3 = *input.get(3)?;
+            let b1_ok = match b0 {
+                0xF0 => (0x90..=0xBF).contains(&b1),
+                0xF4 => (0x80..=0x8F).contains(&b1),
+                _ => is_cont(b1),
+            };
+            if !b1_ok || !is_cont(b2) || !is_cont(b3) {
+                return None;
+            }
+            let cp = ((b0 as u32 & 0x07) << 18)
+                | ((b1 as u32 & 0x3F) << 12)
+                | ((b2 as u32 & 0x3F) << 6)
+                | (b3 as u32 & 0x3F);
+            Some((cp, 4))
+        }
+        // Stray continuation byte, C0/C1, or F5..=FF: never well-formed.
+        _ => None,
+    }
+}
+
 /// An owned copy of one [`Action`], detached from the parser borrow.
 enum Emitted {
     Print(char),
@@ -608,8 +682,10 @@ impl<H: Handler> Stream<H> {
     /// hands each printable run to `Handler::print_slice` in one call, instead
     /// of stepping the parser byte-by-byte. Non-ground bytes and partial UTF-8
     /// fall back to the per-byte `next` path. This mirrors upstream's
-    /// `nextSlice`/`nextSliceCapped` structure (minus the SIMD decode and the
-    /// CSI-param bulk fast path, which are separate perf items).
+    /// `nextSlice`/`nextSliceCapped` structure. The bulk decode is scalar (a
+    /// SWAR ASCII scan plus a well-formed multibyte fast path in
+    /// [`Self::decode_until_control_seq`]) rather than true SIMD, which remains
+    /// a deferred perf item; the CSI-param bulk fast path is landed.
     pub fn feed(&mut self, input: &[u8]) {
         let mut offset = 0;
 
@@ -789,6 +865,39 @@ impl<H: Handler> Stream<H> {
                 i += 1;
                 continue;
             }
+            // Fast path: decode complete, well-formed multi-byte sequences in
+            // one shot (a few masks) instead of stepping the DFA per byte. This
+            // is the hot path for CJK/emoji-heavy streams, where every byte is
+            // >= 0x80 so the ASCII SWAR scan above matches nothing. The inner
+            // loop stays here across a run of consecutive non-ASCII bytes so the
+            // outer loop's ESC / `< 0x80` / partial re-checks are paid once per
+            // run, not once per codepoint. It stops the moment the next byte is
+            // ASCII (`< 0x80`) so ASCII-heavy mixed text falls straight back to
+            // the SWAR scan without a wasted decode probe. Only valid when the
+            // decoder is idle — a partial sequence must keep feeding the DFA so
+            // its error-replacement and continuation state stay exact. A non-
+            // ASCII byte that is ill-formed or truncated breaks out to the DFA
+            // below, which is behavior-identical.
+            if !self.utf8.is_partial() {
+                let mut advanced = false;
+                // `input[i] >= 0x80` holds on entry (we are past the ASCII gate
+                // and not partial); the guard is for subsequent iterations.
+                while n < cap && i < input.len() && input[i] >= 0x80 {
+                    match decode_wellformed_multibyte(&input[i..]) {
+                        Some((cp, len)) => {
+                            self.cp_buf[n] = cp;
+                            n += 1;
+                            i += len;
+                            advanced = true;
+                        }
+                        None => break,
+                    }
+                }
+                if advanced {
+                    continue;
+                }
+            }
+
             let (cp, consumed) = self.utf8.next(byte);
             if consumed {
                 i += 1;

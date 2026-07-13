@@ -18,6 +18,18 @@ const COLS: u16 = 120;
 const ROWS: u16 = 40;
 const STREAM_MIB: usize = 8;
 
+/// Terminal geometry, overridable via `COLS`/`ROWS` env vars so a payload can
+/// be measured at another size (e.g. 80x24 to match the upstream bench).
+fn geom() -> (u16, u16) {
+    let g = |k: &str, d: u16| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    (g("COLS", COLS), g("ROWS", ROWS))
+}
+
 fn ascii_stream() -> Vec<u8> {
     let line = "The quick brown fox jumps over the lazy dog 0123456789 !@#$%^&*()_+-=[]{};:'\r\n";
     line.bytes()
@@ -161,9 +173,10 @@ fn scroll_region_stream() -> Vec<u8> {
 
 fn feed(stream: &[u8], iters: usize) {
     for _ in 0..iters {
+        let (cols, rows) = geom();
         let terminal = Terminal::new(Options {
-            cols: COLS,
-            rows: ROWS,
+            cols,
+            rows,
             max_scrollback: 0,
             colors: Default::default(),
         });
@@ -175,10 +188,63 @@ fn feed(stream: &[u8], iters: usize) {
     }
 }
 
+/// A handler that decodes + dispatches but does NO terminal print work, so the
+/// full-vs-noop delta attributes the print cost separately from decode/dispatch.
+#[derive(Default)]
+struct NoopHandler {
+    sink: u64,
+}
+impl qwertty_term_vt::stream::Handler for NoopHandler {
+    fn print(&mut self, cp: u32) {
+        self.sink = self.sink.wrapping_add(cp as u64);
+    }
+    fn print_slice(&mut self, cps: &[u32]) {
+        for &cp in cps {
+            self.sink = self.sink.wrapping_add(cp as u64);
+        }
+    }
+}
+
+fn feed_noop(stream: &[u8], iters: usize) {
+    for _ in 0..iters {
+        let mut s = Stream::new(NoopHandler::default());
+        for chunk in stream.chunks(64 * 1024) {
+            s.feed(chunk);
+        }
+        std::hint::black_box(&s.handler.sink);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let which = args.get(1).map(String::as_str).unwrap_or("all");
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+
+    // `file:<path>` reads a raw payload and tiles it up to ~STREAM_MIB so a
+    // small vtebench data file (e.g. benchmarks/unicode/symbols) is measured at
+    // steady state through the engine.
+    if let Some(path) = which.strip_prefix("file:") {
+        let raw = std::fs::read(path).expect("read payload file");
+        let mut stream = Vec::with_capacity(STREAM_MIB * 1024 * 1024 + raw.len());
+        while stream.len() < STREAM_MIB * 1024 * 1024 {
+            stream.extend_from_slice(&raw);
+        }
+        let noop = std::env::var("NOOP").is_ok();
+        let start = Instant::now();
+        if noop {
+            feed_noop(&stream, iters);
+        } else {
+            feed(&stream, iters);
+        }
+        let secs = start.elapsed().as_secs_f64();
+        let mib = (stream.len() * iters) as f64 / (1024.0 * 1024.0);
+        let tag = if noop { "noop" } else { "full" };
+        eprintln!(
+            "{path:<28} {tag} {:>8.1} MiB/s  ({iters} iters)",
+            mib / secs
+        );
+        return;
+    }
 
     let all: Vec<(&str, Vec<u8>)> = vec![
         ("ascii", ascii_stream()),
@@ -197,10 +263,19 @@ fn main() {
         if which != "all" && which != *name {
             continue;
         }
+        let noop = std::env::var("NOOP").is_ok();
         let start = Instant::now();
-        feed(stream, iters);
+        if noop {
+            feed_noop(stream, iters);
+        } else {
+            feed(stream, iters);
+        }
         let secs = start.elapsed().as_secs_f64();
         let mib = (stream.len() * iters) as f64 / (1024.0 * 1024.0);
-        eprintln!("{name:<14} {:>8.1} MiB/s  ({iters} iters)", mib / secs);
+        let tag = if noop { "noop" } else { "full" };
+        eprintln!(
+            "{name:<14} {tag} {:>8.1} MiB/s  ({iters} iters)",
+            mib / secs
+        );
     }
 }

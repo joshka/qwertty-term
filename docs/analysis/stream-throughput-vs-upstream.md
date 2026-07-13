@@ -54,6 +54,18 @@ Interpretation:
   path; the Zig side stays at memory-bandwidth-ish speed while ours drops to
   130 MB/s. The wide-char print path is the biggest known throughput gap.
 
+> **Update 2026-07-13:** the CJK gap has since narrowed substantially. Two
+> landings: (1) the wide-class `print_slice` fill (batched `(wide, spacer_tail)`
+> pairs) removed the per-wide-cell print overhead, and (2) a scalar bulk
+> multibyte UTF-8 decode (`decode_wellformed_multibyte`, perf.md Lever 5)
+> replaced the per-byte Hoehrmann DFA on the wide stream. Engine-only on the
+> vtebench `unicode` symbols payload (80×24), our full rate moved from ~300 to
+> ~500 MiB/s (decode+dispatch alone ~770 MiB/s). Upstream's ~790 MiB/s full is
+> still ahead — the remaining gap is split roughly evenly between decode
+> (true SIMD, deferred) and the wide-print path — but it is no longer ~7× or
+> even ~2.6×. Do not conflate this with the whole-app vtebench `unicode` number,
+> which is render-pipeline dominated (see `docs/benchmarks/vtebench-baseline.md`).
+
 ## Pitfall: benching upstream
 
 `zig build -Demit-bench` alone builds the *bench exe* ReleaseFast but the

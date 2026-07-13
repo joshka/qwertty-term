@@ -198,7 +198,9 @@ Gate status: **PASS — every stream >= 0.5x.** All four moved from 0.15-0.31x t
 
 - **SIMD `utf8DecodeUntilControlSeq`** — the scalar decode-until-control-seq scan
   is ported; the SIMD bulk decoder (std::simd / simdutf) is a later item and was
-  out of this chunk's charter. *(Still deferred.)*
+  out of this chunk's charter. **→ PARTLY ADDRESSED** by the scalar bulk
+  multibyte decode (Lever 5 below): true SIMD (NEON/std::simd) is still deferred,
+  but the per-byte DFA is no longer the wide-stream wall.
 - **Batched WIDE `printSliceFill(.wide, …)`** — only the narrow fill is ported;
   wide runs defer to per-cp `print` (correct, just not batched). utf8-mixed
   would gain a little more from a wide batch. **→ SHIPPED** as the wide-class
@@ -207,3 +209,64 @@ Gate status: **PASS — every stream >= 0.5x.** All four moved from 0.15-0.31x t
 - **Dependencies added: none.** (`memchr` was evaluated for the ground scan but
   the hand-rolled ESC-stop scan in `decode_until_control_seq` is already tight
   and keeps the crate dependency-free; no justification to add it.)
+
+## Lever 5 — scalar bulk multibyte UTF-8 decode (cjk / wide, 2026-07-13)
+
+Follow-up pass targeting the wide/CJK engine gap called out in
+`stream-throughput-vs-upstream.md` (engine-only Ghostty ~790 MiB/s on the
+vtebench `unicode` payload vs our ~300). Structural attribution
+(`profile_streams <stream>` full vs `NOOP=1` no-op handler) showed the wall was
+**decode+dispatch**, not print: on the synthetic `cjk` stream the no-op
+(decode+dispatch, zero print) path ran at only ~463 MiB/s — *slower than
+upstream's entire full pipeline* — because `decode_until_control_seq` stepped the
+Hoehrmann DFA byte-by-byte, and every CJK byte is `>= 0x80` so the ASCII SWAR
+scan matched nothing (3 DFA table-lookup steps per 3-byte codepoint).
+
+The lever adds `decode_wellformed_multibyte`: a scalar decode of one *complete,
+well-formed* 2/3/4-byte sequence (exactly Unicode Table 3-7 — the same
+well-formedness the DFA enforces, including the E0/ED and F0/F4 lead-specific
+second-byte ranges that exclude over-longs, surrogates, and code points above
+U+10FFFF). It runs in a tight inner loop across a run of consecutive non-ASCII
+bytes (paying the outer ESC/`< 0x80`/partial re-checks once per run, not per
+codepoint), stopping the instant the next byte is ASCII so mixed text falls back
+to the SWAR scan with no wasted probe. Anything ill-formed, truncated, or a
+partial-decoder state defers to the DFA below — behavior-identical, so it is a
+pure fast path. Scalar analogue of the bulk decode in upstream's
+`simd.vt.utf8DecodeUntilControlSeq`; no SIMD intrinsics, no new dependency,
+portable across targets.
+
+`profile_streams` (release, this machine; full = terminal handler,
+noop = decode+dispatch only):
+
+    stream               full (before→after)     noop (before→after)
+    cjk                    314 → 455  (+45%)       463 → 880  (+90%)
+    utf8-mixed             271 → 285  (+5%)        631 → 733  (+16%)
+    ascii                  579 → 571  (flat)      1543 → 1598 (flat)
+    vtebench unicode
+      symbols @ 80x24     ~300 → 498  (+66%)         — → 766
+
+ascii is untouched (it never reaches the multibyte branch); utf8-mixed improves
+modestly (mostly ASCII + print-bound); the wide/CJK streams — the target — gain
+~45–66%. Decode+dispatch on `cjk` roughly doubled (463 → 880 MiB/s), moving the
+wide-stream bottleneck off decode. The committed throughput gate stays healthy
+(utf8-mixed 0.84×, ascii 0.65×, all ≫ 0.5×).
+
+### Parity + quality gates (Lever 5)
+
+- `cargo test -p qwertty-term-vt` — 1536 lib + doctests green, incl. 2 new
+  `stream::tests::fastpath_{malformed_utf8_defers_to_dfa,wide_cjk_and_emoji_bulk}`
+  whole-vs-per-byte-vs-chunked equivalence tests.
+- `cargo test -p vt-diff --features reference` — differential + corpus +
+  afl_corpus + a **150 000-iteration** generative sweep all green, **zero
+  divergences**.
+- fmt + clippy clean; Miri clean over all 10 `fastpath_*` tests.
+
+### Still deferred after Lever 5
+
+- **True SIMD decode** (NEON / `std::simd`): would push decode+dispatch past the
+  ~880 MiB/s the scalar bulk path reaches, but needs target-specific unsafe (or a
+  nightly feature) and a scalar fallback — out of scope for a dependency-free,
+  stable, all-targets change.
+- **Tighter wide-print path**: after Lever 5 the `cjk` full/noop split is ~455 /
+  880, so print is again ~half the per-byte cost. Per-wide-cell overhead (width
+  lookup, spacer-tail pairing) is the next print-side lever.
