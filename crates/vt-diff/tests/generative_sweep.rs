@@ -43,7 +43,7 @@ impl Rng {
 /// to bias coordinates toward — and just past — the edges).
 fn gen_op(rng: &mut Rng, out: &mut Vec<u8>, cols: u16, rows: u16) {
     // Weighted by the roll below; printing dominates so the grid fills.
-    match rng.below(100) {
+    match rng.below(130) {
         // --- printing (0..40): mostly ASCII, some wide/combining UTF-8 ---
         0..=33 => {
             let c = 0x21 + rng.below(0x5e) as u8; // printable ASCII
@@ -113,7 +113,44 @@ fn gen_op(rng: &mut Rng, out: &mut Vec<u8>, cols: u16, rows: u16) {
         // --- alt screen enter/leave (well-defined) ---
         96 => out.extend_from_slice(b"\x1b[?1049h"),
         97 => out.extend_from_slice(b"\x1b[?1049l"),
-        // --- SGR (parser exercise; no text/cursor effect) ---
+        // --- DECSC / DECRC: save + restore cursor (ESC 7 / ESC 8) ---
+        98..=99 => out.extend_from_slice(b"\x1b7"),
+        100..=101 => out.extend_from_slice(b"\x1b8"),
+        // --- SU / SD: scroll the region up / down ---
+        102..=103 => out.extend_from_slice(format!("\x1b[{}S", rng.param(4)).as_bytes()),
+        104..=105 => out.extend_from_slice(format!("\x1b[{}T", rng.param(4)).as_bytes()),
+        // --- DECSLRM left/right margins (+ DECLRMM mode 69 enable/disable) ---
+        106 => out.extend_from_slice(b"\x1b[?69h"),
+        107 => out.extend_from_slice(b"\x1b[?69l"),
+        108..=109 => {
+            let l = rng.param(cols as u32);
+            let r = rng.param(cols as u32);
+            out.extend_from_slice(format!("\x1b[{l};{r}s").as_bytes());
+        }
+        // --- DECALN: fill the screen with 'E' (ESC # 8) ---
+        110 => out.extend_from_slice(b"\x1b#8"),
+        // --- reverse-wraparound mode 45 ---
+        111 => out.extend_from_slice(b"\x1b[?45h"),
+        112 => out.extend_from_slice(b"\x1b[?45l"),
+        // --- resets: DECSTR (soft, CSI ! p) / RIS (hard, ESC c) ---
+        113 => out.extend_from_slice(b"\x1b[!p"),
+        114 => out.extend_from_slice(b"\x1bc"),
+        // --- richer SGR to exercise the styled diff: italic/dim/strike/
+        //     overline, 256-color and truecolor fg/bg ---
+        115..=119 => {
+            let choices: [&[u8]; 8] = [
+                b"\x1b[3m",
+                b"\x1b[2m",
+                b"\x1b[9m",
+                b"\x1b[53m",
+                b"\x1b[38;5;200m",
+                b"\x1b[48;5;24m",
+                b"\x1b[38;2;10;20;30m",
+                b"\x1b[48;2;90;10;70m",
+            ];
+            out.extend_from_slice(choices[rng.below(8) as usize]);
+        }
+        // --- SGR (parser exercise; base attributes) ---
         _ => {
             let n = [0u32, 1, 4, 7, 30, 31, 37, 40, 44, 47][rng.below(10) as usize];
             out.extend_from_slice(format!("\x1b[{n}m").as_bytes());

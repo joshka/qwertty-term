@@ -1147,6 +1147,27 @@ fn vpr_and_cup_overflow_clamp_to_last_row() {
     }
 }
 
+// ED (erase display) must clear a row's soft-wrap flag: erasing resets the row
+// metadata to default (port of ghostty `clearRows`). A stale `wrap` bit made
+// reverse-wraparound (mode 45) climb a row that ED had erased. Found via the
+// generative differential sweep.
+#[test]
+fn erase_display_clears_wrap_flag_for_reverse_wrap() {
+    // 5 cols: "abcde" fills row 0 (soft-wrap), "X" wraps to row 1.
+    let mut s = term(5, 3);
+    s.feed(b"\x1b[?45habcdeX"); // reverse-wrap on, fill + wrap
+    s.feed(b"\x1b[2J"); // ED: should clear row 0's wrap flag
+    s.feed(b"\x1b[5D"); // CUB 5 with reverse-wrap
+    let cur = &s.handler.terminal.screen().cursor;
+    // Row 0 is no longer wrapped, so reverse-wrap stops at the left margin of
+    // row 1 rather than climbing to row 0.
+    assert_eq!(
+        (cur.x, cur.y),
+        (0, 1),
+        "reverse-wrap must not climb an ED-erased row"
+    );
+}
+
 // Primary device attributes reply.
 #[test]
 fn da_primary_reply() {
