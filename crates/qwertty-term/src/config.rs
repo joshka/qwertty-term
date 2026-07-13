@@ -189,6 +189,19 @@ pub struct Config {
     /// [`Config::middle_click_action`].
     #[serde(rename = "middle-click-action")]
     pub middle_click_action: Option<String>,
+    /// Characters that mark word boundaries during double/triple-click word
+    /// selection — each character in the string becomes a boundary (the null
+    /// char U+0000 is always one). Unset uses the built-in default set (upstream
+    /// `selection-word-chars`, `Config.zig:762`). Parsed by
+    /// [`Config::selection_word_chars_codepoints`].
+    #[serde(rename = "selection-word-chars")]
+    pub selection_word_chars: Option<String>,
+    /// The double/triple-click detection window in milliseconds; `0` (the
+    /// default) uses the OS click interval (falling back to 500 ms) — upstream
+    /// `click-repeat-interval`, `Config.zig:2448`. Read via
+    /// [`Config::click_repeat_interval`].
+    #[serde(rename = "click-repeat-interval")]
+    pub click_repeat_interval: u32,
     /// Require confirmation before pasting text that appears unsafe (contains a
     /// newline or a bracketed-paste end sequence) — the copy/paste-attack guard
     /// (upstream `clipboard-paste-protection`, `Config.zig:2372`, default true).
@@ -344,6 +357,9 @@ impl Default for Config {
             mouse_hide_while_typing: false,
             focus_follows_mouse: false,
             middle_click_action: None,
+            // Unset → the built-in word-boundary set; click interval → OS default.
+            selection_word_chars: None,
+            click_repeat_interval: 0,
             // All clipboard-hardening keys default on (upstream defaults).
             clipboard_paste_protection: true,
             clipboard_paste_bracketed_safe: true,
@@ -578,6 +594,28 @@ impl Config {
     /// The `resize-overlay-duration` as a `Duration` (default 750ms).
     pub fn resize_overlay_duration(&self) -> std::time::Duration {
         crate::resize_overlay::duration_from_ms(self.resize_overlay_duration)
+    }
+
+    /// The configured `selection-word-chars` as boundary codepoints, or `None`
+    /// when unset (the caller then uses the built-in default set). Each
+    /// character of the string is one boundary codepoint, and the null char
+    /// (U+0000) is always prepended — matching upstream `SelectionWordChars`
+    /// (`Config.zig:6112`). Multi-codepoint graphemes aren't meaningful here
+    /// (word boundaries are per-cell), so each `char` maps to one codepoint.
+    pub fn selection_word_chars_codepoints(&self) -> Option<Vec<u32>> {
+        let s = self.selection_word_chars.as_ref()?;
+        let mut codepoints = Vec::with_capacity(s.chars().count() + 1);
+        codepoints.push(0); // null is always a boundary
+        codepoints.extend(s.chars().map(|c| c as u32));
+        Some(codepoints)
+    }
+
+    /// The `click-repeat-interval` (double/triple-click window) as a `Duration`,
+    /// or `None` when `0` — the caller then uses the OS click interval. Upstream
+    /// `click-repeat-interval` (`Config.zig:2448`, `0` = OS default).
+    pub fn click_repeat_interval(&self) -> Option<std::time::Duration> {
+        (self.click_repeat_interval != 0)
+            .then(|| std::time::Duration::from_millis(self.click_repeat_interval as u64))
     }
 
     /// The parsed `right-click-action` (defaults to `context-menu`).
@@ -1353,6 +1391,40 @@ mod tests {
         assert_eq!(
             config.resize_overlay_duration(),
             std::time::Duration::from_millis(300)
+        );
+    }
+
+    #[test]
+    fn parses_selection_gesture_keys() {
+        // Unset → no override (caller uses the built-in default set / OS interval).
+        let default = parse("").unwrap();
+        assert_eq!(default.selection_word_chars_codepoints(), None);
+        assert_eq!(default.click_repeat_interval(), None);
+
+        // selection-word-chars: null is always prepended, then each char.
+        let config = parse(
+            "selection-word-chars = \" /.\"\n\
+             click-repeat-interval = 250\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.selection_word_chars_codepoints(),
+            Some(vec![0, ' ' as u32, '/' as u32, '.' as u32])
+        );
+        assert_eq!(
+            config.click_repeat_interval(),
+            Some(std::time::Duration::from_millis(250))
+        );
+
+        // An empty string still yields the null-only boundary set.
+        let empty = parse("selection-word-chars = \"\"\n").unwrap();
+        assert_eq!(empty.selection_word_chars_codepoints(), Some(vec![0]));
+
+        // A multi-byte UTF-8 boundary char maps to its codepoint.
+        let unicode = parse("selection-word-chars = \"│\"\n").unwrap();
+        assert_eq!(
+            unicode.selection_word_chars_codepoints(),
+            Some(vec![0, '│' as u32])
         );
     }
 

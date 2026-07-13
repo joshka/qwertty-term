@@ -222,7 +222,10 @@ items are `[ ]` wholesale unless noted.
       edge viewport autoscroll — `SelectionGesture.zig` port, selection smoke)
 - [x] `clipboard-paste-protection`/`-bracketed-safe` (confirm unsafe/multiline
       pastes), `clipboard-trim-trailing-spaces`, `selection-clear-on-typing`
-- [ ] `selection-word-chars` (T3 config), `selection-clear-on-copy`
+- [x] `selection-word-chars` (per-config word-boundary set) + `click-repeat-interval`
+      (double/triple-click window) — parsed to codepoints/`Duration` and threaded into the
+      gesture layer's `selection_press`/`selection_drag` + click interval (#30, wordchars smoke)
+- [ ] `selection-clear-on-copy`
 - [ ] `clipboard-read`/`clipboard-write` permission gates
 - [ ] Primary selection / `primary-paste` (Linux)
 
