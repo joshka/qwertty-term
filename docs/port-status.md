@@ -6,6 +6,36 @@ ported against). Extraction candidates from the rewrite prompt are flagged inlin
 
 Status legend: `—` not started · `WIP` · `done`
 
+## Progress snapshot — 2026-07-13
+
+Estimated completion (crude; LoC/feature-weighted, see caveats):
+
+- **~70%** of the whole port (Ghostty 264k Zig + 22k Swift, all platforms).
+- **~88%** of the macOS daily-driver experience — the core is essentially done.
+- Feature-coverage checklist: **84 `[x]` · 18 `[~]` · 47 `[ ]`** (`docs/feature-coverage.md`).
+- 102 PRs merged since 0.1.0 (published 2026-07-08); crates live on crates.io.
+
+| Subsystem | ~% | Note |
+| --------- | -- | ---- |
+| Terminal engine (114k Zig, 43% of all) | ~90% | certified core; XTWINOPS/XTGETTCAP/DECRQSS completeness + tmux remain |
+| Input / keybinds | ~90% | Binding.zig ported; leader/chain + action long-tail landing |
+| Renderer | ~70% | kitty images (R6) complete; **links (R7)**, bg-image, shaders, CVDisplayLink open |
+| macOS app | ~65% | tabs/splits/quick-term/notifications/gestures done; window-state + chrome extras open |
+| Fonts | ~78% | CoreText complete; FreeType/Linux groundwork in progress |
+| Config surface | ~20% | reload + first wiring; **~200 keys mostly unwired** |
+| Linux/GTK | ~10% | renderer compiles on Linux; app shell not started |
+
+**What's truly missing** (beyond deliberate deferrals like Linux/tmux/inspector):
+1. **Clickable links (R7)** — biggest everyday gap; owned by T2.
+2. **Config-option surface** (~200 keys) — cursor color/opacity, `adjust-*` metrics,
+   `window-save-state`, window-title templates; owned by T3.
+3. **Whole-app performance** — the one *competitive* gap: Ghostty `main` is 1.5–2.7× faster
+   on cell-heavy vtebench suites; no dedicated tuning done yet; owned by T1.
+4. Cursor blink, CVDisplayLink pacing, `macos-secure-input`, `+import-ghostty-config`.
+
+Caveat: % by LoC/checkbox is crude — the uncovered third is disproportionately *deliberate*
+deferral, and everything shipped is differential-tested and gated, not stubbed.
+
 ## Phase 0 — foundations
 
 | Item                                                                    | Status          | Notes                                                                                                                                                                                                                                       |
