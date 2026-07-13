@@ -60,6 +60,18 @@ fn empty_on_init() {
     assert_eq!(w.meta_len(), 0);
 }
 
+// Regression (upstream 5bc6588e4): an empty needle is an inactive search — it
+// must yield no matches, not a zero-length match that underflows `highlight`'s
+// inclusive end offset (or the `needle.len() - 1` overlap/prune math).
+#[test]
+fn empty_needle_has_no_matches() {
+    let mut w = SlidingWindow::init(Direction::Forward, b"");
+    let mut s = screen(80, 24, 0);
+    s.test_write_string("hello");
+    w.append(s.pages.first_node());
+    assert!(w.next().is_none());
+}
+
 #[test]
 fn single_append() {
     let mut w = SlidingWindow::init(Direction::Forward, b"boo!");

@@ -114,7 +114,7 @@ impl ViewportSearch {
                 break;
             }
             added += self.window.append(node);
-            if added >= self.window.needle().len() - 1 {
+            if added >= self.window.needle().len().saturating_sub(1) {
                 break;
             }
             node = unsafe { (*node).prev };
@@ -134,7 +134,7 @@ impl ViewportSearch {
             added = 0;
             while !node.is_null() {
                 added += self.window.append(node);
-                if added >= self.window.needle().len() - 1 {
+                if added >= self.window.needle().len().saturating_sub(1) {
                     break;
                 }
                 let page = unsafe { &(*node).data };
