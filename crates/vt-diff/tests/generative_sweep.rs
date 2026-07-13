@@ -43,7 +43,7 @@ impl Rng {
 /// to bias coordinates toward — and just past — the edges).
 fn gen_op(rng: &mut Rng, out: &mut Vec<u8>, cols: u16, rows: u16) {
     // Weighted by the roll below; printing dominates so the grid fills.
-    match rng.below(130) {
+    match rng.below(160) {
         // --- printing (0..40): mostly ASCII, some wide/combining UTF-8 ---
         0..=33 => {
             let c = 0x21 + rng.below(0x5e) as u8; // printable ASCII
@@ -135,6 +135,37 @@ fn gen_op(rng: &mut Rng, out: &mut Vec<u8>, cols: u16, rows: u16) {
         // --- resets: DECSTR (soft, CSI ! p) / RIS (hard, ESC c) ---
         113 => out.extend_from_slice(b"\x1b[!p"),
         114 => out.extend_from_slice(b"\x1bc"),
+        // --- charset designation + shift: DEC special graphics (line drawing) ---
+        120 => out.extend_from_slice(b"\x1b(0"), // G0 = DEC special graphics
+        121 => out.extend_from_slice(b"\x1b(B"), // G0 = ASCII
+        122 => out.extend_from_slice(b"\x1b)0"), // G1 = DEC special graphics
+        123 => out.push(0x0e),                   // SO: invoke G1 into GL
+        124 => out.push(0x0f),                   // SI: invoke G0 into GL
+        // --- DECSCA protected attribute (gates selective erase) ---
+        125 => out.extend_from_slice(b"\x1b[1\"q"), // protect on
+        126 => out.extend_from_slice(b"\x1b[0\"q"), // protect off
+        // --- DECSED / DECSEL: selective erase display / line (respect protect) ---
+        127..=128 => out.extend_from_slice(format!("\x1b[?{}J", rng.below(3)).as_bytes()),
+        129..=130 => out.extend_from_slice(format!("\x1b[?{}K", rng.below(3)).as_bytes()),
+        // --- rectangular area ops: DECERA (erase) / DECFRA (fill) ---
+        131..=132 => {
+            let t = rng.param(rows as u32);
+            let l = rng.param(cols as u32);
+            let b = rng.param(rows as u32);
+            let r = rng.param(cols as u32);
+            out.extend_from_slice(format!("\x1b[{t};{l};{b};{r}$z").as_bytes()); // DECERA
+        }
+        133..=134 => {
+            let ch = 0x41 + rng.below(26); // fill glyph 'A'..'Z'
+            let t = rng.param(rows as u32);
+            let l = rng.param(cols as u32);
+            let b = rng.param(rows as u32);
+            let r = rng.param(cols as u32);
+            out.extend_from_slice(format!("\x1b[{ch};{t};{l};{b};{r}$x").as_bytes()); // DECFRA
+        }
+        // --- DECIC / DECDC: insert / delete column at the cursor ---
+        135 => out.extend_from_slice(format!("\x1b[{}'}}", rng.param(3)).as_bytes()),
+        136 => out.extend_from_slice(format!("\x1b[{}'~", rng.param(3)).as_bytes()),
         // --- richer SGR to exercise the styled diff: italic/dim/strike/
         //     overline, 256-color and truecolor fg/bg ---
         115..=119 => {
