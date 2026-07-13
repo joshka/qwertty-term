@@ -18,11 +18,11 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 name = "qwertty_term_renderer"
 
 [dependencies]
-qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
 # Sprite dispatch (cursors / decorations / box-drawing) is platform-agnostic
 # (pure Rust), so the cell engine can use it on every target — including the
 # headless Linux software-render path (ADR 003).
-qwertty-term-sprite = { version = "0.1.0", path = "../qwertty-term-sprite" }
+qwertty-term-sprite = { version = "0.2.0", path = "../qwertty-term-sprite" }
 
 # Metal backend (chunk R1). All versions already present in the workspace
 # lockfile (transitively via eframe/winit), so these add no new lock entries.
@@ -71,20 +71,20 @@ dispatch2 = { version = "0.3.1", default-features = false, features = [
 ] }
 # The font substrate the cell engine (R4) drives: shaping + glyph→atlas render
 # cache (`Grid`). On macOS the default (CoreText) face backend is used.
-qwertty-term-font = { version = "0.1.0", path = "../qwertty-term-font" }
+qwertty-term-font = { version = "0.2.0", path = "../qwertty-term-font" }
 
 # On non-macOS targets the cell engine renders headless over the Software
 # backend (ADR 003 P1), so it needs the FreeType face backend — enable the
 # font crate's `freetype` feature by default there. This is what makes
 # `Engine<Software>` build and render on Linux CI with no CoreText / no GPU.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-qwertty-term-font = { version = "0.1.0", path = "../qwertty-term-font", features = [
+qwertty-term-font = { version = "0.2.0", path = "../qwertty-term-font", features = [
     "freetype",
 ] }
 
 [dev-dependencies]
 # The acceptance test (R4) drives a real qwertty-term-vt Terminal through a Stream to
 # produce the snapshot the engine renders.
-qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
 # Base64-encodes kitty graphics APC payloads for the image-rendering test (R6).
 base64 = "0.22"
