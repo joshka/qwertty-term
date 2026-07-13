@@ -155,6 +155,23 @@ impl ReferenceTerminal {
         value
     }
 
+    /// Number of scrollback rows (total rows minus viewport rows).
+    fn get_scrollback_rows(&self) -> usize {
+        // SCROLLBACK_ROWS is a `size_t *`, so read into a usize (reading it into
+        // a narrower type would overflow the out-param buffer).
+        let mut value: usize = 0;
+        // SAFETY: handle valid; SCROLLBACK_ROWS is a size_t-typed datum.
+        let result = unsafe {
+            ffi::ghostty_terminal_get(
+                self.handle,
+                ffi::GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS,
+                &raw mut value as *mut c_void,
+            )
+        };
+        assert_eq!(result, ffi::GHOSTTY_SUCCESS);
+        value
+    }
+
     /// Read a `bool *`-typed datum (1 byte). Using [`get_u16`](Self::get_u16)
     /// here would read an adjacent byte as garbage.
     fn get_bool(&self, key: std::ffi::c_int) -> bool {
@@ -296,6 +313,7 @@ impl Oracle for ReferenceTerminal {
             alt_screen: self.get_enum(ffi::GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)
                 == ffi::GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
             cursor_visible: self.get_bool(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE),
+            scrollback_rows: self.get_scrollback_rows(),
         }
     }
 }
