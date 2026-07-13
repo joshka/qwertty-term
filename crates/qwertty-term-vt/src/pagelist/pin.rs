@@ -343,6 +343,14 @@ impl PageList {
         }
         let tl = self.get_top_left(pt.tag);
         let mut p = unsafe { tl.down(pt.coord().y as usize) }?;
+        // Incomplete reflow can leave the destination page narrower than the
+        // list's desired width (`self.cols`, checked above). Never manufacture
+        // an out-of-bounds pin for that page. Port of upstream `d6e24d985`
+        // (make pin traversal width-aware). Only fires mid-reflow; a no-op when
+        // every page is full width.
+        if x >= unsafe { (*p.node).data.size.cols } {
+            return None;
+        }
         p.x = x;
         Some(p)
     }
@@ -421,17 +429,26 @@ impl PageList {
             }
             coord.y = (p.y - tl.y) as u32;
         } else {
-            coord.y += (unsafe { (*tl.node).data.size.rows } - tl.y) as u32;
+            // The Y coordinate is a u32; an unbounded PageList with more than
+            // 2^32 rows could overflow while summing page heights. Use checked
+            // adds and reject the unrepresentable pin instead of panicking
+            // (overflow-checked builds) / wrapping (release). Port of upstream
+            // `30b42f42a`. Unreachable in practice (4 billion rows); a guard.
+            coord.y = coord
+                .y
+                .checked_add((unsafe { (*tl.node).data.size.rows } - tl.y) as u32)?;
             let mut node = unsafe { (*tl.node).next };
             loop {
                 if node.is_null() {
                     return None;
                 }
                 if node == p.node {
-                    coord.y += p.y as u32;
+                    coord.y = coord.y.checked_add(p.y as u32)?;
                     break;
                 }
-                coord.y += unsafe { (*node).data.size.rows } as u32;
+                coord.y = coord
+                    .y
+                    .checked_add(unsafe { (*node).data.size.rows } as u32)?;
                 node = unsafe { (*node).next };
             }
         }

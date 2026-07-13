@@ -345,6 +345,21 @@ fn scroll_with_max_size_0_no_history() {
     assert_eq!(s.viewport_state(), Viewport::Active);
 }
 
+// Regression (upstream c753fe4a4): a DeltaRow of isize::MIN must not panic.
+// The magnitude is taken with unsigned_abs(); `(-n) as usize` would overflow
+// negating isize::MIN in overflow-checked builds. isize::MIN is a huge scroll
+// up, so it clamps to the top of scrollback.
+#[test]
+fn scroll_delta_row_isize_min_does_not_overflow() {
+    let mut s = PageList::init(80, 24, None);
+    s.grow_rows(10);
+    s.scroll(Scroll::DeltaRow(isize::MIN)); // scroll up by the max magnitude
+    assert_eq!(s.viewport_state(), Viewport::Top);
+    // A max positive delta scrolls back down to the active area.
+    s.scroll(Scroll::DeltaRow(isize::MAX));
+    assert_eq!(s.viewport_state(), Viewport::Active);
+}
+
 #[test]
 fn scroll_delta_row_back() {
     let mut s = PageList::init(80, 24, None);
