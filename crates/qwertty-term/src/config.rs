@@ -226,6 +226,12 @@ pub struct Config {
     /// `selection-clear-on-typing`, `Config.zig:724`, default true).
     #[serde(rename = "selection-clear-on-typing")]
     pub selection_clear_on_typing: bool,
+    /// Clear the text selection after an explicit copy (the `copy_to_clipboard`
+    /// action / Cmd-C / menu / context-menu Copy). Does **not** apply to
+    /// `copy-on-select` (upstream `selection-clear-on-copy`, `Config.zig:736`,
+    /// default false).
+    #[serde(rename = "selection-clear-on-copy")]
+    pub selection_clear_on_copy: bool,
     /// Allow applications to post desktop notifications via OSC 9 / OSC 777
     /// (upstream `desktop-notifications`, `Config.zig:3690`, default true).
     /// Gated in the core drain (matching upstream `Surface.zig:1080`): when
@@ -372,6 +378,7 @@ impl Default for Config {
             clipboard_paste_bracketed_safe: true,
             clipboard_trim_trailing_spaces: true,
             selection_clear_on_typing: true,
+            selection_clear_on_copy: false,
             // Applications may post OSC 9/777 desktop notifications by default
             // (upstream `Config.zig:3690`).
             desktop_notifications: true,
@@ -1302,6 +1309,13 @@ mod tests {
         );
         assert!(config.clipboard_trim_trailing_spaces);
         assert!(config.selection_clear_on_typing);
+        // selection-clear-on-copy is off by default (upstream); parses when set.
+        assert!(!config.selection_clear_on_copy);
+        assert!(
+            parse("selection-clear-on-copy = true\n")
+                .unwrap()
+                .selection_clear_on_copy
+        );
         // Desktop notifications: allowed by default (upstream).
         assert!(config.desktop_notifications);
         // Command-finish notifications: off by default, bell action, 5s.

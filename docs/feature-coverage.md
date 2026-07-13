@@ -231,7 +231,9 @@ items are `[ ]` wholesale unless noted.
 - [x] `selection-word-chars` (per-config word-boundary set) + `click-repeat-interval`
       (double/triple-click window) — parsed to codepoints/`Duration` and threaded into the
       gesture layer's `selection_press`/`selection_drag` + click interval (#30, wordchars smoke)
-- [ ] `selection-clear-on-copy`
+- [x] `selection-clear-on-copy` (clear the selection after an *explicit* copy — the
+      `copy_to_clipboard` action / Cmd-C / menu — but not after copy-on-select, matching
+      upstream; config unit test + clear-copy smoke)
 - [ ] `clipboard-read`/`clipboard-write` permission gates
 - [ ] Primary selection / `primary-paste` (Linux)
 
