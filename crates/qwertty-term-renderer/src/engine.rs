@@ -411,6 +411,21 @@ impl<B: GpuBackend> Engine<B> {
                 .and_then(|c| c.link.clone())
         });
 
+        // R7 slice 2: if the mouse isn't over an OSC8 link, try regex URL
+        // detection on the hovered row — a matched URL span underlines like an
+        // OSC8 link. Per visual row; no modifier gate yet (slice 3 adds
+        // cmd+click and can gate both there).
+        let hovered_url: Option<(usize, std::ops::Range<usize>)> = if hovered_link.is_none() {
+            opts.hovered_cell.and_then(|(hc, hr)| {
+                (hr < rows)
+                    .then(|| hovered_url_cols(snapshot.row(hr), hc))
+                    .flatten()
+                    .map(|range| (hr, range))
+            })
+        } else {
+            None
+        };
+
         // Cursor style resolution (renderer-local focus/blink/preedit on top of
         // the snapshot cursor). Preedit isn't wired in the reduced cut.
         let cursor = snapshot.cursor();
@@ -458,6 +473,10 @@ impl<B: GpuBackend> Engine<B> {
             }
             let row = snapshot.row(y);
             let cursor_x = cursor_row_col.and_then(|(cr, cc)| (cr == y).then_some(cc));
+            let url_range = hovered_url
+                .as_ref()
+                .filter(|(r, _)| *r == y)
+                .map(|(_, rng)| rng);
             self.rebuild_row(
                 y,
                 row,
@@ -467,6 +486,7 @@ impl<B: GpuBackend> Engine<B> {
                 default_bg,
                 cursor_x,
                 hovered_link.as_ref(),
+                url_range,
             );
         }
 
@@ -552,6 +572,7 @@ impl<B: GpuBackend> Engine<B> {
         default_bg: Rgb,
         cursor_x: Option<usize>,
         hovered_link: Option<&qwertty_term_vt::page::hyperlink::LinkKey>,
+        hovered_url_range: Option<&std::ops::Range<usize>>,
     ) {
         let cols = self.contents.cols();
 
@@ -586,10 +607,13 @@ impl<B: GpuBackend> Engine<B> {
 
             let alpha: u8 = if style.faint { 128 } else { 255 };
 
-            // R7 hover: a cell of the hovered OSC8 link gets a *forced*
-            // underline — single normally, double if the cell already draws a
-            // single (so it stays visible), mirroring upstream `rebuildCells`.
-            let is_hovered_link = hovered_link.is_some() && cell.link.as_ref() == hovered_link;
+            // R7 hover: a cell of the hovered link gets a *forced* underline —
+            // single normally, double if the cell already draws a single (so it
+            // stays visible), mirroring upstream `rebuildCells`. The hovered
+            // link is either an OSC8 link (matched by `LinkKey`) or a
+            // regex-detected URL span on this row (slice 2).
+            let is_hovered_link = (hovered_link.is_some() && cell.link.as_ref() == hovered_link)
+                || hovered_url_range.is_some_and(|rng| rng.contains(&x));
             let effective_underline = if is_hovered_link {
                 if style.underline == SnapshotUnderline::Single {
                     SnapshotUnderline::Double
@@ -1801,6 +1825,47 @@ fn underline_sprite(u: SnapshotUnderline) -> Sprite {
         SnapshotUnderline::Dotted => Sprite::UnderlineDotted,
         SnapshotUnderline::Dashed => Sprite::UnderlineDashed,
     }
+}
+
+/// The column range of the regex-detected URL under `hover_col` on `row`, if
+/// any (R7 slice 2). Builds the row's text, finds a URL span containing the
+/// hovered column via [`crate::link`], and maps the byte span back to columns.
+/// Per visual row — URLs that wrap across rows aren't joined yet.
+fn hovered_url_cols(row: &[SnapshotCell], hover_col: usize) -> Option<std::ops::Range<usize>> {
+    let mut text = String::new();
+    // Parallel char-indexed maps: the column each char came from, and its byte
+    // offset in `text` (a wide glyph's spacer cells contribute no char).
+    let mut col_of_char: Vec<usize> = Vec::new();
+    let mut byte_of_char: Vec<usize> = Vec::new();
+    for (x, cell) in row.iter().enumerate() {
+        if cell.is_spacer() {
+            continue;
+        }
+        byte_of_char.push(text.len());
+        col_of_char.push(x);
+        text.push(cell.ch);
+        for &c in &cell.combining {
+            text.push(c);
+        }
+    }
+
+    // Byte offset of the hovered column's char, then the URL span covering it.
+    let hover_byte = col_of_char
+        .iter()
+        .position(|&c| c == hover_col)
+        .map(|i| byte_of_char[i])?;
+    let span = crate::link::url_span_at(&text, hover_byte)?;
+
+    // Map the byte span back to the contiguous column range it covers.
+    let mut lo = usize::MAX;
+    let mut hi = 0usize;
+    for (i, &b) in byte_of_char.iter().enumerate() {
+        if span.contains(&b) {
+            lo = lo.min(col_of_char[i]);
+            hi = hi.max(col_of_char[i]);
+        }
+    }
+    (lo != usize::MAX).then_some(lo..hi + 1)
 }
 
 /// Resolve a [`SnapshotColor`] into a concrete [`Rgb`] through the palette /

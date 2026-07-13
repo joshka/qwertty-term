@@ -60,9 +60,9 @@ fn make_grid(face: Face) -> Grid {
     Grid::new(resolver, metrics).expect("grid")
 }
 
-/// Render one offscreen frame of the scripted OSC8 session with the given
-/// `hovered_cell`, returning the read-back pixels.
-fn render(hovered_cell: Option<(usize, usize)>) -> Option<Frame> {
+/// Render one offscreen frame with `feed` scripted into a `cols`-wide terminal
+/// and the given `hovered_cell`, returning the read-back pixels.
+fn render(cols: u16, feed: &[u8], hovered_cell: Option<(usize, usize)>) -> Option<Frame> {
     let backend = match Metal::new() {
         Ok(b) => b,
         Err(e) => {
@@ -76,13 +76,12 @@ fn render(hovered_cell: Option<(usize, usize)>) -> Option<Frame> {
     let mut grid = make_grid(text_face);
 
     let term = Terminal::new(Options {
-        cols: 10,
+        cols,
         rows: 2,
         ..Default::default()
     });
     let mut stream = Stream::new(TerminalHandler::new(term));
-    // OSC8 link over "ab", close, then a plain "c".
-    stream.feed(b"\x1b]8;;http://example.test\x1b\\ab\x1b]8;;\x1b\\c");
+    stream.feed(feed);
     let term = stream.handler.terminal;
 
     let snapshot = FullSnapshot::capture(&term, 0);
@@ -103,14 +102,17 @@ fn render(hovered_cell: Option<(usize, usize)>) -> Option<Frame> {
     })
 }
 
+/// OSC8 link over "ab" (cols 0-1), close, then a plain "c" (col 2, no link).
+const OSC8_SESSION: &[u8] = b"\x1b]8;;http://example.test\x1b\\ab\x1b]8;;\x1b\\c";
+
 #[test]
 fn hovered_link_underlines_all_its_cells_and_only_those() {
-    let Some(off) = render(None) else {
+    let Some(off) = render(10, OSC8_SESSION, None) else {
         return; // skipped (no Metal)
     };
     // Hover the *second* cell of the link (col 1) to prove the underline spans
     // the whole link, not just the hovered cell.
-    let on = render(Some((1, 0))).expect("second render");
+    let on = render(10, OSC8_SESSION, Some((1, 0))).expect("second render");
 
     // Both link cells (col 0 and col 1) change substantially when hovered — the
     // forced underline adds a full-width horizontal line of pixels.
@@ -132,5 +134,36 @@ fn hovered_link_underlines_all_its_cells_and_only_those() {
     assert!(
         nonlink == 0,
         "non-link cell col 2 must not change on hover (changed pixels: {nonlink})"
+    );
+}
+
+#[test]
+fn hovered_regex_url_underlines_the_whole_span() {
+    // A plain (non-OSC8) URL detected by regex. Layout: "x " then
+    // "http://a.test" at cols 2..=14, a space, then "y".
+    const SESSION: &[u8] = b"x http://a.test y";
+    let Some(off) = render(20, SESSION, None) else {
+        return; // skipped (no Metal)
+    };
+    // Hover col 5 ('p'), inside the URL.
+    let on = render(20, SESSION, Some((5, 0))).expect("second render");
+
+    // Both ends of the detected URL span gain the hover underline.
+    let start = on.cell_diff_count(&off, 2, 0); // 'h'
+    let end = on.cell_diff_count(&off, 14, 0); // last 't'
+    assert!(
+        start > 8,
+        "URL start cell (col 2) should gain a hover underline ({start})"
+    );
+    assert!(
+        end > 8,
+        "URL end cell (col 14) should gain a hover underline ({end}) — the whole span, not just col 5"
+    );
+
+    // Text outside the URL is untouched: the leading 'x' (col 0).
+    let outside = on.cell_diff_count(&off, 0, 0);
+    assert!(
+        outside == 0,
+        "non-URL cell (col 0 'x') must not change on hover ({outside})"
     );
 }
