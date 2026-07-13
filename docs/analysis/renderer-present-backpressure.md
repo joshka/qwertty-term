@@ -66,3 +66,31 @@ Note the coupling to R6: enabling `Async` requires moving the engine-level kitty
 texture cache + instance buffers **per-slot** (the `debug_assert_eq!(mode, Sync)` guard at
 `engine.rs:1154` exists precisely because they aren't yet) — so the present-backpressure
 work and that R6 async-safety follow-up (#19) are the same change.
+
+## Running the measurement (wired 2026-07-13)
+
+The `PresentStats` primitive is now fed from the live present path by an env-gated
+recorder in the renderer (`present_stats::PresentStatsRecorder`, held by `Engine`) —
+**no app change**. To get real numbers on a DOOM-fire (or any) run:
+
+```sh
+QWERTTY_TERM_ASSERT_PRESENT=1 \   # makes the host present via the readback path
+QWERTTY_TERM_PRESENT_STATS=1 \    # enables the recorder
+QWERTTY_TERM_PRESENT_STATS_EVERY=120 \  # report cadence in frames (default 120)
+  cargo run -p qwertty-term --release
+```
+
+It prints a running line to stderr every `EVERY` frames:
+
+```text
+PRESENT_STATS frames=120 cadence_ms=8.62±0.31 content_step=1.94±2.63 judder_cv=1.36
+```
+
+Read it as: `cadence_ms=mean±stddev` (present interval; the ± is present-cadence
+jitter — should be small with #139's vsync), and `judder_cv` (coefficient of
+variation of the per-present content step — the animation-step-evenness / judder
+metric; ~0 is smooth, large is chunky). **A small cadence ± with a large judder_cv
+confirms the residual judder is uneven *sampling* (T4's io-apply burstiness), not the
+present path** — which decides whether the fix belongs to T2 or T4 before either is
+built. Caveat: the readback path adds a full-frame CPU readback per present, so the
+absolute cadence is measurement-perturbed; the *ratios* (jitter, CV) are the signal.
