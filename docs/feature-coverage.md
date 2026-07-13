@@ -298,8 +298,9 @@ items are `[ ]` wholesale unless noted.
       `examples/frame-capture`; betamax's own adoption tracked in the betamax repo
 - [~] Injectable clock (deterministic render proven; cursor-blink phase injected via
       `FrameOptions`, but the blink *mode* isn't threaded through the snapshot yet — #57)
-- [x] **crates.io publish — all 8 crates at 0.1.0** (`qwertty-term` + `-vt`/`-font`/
-      `-renderer`/`-termio`/`-input`/`-sprite`/`-ffi`; published 2026-07-08, docs.rs built)
+- [x] **crates.io publish — all 8 crates, latest 0.2.0** (`qwertty-term` + `-vt`/`-font`/
+      `-renderer`/`-termio`/`-input`/`-sprite`/`-ffi`; 0.1.0 published 2026-07-08, 0.2.0
+      2026-07-13 via release-plz + Trusted Publishing, docs.rs built)
 - [x] MB5 API polish (Display/Error on font errors [already in 0.1.0]; matched `Engine::for_grid`;
       typed `Frame` RGBA readback; one-call `Engine::render`; `Stream::terminal()`;
       `capture_live`) — shipped in #5; docs.rs full-API + quickstart in #51
