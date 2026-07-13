@@ -113,6 +113,13 @@ impl Engine {
         self.stream.handler.take_command_boundaries()
     }
 
+    /// Drain the most recent OSC 9;4 ConEmu progress report, if one arrived
+    /// since the last drain. The app renders it as an in-surface progress bar
+    /// (gated by `progress-style`; see `crate::progress`).
+    pub fn take_progress_report(&mut self) -> Option<qwertty_term_vt::osc::ProgressReport> {
+        self.stream.handler.take_progress_report()
+    }
+
     /// Resize the grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.terminal_mut().resize(clamp_dim(cols), clamp_dim(rows));

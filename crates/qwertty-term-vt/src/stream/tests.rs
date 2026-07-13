@@ -629,6 +629,46 @@ fn osc133_command_boundaries_are_drained_in_order() {
     assert!(s.handler.take_command_boundaries().is_empty());
 }
 
+// OSC 9;4 ConEmu progress reports latch a drainable state for the app's
+// in-surface progress bar. Latest-wins (a `Remove` supersedes a prior value).
+#[test]
+fn osc9_4_progress_reports_latch_the_latest_state() {
+    use crate::osc::{ProgressReport, ProgressState};
+    let mut s = term(10, 10);
+    assert!(s.handler.take_progress_report().is_none());
+
+    // `9;4;1;50` — set, 50%.
+    s.feed(b"\x1b]9;4;1;50\x07");
+    assert_eq!(
+        s.handler.take_progress_report(),
+        Some(ProgressReport {
+            state: ProgressState::Set,
+            progress: Some(50)
+        })
+    );
+    assert!(s.handler.take_progress_report().is_none());
+
+    // Latest-wins across a burst: set 30 then error 90 → error 90.
+    s.feed(b"\x1b]9;4;1;30\x07\x1b]9;4;2;90\x07");
+    assert_eq!(
+        s.handler.take_progress_report(),
+        Some(ProgressReport {
+            state: ProgressState::Error,
+            progress: Some(90)
+        })
+    );
+
+    // `9;4;0` — remove clears; it's the latest state.
+    s.feed(b"\x1b]9;4;1;70\x07\x1b]9;4;0\x07");
+    assert_eq!(
+        s.handler.take_progress_report(),
+        Some(ProgressReport {
+            state: ProgressState::Remove,
+            progress: None
+        })
+    );
+}
+
 // OSC 52 clipboard write: surfaced as a drainable event, raw (still
 // base64-encoded) per upstream's `clipboardContents` policy (decode is an
 // apprt/embedder decision, not a terminal-core one).

@@ -90,6 +90,9 @@
 //!   OSC 133 `C`/`D` marks and assert the app times the command and delivers
 //!   the exit-status finish notification (`notify-on-command-finish`), then
 //!   exit 0/1. Needs a temp config with `notify-on-command-finish = always`.
+//! - `QWERTTY_TERM_SMOKE_PROGRESS=1` — run the progress-bar smoke: feed OSC 9;4
+//!   set/error/remove reports and assert the app tracks the derived progress-bar
+//!   display state (fraction + category), clearing on remove, then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -203,6 +206,8 @@ fn run_window() {
     let smoke_notify = std::env::var_os("QWERTTY_TERM_SMOKE_NOTIFY").is_some();
     // Command-finish smoke: assert OSC 133 command-finish notifications fire.
     let smoke_notifycmd = std::env::var_os("QWERTTY_TERM_SMOKE_NOTIFYCMD").is_some();
+    // Progress smoke: assert OSC 9;4 progress-bar state tracking.
+    let smoke_progress = std::env::var_os("QWERTTY_TERM_SMOKE_PROGRESS").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -222,6 +227,7 @@ fn run_window() {
         smoke_windowstate,
         smoke_notify,
         smoke_notifycmd,
+        smoke_progress,
     );
 }
 

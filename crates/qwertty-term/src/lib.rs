@@ -23,6 +23,7 @@ pub mod keybind;
 pub mod menu;
 pub mod notify;
 pub mod paste;
+pub mod progress;
 pub mod quickterm;
 pub mod scroll;
 pub mod search;

@@ -150,6 +150,12 @@ pub struct Config {
     /// the other duration keys in this config.
     #[serde(rename = "notify-on-command-finish-after")]
     pub notify_on_command_finish_after: f64,
+    /// Whether to show the in-surface OSC 9;4 progress bar (upstream
+    /// `progress-style`, `Config.zig:3697`, default true). When false, progress
+    /// reports are ignored (no bar). A reduced form of upstream's style enum —
+    /// a plain on/off toggle.
+    #[serde(rename = "progress-style")]
+    pub progress_style: bool,
     /// Whether to quit the app after the last window/surface closes (upstream
     /// `quit-after-last-window-closed`, `Config.zig:2509`, default **false** on
     /// macOS — the standard "app stays running with no windows" behavior).
@@ -213,6 +219,8 @@ impl Default for Config {
             notify_on_command_finish: None,
             notify_on_command_finish_action: None,
             notify_on_command_finish_after: 5.0,
+            // The OSC 9;4 progress bar is shown by default (upstream).
+            progress_style: true,
             // macOS default: stay running after the last window closes
             // (upstream `Config.zig:2509` → false on macOS).
             quit_after_last_window_closed: false,
@@ -433,6 +441,10 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # notify-on-command-finish = "never"
 # notify-on-command-finish-action = "bell"
 # notify-on-command-finish-after = 5
+
+# Show the in-surface OSC 9;4 progress bar (default true; set false to ignore
+# progress reports).
+# progress-style = true
 
 # Window state. quit-after-last-window-closed keeps the standard macOS behavior
 # of staying running with no windows when false (default); set true to quit.
@@ -665,6 +677,8 @@ mod tests {
             config.notify_on_command_finish_after(),
             std::time::Duration::from_secs(5)
         );
+        // The progress bar is shown by default.
+        assert!(config.progress_style);
         // Window state: macOS default doesn't quit after last window; no
         // configured geometry.
         assert!(!config.quit_after_last_window_closed);
@@ -752,6 +766,12 @@ mod tests {
             config.notify_on_command_finish_after(),
             std::time::Duration::from_secs_f64(2.5)
         );
+    }
+
+    #[test]
+    fn parses_progress_style_key() {
+        assert!(!parse("progress-style = false\n").unwrap().progress_style);
+        assert!(parse("").unwrap().progress_style);
     }
 
     #[test]

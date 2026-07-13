@@ -232,7 +232,9 @@ items are `[ ]` wholesale unless noted.
 - [~] `notify-on-command-finish` (+ `-action` bell/notify, `-after` threshold): OSC 133
       `C`/`D` boundary tracking in the VT engine → per-surface timing → mode/threshold gate
       → bell and/or notification (notifycmd smoke). `abnormal-command-exit-runtime` still open
-- [ ] `progress-style` (OSC 9;4 progress bar)
+- [~] `progress-style` (OSC 9;4 progress bar): ConEmu report → vt hook → gated state
+      (set/error/indeterminate/pause/remove, 0–100, 15s auto-clear) → CALayer bottom-strip
+      overlay over the pane (progress smoke). Reduced to an on/off toggle (upstream is a style enum)
 
 ## Platform: macOS (`macos/Sources`, ~45% reimplemented natively in Rust)
 

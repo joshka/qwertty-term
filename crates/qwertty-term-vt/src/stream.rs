@@ -417,6 +417,10 @@ pub trait Handler {
     /// delivers the OS notification (gated by `desktop-notifications`); this
     /// trait method is the same seam. `title` is empty for the OSC 9 form.
     fn show_desktop_notification(&mut self, title: &str, body: &str) {}
+    /// OSC 9;4 ConEmu progress report (`ESC ] 9 ; 4 ; state ; progress ST`).
+    /// Upstream surfaces this to the apprt, which renders an in-surface progress
+    /// bar (gated by `progress-style`); this trait method is the same seam.
+    fn progress_report(&mut self, report: osc::ProgressReport) {}
 
     // ---- reports (queue-emitting) --------------------------------------
     fn device_attributes(&mut self, req: DeviceAttributesReq) {}
@@ -1612,9 +1616,10 @@ impl<H: Handler> Stream<H> {
             C::ShowDesktopNotification { title, body } => {
                 self.handler.show_desktop_notification(&title, &body);
             }
+            C::ConemuProgressReport(report) => self.handler.progress_report(report),
             // Everything else has no terminal-modifying effect (kitty
             // clipboard protocol (5522, a NON-goal — parsed but not applied,
-            // see module docs), conemu progress, kitty text/dnd, context
+            // see module docs), other conemu ops, kitty text/dnd, context
             // signal).
             _ => {}
         }
@@ -1714,6 +1719,12 @@ pub struct TerminalHandler {
     /// the per-tick drain is cheap. The `semantic_prompt` handler already ran
     /// for row tagging; this is the additional app-observable signal.
     pending_command_boundaries: Vec<CommandBoundary>,
+    /// The most recent OSC 9;4 ConEmu progress report since the last
+    /// [`TerminalHandler::take_progress_report`] drain. Latest-wins (each report
+    /// supersedes the prior progress state — including a `Remove` that clears
+    /// it), so the app reads only the final state per frame. `None` until one
+    /// arrives. The [`TerminalHandler::progress_report`] handler was a no-op.
+    pending_progress: Option<osc::ProgressReport>,
     /// The APC sub-protocol handler (kitty graphics / glyph). Port of
     /// `stream_terminal.Handler.apc_handler`. The stream's `apc_start`/
     /// `apc_put`/`apc_end` events drive it; on `end` a completed
@@ -1802,6 +1813,7 @@ impl TerminalHandler {
             pending_bell: false,
             pending_notification: None,
             pending_command_boundaries: Vec::new(),
+            pending_progress: None,
             apc_handler: apc::Handler::new(),
             color_scheme: None,
             cell_size: None,
@@ -1883,6 +1895,13 @@ impl TerminalHandler {
     /// [`TerminalHandler::pending_command_boundaries`].
     pub fn take_command_boundaries(&mut self) -> Vec<CommandBoundary> {
         std::mem::take(&mut self.pending_command_boundaries)
+    }
+
+    /// Take (and clear) the most recent OSC 9;4 progress report, if one arrived
+    /// since the last drain. The app renders it as an in-surface progress bar
+    /// (gated by `progress-style`). See [`TerminalHandler::pending_progress`].
+    pub fn take_progress_report(&mut self) -> Option<osc::ProgressReport> {
+        self.pending_progress.take()
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
@@ -2062,6 +2081,12 @@ impl Handler for TerminalHandler {
         // `take_notification`, gate on `desktop-notifications`, rate-limit, and
         // deliver. No terminal-state effect.
         self.pending_notification = Some((title.to_owned(), body.to_owned()));
+    }
+    fn progress_report(&mut self, report: osc::ProgressReport) {
+        // Latch the latest progress state (latest-wins, including a `Remove`)
+        // for the app to render as an in-surface progress bar. No terminal-state
+        // effect.
+        self.pending_progress = Some(report);
     }
     fn enquiry(&mut self) {
         // ENQ (0x05) answerback: reply the configured response, or nothing if

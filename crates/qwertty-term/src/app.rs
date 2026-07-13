@@ -53,6 +53,7 @@ use objc2_app_kit::{
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
+use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::engine::Engine;
 use crate::font::{self, FontGrid};
@@ -331,6 +332,15 @@ struct Surface {
     /// `notify-on-command-finish` timing. `Some` between a `C` mark and the
     /// matching `D`; `None` otherwise. Set/cleared in [`Surface::pump`].
     command_started_at: Option<std::time::Instant>,
+    /// Current OSC 9;4 progress-bar display state, or `None` when no bar is
+    /// shown. Derived from the drained report + gated by `progress-style`.
+    progress: Option<crate::progress::ProgressDisplay>,
+    /// When the current progress bar auto-clears if no further updates arrive
+    /// (upstream's 15s timer). `None` when no bar is shown.
+    progress_deadline: Option<std::time::Instant>,
+    /// The lazily-created `CALayer` that draws the progress bar as a bottom
+    /// strip over this pane's terminal content. `None` until the first bar.
+    progress_layer: Option<Retained<CALayer>>,
 }
 
 /// Lock an engine mutex, recovering a poisoned lock instead of panicking.
@@ -363,6 +373,8 @@ struct PumpResult {
     /// A command that finished this tick (OSC 133 `C`→`D`) as
     /// `(exit_code, elapsed)`, for `notify-on-command-finish`.
     command_finished: Option<(Option<i32>, std::time::Duration)>,
+    /// The latest OSC 9;4 progress report observed this tick, if any.
+    progress_report: Option<qwertty_term_vt::osc::ProgressReport>,
 }
 
 impl Surface {
@@ -467,13 +479,14 @@ impl Surface {
         // `take_output`/`take_bell` lock the engine; if the parse thread poisoned
         // the lock, `engine()` recovers it and flips `dead`, so re-check before
         // touching io. Drain both under one lock.
-        let (out, bell, notification, boundaries) = {
+        let (out, bell, notification, boundaries, progress_report) = {
             let mut engine = self.engine();
             (
                 engine.take_output(),
                 engine.take_bell(),
                 engine.take_notification(),
                 engine.take_command_boundaries(),
+                engine.take_progress_report(),
             )
         };
         if self.is_dead() {
@@ -520,6 +533,7 @@ impl Surface {
             bell,
             notification,
             command_finished,
+            progress_report,
         }
     }
 
@@ -563,6 +577,77 @@ impl Surface {
     /// whether this pane's tab has more than one pane; when it does and this pane
     /// is unfocused, the snapshot is dimmed toward the fill color (upstream
     /// `unfocused-split-opacity`, replicated CPU-side like the selection tint).
+    /// Apply an OSC 9;4 progress report: derive the display state (or clear on
+    /// `Remove`) and (re)arm the 15s auto-clear timer.
+    fn set_progress(
+        &mut self,
+        report: qwertty_term_vt::osc::ProgressReport,
+        now: std::time::Instant,
+    ) {
+        self.progress = crate::progress::ProgressDisplay::from_report(report);
+        self.progress_deadline = self.progress.map(|_| now + crate::progress::AUTO_CLEAR);
+    }
+
+    /// Clear the progress bar if its auto-clear deadline has passed (upstream's
+    /// 15s no-update timeout).
+    fn tick_progress_autoclear(&mut self, now: std::time::Instant) {
+        if let Some(deadline) = self.progress_deadline
+            && now >= deadline
+        {
+            self.progress = None;
+            self.progress_deadline = None;
+        }
+    }
+
+    /// Sync the progress-bar `CALayer` to the current [`Self::progress`] state: a
+    /// bottom strip filled to the progress fraction (full width when
+    /// indeterminate), colored by category, drawn over this pane's terminal
+    /// content. Hidden when there is no bar. Implicit layer animations are
+    /// disabled so it tracks resize/updates instantly.
+    fn sync_progress_layer(&mut self) {
+        let host = self.view.host_layer().as_layer();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        match self.progress {
+            None => {
+                if let Some(layer) = &self.progress_layer {
+                    layer.setHidden(true);
+                }
+            }
+            Some(display) => {
+                let bounds = host.bounds();
+                let width = bounds.size.width;
+                let bar_height = 3.0_f64;
+                let frac = if display.indeterminate {
+                    1.0
+                } else {
+                    display.fraction
+                };
+                let (r, g, b) = match display.category {
+                    crate::progress::ProgressCategory::Normal => (0.20, 0.52, 1.0),
+                    crate::progress::ProgressCategory::Error => (0.90, 0.20, 0.20),
+                    crate::progress::ProgressCategory::Paused => (0.95, 0.60, 0.15),
+                };
+                let alpha = if display.indeterminate { 0.5 } else { 1.0 };
+                let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, alpha);
+                let layer = self.progress_layer.get_or_insert_with(|| {
+                    let l = CALayer::new();
+                    host.addSublayer(&l);
+                    l
+                });
+                layer.setHidden(false);
+                // CALayer geometry is bottom-left origin, so y=0 is the pane's
+                // bottom edge — where the progress bar sits.
+                layer.setFrame(NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(width * frac, bar_height),
+                ));
+                layer.setBackgroundColor(Some(&color.CGColor()));
+            }
+        }
+        CATransaction::commit();
+    }
+
     fn render(&mut self, focused: bool, is_split: bool) {
         if self.render.is_none() {
             return;
@@ -1369,6 +1454,8 @@ pub struct ControllerState {
     notify_on_command_finish_action: crate::notify::CommandFinishAction,
     /// Minimum command duration before a finish notifies.
     notify_on_command_finish_after: std::time::Duration,
+    /// Whether to show the in-surface OSC 9;4 progress bar (`progress-style`).
+    progress_style: bool,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1468,6 +1555,7 @@ impl Controller {
             notify_on_command_finish: config.notify_on_command_finish(),
             notify_on_command_finish_action: config.notify_on_command_finish_action(),
             notify_on_command_finish_after: config.notify_on_command_finish_after(),
+            progress_style: config.progress_style,
         })))
     }
 
@@ -2162,6 +2250,22 @@ impl Controller {
             .get(&tab)
             .and_then(|t| t.surfaces.get(&surface))
             .map(|s| (s.cols, s.rows))
+    }
+
+    /// A specific surface's current OSC 9;4 progress-bar display state (or
+    /// `None` when no bar is shown) — the notify-progress smoke reads this to
+    /// assert the parse → drain → gate → auto-clear pipeline (smoke/test).
+    pub fn surface_progress(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+    ) -> Option<crate::progress::ProgressDisplay> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .and_then(|s| s.progress)
     }
 
     /// A specific surface's presented-frame coverage (max background delta) —
@@ -3392,6 +3496,8 @@ impl Controller {
         // title/password state, under one borrow. Render every pane.
         let bell_features = self.0.borrow().bell_features;
         let desktop_notifications = self.0.borrow().desktop_notifications;
+        let progress_style = self.0.borrow().progress_style;
+        let now_tick = std::time::Instant::now();
         let notify_mode = self.0.borrow().notify_on_command_finish;
         // Whether the app is frontmost — the `unfocused` gate needs real user
         // focus (key window + active app), not just a tab's focused pane.
@@ -3439,7 +3545,15 @@ impl Controller {
                         // one row and extends the selection (upstream's
                         // ~15ms `selection_scroll` io timer).
                         surface.selection_autoscroll_tick();
+                        // OSC 9;4 progress bar: apply a fresh report (when
+                        // `progress-style` is on), expire a stale one, then sync
+                        // the overlay layer after the frame is drawn.
+                        if progress_style && let Some(report) = result.progress_report {
+                            surface.set_progress(report, now_tick);
+                        }
+                        surface.tick_progress_autoclear(now_tick);
                         surface.render(*sid == focused, is_split);
+                        surface.sync_progress_layer();
                     }
                     // A BEL from any pane marks this tab's title (until the tab
                     // is next focused) and triggers the once-per-tick audible/
@@ -3664,6 +3778,9 @@ impl Controller {
                 ),
             },
             command_started_at: None,
+            progress: None,
+            progress_deadline: None,
+            progress_layer: None,
         })
     }
 
@@ -4462,6 +4579,9 @@ pub struct DelegateIvars {
     /// command-finish notifications fire. See
     /// [`AppDelegate::run_notifycmd_smoke`].
     smoke_notifycmd: bool,
+    /// Progress smoke (`QWERTTY_TERM_SMOKE_PROGRESS`): assert OSC 9;4 progress-
+    /// bar state tracking. See [`AppDelegate::run_progress_smoke`].
+    smoke_progress: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -4514,6 +4634,7 @@ define_class!(
             let has_windowstate = self.ivars().smoke_windowstate;
             let has_notify = self.ivars().smoke_notify;
             let has_notifycmd = self.ivars().smoke_notifycmd;
+            let has_progress = self.ivars().smoke_progress;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -4543,6 +4664,8 @@ define_class!(
                 self.schedule_notify_smoke();
             } else if has_notifycmd {
                 self.schedule_notifycmd_smoke();
+            } else if has_progress {
+                self.schedule_progress_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -4742,6 +4865,12 @@ define_class!(
         fn notifycmd_smoke(&self, _timer: &AnyObject) {
             self.run_notifycmd_smoke();
         }
+
+        /// Progress smoke: assert OSC 9;4 progress-bar state tracking, exit 0/1.
+        #[unsafe(method(ghosttyProgressSmoke:))]
+        fn progress_smoke(&self, _timer: &AnyObject) {
+            self.run_progress_smoke();
+        }
     }
 );
 
@@ -4768,6 +4897,7 @@ impl AppDelegate {
         smoke_windowstate: bool,
         smoke_notify: bool,
         smoke_notifycmd: bool,
+        smoke_progress: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -4791,6 +4921,7 @@ impl AppDelegate {
             smoke_windowstate,
             smoke_notify,
             smoke_notifycmd,
+            smoke_progress,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -7164,6 +7295,63 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_progress_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyProgressSmoke:));
+    }
+
+    /// Progress-bar smoke (OSC 9;4): feed set/error/remove reports and assert
+    /// the app parses, drains, gates (`progress-style`), and tracks the derived
+    /// display state (fraction + category), clearing on `remove`. Exits 0/1.
+    fn run_progress_smoke(&self) {
+        use crate::progress::ProgressCategory;
+        let controller = &self.ivars().controller;
+        let fail = progress_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at progress smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at progress smoke start".into());
+        };
+
+        // 1. Set 50% → a determinate normal bar at 0.5.
+        controller.feed_surface_output(tab, surface, b"\x1b]9;4;1;50\x07");
+        Self::spin(0.2);
+        match controller.surface_progress(tab, surface) {
+            Some(d)
+                if d.category == ProgressCategory::Normal
+                    && !d.indeterminate
+                    && (d.fraction - 0.5).abs() < 1e-6 => {}
+            other => fail(format!(
+                "set 50% did not yield a 0.5 normal bar; got {other:?}"
+            )),
+        }
+
+        // 2. Error 90% → a red bar at 0.9.
+        controller.feed_surface_output(tab, surface, b"\x1b]9;4;2;90\x07");
+        Self::spin(0.2);
+        match controller.surface_progress(tab, surface) {
+            Some(d) if d.category == ProgressCategory::Error && (d.fraction - 0.9).abs() < 1e-6 => {
+            }
+            other => fail(format!(
+                "error 90% did not yield a 0.9 error bar; got {other:?}"
+            )),
+        }
+
+        // 3. Remove → the bar clears.
+        controller.feed_surface_output(tab, surface, b"\x1b]9;4;0\x07");
+        Self::spin(0.2);
+        if let Some(d) = controller.surface_progress(tab, surface) {
+            fail(format!("remove did not clear the progress bar; got {d:?}"));
+        }
+
+        println!(
+            "OK: progress smoke — OSC 9;4 set/error/remove parsed, drained, gated, and \
+             tracked as a progress-bar display state (0.5 normal → 0.9 error → cleared)."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -7346,6 +7534,12 @@ fn notifycmd_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a progress-bar smoke failure and exit non-zero.
+fn progress_fail(msg: String) -> ! {
+    eprintln!("FAIL: progress smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -7461,6 +7655,7 @@ pub fn run(
     smoke_windowstate: bool,
     smoke_notify: bool,
     smoke_notifycmd: bool,
+    smoke_progress: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -7487,6 +7682,7 @@ pub fn run(
         smoke_windowstate,
         smoke_notify,
         smoke_notifycmd,
+        smoke_progress,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
