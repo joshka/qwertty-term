@@ -63,6 +63,9 @@ pub mod backend;
 pub mod cells;
 pub mod cursor;
 pub mod gpu;
+/// Regex URL detection for clickable links (R7 slice 2, #194); pure Rust, used by
+/// the cell engine on every target.
+pub mod link;
 pub mod options;
 pub mod present_stats;
 pub mod row;
