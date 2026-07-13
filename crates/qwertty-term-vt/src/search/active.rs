@@ -45,6 +45,12 @@ impl ActiveSearch {
     pub(crate) fn update(&mut self, list: &PageList) -> Option<*mut Node> {
         self.window.clear_and_retain_capacity();
 
+        // An empty needle represents an inactive search and has no overlap or
+        // history to load. Port of upstream 5bc6588e4.
+        if self.window.needle().is_empty() {
+            return None;
+        }
+
         // Add enough pages to cover the active area, walking from the last page backward.
         let mut rem: usize = list.rows() as usize;
         let mut node = list.last_node();

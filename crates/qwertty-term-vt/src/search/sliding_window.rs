@@ -125,6 +125,15 @@ impl SlidingWindow {
     /// Returns a [`Flattened`] highlight on a match. The chunks reference internal window
     /// memory and are valid only until the next `next()`/`append()`; clone to retain.
     pub fn next(&mut self) -> Option<Flattened> {
+        // An empty needle represents an inactive search. Searching for it would
+        // otherwise produce a zero-length match, which `highlight` cannot
+        // represent (its end offset is inclusive → underflow), and the
+        // `needle.len() - 1` overlap/prune math below would underflow too. Port
+        // of upstream 5bc6588e4.
+        if self.needle.is_empty() {
+            return None;
+        }
+
         // If we have less data than the needle then we can't possibly match.
         let data_len = self.data.len();
         if data_len < self.needle.len() {
