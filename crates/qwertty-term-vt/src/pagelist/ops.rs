@@ -370,6 +370,10 @@ impl PageList {
     }
 
     fn scroll_delta_row(&mut self, n: isize) {
+        // The magnitude of a negative delta is taken with `unsigned_abs()`, not
+        // `n.unsigned_abs()`: negating `isize::MIN` overflows (a panic in
+        // overflow-checked builds, a wrap in release). Port of upstream
+        // `c753fe4a4` (`@abs` for the minimum row scroll delta).
         // Fast paths keyed on current viewport.
         match self.viewport {
             Viewport::Top => {
@@ -387,12 +391,12 @@ impl PageList {
                 match n.cmp(&0) {
                     Ordering::Equal => return,
                     Ordering::Less => {
-                        let up = unsafe { (*self.viewport_pin).up_overflow((-n) as usize) };
+                        let up = unsafe { (*self.viewport_pin).up_overflow(n.unsigned_abs()) };
                         match up {
                             Overflow::Offset(new_pin) => {
                                 unsafe { *self.viewport_pin = new_pin };
                                 if let Some(v) = self.viewport_offset_cache().as_mut() {
-                                    *v -= (-n) as usize;
+                                    *v -= n.unsigned_abs();
                                 }
                                 return;
                             }
@@ -429,7 +433,7 @@ impl PageList {
         // Slow path.
         let top = self.get_top_left(Tag::Viewport);
         let p = if n < 0 {
-            match unsafe { top.up_overflow((-n) as usize) } {
+            match unsafe { top.up_overflow(n.unsigned_abs()) } {
                 Overflow::Offset(v) => v,
                 Overflow::Overflow { end, .. } => end,
             }
