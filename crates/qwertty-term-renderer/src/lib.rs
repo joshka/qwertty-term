@@ -63,6 +63,7 @@ pub mod backend;
 pub mod cells;
 pub mod cursor;
 pub mod gpu;
+pub mod link;
 pub mod options;
 pub mod present_stats;
 pub mod row;
