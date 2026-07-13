@@ -359,6 +359,7 @@ mod tests {
                 row: 0,
                 style: CursorStyle::Block,
                 visible: true,
+                blinking: false,
             },
             palette: qwertty_term_vt::color::DEFAULT,
             default_fg: None,

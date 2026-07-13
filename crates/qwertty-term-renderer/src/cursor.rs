@@ -182,7 +182,13 @@ mod tests {
             .set(qwertty_term_vt::modes::Mode::CursorBlinking, true);
 
         let snap = term.snapshot();
-        let state = CursorState::from_snapshot_cursor(&snap.cursor, true);
+        // Source `blinking` from the snapshot (mode 12), not a literal — proves
+        // the #57 wiring: mode 12 on → snapshot carries it → blink gates.
+        assert!(
+            snap.cursor.blinking,
+            "mode 12 set → snapshot reports blinking"
+        );
+        let state = CursorState::from_snapshot_cursor(&snap.cursor, snap.cursor.blinking);
 
         assert_eq!(style(&state, opts(false, true, true)), Some(Style::Bar));
         assert_eq!(
@@ -193,6 +199,8 @@ mod tests {
             style(&state, opts(false, false, false)),
             Some(Style::BlockHollow)
         );
+        // Focused + blinking + blink-off phase → cursor hidden. Before #57 this
+        // was inert (blinking was always false); now mode 12 makes it gate.
         assert_eq!(style(&state, opts(false, true, false)), None);
     }
 
@@ -204,7 +212,13 @@ mod tests {
             .set(qwertty_term_vt::modes::Mode::CursorBlinking, false);
 
         let snap = term.snapshot();
-        let state = CursorState::from_snapshot_cursor(&snap.cursor, false);
+        // Mode 12 off → snapshot reports steady; the blink-off phase no longer
+        // hides the cursor (contrast with `default_uses_configured_style`).
+        assert!(
+            !snap.cursor.blinking,
+            "mode 12 off → snapshot reports steady"
+        );
+        let state = CursorState::from_snapshot_cursor(&snap.cursor, snap.cursor.blinking);
 
         assert_eq!(style(&state, opts(false, true, true)), Some(Style::Bar));
         assert_eq!(style(&state, opts(false, true, false)), Some(Style::Bar));
