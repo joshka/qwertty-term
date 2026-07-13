@@ -1465,6 +1465,10 @@ pub struct ControllerState {
     /// (`selection-word-chars` config, or the built-in default set). Shared into
     /// each surface at build time. `Arc<[u32]>` so panes share one allocation.
     word_boundaries: std::sync::Arc<[u32]>,
+    /// Whether the terminal program may capture shift during mouse reporting
+    /// (`mouse-shift-capture`) — combined with each pane's runtime XTSHIFTESCAPE
+    /// flag to decide whether shift overrides reporting for selection.
+    mouse_shift_capture: crate::config::MouseShiftCapture,
     /// Wheel-scroll multipliers (`mouse-scroll-multiplier` config), clamped to
     /// upstream's valid range.
     scroll_multiplier: crate::scroll::ScrollMultiplier,
@@ -1713,6 +1717,7 @@ impl Controller {
                         qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES.as_slice(),
                     )
                 }),
+            mouse_shift_capture: config.mouse_shift_capture(),
             scroll_multiplier: crate::scroll::ScrollMultiplier {
                 precision: config.mouse_scroll_multiplier.precision,
                 discrete: config.mouse_scroll_multiplier.discrete,
@@ -3312,9 +3317,9 @@ impl Controller {
         y: f32,
         pressed: Option<bool>,
     ) {
-        let (copy_on_select, mouse_interval) = {
+        let (copy_on_select, mouse_interval, mouse_shift_capture) = {
             let s = self.0.borrow();
-            (s.copy_on_select, s.mouse_interval)
+            (s.copy_on_select, s.mouse_interval, s.mouse_shift_capture)
         };
         let mut state = self.0.borrow_mut();
         let Some(s) = state
@@ -3340,9 +3345,12 @@ impl Controller {
         if button == Some(qwertty_term_input::mouse::Button::Left) {
             let reporting_active =
                 s.engine().mouse_event() != qwertty_term_input::mouse_encode::MouseEvent::None;
-            // Shift overrides mouse reporting for selection (upstream's
-            // default `mouse-shift-capture = false`, `Surface.zig:3788-3790`).
-            let selection_allowed = !reporting_active || mods.shift;
+            // Shift overrides mouse reporting for selection, unless
+            // `mouse-shift-capture` (combined with the program's XTSHIFTESCAPE
+            // request) lets the program capture shift instead (upstream
+            // `Surface.zig:3788-3790` + `mouseShiftCapture`).
+            let shift_captured = mouse_shift_capture.captures(s.engine().mouse_shift_capture());
+            let selection_allowed = !reporting_active || (mods.shift && !shift_captured);
             if selection_allowed {
                 match action {
                     qwertty_term_input::mouse::Action::Press => {
@@ -5493,6 +5501,10 @@ pub struct DelegateIvars {
     /// `selection-word-chars` + `click-repeat-interval` config wiring. See
     /// [`AppDelegate::run_wordchars_smoke`].
     smoke_wordchars: bool,
+    /// Mouse-shift smoke (`QWERTTY_TERM_SMOKE_MOUSESHIFT`): assert
+    /// `mouse-shift-capture` gates the shift-over-reporting selection override.
+    /// See [`AppDelegate::run_mouseshift_smoke`].
+    smoke_mouseshift: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -5574,6 +5586,7 @@ define_class!(
             let has_savestate = self.ivars().smoke_savestate;
             let has_session = self.ivars().smoke_session;
             let has_wordchars = self.ivars().smoke_wordchars;
+            let has_mouseshift = self.ivars().smoke_mouseshift;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -5617,6 +5630,8 @@ define_class!(
                 self.schedule_session_smoke();
             } else if has_wordchars {
                 self.schedule_wordchars_smoke();
+            } else if has_mouseshift {
+                self.schedule_mouseshift_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -5918,6 +5933,12 @@ define_class!(
         fn wordchars_smoke(&self, _timer: &AnyObject) {
             self.run_wordchars_smoke();
         }
+
+        /// Mouse-shift smoke: assert mouse-shift-capture gating, exit 0/1.
+        #[unsafe(method(ghosttyMouseShiftSmoke:))]
+        fn mouseshift_smoke(&self, _timer: &AnyObject) {
+            self.run_mouseshift_smoke();
+        }
     }
 );
 
@@ -5951,6 +5972,7 @@ impl AppDelegate {
         smoke_savestate: bool,
         smoke_session: bool,
         smoke_wordchars: bool,
+        smoke_mouseshift: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -5981,6 +6003,7 @@ impl AppDelegate {
             smoke_savestate,
             smoke_session,
             smoke_wordchars,
+            smoke_mouseshift,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -7846,6 +7869,83 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_mouseshift_smoke(&self) {
+        self.schedule_selector(0.5, sel!(ghosttyMouseShiftSmoke:));
+    }
+
+    /// `mouse-shift-capture` config smoke. Launched with
+    /// `mouse-shift-capture = always`: with a program that has mouse reporting on
+    /// (`CSI ?1000h`), a shift-drag does *not* select (shift is captured by the
+    /// program instead of overriding reporting) — whereas the default config
+    /// would select. A control drag with reporting off still selects, proving the
+    /// selection machinery is live and it's the config gating shift. Exits 0/1.
+    fn run_mouseshift_smoke(&self) {
+        let mtm = self.mtm();
+        let controller = &self.ivars().controller;
+        let fail = mouseshift_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at mouse-shift smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at mouse-shift smoke start".into());
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let win_num: isize = app
+            .keyWindow()
+            .or_else(|| controller.active_window())
+            .map(|w| w.windowNumber())
+            .unwrap_or(0);
+        let view = controller
+            .surface_view(tab, surface)
+            .unwrap_or_else(|| fail("no view for the focused surface".into()));
+        let view = &*view;
+
+        let pt = |col: f64, row: f64| {
+            controller
+                .surface_cell_window_point(tab, surface, col, row)
+                .unwrap_or_else(|| fail("cell → window point mapping failed".into()))
+        };
+        let shift = NSEventModifierFlags::Shift;
+        let none = NSEventModifierFlags::empty();
+        let drag = |from: NSPoint, to: NSPoint, mods: NSEventModifierFlags| {
+            Self::send_mouse(view, win_num, NSEventType::LeftMouseDown, from, mods);
+            Self::send_mouse(view, win_num, NSEventType::LeftMouseDragged, to, mods);
+            Self::send_mouse(view, win_num, NSEventType::LeftMouseUp, to, mods);
+        };
+
+        // 1. Enable mouse reporting + lay down a word to drag over.
+        controller.feed_surface_output(tab, surface, b"\x1b[?1000h\x1b[2J\x1b[HSELECTME");
+        Self::spin(0.15);
+
+        // With mouse-shift-capture=always + reporting on, a shift-drag is captured
+        // by the program → no selection is made.
+        drag(pt(0.2, 0.5), pt(7.8, 0.5), shift);
+        if controller.surface_has_selection(tab, surface) {
+            fail(
+                "with mouse-shift-capture=always a shift-drag under reporting should \
+                  NOT select (shift is captured by the program)"
+                    .into(),
+            );
+        }
+
+        // 2. Control: disable reporting; a plain drag now selects, proving the
+        //    machinery works and it was the config gating shift above.
+        controller.feed_surface_output(tab, surface, b"\x1b[?1000l");
+        Self::spin(0.1);
+        drag(pt(0.2, 0.5), pt(7.8, 0.5), none);
+        if !controller.surface_has_selection(tab, surface) {
+            fail("a plain drag with reporting off should select (control)".into());
+        }
+
+        println!(
+            "OK: mouse-shift smoke — mouse-shift-capture=always let the program \
+             capture a shift-drag under mouse reporting (no selection), while a \
+             plain drag with reporting off still selected."
+        );
+        std::process::exit(0);
+    }
+
     /// Schedule the title smoke: let the first shell settle, then run.
     fn schedule_title_smoke(&self) {
         self.schedule_selector(0.7, sel!(ghosttyTitleSmoke:));
@@ -9146,6 +9246,12 @@ fn wordchars_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a mouse-shift smoke failure and exit non-zero.
+fn mouseshift_fail(msg: String) -> ! {
+    eprintln!("FAIL: mouse-shift smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -9268,6 +9374,7 @@ pub fn run(
     smoke_savestate: bool,
     smoke_session: bool,
     smoke_wordchars: bool,
+    smoke_mouseshift: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -9301,6 +9408,7 @@ pub fn run(
         smoke_savestate,
         smoke_session,
         smoke_wordchars,
+        smoke_mouseshift,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

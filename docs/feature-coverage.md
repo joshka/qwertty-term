@@ -211,7 +211,10 @@ items are `[ ]` wholesale unless noted.
 - [x] `mouse-hide-while-typing` (hide on keystroke, reveal on move)
 - [x] `focus-follows-mouse` (per-pane NSTrackingArea → `mouseEntered:` focuses the pane)
 - [x] `middle-click-action` (`primary-paste` pastes the selection / `ignore`) — mouse2 smoke
-- [ ] `cursor-click-to-move` (OSC133 zone), `mouse-shift-capture` config
+- [x] `mouse-shift-capture` (`false`/`true`/`always`/`never`): gates whether shift overrides
+      mouse reporting for selection, combined with the program's runtime XTSHIFTESCAPE request
+      (`Surface.mouseShiftCapture` port; config unit tests + mouse-shift smoke)
+- [ ] `cursor-click-to-move` (OSC133 zone)
 
 ## Clipboard & selection
 

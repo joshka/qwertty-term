@@ -108,6 +108,10 @@
 //! - `QWERTTY_TERM_SMOKE_SAVESTATE=1` — run the window-save-state smoke: with
 //!   `window-save-state = never` configured, assert the window is non-restorable
 //!   and `NSQuitAlwaysKeepsWindows` was set false, then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_MOUSESHIFT=1` — run the mouse-shift-capture smoke: with
+//!   `mouse-shift-capture = always`, assert a shift-drag under mouse reporting
+//!   does not select (shift is captured), while a plain drag with reporting off
+//!   does, then exit 0/1.
 //! - `QWERTTY_TERM_SMOKE_WORDCHARS=1` — run the selection config smoke: with a
 //!   config setting `selection-word-chars = " -"` + `click-repeat-interval =
 //!   1234`, assert a double-click selects "beta" (hyphen is now a boundary) and
@@ -303,6 +307,8 @@ fn run_window() {
     let smoke_session = std::env::var_os("QWERTTY_TERM_SMOKE_SESSION").is_some();
     // Word-chars smoke: assert selection-word-chars + click-repeat-interval wiring.
     let smoke_wordchars = std::env::var_os("QWERTTY_TERM_SMOKE_WORDCHARS").is_some();
+    // Mouse-shift smoke: assert mouse-shift-capture gating.
+    let smoke_mouseshift = std::env::var_os("QWERTTY_TERM_SMOKE_MOUSESHIFT").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -329,6 +335,7 @@ fn run_window() {
         smoke_savestate,
         smoke_session,
         smoke_wordchars,
+        smoke_mouseshift,
     );
 }
 
