@@ -122,6 +122,29 @@ pub struct Config {
     /// `selection-clear-on-typing`, `Config.zig:724`, default true).
     #[serde(rename = "selection-clear-on-typing")]
     pub selection_clear_on_typing: bool,
+    /// Whether to quit the app after the last window/surface closes (upstream
+    /// `quit-after-last-window-closed`, `Config.zig:2509`, default **false** on
+    /// macOS — the standard "app stays running with no windows" behavior).
+    #[serde(rename = "quit-after-last-window-closed")]
+    pub quit_after_last_window_closed: bool,
+    /// Initial window width in **cells** (grid columns). `0` (default) = the
+    /// app's default size. Upstream `window-width` (`Config.zig:2171`); only
+    /// affects the first window.
+    #[serde(rename = "window-width")]
+    pub window_width: u32,
+    /// Initial window height in **cells** (grid rows). `0` (default) = the
+    /// app's default size. Upstream `window-height` (`Config.zig:2170`).
+    #[serde(rename = "window-height")]
+    pub window_height: u32,
+    /// Initial window x position in pixels from the visible screen's top-left.
+    /// Both x and y must be set to take effect (upstream `window-position-x`,
+    /// `Config.zig:2196`).
+    #[serde(rename = "window-position-x")]
+    pub window_position_x: Option<i32>,
+    /// Initial window y position in pixels from the visible screen's top-left
+    /// (upstream `window-position-y`, `Config.zig:2197`).
+    #[serde(rename = "window-position-y")]
+    pub window_position_y: Option<i32>,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -155,6 +178,13 @@ impl Default for Config {
             clipboard_paste_bracketed_safe: true,
             clipboard_trim_trailing_spaces: true,
             selection_clear_on_typing: true,
+            // macOS default: stay running after the last window closes
+            // (upstream `Config.zig:2509` → false on macOS).
+            quit_after_last_window_closed: false,
+            window_width: 0,
+            window_height: 0,
+            window_position_x: None,
+            window_position_y: None,
         }
     }
 }
@@ -220,6 +250,27 @@ impl Config {
         crate::paste::PasteProtection {
             enabled: self.clipboard_paste_protection,
             bracketed_safe: self.clipboard_paste_bracketed_safe,
+        }
+    }
+
+    /// The configured initial window size in `(cols, rows)`, or `None` to use
+    /// the app default. Only returns a size when *both* dimensions are set
+    /// (a lone dimension is ignored, matching upstream's all-or-nothing
+    /// geometry). Clamped to the upstream minimum of 10×4.
+    pub fn initial_window_cells(&self) -> Option<(u32, u32)> {
+        if self.window_width == 0 || self.window_height == 0 {
+            return None;
+        }
+        Some((self.window_width.max(10), self.window_height.max(4)))
+    }
+
+    /// The configured initial window position `(x, y)` in pixels, or `None`.
+    /// Both `window-position-x` and `-y` must be set (upstream ignores a lone
+    /// value).
+    pub fn initial_window_position(&self) -> Option<(i32, i32)> {
+        match (self.window_position_x, self.window_position_y) {
+            (Some(x), Some(y)) => Some((x, y)),
+            _ => None,
         }
     }
 }
@@ -312,6 +363,16 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # clipboard-paste-bracketed-safe = true
 # clipboard-trim-trailing-spaces = true
 # selection-clear-on-typing = true
+
+# Window state. quit-after-last-window-closed keeps the standard macOS behavior
+# of staying running with no windows when false (default); set true to quit.
+# window-width/height are the initial size in cells (0 = default). Both
+# window-position-x/y (pixels from the screen's top-left) must be set to apply.
+# quit-after-last-window-closed = false
+# window-width = 0
+# window-height = 0
+# window-position-x = 100
+# window-position-y = 50
 "#;
 
 /// Load the config, creating the file with a commented example if it does not
@@ -418,6 +479,39 @@ mod tests {
         );
         assert!(config.clipboard_trim_trailing_spaces);
         assert!(config.selection_clear_on_typing);
+        // Window state: macOS default doesn't quit after last window; no
+        // configured geometry.
+        assert!(!config.quit_after_last_window_closed);
+        assert_eq!(config.initial_window_cells(), None);
+        assert_eq!(config.initial_window_position(), None);
+    }
+
+    #[test]
+    fn parses_window_state_keys() {
+        let config = parse(
+            "quit-after-last-window-closed = true\n\
+             window-width = 120\n\
+             window-height = 40\n\
+             window-position-x = 100\n\
+             window-position-y = 50\n",
+        )
+        .unwrap();
+        assert!(config.quit_after_last_window_closed);
+        assert_eq!(config.initial_window_cells(), Some((120, 40)));
+        assert_eq!(config.initial_window_position(), Some((100, 50)));
+    }
+
+    #[test]
+    fn window_geometry_is_all_or_nothing_and_clamped() {
+        // A lone width (no height) is ignored.
+        let one = parse("window-width = 120\n").unwrap();
+        assert_eq!(one.initial_window_cells(), None);
+        // A lone position axis is ignored.
+        let pos = parse("window-position-x = 100\n").unwrap();
+        assert_eq!(pos.initial_window_position(), None);
+        // Below the 10×4 minimum clamps up.
+        let tiny = parse("window-width = 3\nwindow-height = 1\n").unwrap();
+        assert_eq!(tiny.initial_window_cells(), Some((10, 4)));
     }
 
     #[test]

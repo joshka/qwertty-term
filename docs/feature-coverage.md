@@ -96,7 +96,7 @@ items are `[ ]` wholesale unless noted.
 - [x] Native AppKit window, `window-padding-x/y`, content-flush layout
 - [x] `window-decoration`, native + non-native fullscreen
 - [x] Menu bar (basic), key-window activation
-- [~] `window-height`/`-width`/`-position` (defaults; config unwired)
+- [x] `window-height`/`-width`/`-position` (initial geometry: cells → first window)
 - [ ] `window-save-state`, `window-step-resize`, `window-title`/`-subtitle` templates
 - [ ] `window-titlebar-background`/`-foreground`, `window-new-tab-position`
 - [ ] `resize-overlay`, `command-palette`, undo/redo (`undo-timeout`)
@@ -133,7 +133,8 @@ items are `[ ]` wholesale unless noted.
 - [x] `working-directory` / cwd inheritance (OSC 7)
 - [~] `command` / `-e` initial command (env-override path exists; full `-e` CLI parse partial)
 - [ ] `initial-command`, `initial-window`, `wait-after-command`
-- [ ] `confirm-close-surface`, `quit-after-last-window-closed` (+ delay)
+- [~] `quit-after-last-window-closed` (wired; default false on macOS);
+      `confirm-close-surface` (+ delay) still open (needs a running-process signal)
 - [ ] `abnormal-command-exit-runtime`, `window-inherit-working-directory`/`-font-size`
 
 ## Input & keybindings (`src/input`, ~78% encoders / ~10% bind system)

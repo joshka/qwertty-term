@@ -1305,6 +1305,18 @@ pub struct ControllerState {
     /// short-circuits the modal alert (which a headless smoke can't drive).
     /// `None` in normal operation. See [`Controller::set_paste_confirm_hook`].
     paste_confirm_hook: Option<bool>,
+    /// Whether to quit the app after the last window/surface closes
+    /// (`quit-after-last-window-closed`, default false on macOS).
+    quit_after_last_window_closed: bool,
+    /// Configured initial window size in `(cols, rows)`, applied to the first
+    /// window only (`window-width`/`-height`).
+    initial_window_cells: Option<(u32, u32)>,
+    /// Configured initial window position in `(x, y)` pixels, applied to the
+    /// first window only (`window-position-x`/`-y`).
+    initial_window_position: Option<(i32, i32)>,
+    /// Set once the first window has been created, so the initial-geometry
+    /// config applies only to it (not to later Cmd-N windows).
+    first_window_placed: Cell<bool>,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1394,6 +1406,10 @@ impl Controller {
             clipboard_trim_trailing_spaces: config.clipboard_trim_trailing_spaces,
             selection_clear_on_typing: config.selection_clear_on_typing,
             paste_confirm_hook: None,
+            quit_after_last_window_closed: config.quit_after_last_window_closed,
+            initial_window_cells: config.initial_window_cells(),
+            initial_window_position: config.initial_window_position(),
+            first_window_placed: Cell::new(false),
         })))
     }
 
@@ -2941,6 +2957,53 @@ impl Controller {
 
     // -- right-click / mouse behaviors ------------------------------------
 
+    /// Whether the app should quit after the last window/surface closes
+    /// (`quit-after-last-window-closed`).
+    pub fn quit_after_last_window_closed(&self) -> bool {
+        self.0.borrow().quit_after_last_window_closed
+    }
+
+    /// The configured initial window size in cells (`window-width`/`-height`),
+    /// or `None` when unset (smoke/test).
+    pub fn configured_initial_cells(&self) -> Option<(u32, u32)> {
+        self.0.borrow().initial_window_cells
+    }
+
+    /// Apply the configured initial geometry (`window-width`/`-height` cells +
+    /// `window-position-x`/`-y`) to `window`, but only for the *first* window
+    /// (a latch ensures later Cmd-N windows use the default size). `cell_w`/
+    /// `cell_h` are the surface's device-pixel cell metrics; the content is
+    /// sized to `cols × rows` cells in points (device px / scale). A no-op when
+    /// no geometry is configured.
+    fn apply_initial_window_geometry(&self, window: &NSWindow, cell_w: u32, cell_h: u32) {
+        let (cells, position) = {
+            let state = self.0.borrow();
+            if state.first_window_placed.get() {
+                return;
+            }
+            state.first_window_placed.set(true);
+            (state.initial_window_cells, state.initial_window_position)
+        };
+        let scale = window.backingScaleFactor().max(1.0);
+        if let Some((cols, rows)) = cells {
+            // Cell metrics are device pixels; content-size is in points.
+            let w = cols as f64 * cell_w as f64 / scale;
+            let h = rows as f64 * cell_h as f64 / scale;
+            window.setContentSize(NSSize::new(w, h));
+        }
+        if let Some((x, y)) = position {
+            // `window-position-*` is pixels from the visible screen's top-left;
+            // AppKit's `setFrameTopLeftPoint` is in bottom-left screen space, so
+            // convert y against the screen's full height.
+            let screen_h = window
+                .screen()
+                .map(|s| s.frame().size.height)
+                .unwrap_or(0.0);
+            let top_left = NSPoint::new(x as f64, screen_h - y as f64);
+            window.setFrameTopLeftPoint(top_left);
+        }
+    }
+
     /// The configured `right-click-action`.
     pub fn right_click_action(&self) -> crate::context_menu::RightClickAction {
         self.0.borrow().right_click_action
@@ -3282,8 +3345,10 @@ impl Controller {
         for (tab, surface) in exited {
             self.close_surface(tab, surface);
         }
-        // Quit when the last tab's last pane exits.
-        if self.tab_count() == 0 {
+        // Quit when the last tab's last pane exits — but only if
+        // `quit-after-last-window-closed` is set (default false on macOS: the
+        // app stays running with no windows, standard macOS behavior).
+        if self.tab_count() == 0 && self.0.borrow().quit_after_last_window_closed {
             let mtm = self.0.borrow().mtm;
             NSApplication::sharedApplication(mtm).terminate(None);
         }
@@ -3439,6 +3504,15 @@ impl Controller {
             let family = self.0.borrow().font_family.clone();
             surface.rebuild_font(family.as_deref());
         }
+
+        // Apply configured initial geometry to the very first window only
+        // (later Cmd-N windows keep the default size). Cell metrics are the
+        // surface's device-pixel font cell; the helper converts to points.
+        self.apply_initial_window_geometry(
+            &window,
+            surface.font.cell_width,
+            surface.font.cell_height,
+        );
 
         let view = surface.view.clone();
         let mut surfaces = HashMap::new();
@@ -4164,6 +4238,10 @@ pub struct DelegateIvars {
     /// Clipboard smoke (`QWERTTY_TERM_SMOKE_CLIPBOARD`): paste-protection +
     /// selection-clear-on-typing. See [`AppDelegate::run_clipboard_smoke`].
     smoke_clipboard: bool,
+    /// Window-state smoke (`QWERTTY_TERM_SMOKE_WINDOWSTATE`): assert the first
+    /// window honors configured initial geometry. See
+    /// [`AppDelegate::run_windowstate_smoke`].
+    smoke_windowstate: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -4213,6 +4291,7 @@ define_class!(
             let has_bell = self.ivars().smoke_bell;
             let has_mouse = self.ivars().smoke_mouse;
             let has_clipboard = self.ivars().smoke_clipboard;
+            let has_windowstate = self.ivars().smoke_windowstate;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -4236,6 +4315,8 @@ define_class!(
                 self.schedule_mouse_smoke();
             } else if has_clipboard {
                 self.schedule_clipboard_smoke();
+            } else if has_windowstate {
+                self.schedule_windowstate_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -4262,7 +4343,8 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last(&self, _app: &NSApplication) -> bool {
-            true
+            // Honor `quit-after-last-window-closed` (default false on macOS).
+            self.ivars().controller.quit_after_last_window_closed()
         }
     }
 
@@ -4416,6 +4498,12 @@ define_class!(
         fn clipboard_smoke(&self, _timer: &AnyObject) {
             self.run_clipboard_smoke();
         }
+
+        /// Window-state smoke: assert initial geometry, exit 0/1.
+        #[unsafe(method(ghosttyWindowStateSmoke:))]
+        fn windowstate_smoke(&self, _timer: &AnyObject) {
+            self.run_windowstate_smoke();
+        }
     }
 );
 
@@ -4439,6 +4527,7 @@ impl AppDelegate {
         smoke_bell: bool,
         smoke_mouse: bool,
         smoke_clipboard: bool,
+        smoke_windowstate: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -4459,6 +4548,7 @@ impl AppDelegate {
             smoke_bell,
             smoke_mouse,
             smoke_clipboard,
+            smoke_windowstate,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -6668,6 +6758,62 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_windowstate_smoke(&self) {
+        // Give AppKit time to place + first-layout the window before probing.
+        self.schedule_selector(0.7, sel!(ghosttyWindowStateSmoke:));
+    }
+
+    /// Window-state smoke: with `window-width`/`window-height` configured (the
+    /// harness writes a temp config), assert the first window's live grid
+    /// equals the requested cell count — proving the initial geometry override
+    /// took effect end-to-end (config → Controller → `setContentSize`). Exits
+    /// 0/1.
+    fn run_windowstate_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = windowstate_fail;
+
+        let Some((cfg_cols, cfg_rows)) = controller.configured_initial_cells() else {
+            fail(
+                "no initial window geometry configured — the smoke harness must set \
+                 window-width/window-height in a temp QWERTTY_TERM_CONFIG_DIR."
+                    .into(),
+            );
+        };
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at window-state smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at window-state smoke start".into());
+        };
+
+        // Let the window settle (place + backing-scale correction + relayout).
+        Self::spin(0.4);
+
+        let Some((cols, rows)) = controller.surface_grid(tab, surface) else {
+            fail("could not read the surface grid".into());
+        };
+
+        // The grid is derived from the content area / cell size; if the initial
+        // geometry took effect the fit rounds back to the configured cells. Allow
+        // a ±1 cell slack for sub-pixel content-rect rounding.
+        let (want_c, want_r) = (cfg_cols as i64, cfg_rows as i64);
+        let (got_c, got_r) = (cols as i64, rows as i64);
+        if (got_c - want_c).abs() > 1 || (got_r - want_r).abs() > 1 {
+            fail(format!(
+                "the first window did not honor the configured initial geometry: \
+                 requested {want_c}x{want_r} cells but the live grid is {got_c}x{got_r} \
+                 (more than 1 cell off). The window-width/-height override did not \
+                 reach setContentSize on the first window."
+            ));
+        }
+
+        println!(
+            "OK: window-state smoke — the first window honored the configured initial \
+             geometry (requested {want_c}x{want_r} cells; live grid {got_c}x{got_r})."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -6832,6 +6978,12 @@ fn clipboard_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a window-state smoke failure and exit non-zero.
+fn windowstate_fail(msg: String) -> ! {
+    eprintln!("FAIL: window-state smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -6944,6 +7096,7 @@ pub fn run(
     smoke_bell: bool,
     smoke_mouse: bool,
     smoke_clipboard: bool,
+    smoke_windowstate: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -6967,6 +7120,7 @@ pub fn run(
         smoke_bell,
         smoke_mouse,
         smoke_clipboard,
+        smoke_windowstate,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
