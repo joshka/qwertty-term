@@ -120,6 +120,15 @@ impl Engine {
         self.stream.handler.take_progress_report()
     }
 
+    /// Whether the cursor is currently at a shell prompt (OSC 133 semantic
+    /// state): `false` on the alternate screen or mid-command-output, `true` at
+    /// a prompt/input. With no shell integration the cursor stays in the
+    /// `output` state, so this returns `false` (i.e. "a process may be
+    /// running"). Drives `confirm-close-surface`.
+    pub fn cursor_is_at_prompt(&self) -> bool {
+        self.terminal().cursor_is_at_prompt()
+    }
+
     /// Resize the grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.terminal_mut().resize(clamp_dim(cols), clamp_dim(rows));

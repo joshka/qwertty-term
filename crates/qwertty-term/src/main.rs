@@ -93,6 +93,10 @@
 //! - `QWERTTY_TERM_SMOKE_PROGRESS=1` — run the progress-bar smoke: feed OSC 9;4
 //!   set/error/remove reports and assert the app tracks the derived progress-bar
 //!   display state (fraction + category), clearing on remove, then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_CONFIRMCLOSE=1` — run the confirm-close smoke: drive the
+//!   OSC 133 prompt state and assert `confirm-close-surface` needs confirmation
+//!   only when a process is running (or shell integration is absent), and that
+//!   the modal answer gates the close, then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -208,6 +212,8 @@ fn run_window() {
     let smoke_notifycmd = std::env::var_os("QWERTTY_TERM_SMOKE_NOTIFYCMD").is_some();
     // Progress smoke: assert OSC 9;4 progress-bar state tracking.
     let smoke_progress = std::env::var_os("QWERTTY_TERM_SMOKE_PROGRESS").is_some();
+    // Confirm-close smoke: assert confirm-close-surface gating.
+    let smoke_confirmclose = std::env::var_os("QWERTTY_TERM_SMOKE_CONFIRMCLOSE").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -228,6 +234,7 @@ fn run_window() {
         smoke_notify,
         smoke_notifycmd,
         smoke_progress,
+        smoke_confirmclose,
     );
 }
 
