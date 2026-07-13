@@ -210,8 +210,10 @@ items are `[ ]` wholesale unless noted.
 - [—] Ghostty's custom config format (replaced by TOML — ADR)
 - [ ] `+import-ghostty-config` converter
 - [~] `config-reload` action (default `cmd+shift+,`) — re-reads config and re-applies
-      the runtime-safe fields (keybinds, copy-on-select, scroll-multiplier); theme/fonts/
-      colors re-apply deferred (need per-surface re-derivation, config-core.md §7)
+      keybinds, copy-on-select, scroll-multiplier, **and the theme live** (palette + fg/bg/
+      cursor + selection colors pushed into every surface's engine, forced full repaint
+      via `PageList::mark_all_dirty`). Fonts/cursor-style/padding re-apply deferred
+      (need font-grid/window rebuild, config-core.md §7)
 - [ ] `config-file` includes, `config-default-files`, two-location merge
 - [ ] Full option surface (~200 keys) — most map to features listed elsewhere here
 

@@ -111,6 +111,18 @@ impl Engine {
         self.terminal_mut().resize(clamp_dim(cols), clamp_dim(rows));
     }
 
+    /// Replace the terminal's colors (256-palette + default fg/bg/cursor) live —
+    /// used by `config-reload` to apply a new `theme` without recreating the
+    /// engine — and mark the whole active screen dirty so the next render
+    /// repaints every cell with the new palette (a palette swap changes no cell
+    /// contents, so it wouldn't otherwise re-dirty anything). Any OSC-set dynamic
+    /// colors are replaced by the config's, matching a config re-derive.
+    pub fn set_colors(&mut self, colors: Colors) {
+        let terminal = self.terminal_mut();
+        terminal.colors = colors;
+        terminal.screen_mut().pages.mark_all_dirty();
+    }
+
     /// Whether synchronized output (mode 2026) is currently active. When set,
     /// a program has asked the terminal to buffer rendering until it clears the
     /// mode; the termio hub's 1s reset timer force-clears a stuck one.
@@ -696,6 +708,29 @@ mod tests {
         assert_eq!(
             window.default_bg,
             Some(qwertty_term_vt::color::Rgb::new(0x00, 0x11, 0x22))
+        );
+    }
+
+    #[test]
+    fn set_colors_swaps_palette_live() {
+        // The live palette / default bg swap on `set_colors` (the dirty-marking
+        // half is covered by `pagelist::tests::mark_all_dirty_is_the_inverse_of_clear_dirty`).
+        let mut engine = Engine::new(10, 3);
+        let mut colors = Colors::default();
+        colors.palette.current[1] = qwertty_term_vt::color::Rgb::new(0x44, 0x55, 0x66);
+        colors
+            .background
+            .set(qwertty_term_vt::color::Rgb::new(0x77, 0x88, 0x99));
+        engine.set_colors(colors);
+
+        let window = engine.snapshot_window(0);
+        assert_eq!(
+            window.palette[1],
+            qwertty_term_vt::color::Rgb::new(0x44, 0x55, 0x66)
+        );
+        assert_eq!(
+            window.default_bg,
+            Some(qwertty_term_vt::color::Rgb::new(0x77, 0x88, 0x99))
         );
     }
 
