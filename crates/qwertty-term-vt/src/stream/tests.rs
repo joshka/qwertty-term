@@ -1083,6 +1083,45 @@ fn decrqss_decslrm_gated_on_declrmm() {
     assert_eq!(s.handler.take_output(), b"\x1BP1$r3;10s\x1B\\");
 }
 
+// XTGETTCAP (`DCS + q <hexnames> ST`): a known capability gets a
+// `\eP1+r<hexname>=<hexvalue>\e\\` reply. "Co" (max colors) -> "256".
+#[test]
+fn xtgettcap_known_capability_reply() {
+    let mut s = term(20, 4);
+    s.feed(b"\x1bP+q436F\x1b\\"); // "Co"
+    assert_eq!(s.handler.take_output(), b"\x1bP1+r436F=323536\x1b\\");
+}
+
+// Lower-case hex from the client is normalized to upper-case, and the reply
+// echoes the (upper-cased) requested name.
+#[test]
+fn xtgettcap_lowercase_hex_normalized() {
+    let mut s = term(20, 4);
+    s.feed(b"\x1bP+q436f\x1b\\"); // "Co", lower-case hex
+    assert_eq!(s.handler.take_output(), b"\x1bP1+r436F=323536\x1b\\");
+}
+
+// Multiple caps in one request, `;`-separated, each get their own reply,
+// concatenated. Unknown caps produce no reply and don't break the others.
+#[test]
+fn xtgettcap_multiple_and_unknown() {
+    let mut s = term(20, 4);
+    // "Co" (known) ; "ZZ" (unknown) ; "Tc" (known boolean, no =value).
+    s.feed(b"\x1bP+q436F;5A5A;5463\x1b\\");
+    assert_eq!(
+        s.handler.take_output(),
+        b"\x1bP1+r436F=323536\x1b\\\x1bP1+r5463\x1b\\".as_slice(),
+    );
+}
+
+// An entirely-unknown request yields no output at all.
+#[test]
+fn xtgettcap_unknown_only_is_silent() {
+    let mut s = term(20, 4);
+    s.feed(b"\x1bP+q5A5A\x1b\\"); // "ZZ"
+    assert_eq!(s.handler.take_output(), b"");
+}
+
 // Primary device attributes reply.
 #[test]
 fn da_primary_reply() {
