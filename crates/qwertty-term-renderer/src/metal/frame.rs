@@ -29,31 +29,11 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLPrimitiveType};
+use objc2_metal::{MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
 
-use super::MetalError;
-use super::render_pass::{Attachment, RenderPass};
-
-/// Health of a completed frame. Port of `renderer.Health` (the two states
-/// upstream distinguishes: a command buffer that finished with `.error`
-/// status is `unhealthy`, anything else is `healthy`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Health {
-    Healthy,
-    Unhealthy,
-}
-
-/// What to do when a frame's GPU work finishes: present the target (if the
-/// frame is healthy) and record the health status. Port of the
-/// `bufferCompleted` body (`api.present(target, sync)` +
-/// `renderer.frameCompleted(health)`), lifted out of `Frame` so the frame
-/// lifecycle doesn't depend on the generic renderer.
-///
-/// Invoked exactly once per frame, on the GPU-completion thread in async mode
-/// or inline on the committing thread in sync mode. The `bool` is the sync
-/// flag, forwarded so the present step can choose sync vs async surface
-/// assignment (upstream `present(target, sync)`).
-pub type FrameCompletion = Box<dyn Fn(Health, bool) + Send + 'static>;
+use super::render_pass::RenderPass;
+use super::{Metal, MetalError};
+use crate::gpu::{Attachment, FrameCompletion, GpuFrame, Health};
 
 /// One in-flight frame. Port of `Frame`.
 pub struct Frame {
@@ -82,10 +62,14 @@ impl Frame {
     pub fn command_buffer(&self) -> &ProtocolObject<dyn MTLCommandBuffer> {
         &self.buffer
     }
+}
+
+impl GpuFrame for Frame {
+    type Backend = Metal;
 
     /// Begin a render pass into this frame with the given color attachments.
     /// Port of `Frame.renderPass`.
-    pub fn render_pass(&self, attachments: &[Attachment<'_>]) -> Result<RenderPass, MetalError> {
+    fn render_pass(&self, attachments: &[Attachment<'_, Metal>]) -> Result<RenderPass, MetalError> {
         RenderPass::begin(&self.buffer, attachments)
     }
 
@@ -98,7 +82,7 @@ impl Frame {
     /// M3 offscreen-readback tests and the resize `display` callback use.
     ///
     /// Idempotent: a second call is a no-op (the hook was already consumed).
-    pub fn complete(&mut self, sync: bool) {
+    fn complete(&mut self, sync: bool) {
         let Some(completion) = self.completion.take() else {
             return;
         };
@@ -152,25 +136,6 @@ fn health_of(buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> Health {
     }
 }
 
-/// The Metal primitive types the renderer draws. Port of the
-/// `mtl.MTLPrimitiveType` values reachable through `RenderPass.Step.Draw`
-/// (upstream draws triangles for cells/backgrounds; the full-screen passes use
-/// a triangle strip).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Primitive {
-    Triangle,
-    TriangleStrip,
-}
-
-impl Primitive {
-    pub(super) fn to_metal(self) -> MTLPrimitiveType {
-        match self {
-            Self::Triangle => MTLPrimitiveType::Triangle,
-            Self::TriangleStrip => MTLPrimitiveType::TriangleStrip,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -180,10 +145,9 @@ mod tests {
         ColorAttachment, Options as PipelineOptions, Pipeline, VertexAttribute, VertexFormat,
         VertexLayout, VertexStep, library_from_source,
     };
-    use super::super::render_pass::{Attachment, Draw, Step};
     use super::super::test_metal;
     use super::*;
-    use crate::gpu::GpuBackend;
+    use crate::gpu::{Attachment, Draw, GpuBackend, GpuFrame, GpuRenderPass, Primitive, Step};
 
     /// A trivial MSL shader pair, private to this test — the production shaders
     /// live with chunk R3 (`src/shaders/`), which this chunk must not touch.
@@ -228,7 +192,7 @@ fragment float4 test_fragment() { return float4(1.0, 0.0, 1.0, 1.0); }
         {
             let pass = frame
                 .render_pass(&[Attachment {
-                    texture: target.texture(),
+                    texture: &target,
                     clear_color: Some(clear),
                 }])
                 .expect("render pass");
@@ -386,12 +350,12 @@ fragment float4 test_fragment() { return float4(1.0, 0.0, 1.0, 1.0); }
         {
             let pass = frame
                 .render_pass(&[Attachment {
-                    texture: target.texture(),
+                    texture: &target,
                     clear_color: Some([0.0, 0.0, 0.0, 1.0]),
                 }])
                 .expect("render pass");
             pass.step(&Step {
-                pipeline_state: pipeline.state(),
+                pipeline: &pipeline,
                 vertex: None,
                 uniforms: None,
                 extras: &[],

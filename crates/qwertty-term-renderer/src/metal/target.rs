@@ -19,6 +19,7 @@ use objc2_metal::{
 };
 
 use super::{Metal, MetalError};
+use crate::gpu::GpuTarget;
 
 /// The `32BGRA` IOSurface pixel format: the fourcc `'BGRA'`
 /// (`kCVPixelFormatType_32BGRA`).
@@ -129,6 +130,18 @@ impl Target {
                 .unlock(IOSurfaceLockOptions::ReadOnly, std::ptr::null_mut());
         }
         out
+    }
+}
+
+impl GpuTarget for Target {
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    fn read_pixels(&self) -> Vec<u8> {
+        Target::read_pixels(self)
     }
 }
 

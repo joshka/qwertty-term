@@ -25,71 +25,23 @@
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLLoadAction,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLSamplerState, MTLStoreAction, MTLTexture,
+    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLLoadAction, MTLPrimitiveType,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLStoreAction,
 };
 
-use super::MetalError;
-use super::frame::Primitive;
+use super::{Metal, MetalError};
+use crate::gpu::{Attachment, GpuRenderPass, Primitive, Step};
 
-/// A color attachment for a render pass. Port of `RenderPass.Options.Attachment`.
-///
-/// `texture` is the render destination (upstream's tagged union of
-/// `Texture`/`Target` collapses here to the underlying `MTLTexture`, which both
-/// expose). `clear_color`, when set, makes the pass clear the attachment to
-/// that color on load; otherwise the existing contents are loaded.
-#[derive(Clone, Copy)]
-pub struct Attachment<'a> {
-    /// The destination texture (a `Target`'s or `Texture`'s Metal view).
-    pub texture: &'a ProtocolObject<dyn MTLTexture>,
-    /// Clear color as linear RGBA in `[0, 1]`; `None` = load existing pixels.
-    pub clear_color: Option<[f64; 4]>,
-}
+// `Attachment`, `Step`, `Draw`, and `Primitive` are the backend-neutral types in
+// [`crate::gpu`], generic over the backend's own resource types (`Metal` here).
+// This module reads them via the `GpuBuffer::handle`/`GpuTexture`/`Pipeline::state`
+// accessors, so no raw `objc2_metal` handles leak into the trait surface.
 
-/// One draw step within a render pass. Port of `RenderPass.Step`.
-///
-/// `pipeline_state` is the compiled `MTLRenderPipelineState`. The three buffer
-/// slots follow the index convention (see module docs): `vertex` → index 0,
-/// `uniforms` → index 1, `extras` → indices 2.. . Textures bind to matching
-/// fragment/vertex texture slots by position; samplers to fragment sampler
-/// slots by position.
-pub struct Step<'a> {
-    /// The compiled pipeline state (`Pipeline::state`).
-    pub pipeline_state: &'a ProtocolObject<dyn MTLRenderPipelineState>,
-    /// Index-0 vertex/instance buffer.
-    pub vertex: Option<&'a ProtocolObject<dyn MTLBuffer>>,
-    /// Index-1 uniforms buffer.
-    pub uniforms: Option<&'a ProtocolObject<dyn MTLBuffer>>,
-    /// Index-2+ extra buffers, in order.
-    pub extras: &'a [Option<&'a ProtocolObject<dyn MTLBuffer>>],
-    /// Fragment/vertex textures, bound by position.
-    pub textures: &'a [Option<&'a ProtocolObject<dyn MTLTexture>>],
-    /// Fragment samplers, bound by position.
-    pub samplers: &'a [Option<&'a ProtocolObject<dyn MTLSamplerState>>],
-    /// The draw call.
-    pub draw: Draw,
-}
-
-use objc2_metal::MTLRenderPipelineState;
-
-/// A draw call. Port of `RenderPass.Step.Draw`. Instanced by default
-/// (`instance_count = 1`); the cell shaders draw one instance per cell.
-#[derive(Debug, Clone, Copy)]
-pub struct Draw {
-    pub primitive: Primitive,
-    pub vertex_count: usize,
-    pub instance_count: usize,
-}
-
-impl Draw {
-    /// A single non-instanced draw of `vertex_count` vertices.
-    #[must_use]
-    pub fn vertices(primitive: Primitive, vertex_count: usize) -> Self {
-        Self {
-            primitive,
-            vertex_count,
-            instance_count: 1,
-        }
+/// Map the backend-neutral [`Primitive`] to its Metal enum.
+fn primitive_to_metal(p: Primitive) -> MTLPrimitiveType {
+    match p {
+        Primitive::Triangle => MTLPrimitiveType::Triangle,
+        Primitive::TriangleStrip => MTLPrimitiveType::TriangleStrip,
     }
 }
 
@@ -105,7 +57,7 @@ impl RenderPass {
     /// Port of `RenderPass.begin`.
     pub(super) fn begin(
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
-        attachments: &[Attachment<'_>],
+        attachments: &[Attachment<'_, Metal>],
     ) -> Result<Self, MetalError> {
         let desc = MTLRenderPassDescriptor::renderPassDescriptor();
         let color_attachments = desc.colorAttachments();
@@ -120,7 +72,7 @@ impl RenderPass {
                 MTLLoadAction::Load
             });
             attachment.setStoreAction(MTLStoreAction::Store);
-            attachment.setTexture(Some(at.texture));
+            attachment.setTexture(Some(at.texture.texture()));
             if let Some(c) = at.clear_color {
                 attachment.setClearColor(MTLClearColor {
                     red: c[0],
@@ -143,13 +95,15 @@ impl RenderPass {
 
     /// Add a step: bind pipeline + resources, then draw. Port of
     /// `RenderPass.step`. A zero-instance draw is skipped entirely (matches
-    /// upstream's early return).
-    pub fn step(&self, step: &Step<'_>) {
+    /// upstream's early return). Reads the generic [`Step`] via the backend's
+    /// resource accessors (`Pipeline::state`, `GpuBuffer::handle`,
+    /// `GpuTexture`/`Sampler`).
+    fn step_impl(&self, step: &Step<'_, Metal>) {
         if step.draw.instance_count == 0 {
             return;
         }
 
-        self.encoder.setRenderPipelineState(step.pipeline_state);
+        self.encoder.setRenderPipelineState(step.pipeline.state());
 
         // Index 0: vertex/instance buffer, bound to both stages (OpenGL-compat
         // convention).
@@ -189,10 +143,11 @@ impl RenderPass {
         // Textures, bound to both stages by position.
         for (i, tex) in step.textures.iter().enumerate() {
             if let Some(tex) = tex {
-                // SAFETY: `tex` is a live MTLTexture; `i` is a valid slot.
+                let mtl = tex.texture();
+                // SAFETY: `mtl` is a live MTLTexture; `i` is a valid slot.
                 unsafe {
-                    self.encoder.setVertexTexture_atIndex(Some(tex), i);
-                    self.encoder.setFragmentTexture_atIndex(Some(tex), i);
+                    self.encoder.setVertexTexture_atIndex(Some(mtl), i);
+                    self.encoder.setFragmentTexture_atIndex(Some(mtl), i);
                 }
             }
         }
@@ -200,9 +155,10 @@ impl RenderPass {
         // Fragment samplers, by position.
         for (i, samp) in step.samplers.iter().enumerate() {
             if let Some(samp) = samp {
-                // SAFETY: `samp` is a live MTLSamplerState; `i` is a valid slot.
+                let mtl = samp.sampler();
+                // SAFETY: `mtl` is a live MTLSamplerState; `i` is a valid slot.
                 unsafe {
-                    self.encoder.setFragmentSamplerState_atIndex(Some(samp), i);
+                    self.encoder.setFragmentSamplerState_atIndex(Some(mtl), i);
                 }
             }
         }
@@ -212,7 +168,7 @@ impl RenderPass {
         unsafe {
             self.encoder
                 .drawPrimitives_vertexStart_vertexCount_instanceCount(
-                    step.draw.primitive.to_metal(),
+                    primitive_to_metal(step.draw.primitive),
                     0,
                     step.draw.vertex_count,
                     step.draw.instance_count,
@@ -220,17 +176,25 @@ impl RenderPass {
         }
     }
 
-    /// End encoding. Port of `RenderPass.complete`. The pass must not be used
-    /// after this; calling twice (or letting `Drop` run afterward) is a no-op.
-    pub fn complete(mut self) {
-        self.end();
-    }
-
     fn end(&mut self) {
         if !self.ended {
             self.encoder.endEncoding();
             self.ended = true;
         }
+    }
+}
+
+impl GpuRenderPass for RenderPass {
+    type Backend = Metal;
+
+    fn step(&self, step: &Step<'_, Metal>) {
+        self.step_impl(step);
+    }
+
+    /// End encoding. Port of `RenderPass.complete`. The pass must not be used
+    /// after this; calling twice (or letting `Drop` run afterward) is a no-op.
+    fn complete(mut self) {
+        self.end();
     }
 }
 
