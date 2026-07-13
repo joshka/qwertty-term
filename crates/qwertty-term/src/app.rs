@@ -2865,6 +2865,37 @@ impl Controller {
                 true
             }
 
+            // Clipboard (default `cmd+c` / `cmd+v`). Route to the same handlers
+            // the Copy/Paste menu items use — so a user rebinding of these
+            // actions works and paste-protection is preserved. We only have a
+            // system clipboard (no separate primary selection on macOS), so the
+            // `CopyToClipboard` mode param is ignored (plain text) and
+            // `PasteFromSelection` falls through.
+            A::CopyToClipboard(_) => {
+                self.copy_selection_from_active();
+                true
+            }
+            A::PasteFromClipboard => {
+                self.paste_into_active();
+                true
+            }
+
+            // Font size (default `cmd+=`/`cmd+-`/`cmd+0`). Our font-size model
+            // steps by a fixed increment, so the upstream point delta folds to a
+            // single step up/down.
+            A::IncreaseFontSize(_) => {
+                self.font_size_active(FontStep::Up);
+                true
+            }
+            A::DecreaseFontSize(_) => {
+                self.font_size_active(FontStep::Down);
+                true
+            }
+            A::ResetFontSize => {
+                self.font_size_active(FontStep::Reset);
+                true
+            }
+
             // Re-read the config from disk and re-apply the runtime-safe settings
             // (default `cmd+shift+,`).
             A::ReloadConfig => {
