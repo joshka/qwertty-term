@@ -28,9 +28,9 @@ use crate::engine::Engine;
 use crate::gpu::{
     Attachment, Draw, GpuBackend, GpuBuffer, GpuFrame, GpuRenderPass, Primitive, Step,
 };
-use crate::metal::{IOSurfaceLayer, MetalError};
+use crate::metal::{IOSurfaceLayer, Metal, MetalError};
 
-impl Engine {
+impl Engine<Metal> {
     /// Draw one frame and present it by attaching the drawn target's IOSurface
     /// to `layer`.
     ///
