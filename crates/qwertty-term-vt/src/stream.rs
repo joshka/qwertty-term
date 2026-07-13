@@ -423,6 +423,9 @@ pub trait Handler {
 
     // ---- XTWINOPS size reports (CSI 14/16/18/21 t) ----------------------
     fn size_report(&mut self, style: SizeReportStyle) {}
+
+    // ---- XTMODKEYS (CSI > Pp ; Pv m) ------------------------------------
+    fn modify_key_format(&mut self, format: ModifyKeyFormat) {}
 }
 
 /// DECSCUSR cursor styles (`CSI Ps SP q`). Port of `ansi.CursorStyle`.
@@ -476,6 +479,44 @@ impl DeviceStatusReq {
 pub enum ColorScheme {
     Light,
     Dark,
+}
+
+/// XTMODKEYS key-modifier format (`CSI > Pp ; Pv m`). Port of
+/// `ansi.ModifyKeyFormat`. Only `OtherKeysNumeric` has a terminal-state effect
+/// in this port (it drives `flags.modify_other_keys_2`); the rest are tracked
+/// so the dispatch is faithful and future subparams can hang off them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifyKeyFormat {
+    Legacy,
+    CursorKeys,
+    FunctionKeys,
+    OtherKeysNone,
+    OtherKeysNumeric,
+}
+
+/// Resolve `CSI > Pp ; Pv m` params into a [`ModifyKeyFormat`], or `None` if
+/// the request is invalid (unknown resource, or 3+ params). Port of the inline
+/// switch in `stream.zig`'s modify_key_format branch.
+fn modify_key_format_from_params(params: &[u16]) -> Option<ModifyKeyFormat> {
+    // No params → reset to legacy.
+    if params.is_empty() {
+        return Some(ModifyKeyFormat::Legacy);
+    }
+    if params.len() > 2 {
+        return None;
+    }
+    let mut format = match params[0] {
+        0 => ModifyKeyFormat::Legacy,
+        1 => ModifyKeyFormat::CursorKeys,
+        2 => ModifyKeyFormat::FunctionKeys,
+        4 => ModifyKeyFormat::OtherKeysNone,
+        _ => return None,
+    };
+    // The only supported subparam is `other_keys` = 2 → numeric.
+    if params.len() == 2 && format == ModifyKeyFormat::OtherKeysNone && params[1] == 2 {
+        format = ModifyKeyFormat::OtherKeysNumeric;
+    }
+    Some(format)
 }
 
 /// XTWINOPS size-report style (`CSI 14/16/18/21 t`). Port of
@@ -1206,7 +1247,7 @@ impl<H: Handler> Stream<H> {
                     }
                 }
             }
-            // SGR
+            // SGR / XTMODKEYS
             b'm' => {
                 if intermediates.is_empty() {
                     let mut p = sgr::Parser {
@@ -1217,8 +1258,16 @@ impl<H: Handler> Stream<H> {
                     while let Some(attr) = p.next() {
                         self.handler.set_attribute(attr);
                     }
+                } else if intermediates.len() == 1 && intermediates[0] == b'>' {
+                    // XTMODKEYS `CSI > Pp ; Pv m`. No params resets to legacy;
+                    // otherwise params[0] selects the resource. Only the
+                    // `other_keys` numeric form (`CSI > 4 ; 2 m`) has a
+                    // terminal-state effect. Port of `stream.zig`'s `'>'`
+                    // modify_key_format branch.
+                    if let Some(format) = modify_key_format_from_params(params) {
+                        self.handler.modify_key_format(format);
+                    }
                 }
-                // Intermediate forms (XTMODKEYS `CSI > … m`) not modeled.
             }
             // DSR
             b'n' => {
@@ -2536,6 +2585,13 @@ impl Handler for TerminalHandler {
         } else {
             crate::terminal::MouseShiftCapture::False
         };
+    }
+
+    fn modify_key_format(&mut self, format: ModifyKeyFormat) {
+        // Port of `setModifyKeyFormat`: only the `other_keys` numeric form
+        // (`CSI > 4 ; 2 m`) enables modify-other-keys mode 2; every other
+        // format clears it.
+        self.terminal.flags.modify_other_keys_2 = format == ModifyKeyFormat::OtherKeysNumeric;
     }
 
     // ---- APC (kitty graphics / glyph) -----------------------------------
