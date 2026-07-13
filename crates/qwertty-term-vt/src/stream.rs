@@ -414,6 +414,9 @@ pub trait Handler {
     fn dcs_hook(&mut self, dcs: crate::parser::Dcs) {}
     fn dcs_put(&mut self, byte: u8) {}
     fn dcs_unhook(&mut self) {}
+
+    // ---- XTWINOPS size reports (CSI 14/16/18/21 t) ----------------------
+    fn size_report(&mut self, style: SizeReportStyle) {}
 }
 
 /// DECSCUSR cursor styles (`CSI Ps SP q`). Port of `ansi.CursorStyle`.
@@ -467,6 +470,30 @@ impl DeviceStatusReq {
 pub enum ColorScheme {
     Light,
     Dark,
+}
+
+/// XTWINOPS size-report style (`CSI 14/16/18/21 t`). Port of
+/// `csi.SizeReportStyle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeReportStyle {
+    /// `CSI 14 t` — text-area size in pixels.
+    Csi14t,
+    /// `CSI 16 t` — cell size in pixels.
+    Csi16t,
+    /// `CSI 18 t` — text-area size in characters.
+    Csi18t,
+    /// `CSI 21 t` — window title report.
+    Csi21t,
+}
+
+/// Cell dimensions in pixels, supplied by the embedder for XTWINOPS pixel/cell
+/// size reports (`CSI 14/16/18 t`). The terminal derives the text-area pixel
+/// size as `columns × width` / `rows × height`. Port of the `cell_width`/
+/// `cell_height` fields of `size_report.Size`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellSize {
+    pub width: u32,
+    pub height: u32,
 }
 
 /// The stream: composes decoder + parser and routes parser actions to a
@@ -1305,17 +1332,19 @@ impl<H: Handler> Stream<H> {
                 }
                 _ => {}
             },
-            // XTWINOPS (`CSI … t`). We implement the title push/pop ops (22/23)
-            // that upstream backs with terminal state; the size-report ops
-            // (14/16/18/21) route to a pixel-geometry effect callback upstream
-            // and remain a documented seam here (they need a size effect this
-            // chunk's `Terminal` does not own — see docs/analysis/stream.md).
-            // Port of the `'t'` prong.
+            // XTWINOPS (`CSI … t`). Size reports (14/16/18/21) + title push/pop
+            // (22/23). Port of the `'t'` prong.
             b't' => {
                 if intermediates.is_empty() && !params.is_empty() {
                     match params[0] {
-                        // 14/16/18/21: size reports — seam (need pixel geometry).
-                        14 | 16 | 18 | 21 => {}
+                        // Size reports. 21 (title) is always answerable; 14/16/18
+                        // (pixel/cell/char geometry) need the cell-size seam and
+                        // stay silent until it's set (matching the lib layer,
+                        // whose `size` effect returns null when absent).
+                        14 => self.handler.size_report(SizeReportStyle::Csi14t),
+                        16 => self.handler.size_report(SizeReportStyle::Csi16t),
+                        18 => self.handler.size_report(SizeReportStyle::Csi18t),
+                        21 => self.handler.size_report(SizeReportStyle::Csi21t),
                         // 22/23: push/pop title. We only support window title
                         // (param[1] must be 0 or 2); when present, param[2] is
                         // the stack index. Port of the inline `22, 23 => …`
@@ -1612,6 +1641,11 @@ pub struct TerminalHandler {
     /// `None` → no reply. (The apprt/embedder is the source of truth for the
     /// OS theme; the terminal core just relays it.)
     color_scheme: Option<ColorScheme>,
+    /// The cell dimensions in pixels, if the embedder has provided them via
+    /// [`TerminalHandler::set_cell_size`]. Consumed by the `CSI 14/16/18 t`
+    /// XTWINOPS size reports; `None` until set, in which case those reports
+    /// stay silent (mirroring the lib layer's null `size` effect).
+    cell_size: Option<CellSize>,
 }
 
 /// Convenience accessors for the common `Stream<TerminalHandler>` pairing, so
@@ -1654,7 +1688,15 @@ impl TerminalHandler {
             pending_bell: false,
             apc_handler: apc::Handler::new(),
             color_scheme: None,
+            cell_size: None,
         }
+    }
+
+    /// Provide the cell dimensions in pixels so `CSI 14/16/18 t` XTWINOPS size
+    /// reports can be answered. Until set, those reports stay silent (the app
+    /// should set this on startup and on font-size / DPI changes).
+    pub fn set_cell_size(&mut self, width: u32, height: u32) {
+        self.cell_size = Some(CellSize { width, height });
     }
 
     /// Tell the terminal the current OS light/dark color scheme, so a
@@ -2373,6 +2415,46 @@ impl Handler for TerminalHandler {
     }
     fn xtversion(&mut self) {
         self.write_pty(b"\x1bP>|libghostty\x1b\\");
+    }
+    fn size_report(&mut self, style: SizeReportStyle) {
+        // Port of `stream_terminal.reportSize`. CSI 21 t (window title) is
+        // always answerable from terminal state; the pixel/cell/char geometry
+        // reports (14/16/18 t) require the embedder-supplied cell size and stay
+        // silent until `set_cell_size` is called (mirroring the lib layer's
+        // null `size` effect, which the vt-diff reference also lacks).
+        match style {
+            SizeReportStyle::Csi21t => {
+                // `OSC l <title> ST` — the window title, empty if unset.
+                let title = self.terminal.get_title().unwrap_or(b"");
+                let mut resp = Vec::with_capacity(title.len() + 5);
+                resp.extend_from_slice(b"\x1b]l");
+                resp.extend_from_slice(title);
+                resp.extend_from_slice(b"\x1b\\");
+                self.write_pty(&resp);
+            }
+            SizeReportStyle::Csi14t => {
+                if let Some(cell) = self.cell_size {
+                    // Text-area size in pixels: `CSI 4 ; height ; width t`.
+                    let h = u64::from(self.terminal.rows) * u64::from(cell.height);
+                    let w = u64::from(self.terminal.cols) * u64::from(cell.width);
+                    self.write_pty(format!("\x1b[4;{h};{w}t").as_bytes());
+                }
+            }
+            SizeReportStyle::Csi16t => {
+                if let Some(cell) = self.cell_size {
+                    // Cell size in pixels: `CSI 6 ; height ; width t`.
+                    self.write_pty(format!("\x1b[6;{};{}t", cell.height, cell.width).as_bytes());
+                }
+            }
+            SizeReportStyle::Csi18t => {
+                if self.cell_size.is_some() {
+                    // Text-area size in characters: `CSI 8 ; rows ; cols t`.
+                    self.write_pty(
+                        format!("\x1b[8;{};{}t", self.terminal.rows, self.terminal.cols).as_bytes(),
+                    );
+                }
+            }
+        }
     }
 
     // ---- REP ------------------------------------------------------------
