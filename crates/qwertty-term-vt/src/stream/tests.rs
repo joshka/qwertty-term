@@ -767,6 +767,40 @@ fn xtmodkeys_modify_other_keys_2() {
     assert!(s.handler.terminal.flags.modify_other_keys_2);
 }
 
+// ENQ (0x05) replies the configured answerback, or nothing when unset.
+#[test]
+fn enquiry_answerback() {
+    let mut s = term(10, 4);
+    // Default: no answerback -> ENQ is silent.
+    s.feed(b"\x05");
+    assert!(s.handler.take_output().is_empty());
+
+    s.handler.set_enquiry_response(b"PONG");
+    s.feed(b"\x05");
+    assert_eq!(s.handler.take_output(), b"PONG");
+}
+
+// osc-color-report-format drives the OSC color-query reply width; None
+// suppresses it, 8-bit / 16-bit pick the encoding.
+#[test]
+fn osc_color_report_format_config() {
+    use crate::stream::OscColorReportFormat;
+
+    // 8-bit form.
+    let mut s = term(10, 4);
+    s.handler
+        .set_osc_color_report_format(OscColorReportFormat::Bit8);
+    s.feed(b"\x1b]4;1;rgb:12/34/56\x1b\\\x1b]4;1;?\x1b\\");
+    assert_eq!(s.handler.take_output(), b"\x1b]4;1;rgb:12/34/56\x1b\\");
+
+    // None suppresses the reply.
+    let mut s2 = term(10, 4);
+    s2.handler
+        .set_osc_color_report_format(OscColorReportFormat::None);
+    s2.feed(b"\x1b]4;1;?\x1b\\");
+    assert!(s2.handler.take_output().is_empty());
+}
+
 // OSC 8 hyperlink start/end wire through to Screen hyperlink attribution.
 // Regression for the previously-dropped `osc_dispatch` arm (#26): the Screen
 // implemented hyperlinks all along, but the stream handler ignored the parsed
