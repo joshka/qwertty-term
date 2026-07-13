@@ -111,6 +111,15 @@ pub struct Config {
     /// (upstream `mouse-hide-while-typing`, `Config.zig:921`, default false).
     #[serde(rename = "mouse-hide-while-typing")]
     pub mouse_hide_while_typing: bool,
+    /// Focus the pane the mouse moves over, without clicking (upstream
+    /// `focus-follows-mouse`, `Config.zig:2348`, default false).
+    #[serde(rename = "focus-follows-mouse")]
+    pub focus_follows_mouse: bool,
+    /// What a middle-click does: `primary-paste` (default) / `ignore` (upstream
+    /// `middle-click-action`, `Config.zig:2442`). Parsed by
+    /// [`Config::middle_click_action`].
+    #[serde(rename = "middle-click-action")]
+    pub middle_click_action: Option<String>,
     /// Require confirmation before pasting text that appears unsafe (contains a
     /// newline or a bracketed-paste end sequence) — the copy/paste-attack guard
     /// (upstream `clipboard-paste-protection`, `Config.zig:2372`, default true).
@@ -234,6 +243,8 @@ impl Default for Config {
             bell_features: None,
             right_click_action: None,
             mouse_hide_while_typing: false,
+            focus_follows_mouse: false,
+            middle_click_action: None,
             // All clipboard-hardening keys default on (upstream defaults).
             clipboard_paste_protection: true,
             clipboard_paste_bracketed_safe: true,
@@ -372,6 +383,14 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// The parsed `middle-click-action` (default `PrimaryPaste`).
+    pub fn middle_click_action(&self) -> MiddleClickAction {
+        self.middle_click_action
+            .as_deref()
+            .map(MiddleClickAction::parse)
+            .unwrap_or_default()
+    }
+
     /// The paste-protection settings (`clipboard-paste-protection` +
     /// `clipboard-paste-bracketed-safe`).
     pub fn paste_protection(&self) -> crate::paste::PasteProtection {
@@ -448,6 +467,27 @@ impl ConfirmCloseSurface {
     }
 }
 
+/// What a middle-click does (`middle-click-action`, upstream `MiddleClickAction`,
+/// `Config.zig:8610`, default `primary-paste`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MiddleClickAction {
+    /// Paste the current selection into the pane (the X11-style "primary" paste).
+    #[default]
+    PrimaryPaste,
+    /// Do nothing.
+    Ignore,
+}
+
+impl MiddleClickAction {
+    /// Parse the config value; unknown values fall back to `primary-paste`.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ignore" => Self::Ignore,
+            _ => Self::PrimaryPaste,
+        }
+    }
+}
+
 const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 #
 # This file is created automatically on first run. Uncomment and edit any of
@@ -510,6 +550,10 @@ const EXAMPLE_CONFIG: &str = r#"# qwertty-term config
 # the next mouse move).
 # right-click-action = "context-menu"
 # mouse-hide-while-typing = false
+# focus-follows-mouse focuses the pane the mouse moves over (default false).
+# middle-click-action is "primary-paste" (paste the selection) or "ignore".
+# focus-follows-mouse = false
+# middle-click-action = "primary-paste"
 
 # Clipboard hardening (all default true): confirm before pasting unsafe
 # (multiline) text; trust bracketed pastes as safe; trim trailing whitespace
@@ -1055,13 +1099,28 @@ mod tests {
 
     #[test]
     fn parses_mouse_keys() {
-        let config =
-            parse("right-click-action = \"paste\"\nmouse-hide-while-typing = true\n").unwrap();
+        let config = parse(
+            "right-click-action = \"paste\"\nmouse-hide-while-typing = true\n\
+             focus-follows-mouse = true\nmiddle-click-action = \"ignore\"\n",
+        )
+        .unwrap();
         assert_eq!(
             config.right_click_action(),
             crate::context_menu::RightClickAction::Paste
         );
         assert!(config.mouse_hide_while_typing);
+        assert!(config.focus_follows_mouse);
+        assert_eq!(
+            config.middle_click_action(),
+            crate::config::MiddleClickAction::Ignore
+        );
+        // Defaults: focus-follows-mouse off, middle-click primary-paste.
+        let d = parse("").unwrap();
+        assert!(!d.focus_follows_mouse);
+        assert_eq!(
+            d.middle_click_action(),
+            crate::config::MiddleClickAction::PrimaryPaste
+        );
     }
 
     #[test]

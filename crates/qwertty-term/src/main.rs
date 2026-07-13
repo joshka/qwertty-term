@@ -101,6 +101,10 @@
 //!   `resize-overlay = always` configured, resize the window and assert the
 //!   `cols ⨯ rows` HUD shows the new grid and auto-clears after its duration,
 //!   then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_MOUSE2=1` — run the mouse slice-2 smoke: assert a
+//!   middle-click primary-pastes the current selection (echoed by `cat`), and
+//!   that with `focus-follows-mouse` the hovered pane takes focus, then exit
+//!   0/1. Needs a temp config with `focus-follows-mouse = true`.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -280,6 +284,8 @@ fn run_window() {
     let smoke_confirmclose = std::env::var_os("QWERTTY_TERM_SMOKE_CONFIRMCLOSE").is_some();
     // Resize smoke: assert the resize-overlay HUD shows + clears.
     let smoke_resize = std::env::var_os("QWERTTY_TERM_SMOKE_RESIZE").is_some();
+    // Mouse-2 smoke: middle-click primary-paste + focus-follows-mouse.
+    let smoke_mouse2 = std::env::var_os("QWERTTY_TERM_SMOKE_MOUSE2").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -302,6 +308,7 @@ fn run_window() {
         smoke_progress,
         smoke_confirmclose,
         smoke_resize,
+        smoke_mouse2,
     );
 }
 
