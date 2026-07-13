@@ -63,7 +63,6 @@ pub mod backend;
 pub mod cells;
 pub mod cursor;
 pub mod gpu;
-pub mod link;
 pub mod options;
 pub mod present_stats;
 pub mod row;
@@ -87,10 +86,13 @@ pub mod wire;
 pub mod metal;
 
 /// The cell engine: builds GPU buffers from a [`snapshot::RenderSnapshot`] and
-/// a `qwertty-term-font` `Grid`, and draws them via the Metal backend. Chunk R4
-/// (first pixels). macOS only (it drives the Metal backend and the CoreText
-/// font stack).
-#[cfg(target_os = "macos")]
+/// a `qwertty-term-font` `Grid`, and draws them via a [`gpu::GpuBackend`]. Chunk
+/// R4 (first pixels). Generic over the backend since ADR 003 PR-3
+/// ([`engine::Engine<B>`](engine::Engine)): on macOS it defaults to
+/// [`metal::Metal`] (CoreText font stack); on other targets it defaults to the
+/// [`software::Software`] backend (FreeType font stack) — the headless render
+/// path. Available on every target; the Metal-specific pieces inside are
+/// `#[cfg(target_os = "macos")]`-gated.
 pub mod engine;
 
 /// Presentation wiring for a window host: draw a frame and assign its IOSurface

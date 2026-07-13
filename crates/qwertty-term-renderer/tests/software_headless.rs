@@ -8,17 +8,14 @@
 //! rasterizes glyphs through the CPU compositor, and reads back a BGRA frame.
 //!
 //! Because the Software backend is pure Rust (no `objc2`, no device), this test
-//! **never skips** — it is the render path Linux CI will run. The font
-//! substrate here is CoreText only because the test is compiled on macOS (where
-//! the renderer's integration tests live); on Linux the identical flow runs
-//! over the FreeType `Grid`, which is why the assertions below are about
-//! backend-agnostic facts (dimensions + ink coverage), not Apple specifics.
+//! **never skips**, and it is not gated to any OS — it runs on macOS (over the
+//! CoreText face) and on Linux CI (over the FreeType face) alike. `Face` is the
+//! cfg-selected platform face alias, so the flow is identical; the assertions
+//! below are about backend-agnostic facts (dimensions + ink coverage), not Apple
+//! specifics. This is the betamax headless-render artifact running on Linux.
 
-#![cfg(target_os = "macos")]
-
-use qwertty_term_font::coretext::Face;
 use qwertty_term_font::grid::Grid;
-use qwertty_term_font::{CodepointResolver, Collection, Metrics};
+use qwertty_term_font::{CodepointResolver, Collection, Face, Metrics};
 use qwertty_term_renderer::engine::{Engine, FrameOptions};
 use qwertty_term_renderer::snapshot::FullSnapshot;
 use qwertty_term_renderer::software::Software;

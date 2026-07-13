@@ -85,6 +85,14 @@ jobs:
           -p qwertty-term-termio
           -p qwertty-term-ffi
 
+      # The betamax headless-render artifact (ADR 003): render a terminal frame
+      # on Linux with no GPU, no window, no CoreText — `Engine<Software>` over
+      # the FreeType font stack (auto-enabled by the renderer's non-macOS dep).
+      # This is the whole point of the headless-first strategy, so it runs on
+      # the free Linux runner, not just macOS.
+      - name: headless render (Engine<Software>, no GPU)
+        run: cargo test -p qwertty-term-renderer --test software_headless
+
   # Modest macOS job: lint + build + unit tests for the macOS-only surface
   # (renderer, font, app). GPU-dependent tests skip themselves when no Metal
   # device is available; the windowed/offscreen app smokes stay local-only.
