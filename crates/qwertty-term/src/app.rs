@@ -353,6 +353,9 @@ struct PumpResult {
     exited: bool,
     password: Option<bool>,
     bell: bool,
+    /// The most recent OSC 9 / OSC 777 desktop notification `(title, body)`
+    /// observed this tick, if any (latest-wins per frame).
+    notification: Option<(String, String)>,
 }
 
 impl Surface {
@@ -457,9 +460,13 @@ impl Surface {
         // `take_output`/`take_bell` lock the engine; if the parse thread poisoned
         // the lock, `engine()` recovers it and flips `dead`, so re-check before
         // touching io. Drain both under one lock.
-        let (out, bell) = {
+        let (out, bell, notification) = {
             let mut engine = self.engine();
-            (engine.take_output(), engine.take_bell())
+            (
+                engine.take_output(),
+                engine.take_bell(),
+                engine.take_notification(),
+            )
         };
         if self.is_dead() {
             return PumpResult::default();
@@ -486,6 +493,7 @@ impl Surface {
             exited,
             password,
             bell,
+            notification,
         }
     }
 
@@ -1317,6 +1325,17 @@ pub struct ControllerState {
     /// Set once the first window has been created, so the initial-geometry
     /// config applies only to it (not to later Cmd-N windows).
     first_window_placed: Cell<bool>,
+    /// Whether apps may post OSC 9 / OSC 777 desktop notifications
+    /// (`desktop-notifications`). When false, drained notifications are dropped
+    /// before delivery (core-level gate, matching upstream).
+    desktop_notifications: bool,
+    /// Rate limiter shared across all surfaces (1/sec global + 5s identical
+    /// dedup), matching upstream's core notification throttle. `RefCell` so it
+    /// can be updated on the pace tick through the shared immutable borrow.
+    notification_throttle: RefCell<crate::notify::NotificationThrottle>,
+    /// The last desktop notification actually delivered (post-throttle), for
+    /// the windowed smoke to observe. `None` until one is delivered.
+    last_delivered_notification: RefCell<Option<(String, String)>>,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1410,6 +1429,9 @@ impl Controller {
             initial_window_cells: config.initial_window_cells(),
             initial_window_position: config.initial_window_position(),
             first_window_placed: Cell::new(false),
+            desktop_notifications: config.desktop_notifications,
+            notification_throttle: RefCell::new(crate::notify::NotificationThrottle::new()),
+            last_delivered_notification: RefCell::new(None),
         })))
     }
 
@@ -2969,6 +2991,37 @@ impl Controller {
         self.0.borrow().initial_window_cells
     }
 
+    /// Deliver one desktop notification (already gated + throttled). macOS
+    /// notifications proper (`UNUserNotificationCenter`) require a signed app
+    /// bundle + runtime authorization, which this CLI-launched binary does not
+    /// have (see ADR 0003). Until the app ships as a bundle we use the
+    /// unbundled-safe fallback: bounce the Dock (informational attention) and
+    /// log the title/body. The delivered `(title, body)` is recorded for the
+    /// windowed smoke to observe.
+    fn deliver_notification(&self, title: &str, body: &str) {
+        let mtm = {
+            let state = self.0.borrow();
+            *state.last_delivered_notification.borrow_mut() =
+                Some((title.to_owned(), body.to_owned()));
+            state.mtm
+        };
+        if title.is_empty() {
+            eprintln!("qwertty-term: notification: {body}");
+        } else {
+            eprintln!("qwertty-term: notification: {title} — {body}");
+        }
+        // Dock attention (no-op while the app is already frontmost); the real
+        // OS notification lands here once bundled (ADR 0003).
+        NSApplication::sharedApplication(mtm)
+            .requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
+    }
+
+    /// The last desktop notification actually delivered (post-throttle), for
+    /// the windowed smoke to assert on (smoke/test).
+    pub fn last_delivered_notification(&self) -> Option<(String, String)> {
+        self.0.borrow().last_delivered_notification.borrow().clone()
+    }
+
     /// Apply the configured initial geometry (`window-width`/`-height` cells +
     /// `window-position-x`/`-y`) to `window`, but only for the *first* window
     /// (a latch ensures later Cmd-N windows use the default size). `cell_w`/
@@ -3271,12 +3324,16 @@ impl Controller {
         // Collect (tab, surface) pairs whose shell exited, plus per-tab focused
         // title/password state, under one borrow. Render every pane.
         let bell_features = self.0.borrow().bell_features;
-        let (exited, bell_rang): (Vec<(TabId, SurfaceId)>, bool) = {
+        let desktop_notifications = self.0.borrow().desktop_notifications;
+        let (exited, bell_rang, notifications) = {
             let mut state = self.0.borrow_mut();
-            let mut dead = Vec::new();
+            let mut dead: Vec<(TabId, SurfaceId)> = Vec::new();
             // Whether any pane rang this tick — drives the once-per-tick
             // audible/attention effects below (the title indicator is per-tab).
             let mut any_bell = false;
+            // OSC 9/777 desktop notifications observed this tick (across all
+            // panes); throttled + delivered after the borrow drops.
+            let mut notifications: Vec<(String, String)> = Vec::new();
             for (tid, tab) in state.tabs.iter_mut() {
                 let focused = tab.tree.focused();
                 // Whether this tab has more than one pane — the gate for
@@ -3314,6 +3371,11 @@ impl Controller {
                         }
                         any_bell = true;
                     }
+                    // Collect any OSC 9/777 notification (dropped here when
+                    // `desktop-notifications` is off — the core-level gate).
+                    if desktop_notifications && let Some(n) = result.notification {
+                        notifications.push(n);
+                    }
                     if *sid == focused
                         && let Some(active) = result.password
                     {
@@ -3322,7 +3384,7 @@ impl Controller {
                 }
                 tab.update_window_title(password_focused);
             }
-            (dead, any_bell)
+            (dead, any_bell, notifications)
         };
         // Fire the once-per-tick audible/attention bell effects with no
         // controller borrow held (these are AppKit calls). The per-tab title
@@ -3340,6 +3402,28 @@ impl Controller {
                 NSApplication::sharedApplication(mtm).requestUserAttention(
                     objc2_app_kit::NSRequestUserAttentionType::InformationalRequest,
                 );
+            }
+        }
+        // Rate-limit the collected desktop notifications (1/sec global + 5s
+        // identical dedup, matching upstream's core throttle) under a short
+        // borrow, then deliver the admitted ones with no borrow held.
+        if !notifications.is_empty() {
+            let admitted: Vec<(String, String)> = {
+                let state = self.0.borrow();
+                let mut throttle = state.notification_throttle.borrow_mut();
+                let now = std::time::Instant::now();
+                notifications
+                    .into_iter()
+                    .filter(|(title, body)| {
+                        throttle.admit(
+                            &crate::notify::Notification::new(title.clone(), body.clone()),
+                            now,
+                        )
+                    })
+                    .collect()
+            };
+            for (title, body) in admitted {
+                self.deliver_notification(&title, &body);
             }
         }
         for (tab, surface) in exited {
@@ -4242,6 +4326,10 @@ pub struct DelegateIvars {
     /// window honors configured initial geometry. See
     /// [`AppDelegate::run_windowstate_smoke`].
     smoke_windowstate: bool,
+    /// Notify smoke (`QWERTTY_TERM_SMOKE_NOTIFY`): assert OSC 9/777 desktop
+    /// notifications reach the delivery seam. See
+    /// [`AppDelegate::run_notify_smoke`].
+    smoke_notify: bool,
 }
 
 /// Phase-1→phase-2 handoff for the splits smoke: the tab under test and each
@@ -4292,6 +4380,7 @@ define_class!(
             let has_mouse = self.ivars().smoke_mouse;
             let has_clipboard = self.ivars().smoke_clipboard;
             let has_windowstate = self.ivars().smoke_windowstate;
+            let has_notify = self.ivars().smoke_notify;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -4317,6 +4406,8 @@ define_class!(
                 self.schedule_clipboard_smoke();
             } else if has_windowstate {
                 self.schedule_windowstate_smoke();
+            } else if has_notify {
+                self.schedule_notify_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -4504,6 +4595,12 @@ define_class!(
         fn windowstate_smoke(&self, _timer: &AnyObject) {
             self.run_windowstate_smoke();
         }
+
+        /// Notify smoke: assert OSC 9/777 desktop notifications deliver, exit 0/1.
+        #[unsafe(method(ghosttyNotifySmoke:))]
+        fn notify_smoke(&self, _timer: &AnyObject) {
+            self.run_notify_smoke();
+        }
     }
 );
 
@@ -4528,6 +4625,7 @@ impl AppDelegate {
         smoke_mouse: bool,
         smoke_clipboard: bool,
         smoke_windowstate: bool,
+        smoke_notify: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -4549,6 +4647,7 @@ impl AppDelegate {
             smoke_mouse,
             smoke_clipboard,
             smoke_windowstate,
+            smoke_notify,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -6814,6 +6913,60 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_notify_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyNotifySmoke:));
+    }
+
+    /// Desktop-notification smoke: feed OSC 9 and OSC 777 to the focused
+    /// surface and assert each is parsed, drained, gated, throttled, and
+    /// delivered (observed via `last_delivered_notification`). Real OS delivery
+    /// needs a bundle (ADR 0003); this asserts the end-to-end plumbing up to the
+    /// delivery seam. Exits 0/1.
+    fn run_notify_smoke(&self) {
+        let controller = &self.ivars().controller;
+        let fail = notify_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at notify smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at notify smoke start".into());
+        };
+
+        // 1. OSC 9: the whole payload is the body; title is empty.
+        controller.feed_surface_output(tab, surface, b"\x1b]9;build finished\x07");
+        Self::spin(0.4);
+        match controller.last_delivered_notification() {
+            Some((title, body)) if title.is_empty() && body == "build finished" => {}
+            other => fail(format!(
+                "OSC 9 notification did not reach the delivery seam as (\"\", \
+                 \"build finished\"); got {other:?}"
+            )),
+        }
+
+        // 2. OSC 777;notify;Title;Body after the 1s global throttle window.
+        Self::spin(1.1);
+        controller.feed_surface_output(
+            tab,
+            surface,
+            b"\x1b]777;notify;Deploy;the release is live\x07",
+        );
+        Self::spin(0.4);
+        match controller.last_delivered_notification() {
+            Some((title, body)) if title == "Deploy" && body == "the release is live" => {}
+            other => fail(format!(
+                "OSC 777 notification did not reach the delivery seam as \
+                 (\"Deploy\", \"the release is live\"); got {other:?}"
+            )),
+        }
+
+        println!(
+            "OK: notify smoke — OSC 9 and OSC 777 desktop notifications parsed, drained, \
+             gated, throttled, and delivered to the notification seam."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -6984,6 +7137,12 @@ fn windowstate_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a notify-smoke failure and exit non-zero.
+fn notify_fail(msg: String) -> ! {
+    eprintln!("FAIL: notify smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -7097,6 +7256,7 @@ pub fn run(
     smoke_mouse: bool,
     smoke_clipboard: bool,
     smoke_windowstate: bool,
+    smoke_notify: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -7121,6 +7281,7 @@ pub fn run(
         smoke_mouse,
         smoke_clipboard,
         smoke_windowstate,
+        smoke_notify,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

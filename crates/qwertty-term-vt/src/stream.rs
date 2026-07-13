@@ -396,6 +396,12 @@ pub trait Handler {
     /// layer decode base64 / perform the actual clipboard I/O; this trait
     /// method is the same seam.
     fn clipboard(&mut self, kind: u8, data: &str) {}
+    /// OSC 9 / OSC 777 desktop notification (`ESC ] 9 ; body ST` iTerm2-style,
+    /// or `ESC ] 777 ; notify ; title ; body ST` rxvt-style). Upstream hands
+    /// the parsed `title`/`body` up to the apprt surface, which rate-limits and
+    /// delivers the OS notification (gated by `desktop-notifications`); this
+    /// trait method is the same seam. `title` is empty for the OSC 9 form.
+    fn show_desktop_notification(&mut self, title: &str, body: &str) {}
 
     // ---- reports (queue-emitting) --------------------------------------
     fn device_attributes(&mut self, req: DeviceAttributesReq) {}
@@ -1539,10 +1545,13 @@ impl<H: Handler> Stream<H> {
             C::ClipboardContents { kind, data } => self.handler.clipboard(kind, &data),
             C::HyperlinkStart { id, uri } => self.handler.start_hyperlink(&uri, id.as_deref()),
             C::HyperlinkEnd => self.handler.end_hyperlink(),
+            C::ShowDesktopNotification { title, body } => {
+                self.handler.show_desktop_notification(&title, &body);
+            }
             // Everything else has no terminal-modifying effect (kitty
             // clipboard protocol (5522, a NON-goal — parsed but not applied,
-            // see module docs), notifications, conemu, kitty text/dnd,
-            // context signal).
+            // see module docs), conemu progress, kitty text/dnd, context
+            // signal).
             _ => {}
         }
     }
@@ -1626,6 +1635,13 @@ pub struct TerminalHandler {
     /// surfaces the bell via the apprt `ring_bell` action; the app drains this
     /// on its pace tick. The `bell()` handler was previously a no-op.
     pending_bell: bool,
+    /// The most recent OSC 9 / OSC 777 desktop notification received since the
+    /// last [`TerminalHandler::take_notification`] drain, as `(title, body)`.
+    /// Latest-wins (like `pending_clipboard`): a burst within one frame
+    /// coalesces to the last one — the apprt applies its own rate-limit + dedup
+    /// policy on drain. `None` until one arrives. The
+    /// [`TerminalHandler::show_desktop_notification`] handler was a no-op.
+    pending_notification: Option<(String, String)>,
     /// The APC sub-protocol handler (kitty graphics / glyph). Port of
     /// `stream_terminal.Handler.apc_handler`. The stream's `apc_start`/
     /// `apc_put`/`apc_end` events drive it; on `end` a completed
@@ -1686,6 +1702,7 @@ impl TerminalHandler {
             output: Vec::new(),
             pending_clipboard: None,
             pending_bell: false,
+            pending_notification: None,
             apc_handler: apc::Handler::new(),
             color_scheme: None,
             cell_size: None,
@@ -1730,6 +1747,15 @@ impl TerminalHandler {
     /// [`TerminalHandler::pending_bell`].
     pub fn take_bell(&mut self) -> bool {
         std::mem::take(&mut self.pending_bell)
+    }
+
+    /// Take (and clear) the most recent pending desktop notification as
+    /// `(title, body)`, if any arrived since the last drain. The apprt polls
+    /// this each frame and applies its `desktop-notifications` gate + rate-limit
+    /// before delivering the OS notification. See
+    /// [`TerminalHandler::pending_notification`].
+    pub fn take_notification(&mut self) -> Option<(String, String)> {
+        self.pending_notification.take()
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
@@ -1903,6 +1929,12 @@ impl Handler for TerminalHandler {
         // configured `bell-features` (audible/attention/title). No
         // terminal-state effect.
         self.pending_bell = true;
+    }
+    fn show_desktop_notification(&mut self, title: &str, body: &str) {
+        // Latch the notification (latest-wins) for the apprt to drain via
+        // `take_notification`, gate on `desktop-notifications`, rate-limit, and
+        // deliver. No terminal-state effect.
+        self.pending_notification = Some((title.to_owned(), body.to_owned()));
     }
     fn enquiry(&mut self) {}
 

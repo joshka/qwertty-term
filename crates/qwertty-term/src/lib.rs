@@ -21,6 +21,7 @@ pub mod gesture;
 pub mod input;
 pub mod keybind;
 pub mod menu;
+pub mod notify;
 pub mod paste;
 pub mod quickterm;
 pub mod scroll;

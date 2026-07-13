@@ -553,6 +553,40 @@ fn bel_latches_a_drainable_bell() {
     assert!(!s.handler.take_bell(), "OSC-terminating BEL is not a bell");
 }
 
+// OSC 9 / OSC 777 desktop notifications latch a drainable `(title, body)` for
+// the apprt to gate + rate-limit + deliver. Latest-wins; a no-op on state.
+#[test]
+fn osc9_and_osc777_latch_a_drainable_notification() {
+    let mut s = term(10, 10);
+    assert!(
+        s.handler.take_notification().is_none(),
+        "no notification before any OSC 9/777"
+    );
+
+    // OSC 9: the whole payload is the body; title is empty (iTerm2 form).
+    s.feed(b"\x1b]9;build finished\x07");
+    let (title, body) = s.handler.take_notification().expect("OSC 9 latches");
+    assert_eq!(title, "");
+    assert_eq!(body, "build finished");
+    // Drained; stays None until another arrives.
+    assert!(
+        s.handler.take_notification().is_none(),
+        "notification cleared on take"
+    );
+
+    // OSC 777;notify;Title;Body (rxvt form): both title and body.
+    s.feed(b"\x1b]777;notify;Alert;the deploy is done\x07");
+    let (title, body) = s.handler.take_notification().expect("OSC 777 latches");
+    assert_eq!(title, "Alert");
+    assert_eq!(body, "the deploy is done");
+
+    // Latest-wins: a burst within one drain coalesces to the last one.
+    s.feed(b"\x1b]9;first\x07\x1b]9;second\x07");
+    let (_t, body) = s.handler.take_notification().expect("burst latches last");
+    assert_eq!(body, "second");
+    assert!(s.handler.take_notification().is_none());
+}
+
 // OSC 52 clipboard write: surfaced as a drainable event, raw (still
 // base64-encoded) per upstream's `clipboardContents` policy (decode is an
 // apprt/embedder decision, not a terminal-core one).

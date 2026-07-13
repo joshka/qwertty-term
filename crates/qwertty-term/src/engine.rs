@@ -98,6 +98,14 @@ impl Engine {
         self.stream.handler.take_bell()
     }
 
+    /// Drain the most recent pending desktop notification `(title, body)` if
+    /// one arrived (OSC 9 / OSC 777) since the last drain. The app polls this
+    /// each pace tick, gates it on `desktop-notifications`, rate-limits, and
+    /// delivers (see `crate::notify`).
+    pub fn take_notification(&mut self) -> Option<(String, String)> {
+        self.stream.handler.take_notification()
+    }
+
     /// Resize the grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.terminal_mut().resize(clamp_dim(cols), clamp_dim(rows));

@@ -220,8 +220,12 @@ items are `[ ]` wholesale unless noted.
 - [~] Bell (`bell-features`): system beep + dock attention + 🔔 title indicator
       on BEL, cleared on refocus (bell smoke). Deferred: `audio`
       (`bell-audio-path`/`-volume`) + `border` flash
-- [ ] `desktop-notifications` / `app-notifications`
+- [~] `desktop-notifications`: OSC 9 / OSC 777 parsed → gated → throttled (1/sec +
+      5s-identical, upstream core policy) → delivered (dock attention + log; notify
+      smoke). Real `UNUserNotificationCenter` banner deferred to the bundling
+      milestone (ADR 0003). `app-notifications` still open
 - [ ] `notify-on-command-finish` (+ action/after), `abnormal-command-exit-runtime`
+      (needs OSC 133 command-boundary tracking in the VT engine)
 - [ ] `progress-style` (OSC 9;4 progress bar)
 
 ## Platform: macOS (`macos/Sources`, ~45% reimplemented natively in Rust)
