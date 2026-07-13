@@ -105,13 +105,16 @@ items are `[ ]` wholesale unless noted.
 - [x] Menu bar (basic), key-window activation
 - [x] `window-height`/`-width`/`-position` (initial geometry: cells → first window)
 - [x] `title` (fixed window/tab title override; forces over OSC 0/2, live on reload; imports)
-- [~] `window-save-state` (default/never/always): config-gates macOS native restoration
+- [x] `window-save-state` (default/never/always): config-gates macOS native restoration
       (`NSQuitAlwaysKeepsWindows` + per-window `isRestorable`; savestate smoke). Content restore
-      landed — a live tab's split tree + per-pane cwd captures to a serializable `WindowSession`,
-      round-trips through JSON, and rebuilds into a fresh tab: single-pane and multi-pane (full
-      structure + per-split ratios, one shell per leaf in its saved cwd; session unit tests +
-      smoke). Remaining: the `NSWindowRestoration`/`NSCoder` OS wiring that replays a session on
-      a genuine quit+relaunch (only verifiable by a real relaunch, no headless smoke)
+      complete — a tab's split tree + per-pane cwd captures to a serializable `WindowSession`,
+      round-trips through JSON, and rebuilds into a tab: single-pane and multi-pane (full
+      structure + per-split ratios, one shell per leaf in its saved cwd). OS wiring in place:
+      each restorable window carries a restoration identifier + names the app delegate as its
+      `restorationClass`, and the session encodes/decodes through the real `NSCoder` path
+      (`willEncodeRestorableState` → JSON `NSString`; `didDecodeRestorableState` → rebuild).
+      Session unit tests + smoke cover the tree round-trip and a live `NSKeyedArchiver` coder
+      round-trip; macOS actually firing restoration on a real quit+relaunch is manual-verify only
 - [ ] `window-step-resize`, `window-subtitle`
 - [ ] `window-titlebar-background`/`-foreground`, `window-new-tab-position`
 - [x] `resize-overlay` (+ `-position`, `-duration`): `cols ⨯ rows` HUD (NSTextField overlay)
