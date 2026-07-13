@@ -19,6 +19,8 @@ name = "qwertty_term_renderer"
 
 [dependencies]
 qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
+# URL/link detection (R7) in the platform-agnostic `link` module.
+regex = "1"
 # Sprite dispatch (cursors / decorations / box-drawing) is platform-agnostic
 # (pure Rust), so the cell engine can use it on every target — including the
 # headless Linux software-render path (ADR 003).
