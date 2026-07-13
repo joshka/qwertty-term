@@ -741,6 +741,32 @@ fn xtwinops_size_reports_gated_on_cell_size() {
     assert_eq!(s.handler.take_output(), b"\x1b[8;24;80t");
 }
 
+// XTMODKEYS `CSI > 4 ; 2 m` enables modify-other-keys mode 2; every other
+// format (and the reset `CSI > m`) clears it. Port of setModifyKeyFormat.
+#[test]
+fn xtmodkeys_modify_other_keys_2() {
+    let mut s = term(10, 4);
+    assert!(!s.handler.terminal.flags.modify_other_keys_2);
+
+    // `> 4 ; 2 m` -> other_keys_numeric -> flag set.
+    s.feed(b"\x1b[>4;2m");
+    assert!(s.handler.terminal.flags.modify_other_keys_2);
+
+    // `> 4 m` (other_keys_none, no numeric subparam) -> cleared.
+    s.feed(b"\x1b[>4m");
+    assert!(!s.handler.terminal.flags.modify_other_keys_2);
+
+    // Re-enable, then reset via `> m` (no params -> legacy) -> cleared.
+    s.feed(b"\x1b[>4;2m");
+    assert!(s.handler.terminal.flags.modify_other_keys_2);
+    s.feed(b"\x1b[>m");
+    assert!(!s.handler.terminal.flags.modify_other_keys_2);
+
+    // A plain SGR reset must not touch the flag path (no `>` intermediate).
+    s.feed(b"\x1b[>4;2m\x1b[0m");
+    assert!(s.handler.terminal.flags.modify_other_keys_2);
+}
+
 // OSC 8 hyperlink start/end wire through to Screen hyperlink attribution.
 // Regression for the previously-dropped `osc_dispatch` arm (#26): the Screen
 // implemented hyperlinks all along, but the stream handler ignored the parsed
