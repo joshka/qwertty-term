@@ -99,7 +99,9 @@ items are `[ ]` wholesale unless noted.
 - [x] `window-height`/`-width`/`-position` (initial geometry: cells → first window)
 - [ ] `window-save-state`, `window-step-resize`, `window-title`/`-subtitle` templates
 - [ ] `window-titlebar-background`/`-foreground`, `window-new-tab-position`
-- [ ] `resize-overlay`, `command-palette`, undo/redo (`undo-timeout`)
+- [x] `resize-overlay` (+ `-position`, `-duration`): `cols ⨯ rows` HUD (NSTextField overlay)
+      on live resize, positioned per config, auto-hiding after the duration (resize smoke)
+- [ ] `command-palette`, undo/redo (`undo-timeout`)
 
 ## Tabs
 

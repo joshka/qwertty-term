@@ -97,6 +97,10 @@
 //!   OSC 133 prompt state and assert `confirm-close-surface` needs confirmation
 //!   only when a process is running (or shell integration is absent), and that
 //!   the modal answer gates the close, then exit 0/1.
+//! - `QWERTTY_TERM_SMOKE_RESIZE=1` — run the resize-overlay smoke: with
+//!   `resize-overlay = always` configured, resize the window and assert the
+//!   `cols ⨯ rows` HUD shows the new grid and auto-clears after its duration,
+//!   then exit 0/1.
 
 fn main() {
     let mode = parse_mode(std::env::args().skip(1));
@@ -214,6 +218,8 @@ fn run_window() {
     let smoke_progress = std::env::var_os("QWERTTY_TERM_SMOKE_PROGRESS").is_some();
     // Confirm-close smoke: assert confirm-close-surface gating.
     let smoke_confirmclose = std::env::var_os("QWERTTY_TERM_SMOKE_CONFIRMCLOSE").is_some();
+    // Resize smoke: assert the resize-overlay HUD shows + clears.
+    let smoke_resize = std::env::var_os("QWERTTY_TERM_SMOKE_RESIZE").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -235,6 +241,7 @@ fn run_window() {
         smoke_notifycmd,
         smoke_progress,
         smoke_confirmclose,
+        smoke_resize,
     );
 }
 
