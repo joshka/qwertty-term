@@ -136,6 +136,14 @@ pub struct Config {
     /// `selection-foreground` (`Config.zig:620`).
     #[serde(rename = "selection-foreground")]
     pub selection_foreground: Option<String>,
+    /// Per-index palette color overrides, each `"N=<color>"` where `N` is a
+    /// palette index `0..=255` and `<color>` is `#RRGGBB`/`RRGGBB`/an X11 name.
+    /// A TOML-array spelling of upstream's repeatable `palette = N=color`
+    /// (`Config.zig:560`). Applied on top of the theme's palette; a running
+    /// program's OSC 4 still overrides at runtime. Bad entries are logged and
+    /// skipped. See [`Config::palette_overrides`].
+    #[serde(default)]
+    pub palette: Vec<String>,
     /// Which screen edge the quick-terminal dropdown animates from:
     /// `top`/`bottom`/`left`/`right`/`center` (upstream `quick-terminal-position`,
     /// `Config.zig:2624`, default `top`). Unknown values fall back to the
@@ -325,6 +333,7 @@ impl Default for Config {
             foreground: None,
             selection_background: None,
             selection_foreground: None,
+            palette: Vec::new(),
             quick_terminal_position: None,
             quick_terminal_size: None,
             quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
@@ -414,6 +423,27 @@ impl Config {
     /// The configured `selection-foreground`, or `None` when unset/invalid.
     pub fn selection_foreground(&self) -> Option<qwertty_term_vt::color::Rgb> {
         parse_color(self.selection_foreground.as_deref(), "selection-foreground")
+    }
+
+    /// The parsed `palette` overrides as `(index, color)` pairs. Each entry is
+    /// `"N=<color>"`; entries with a bad index (`0..=255`) or unparseable color
+    /// are logged and skipped (so one typo never breaks the palette).
+    pub fn palette_overrides(&self) -> Vec<(u8, qwertty_term_vt::color::Rgb)> {
+        self.palette
+            .iter()
+            .filter_map(|entry| {
+                let Some((idx, color)) = entry.split_once('=') else {
+                    eprintln!("ignoring invalid palette entry (want N=color): {entry:?}");
+                    return None;
+                };
+                let Ok(idx) = idx.trim().parse::<u8>() else {
+                    eprintln!("ignoring palette entry with bad index (0-255): {entry:?}");
+                    return None;
+                };
+                let rgb = parse_color(Some(color.trim()), "palette color")?;
+                Some((idx, rgb))
+            })
+            .collect()
     }
 
     /// Build the font-metric modifier set from the `adjust-*` keys, mapping each
@@ -708,6 +738,10 @@ const EXAMPLE_CONFIG: &str = r##"# qwertty-term config
 # foreground = "#e0e0e0"
 # selection-background = "#334455"
 # selection-foreground = "#ffffff"
+
+# Per-index palette overrides ("N=color" for index 0-255), applied on top of the
+# theme; the program's OSC 4 still wins at runtime.
+# palette = ["0=#1e1e2e", "1=#f38ba8"]
 
 # Copy the mouse selection to the clipboard as soon as the drag finishes.
 # copy-on-select = false
@@ -1518,6 +1552,23 @@ mod tests {
         assert_eq!(c.selection_background(), Some(Rgb::new(0x33, 0x44, 0x55)));
         // Garbage → None (skipped).
         assert_eq!(c.selection_foreground(), None);
+    }
+
+    #[test]
+    fn palette_overrides_parse_pairs_and_skip_garbage() {
+        use qwertty_term_vt::color::Rgb;
+        assert!(Config::default().palette_overrides().is_empty());
+
+        let c = parse(
+            "palette = [\"0=#1e1e2e\", \"1=red\", \"bad-entry\", \"999=#000000\", \"2=not-a-color\"]",
+        )
+        .unwrap();
+        // Only the two well-formed entries survive (bad separator, out-of-range
+        // index, and unparseable color are all skipped).
+        assert_eq!(
+            c.palette_overrides(),
+            vec![(0, Rgb::new(0x1e, 0x1e, 0x2e)), (1, Rgb::new(0xff, 0, 0))]
+        );
     }
 
     #[test]

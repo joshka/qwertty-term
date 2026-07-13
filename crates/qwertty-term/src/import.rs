@@ -151,6 +151,7 @@ pub fn convert(contents: &str) -> String {
         "# Imported from a Ghostty config by `qwertty-term +import-ghostty-config`.".to_string(),
     ];
     let mut keybinds: Vec<String> = Vec::new();
+    let mut palettes: Vec<String> = Vec::new();
     // Scalar settings, deduped last-wins while preserving first-seen order (a
     // repeated Ghostty scalar would otherwise emit a duplicate TOML key).
     let mut scalar_order: Vec<String> = Vec::new();
@@ -169,6 +170,10 @@ pub fn convert(contents: &str) -> String {
             // Repeatable keybind → a single TOML array (trigger/action grammar is
             // byte-identical between the two tools; only TOML quoting changes).
             "keybind" => keybinds.push(value),
+
+            // Repeatable `palette = N=color` → a single TOML array (same `N=color`
+            // entry syntax; only the array framing/quoting changes).
+            "palette" => palettes.push(value),
 
             // `copy-on-select` is a tri-state enum upstream (`false`/`true`/
             // `clipboard`); our field is a bool, so `clipboard`/`true` → true
@@ -215,6 +220,15 @@ pub fn convert(contents: &str) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         out.push(format!("keybind = [{array}]"));
+    }
+
+    if !palettes.is_empty() {
+        let array = palettes
+            .iter()
+            .map(|p| toml_string(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(format!("palette = [{array}]"));
     }
 
     if !comments.is_empty() {
@@ -331,6 +345,16 @@ keybind = shift+enter=text:\\x1b\\r
             toml.contains("# unsupported (not yet): background-blur = true"),
             "{toml}"
         );
+    }
+
+    #[test]
+    fn multiple_palette_entries_accumulate_into_one_array() {
+        let toml = convert("palette = 0=#1e1e2e\npalette = 1=#f38ba8\n");
+        assert!(
+            toml.contains(r##"palette = ["0=#1e1e2e", "1=#f38ba8"]"##),
+            "{toml}"
+        );
+        assert!(crate::config::parse(&toml).is_ok(), "{toml}");
     }
 
     #[test]
