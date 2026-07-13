@@ -2204,8 +2204,14 @@ impl Handler for TerminalHandler {
             self.write_pty(reply.as_bytes());
         }
     }
-    fn mouse_shape(&mut self, _value: &str) {
-        // Stored on flags in upstream; not interpreted by Terminal.
+    fn mouse_shape(&mut self, value: &str) {
+        // OSC 22: parse the shape name and store it. An unrecognized name is
+        // ignored (upstream logs and drops it). The apprt reads
+        // `terminal.mouse_shape` and applies the native cursor. Port of
+        // `stream_handler.setMouseShape`.
+        if let Some(shape) = crate::terminal::MouseShape::from_name(value) {
+            self.terminal.mouse_shape = shape;
+        }
     }
     fn clipboard(&mut self, kind: u8, data: &str) {
         // Port of `stream_terminal.Handler.clipboardContents`: a lone `?`
