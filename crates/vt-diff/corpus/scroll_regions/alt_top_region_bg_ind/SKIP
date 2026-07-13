@@ -1,1 +1,0 @@
-POST-PIN DIVERGENCE (upstream 77190bd02): top-anchored region scroll with SGR bg on a non-retaining screen; no phantom scrollback. Same root cause as alt_top_region_ind.

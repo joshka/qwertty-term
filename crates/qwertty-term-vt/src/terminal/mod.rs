@@ -747,12 +747,10 @@ impl Terminal {
     /// IND / LF: move to the next line in the scroll region, possibly scrolling.
     /// Port of `index`.
     ///
-    /// The scroll at the bottom margin routes to one of three paths: the
-    /// scrollback-creating `cursor_scroll_above` (top-anchored full-width region
-    /// on a scrollback-retaining screen), the `scroll_up` slow path (l/r margins
-    /// or an SGR background to preserve), or the in-place `erase_row_bounded`
-    /// region-scroll hot path (everything else, including top-anchored regions on
-    /// the non-retaining alt screen — see commit 77190bd02).
+    /// PROGRESS: the scrollback fast path (`cursorScrollAbove`) and the l/r-margin
+    /// slow path (`scrollUp` with bg fill) are NOT yet wired — see PROGRESS note
+    /// in `docs/analysis/terminal.md`. This implements the no-scroll moves and
+    /// the full-screen `erase_row_bounded` hot path.
     pub fn index(&mut self) {
         // Unset pending wrap.
         self.screen_mut().cursor.pending_wrap = false;
@@ -790,19 +788,10 @@ impl Terminal {
         let x = self.screen().cursor.x;
         // Inside the region and on the bottom-most line: scroll up.
         if y == bottom && x >= self.scrolling_region.left && x <= self.scrolling_region.right {
-            // Top-anchored, full-width region: create scrollback — but only if
-            // the screen retains scrollback. On a non-retaining screen (the alt
-            // screen) `cursor_scroll_above` would pay `PageList::grow` + amortized
-            // page pruning (a 512 KiB `memset` on recycle) to build rows that are
-            // never visible and immediately pruned; the in-place region scroll
-            // below is far cheaper. The one exception is a single-row region
-            // (`bottom == 0`), which the region-scroll path can't handle and
-            // which `cursor_scroll_above`/`cursor_down_scroll` special-cases.
-            // Port of upstream `index` (Terminal.zig, commit 77190bd02).
+            // Full-screen (no margins) scrollback path.
             if self.scrolling_region.top == 0
                 && self.scrolling_region.left == 0
                 && self.scrolling_region.right == self.cols - 1
-                && (!self.screen().no_scrollback || bottom == 0)
             {
                 // Port of the scrollback-creating scroll.
                 self.screen_mut().cursor_scroll_above();
@@ -810,21 +799,33 @@ impl Terminal {
                 return;
             }
 
-            // Slow path for left/right scrolling-region margins. Unlike the old
-            // `erase_row_bounded` region scroll, `cursor_scroll_region_up` below
-            // preserves the SGR background in the erased row, so an SGR bg no
-            // longer forces this (much slower) detour.
-            if self.scrolling_region.left != 0 || self.scrolling_region.right != self.cols - 1 {
+            // Slow path for left/right margins OR when we have an SGR bg to
+            // preserve in the erased rows (erase_row_bounded doesn't fill bg,
+            // scroll_up does — but scroll_up is much slower).
+            if self.scrolling_region.left != 0
+                || self.scrolling_region.right != self.cols - 1
+                || !self.screen().blank_cell().is_zero()
+            {
                 self.scroll_up(1);
                 apply_semantic(self);
                 return;
             }
 
-            // Otherwise use the specialized in-place region-scroll hot path. The
-            // cursor sits on the region bottom; it stays there on the new blank
-            // row. Port of upstream `index` (Terminal.zig, commit 77190bd02).
-            let limit = (bottom - self.scrolling_region.top) as usize;
-            self.screen_mut().cursor_scroll_region_up(limit);
+            // Otherwise use the fast PageList scroll of the region contents.
+            let region_top = self.scrolling_region.top;
+            self.screen_mut().pages.erase_row_bounded(
+                crate::point::Point::active(0, region_top as u32),
+                (bottom - region_top) as usize,
+            );
+            // erase_row_bounded moves the cursor pin up by 1; move it back.
+            self.screen_mut().cursor.y -= 1;
+            self.screen_mut().cursor_down(1);
+            if self.screen_mut().manual_style_update().is_err() {
+                self.screen_mut().cursor.style = Style::default();
+                self.screen_mut()
+                    .manual_style_update()
+                    .expect("default-style update cannot fail");
+            }
             apply_semantic(self);
             return;
         }
@@ -960,17 +961,10 @@ impl Terminal {
         let old_wrap = self.screen().cursor.pending_wrap;
 
         // If the region is at the top with no l/r margins, move scrolled-out
-        // text into scrollback via cursor_scroll_above — but only if the screen
-        // retains scrollback. On a non-retaining screen (the alt screen) that is
-        // pure overhead (`grow` + prune for never-visible rows), so we fall
-        // through to the in-place `delete_lines` path below. The exception is the
-        // full-screen region (`bottom == rows - 1`), where `cursor_scroll_above`
-        // → `cursor_down_scroll` has a specialized no-scrollback fast path.
-        // Port of upstream `scrollUp` (Terminal.zig, commit 77190bd02).
+        // text into scrollback via cursor_scroll_above.
         if self.scrolling_region.top == 0
             && self.scrolling_region.left == 0
             && self.scrolling_region.right == self.cols - 1
-            && (!self.screen().no_scrollback || self.scrolling_region.bottom == self.rows - 1)
         {
             let region_height = self.scrolling_region.bottom + 1;
             let adjusted_count = count.min(region_height as usize);

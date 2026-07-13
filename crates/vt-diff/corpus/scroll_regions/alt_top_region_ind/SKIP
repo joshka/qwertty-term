@@ -1,1 +1,0 @@
-POST-PIN DIVERGENCE (upstream 77190bd02): on a non-retaining screen a top-anchored region scroll no longer creates phantom scrollback. Oracle pinned at 2da015cd6 predates this and retains the scrolled-out rows; visible grid + cursor are byte-identical. Un-SKIP when the oracle is re-pinned past 77190bd02. See corpus.rs known-divergences.
