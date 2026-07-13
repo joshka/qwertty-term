@@ -19,6 +19,10 @@ name = "qwertty_term_renderer"
 
 [dependencies]
 qwertty-term-vt = { version = "0.1.0", path = "../qwertty-term-vt" }
+# URL/link detection (R7 links). Already in the workspace lockfile (transitive),
+# so this adds no new lock entry. Platform-agnostic (helps a future non-macOS
+# backend too).
+regex = "1"
 
 # Metal backend (chunk R1). All versions already present in the workspace
 # lockfile (transitively via eframe/winit), so these add no new lock entries.
