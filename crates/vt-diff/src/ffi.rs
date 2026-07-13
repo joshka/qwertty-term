@@ -28,6 +28,7 @@ pub const GHOSTTY_TERMINAL_DATA_CURSOR_Y: c_int = 4;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP: c_int = 5;
 pub const GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN: c_int = 6;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE: c_int = 7;
+pub const GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING: c_int = 11;
 pub const GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS: c_int = 15;
 
 /// `GhosttyTerminalScreen` (terminal.h) — value of `ACTIVE_SCREEN`.

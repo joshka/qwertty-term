@@ -313,6 +313,7 @@ impl Oracle for ReferenceTerminal {
             alt_screen: self.get_enum(ffi::GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)
                 == ffi::GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
             cursor_visible: self.get_bool(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE),
+            mouse_tracking: self.get_bool(ffi::GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING),
             scrollback_rows: self.get_scrollback_rows(),
         }
     }

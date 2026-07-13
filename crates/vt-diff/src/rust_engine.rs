@@ -116,6 +116,15 @@ impl Oracle for RustTerminal {
             pending_wrap: t.screen().cursor.pending_wrap,
             alt_screen: t.screens.active_key() == ScreenKey::Alternate,
             cursor_visible: t.modes.get(Mode::CursorVisible),
+            // Mirror ghostty MOUSE_TRACKING: it reports whether any of the mouse
+            // DEC private *mode flags* is set — NOT the derived `mouse_event`
+            // enum. The two can disagree: disabling one mode (e.g. `?1003l`)
+            // resets the `mouse_event` enum to none while a different mode's flag
+            // (e.g. X10) stays set, so tracking is still "on" by the flags.
+            mouse_tracking: t.modes.get(Mode::MouseEventX10)
+                || t.modes.get(Mode::MouseEventNormal)
+                || t.modes.get(Mode::MouseEventButton)
+                || t.modes.get(Mode::MouseEventAny),
             // "total rows minus the viewport" — mirror of ghostty SCROLLBACK_ROWS.
             scrollback_rows: pages.total_rows().saturating_sub(pages.rows() as usize),
         }

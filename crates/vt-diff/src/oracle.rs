@@ -19,6 +19,8 @@ pub struct TermState {
     pub alt_screen: bool,
     /// The cursor is visible (DECTCEM / mode 25).
     pub cursor_visible: bool,
+    /// Any mouse-tracking mode is active (X10 / normal / button / any-event).
+    pub mouse_tracking: bool,
     /// Number of scrollback rows (total rows minus the viewport).
     pub scrollback_rows: usize,
 }
