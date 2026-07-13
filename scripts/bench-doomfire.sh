@@ -55,6 +55,8 @@ LABEL=""
 SECS=15
 RUNS=3
 FONT_SIZE=8
+GHOSTTY_COLS=145
+GHOSTTY_ROWS=42
 KEEP_CAPTURES=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,6 +82,21 @@ while [[ $# -gt 0 ]]; do
         ;;
     --font-size)
         FONT_SIZE="$2"
+        shift 2
+        ;;
+    --ghostty-grid)
+        GHOSTTY_COLS="${2%x*}"
+        GHOSTTY_ROWS="${2#*x}"
+        shift 2
+        ;;
+    --app-path)
+        # ghostty only: point at an alternate Ghostty.app bundle (or its inner
+        # binary), e.g. a ReleaseLocal main build for the upstream-main column.
+        if [[ -d "$2" ]]; then
+            GHOSTTY_APP_BUNDLE="$2/Contents/MacOS/ghostty"
+        else
+            GHOSTTY_APP_BUNDLE="$2"
+        fi
         shift 2
         ;;
     --keep-captures)
@@ -211,12 +228,14 @@ for run in $(seq 1 "$RUNS"); do
             exit 1
         }
         # Window size flags are in grid cells; match the grid qwertty-term
-        # gets from its fixed 800x480pt window at this font size (check
-        # grid.txt from a qwertty-term run and adjust if comparing).
+        # gets from its fixed 800x480pt window at this font size (run a
+        # qwertty-term pass first, read its grid.txt, and pass --ghostty-grid
+        # COLSxROWS so both terminals paint the same number of cells — fps is
+        # steeply grid-dependent, so an unmatched grid invalidates the compare).
         run_with_timeout $((BUDGET_SECS + 15)) "$GHOSTTY_APP_BUNDLE" \
             --command="/bin/sh $RUNNER" \
             --font-size="$FONT_SIZE" \
-            --window-width=145 --window-height=42 \
+            --window-width="$GHOSTTY_COLS" --window-height="$GHOSTTY_ROWS" \
             --quit-after-last-window-closed=true \
             --confirm-close-surface=false \
             --window-save-state=never \
