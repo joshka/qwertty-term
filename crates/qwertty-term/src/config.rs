@@ -189,6 +189,12 @@ pub struct Config {
     /// [`Config::middle_click_action`].
     #[serde(rename = "middle-click-action")]
     pub middle_click_action: Option<String>,
+    /// Whether the terminal program may capture the shift modifier during mouse
+    /// reporting (`false`/`true`/`always`/`never`, default `false`) — upstream
+    /// `mouse-shift-capture` (`Config.zig:964`). Parsed by
+    /// [`Config::mouse_shift_capture`].
+    #[serde(rename = "mouse-shift-capture")]
+    pub mouse_shift_capture: Option<String>,
     /// Characters that mark word boundaries during double/triple-click word
     /// selection — each character in the string becomes a boundary (the null
     /// char U+0000 is always one). Unset uses the built-in default set (upstream
@@ -357,6 +363,7 @@ impl Default for Config {
             mouse_hide_while_typing: false,
             focus_follows_mouse: false,
             middle_click_action: None,
+            mouse_shift_capture: None,
             // Unset → the built-in word-boundary set; click interval → OS default.
             selection_word_chars: None,
             click_repeat_interval: 0,
@@ -618,6 +625,14 @@ impl Config {
             .then(|| std::time::Duration::from_millis(self.click_repeat_interval as u64))
     }
 
+    /// The parsed `mouse-shift-capture` policy (default `false`).
+    pub fn mouse_shift_capture(&self) -> MouseShiftCapture {
+        self.mouse_shift_capture
+            .as_deref()
+            .map(MouseShiftCapture::parse)
+            .unwrap_or_default()
+    }
+
     /// The parsed `right-click-action` (defaults to `context-menu`).
     pub fn right_click_action(&self) -> crate::context_menu::RightClickAction {
         self.right_click_action
@@ -752,6 +767,56 @@ impl MiddleClickAction {
         match s.trim().to_ascii_lowercase().as_str() {
             "ignore" => Self::Ignore,
             _ => Self::PrimaryPaste,
+        }
+    }
+}
+
+/// Whether the terminal program may "capture" the shift modifier while mouse
+/// reporting is active — i.e. whether shift is passed through to the program's
+/// mouse report rather than overriding reporting to let the user select text
+/// (`mouse-shift-capture`, upstream `MouseShiftCapture`, `Config.zig:964`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseShiftCapture {
+    /// Shift is not captured by default, but the program may request it via
+    /// XTSHIFTESCAPE (`CSI > 1 s`). Upstream default.
+    #[default]
+    False,
+    /// Shift is captured by default, but the program may release it via
+    /// XTSHIFTESCAPE (`CSI > 0 s`).
+    True,
+    /// Shift is always captured, ignoring any program request.
+    Always,
+    /// Shift is never captured, ignoring any program request (shift always
+    /// overrides reporting for selection).
+    Never,
+}
+
+impl MouseShiftCapture {
+    /// Parse the config value; unknown values fall back to `false`.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Self::True,
+            "always" => Self::Always,
+            "never" => Self::Never,
+            _ => Self::False,
+        }
+    }
+
+    /// Whether shift is captured by the program given this config and the
+    /// program's runtime XTSHIFTESCAPE request `flag`. Port of upstream
+    /// `Surface.mouseShiftCapture` (`Surface.zig:3712`): `never`/`always` ignore
+    /// the program; otherwise the program's explicit request wins, falling back
+    /// to the config default when it hasn't set one (`Null`).
+    pub fn captures(self, flag: qwertty_term_vt::terminal::MouseShiftCapture) -> bool {
+        use qwertty_term_vt::terminal::MouseShiftCapture as Flag;
+        match self {
+            Self::Never => false,
+            Self::Always => true,
+            Self::False | Self::True => match flag {
+                Flag::True => true,
+                Flag::False => false,
+                Flag::Null => self == Self::True,
+            },
         }
     }
 }
@@ -1426,6 +1491,39 @@ mod tests {
             unicode.selection_word_chars_codepoints(),
             Some(vec![0, '│' as u32])
         );
+    }
+
+    #[test]
+    fn parses_mouse_shift_capture_key() {
+        use crate::config::MouseShiftCapture;
+        use qwertty_term_vt::terminal::MouseShiftCapture as Flag;
+
+        assert_eq!(
+            parse("").unwrap().mouse_shift_capture(),
+            MouseShiftCapture::False
+        );
+        assert_eq!(
+            parse("mouse-shift-capture = \"always\"\n")
+                .unwrap()
+                .mouse_shift_capture(),
+            MouseShiftCapture::Always
+        );
+        assert_eq!(
+            parse("mouse-shift-capture = \"true\"\n")
+                .unwrap()
+                .mouse_shift_capture(),
+            MouseShiftCapture::True
+        );
+
+        // `captures()` combines the config with the program's XTSHIFTESCAPE flag.
+        // never/always ignore the program flag entirely.
+        assert!(!MouseShiftCapture::Never.captures(Flag::True));
+        assert!(MouseShiftCapture::Always.captures(Flag::False));
+        // false/true: the program's explicit request wins, else the config default.
+        assert!(MouseShiftCapture::False.captures(Flag::True));
+        assert!(!MouseShiftCapture::True.captures(Flag::False));
+        assert!(!MouseShiftCapture::False.captures(Flag::Null));
+        assert!(MouseShiftCapture::True.captures(Flag::Null));
     }
 
     #[test]

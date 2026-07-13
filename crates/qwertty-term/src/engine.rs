@@ -559,6 +559,14 @@ impl Engine {
         }
     }
 
+    /// The program's runtime XTSHIFTESCAPE shift-capture request
+    /// (`Null` unless it set `CSI > Ps s`). Combined with the
+    /// `mouse-shift-capture` config to decide whether shift overrides mouse
+    /// reporting for selection.
+    pub fn mouse_shift_capture(&self) -> qwertty_term_vt::terminal::MouseShiftCapture {
+        self.stream.handler.terminal.flags.mouse_shift_capture
+    }
+
     /// The terminal's requested mouse reporting mode (`None` if off).
     pub fn mouse_event(&self) -> MouseEvent {
         if self.mode(Mode::MouseEventAny) {
