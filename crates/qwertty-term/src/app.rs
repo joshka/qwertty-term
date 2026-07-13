@@ -1481,6 +1481,10 @@ pub struct ControllerState {
     right_click_action: crate::context_menu::RightClickAction,
     /// Whether to hide the mouse cursor while typing (`mouse-hide-while-typing`).
     mouse_hide_while_typing: bool,
+    /// Whether hovering a pane focuses it (`focus-follows-mouse`).
+    focus_follows_mouse: bool,
+    /// What a middle-click does (`middle-click-action`).
+    middle_click_action: crate::config::MiddleClickAction,
     /// Paste-protection settings (`clipboard-paste-protection` + `-bracketed-safe`).
     paste_protection: crate::paste::PasteProtection,
     /// Trim trailing whitespace from copied lines (`clipboard-trim-trailing-spaces`).
@@ -1622,6 +1626,8 @@ impl Controller {
             bell_features: config.bell_features(),
             right_click_action: config.right_click_action(),
             mouse_hide_while_typing: config.mouse_hide_while_typing,
+            focus_follows_mouse: config.focus_follows_mouse,
+            middle_click_action: config.middle_click_action(),
             paste_protection: config.paste_protection(),
             clipboard_trim_trailing_spaces: config.clipboard_trim_trailing_spaces,
             selection_clear_on_typing: config.selection_clear_on_typing,
@@ -3397,10 +3403,11 @@ impl Controller {
         crate::paste::is_unsafe(text, bracketed, state.paste_protection)
     }
 
-    /// Paste `text` into `surface` as if from the clipboard (smoke/test): runs
-    /// the full hardened paste path (protection + confirm hook) without going
-    /// through `NSPasteboard`.
-    pub fn paste_text_for_test(&self, tab: TabId, surface: SurfaceId, text: &str) {
+    /// Paste `text` into `surface` through the full hardened paste path
+    /// (bracketed detection + `clipboard-paste-protection` + confirm hook),
+    /// without going through `NSPasteboard`. Shared by the clipboard-smoke hook
+    /// and the middle-click primary paste.
+    fn paste_text(&self, tab: TabId, surface: SurfaceId, text: &str) {
         let bracketed = {
             let state = self.0.borrow();
             state
@@ -3416,6 +3423,29 @@ impl Controller {
             return;
         }
         self.write_paste(tab, surface, text, bracketed);
+    }
+
+    /// Paste `text` into `surface` as if from the clipboard (smoke/test).
+    pub fn paste_text_for_test(&self, tab: TabId, surface: SurfaceId, text: &str) {
+        self.paste_text(tab, surface, text);
+    }
+
+    /// Whether hovering a pane focuses it (`focus-follows-mouse`).
+    pub fn focus_follows_mouse(&self) -> bool {
+        self.0.borrow().focus_follows_mouse
+    }
+
+    /// Handle a middle-click on `surface` per `middle-click-action`:
+    /// `primary-paste` pastes the current selection into the pane (through the
+    /// hardened paste path); `ignore` does nothing.
+    pub fn middle_click(&self, tab: TabId, surface: SurfaceId) {
+        use crate::config::MiddleClickAction as MCA;
+        if self.0.borrow().middle_click_action != MCA::PrimaryPaste {
+            return;
+        }
+        if let Some(text) = self.surface_selection_string(tab, surface) {
+            self.paste_text(tab, surface, &text);
+        }
     }
 
     /// Select `n` cells on row 0 of `surface` (smoke/test), so tests can create
@@ -4906,6 +4936,9 @@ pub struct DelegateIvars {
     /// Resize smoke (`QWERTTY_TERM_SMOKE_RESIZE`): assert the resize overlay HUD.
     /// See [`AppDelegate::run_resize_smoke`].
     smoke_resize: bool,
+    /// Mouse-2 smoke (`QWERTTY_TERM_SMOKE_MOUSE2`): middle-click paste +
+    /// focus-follows-mouse. See [`AppDelegate::run_mouse2_smoke`].
+    smoke_mouse2: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -4983,6 +5016,7 @@ define_class!(
             let has_progress = self.ivars().smoke_progress;
             let has_confirmclose = self.ivars().smoke_confirmclose;
             let has_resize = self.ivars().smoke_resize;
+            let has_mouse2 = self.ivars().smoke_mouse2;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -5018,6 +5052,8 @@ define_class!(
                 self.schedule_confirmclose_smoke();
             } else if has_resize {
                 self.schedule_resize_smoke();
+            } else if has_mouse2 {
+                self.schedule_mouse2_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -5248,6 +5284,12 @@ define_class!(
         fn resize_smoke(&self, _timer: &AnyObject) {
             self.run_resize_smoke();
         }
+
+        /// Mouse-2 smoke: middle-click paste + focus-follows-mouse, exit 0/1.
+        #[unsafe(method(ghosttyMouse2Smoke:))]
+        fn mouse2_smoke(&self, _timer: &AnyObject) {
+            self.run_mouse2_smoke();
+        }
     }
 );
 
@@ -5277,6 +5319,7 @@ impl AppDelegate {
         smoke_progress: bool,
         smoke_confirmclose: bool,
         smoke_resize: bool,
+        smoke_mouse2: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -5303,6 +5346,7 @@ impl AppDelegate {
             smoke_progress,
             smoke_confirmclose,
             smoke_resize,
+            smoke_mouse2,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -7840,6 +7884,77 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    fn schedule_mouse2_smoke(&self) {
+        self.schedule_selector(0.7, sel!(ghosttyMouse2Smoke:));
+    }
+
+    /// Mouse slice-2 smoke: middle-click primary-paste + focus-follows-mouse.
+    /// The harness configures `focus-follows-mouse = true` and uses a `cat`
+    /// child so a paste echoes deterministically. Exits 0/1.
+    fn run_mouse2_smoke(&self) {
+        use crate::context_menu::ContextAction;
+        let controller = &self.ivars().controller;
+        let fail = mouse2_fail;
+
+        let Some(tab) = controller.active_tab() else {
+            fail("no active tab at mouse2 smoke start".into());
+        };
+        let Some(surface) = controller.active_focused_surface() else {
+            fail("no focused surface at mouse2 smoke start".into());
+        };
+
+        // 1. middle-click primary-paste: show a marker on screen, select it,
+        //    then middle-click — which pastes the selection to the pty, so the
+        //    `cat` child echoes it and the marker appears a second time. Let the
+        //    login banner settle, then clear + home so the marker is at row 0
+        //    (where `smoke_select_row0` selects).
+        Self::spin(0.3);
+        controller.feed_surface_output(tab, surface, b"\x1b[2J\x1b[HMARK123456");
+        Self::spin(0.2);
+        controller.smoke_select_row0(tab, surface, 10);
+        if !controller.surface_has_selection(tab, surface) {
+            fail("failed to create a selection for the primary-paste check".into());
+        }
+        controller.middle_click(tab, surface);
+        Self::spin(0.6);
+        let screen = controller
+            .surface_screen_text(tab, surface)
+            .unwrap_or_default();
+        if screen.matches("MARK123456").count() < 2 {
+            fail(format!(
+                "middle-click did not primary-paste the selection (marker should appear \
+                 twice).\n--- screen ---\n{screen}"
+            ));
+        }
+
+        // 2. focus-follows-mouse: split right (the new pane takes focus), then
+        //    simulate the mouse entering the original pane — with the config on,
+        //    that focuses it (exactly what the view's `mouseEntered:` does).
+        if !controller.focus_follows_mouse() {
+            fail("focus-follows-mouse should be enabled by the smoke config".into());
+        }
+        let original = surface;
+        controller.context_menu_action(tab, original, ContextAction::SplitRight);
+        Self::spin(0.4);
+        let new_pane = controller.active_focused_surface();
+        if new_pane == Some(original) || new_pane.is_none() {
+            fail("Split Right did not create + focus a new pane".into());
+        }
+        // The mouseEntered handler is `if focus_follows_mouse() { focus(..) }`.
+        if controller.focus_follows_mouse() {
+            controller.focus_surface_in_tab(tab, original);
+        }
+        if controller.active_focused_surface() != Some(original) {
+            fail("entering the original pane with focus-follows-mouse did not focus it".into());
+        }
+
+        println!(
+            "OK: mouse2 smoke — middle-click primary-pasted the selection, and \
+             focus-follows-mouse focused the hovered pane."
+        );
+        std::process::exit(0);
+    }
+
     /// Pump the run loop for `secs` so scheduled io + pace ticks make progress
     /// (the smoke drives assertions synchronously between focus switches, but the
     /// pty round-trip + render happen on the run loop). Runs the default run loop
@@ -8095,6 +8210,12 @@ fn resize_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a mouse-2 smoke failure and exit non-zero.
+fn mouse2_fail(msg: String) -> ! {
+    eprintln!("FAIL: mouse2 smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -8213,6 +8334,7 @@ pub fn run(
     smoke_progress: bool,
     smoke_confirmclose: bool,
     smoke_resize: bool,
+    smoke_mouse2: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -8242,6 +8364,7 @@ pub fn run(
         smoke_progress,
         smoke_confirmclose,
         smoke_resize,
+        smoke_mouse2,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

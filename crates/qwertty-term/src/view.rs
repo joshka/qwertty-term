@@ -21,7 +21,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSTextInputClient, NSView,
+    NSCursor, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSTextInputClient, NSTrackingArea,
+    NSTrackingAreaOptions, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSPoint, NSRange, NSRangePointer, NSRect,
@@ -161,6 +162,54 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             self.route_mouse(event, MouseKind::Up, Some(MouseBtn::Left));
+        }
+
+        /// Middle-click (and other extra buttons). Button 2 is the middle
+        /// button: when the program is capturing the mouse, report it;
+        /// otherwise run `middle-click-action` (primary-paste). Other extra
+        /// buttons only matter for mouse reporting.
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            if reporting {
+                self.route_mouse(event, MouseKind::Down, Some(MouseBtn::Middle));
+                return;
+            }
+            // Middle button only (buttonNumber 2); ignore 4th/5th buttons here.
+            if event.buttonNumber() == 2 {
+                self.with_controller(|c| {
+                    c.focus_surface_in_tab(tab, surface);
+                    c.middle_click(tab, surface);
+                });
+            }
+        }
+
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            if reporting {
+                self.route_mouse(event, MouseKind::Up, Some(MouseBtn::Middle));
+            }
+        }
+
+        /// The mouse entered this pane's view. With `focus-follows-mouse`, focus
+        /// this pane (in the key window only — the tracking area is
+        /// `activeInKeyWindow`). A no-op if it's already focused.
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let follows = self
+                .with_controller(|c| c.focus_follows_mouse())
+                .unwrap_or(false);
+            if follows {
+                self.with_controller(|c| c.focus_surface_in_tab(tab, surface));
+            }
         }
 
         #[unsafe(method(rightMouseDown:))]
@@ -374,6 +423,24 @@ impl TerminalView {
         this.setWantsLayer(true);
         let calayer: &CALayer = this.ivars().layer.as_layer();
         this.setLayer(Some(calayer));
+
+        // Tracking area for `focus-follows-mouse` (delivers `mouseEntered:`).
+        // `InVisibleRect` auto-tracks the view's bounds, so no
+        // `updateTrackingAreas` bookkeeping; `ActiveInKeyWindow` limits it to the
+        // focused window.
+        let options = NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::ActiveInKeyWindow
+            | NSTrackingAreaOptions::InVisibleRect;
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                mtm.alloc(),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+                options,
+                Some(&this),
+                None,
+            )
+        };
+        this.addTrackingArea(&tracking);
         this
     }
 
@@ -659,6 +726,7 @@ enum MouseKind {
 enum MouseBtn {
     Left,
     Right,
+    Middle,
 }
 
 impl MouseBtn {
@@ -667,6 +735,7 @@ impl MouseBtn {
         match self {
             MouseBtn::Left => Button::Left,
             MouseBtn::Right => Button::Right,
+            MouseBtn::Middle => Button::Middle,
         }
     }
 }

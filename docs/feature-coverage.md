@@ -182,8 +182,9 @@ items are `[ ]` wholesale unless noted.
 - [x] `context-menu` (right-click menu): Copy (on selection)/Paste/Split ×4/Close,
       per-pane; `right-click-action` (context-menu/paste/copy/copy-or-paste/ignore)
 - [x] `mouse-hide-while-typing` (hide on keystroke, reveal on move)
-- [ ] `focus-follows-mouse` (needs tracking areas), `cursor-click-to-move` (OSC133 zone)
-- [ ] `middle-click-action`, `mouse-shift-capture` config
+- [x] `focus-follows-mouse` (per-pane NSTrackingArea → `mouseEntered:` focuses the pane)
+- [x] `middle-click-action` (`primary-paste` pastes the selection / `ignore`) — mouse2 smoke
+- [ ] `cursor-click-to-move` (OSC133 zone), `mouse-shift-capture` config
 
 ## Clipboard & selection
 
