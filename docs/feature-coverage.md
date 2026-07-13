@@ -182,8 +182,9 @@ items are `[ ]` wholesale unless noted.
       the tab/split/search chords (b2) now resolve through one unified `Set`
       (`default_set()` + user config) at the `keyDown:`/`performKeyEquivalent:` seam.
       macOS split/search/tab chords are now upstream's exact defaults. Scroll, font-size,
-      and clipboard action categories are now dispatched too. Remaining: window/misc
-      action categories + `performable` menu fallthrough.
+      clipboard, and window/tab-lifecycle (`new_window`/`new_tab`/`close_surface`/
+      `close_tab`/`toggle_quick_terminal`) action categories are now dispatched too.
+      Remaining: misc actions needing new behavior + `performable` menu fallthrough.
 - [~] `Binding.zig` runtime: **leader-key sequences** (`ctrl+a>c`) **and `chain=`
       multi-action bindings dispatched** (`handle_key_sequence` + `resolve_actions`
       over the `Set`'s `Leader`/`Leaf`/`LeafChained` storage). Remaining: sequence

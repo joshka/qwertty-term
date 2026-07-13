@@ -2264,6 +2264,19 @@ impl Controller {
         }
     }
 
+    /// Close the focused pane of `tab`, gated by `confirm-close-surface` when a
+    /// process is running. The cmd+w / `close_surface` behavior: the last pane's
+    /// collapse closes the tab (today's model for single-pane tabs). Shared by
+    /// the Close-Tab menu item and the `close_surface`/`close_tab` keybinds.
+    fn close_focused_confirmed(&self, tab: TabId) {
+        let focused = self.0.borrow().tabs.get(&tab).map(|t| t.tree.focused());
+        if let Some(surface) = focused
+            && self.confirm_close_surface(tab, surface)
+        {
+            self.close_surface(tab, surface);
+        }
+    }
+
     /// Move the focused pane's scrollback viewport per a keybind scroll action
     /// (`scroll_page_up`/`scroll_to_bottom`/…).
     fn scroll_focused_surface(&self, tab: TabId, to: crate::scroll::ScrollTo) {
@@ -2754,7 +2767,7 @@ impl Controller {
         use crate::searchkeys::SearchAction;
         use qwertty_term_input::binding::Action as A;
         use qwertty_term_input::binding::action::{
-            NavigateSearch, SplitDirection, SplitFocusDirection, SplitResizeDirection,
+            CloseTabMode, NavigateSearch, SplitDirection, SplitFocusDirection, SplitResizeDirection,
         };
 
         let split_dir = |d: SplitDirection| match d {
@@ -2894,6 +2907,27 @@ impl Controller {
             }
             A::ResetFontSize => {
                 self.font_size_active(FontStep::Reset);
+                true
+            }
+
+            // Window / tab lifecycle. Route to the same handlers the menu items
+            // use. `CloseSurface` and `CloseTab(this)` both close the focused
+            // pane (the last pane's collapse closes the tab — today's model);
+            // `CloseTab(other/right)` isn't supported yet and falls through.
+            A::NewWindow => {
+                self.new_window();
+                true
+            }
+            A::NewTab => {
+                self.new_tab_in(tab);
+                true
+            }
+            A::CloseSurface | A::CloseTab(CloseTabMode::This) => {
+                self.close_focused_confirmed(tab);
+                true
+            }
+            A::ToggleQuickTerminal => {
+                self.toggle_quick_terminal();
                 true
             }
 
@@ -3413,16 +3447,8 @@ impl Controller {
                 }
             }
             MenuAction::CloseTab => {
-                // cmd+w closes the *focused pane*; the last pane collapse closes
-                // the tab (today's behaviour, preserved for single-pane tabs).
-                // Gated by `confirm-close-surface` when a process is running.
                 if let Some(active) = self.active_tab() {
-                    let focused = self.0.borrow().tabs.get(&active).map(|t| t.tree.focused());
-                    if let Some(surface) = focused
-                        && self.confirm_close_surface(active, surface)
-                    {
-                        self.close_surface(active, surface);
-                    }
+                    self.close_focused_confirmed(active);
                 }
             }
             MenuAction::Copy => self.copy_selection_from_active(),
