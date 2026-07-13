@@ -98,8 +98,17 @@ impl PageListSearch {
             let added = self.window.append(node);
             rem = rem.saturating_sub(added);
 
-            // Move our tracked pin to the new node.
-            unsafe { (*self.pin).node = node };
+            // Move our tracked pin to the new node, resetting both coordinates
+            // to that node's actual bottom-right cell. A preceding history page
+            // may have fewer rows/cols (e.g. after a split), so retaining the
+            // old coordinates would leave the pin outside the new page and trip
+            // the next PageList integrity check. Port of upstream 5d8eb78b7.
+            unsafe {
+                let size = (*node).data.size;
+                (*self.pin).node = node;
+                (*self.pin).y = size.rows - 1;
+                (*self.pin).x = size.cols - 1;
+            }
 
             if rem == 0 {
                 break;
