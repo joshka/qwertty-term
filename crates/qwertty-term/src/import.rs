@@ -82,6 +82,7 @@ const SUPPORTED: &[(&str, Kind)] = &[
     ("resize-overlay", Kind::Str),
     ("resize-overlay-position", Kind::Str),
     // Window / lifecycle
+    ("title", Kind::Str),
     ("quit-after-last-window-closed", Kind::Bool),
     ("window-width", Kind::Num),
     ("window-height", Kind::Num),

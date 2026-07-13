@@ -1381,30 +1381,16 @@ impl Tab {
     /// name holds the spot (a macOS window needs *some* title before first
     /// draw). `setTitle` is only called when the computed title actually
     /// changes (see [`Tab::last_title`]).
-    fn update_window_title(&self, password: bool) {
-        let base = self
-            .focused_surface()
-            .and_then(|s| s.engine().title())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| {
-                if self.created.elapsed() >= std::time::Duration::from_millis(500) {
-                    "👻".to_string()
-                } else {
-                    "qwertty-term".to_string()
-                }
-            });
-        // Bell indicator prefix (upstream `bell-features = title`); cleared
-        // when the tab is next focused. Password lock is a suffix as before.
-        let base = if self.bell_ringing.get() {
-            format!("🔔 {base}")
-        } else {
-            base
-        };
-        let title = if password {
-            format!("{base} 🔒")
-        } else {
-            base
-        };
+    fn update_window_title(&self, password: bool, forced: Option<&str>) {
+        let osc_title = self.focused_surface().and_then(|s| s.engine().title());
+        let grace_elapsed = self.created.elapsed() >= std::time::Duration::from_millis(500);
+        let title = compose_window_title(
+            forced,
+            osc_title.as_deref(),
+            grace_elapsed,
+            self.bell_ringing.get(),
+            password,
+        );
         if *self.last_title.borrow() == title {
             return;
         }
@@ -1432,6 +1418,9 @@ pub struct ControllerState {
     /// The user's `adjust-*` font-metric nudges, applied to every surface's font
     /// grid at build time (`config.metric_modifiers()`).
     metric_modifiers: qwertty_term_font::metrics::ModifierSet,
+    /// A fixed window/tab title override (`title`); when `Some`, it wins over the
+    /// program's OSC 0/2 title for every tab (see [`compose_window_title`]).
+    forced_title: Option<String>,
     mtm: MainThreadMarker,
     /// The engine startup colors resolved from `config.theme` (palette +
     /// default fg/bg/cursor), applied to every new tab's engine. Falls back
@@ -1588,6 +1577,38 @@ pub struct Controller(Rc<RefCell<ControllerState>>);
 /// [`Controller::reload_config`] so both derive colors identically. Mirrors the
 /// reference spike's `WindowTerminal::new` theme lookup
 /// (`crates/spike/src/window/mod.rs`).
+/// Compose the window/tab title string. A configured `title` (`forced`)
+/// overrides the program-set `osc_title` entirely (upstream `title` semantics:
+/// OSC 0/2 changes are ignored while it is set). With neither, the ghost-emoji
+/// fallback holds the spot once the 500ms startup grace has elapsed, else the
+/// app name. The bell prefix (`bell-features = title`) and password-lock suffix
+/// are applied on top of whichever base was chosen.
+fn compose_window_title(
+    forced: Option<&str>,
+    osc_title: Option<&str>,
+    grace_elapsed: bool,
+    bell: bool,
+    password: bool,
+) -> String {
+    let base = forced
+        .or(osc_title)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if grace_elapsed {
+                "👻".to_string()
+            } else {
+                "qwertty-term".to_string()
+            }
+        });
+    let base = if bell { format!("🔔 {base}") } else { base };
+    if password {
+        format!("{base} 🔒")
+    } else {
+        base
+    }
+}
+
 fn resolve_colors(
     config: &crate::config::Config,
 ) -> (qwertty_term_vt::terminal::Colors, SelectionColors) {
@@ -1633,6 +1654,7 @@ impl Controller {
             font_family: config.font_family.clone(),
             default_font_size,
             metric_modifiers: config.metric_modifiers(),
+            forced_title: config.forced_title().map(str::to_owned),
             mtm,
             startup_colors,
             selection_colors,
@@ -2822,6 +2844,8 @@ impl Controller {
         // panes needs the font-reload path — still a restart today.)
         let metric_modifiers = config.metric_modifiers();
         state.metric_modifiers = metric_modifiers.clone();
+        // The forced-title override re-applies to every tab on the next tick.
+        state.forced_title = config.forced_title().map(str::to_owned);
         for tab in state.tabs.values_mut() {
             for surface in tab.surfaces.values_mut() {
                 surface.selection_colors = selection_colors;
@@ -3866,6 +3890,9 @@ impl Controller {
             // exit_code, elapsed, focused)`.
             let mut command_finishes: Vec<(TabId, Option<i32>, std::time::Duration, bool)> =
                 Vec::new();
+            // The forced-title override (config `title`); cloned out before the
+            // per-tab loop so it doesn't alias the `state.tabs` mutable borrow.
+            let forced_title = state.forced_title.clone();
             for (tid, tab) in state.tabs.iter_mut() {
                 let focused = tab.tree.focused();
                 // Whether this tab has more than one pane — the gate for
@@ -3935,7 +3962,7 @@ impl Controller {
                         password_focused = active;
                     }
                 }
-                tab.update_window_title(password_focused);
+                tab.update_window_title(password_focused, forced_title.as_deref());
                 // Expire the resize overlay once its lifetime elapses.
                 tab.tick_resize_overlay(now_tick);
             }
@@ -8504,6 +8531,38 @@ mod tests {
         // Application mode (DECCKM on): SS3 A / SS3 B.
         assert_eq!(arrow_key_bytes(true, true), b"\x1bOA");
         assert_eq!(arrow_key_bytes(false, true), b"\x1bOB");
+    }
+
+    #[test]
+    fn compose_window_title_forces_over_osc_and_applies_decorations() {
+        use super::compose_window_title;
+
+        // A configured `title` wins over the program's OSC title.
+        assert_eq!(
+            compose_window_title(Some("Build"), Some("vim"), true, false, false),
+            "Build"
+        );
+        // Without a forced title, the OSC title is used.
+        assert_eq!(
+            compose_window_title(None, Some("vim"), true, false, false),
+            "vim"
+        );
+        // Neither, after the grace → ghost; before the grace → app name.
+        assert_eq!(compose_window_title(None, None, true, false, false), "👻");
+        assert_eq!(
+            compose_window_title(None, None, false, false, false),
+            "qwertty-term"
+        );
+        // Bell prefix + password suffix decorate the chosen base (even a forced one).
+        assert_eq!(
+            compose_window_title(Some("Build"), None, true, true, true),
+            "🔔 Build 🔒"
+        );
+        // An empty OSC title is ignored (falls through to the fallback).
+        assert_eq!(
+            compose_window_title(None, Some(""), true, false, false),
+            "👻"
+        );
     }
 
     /// `cursor-color` seeds the engine's startup cursor color, overriding the
