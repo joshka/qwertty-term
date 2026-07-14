@@ -73,7 +73,10 @@ items are `[ ]` wholesale unless noted.
       storage-limit texture reclaim, live-app rendering (kitty data through `SnapshotWindow`),
       and z-order buckets (below-bg / below-text / above-text); offscreen readback +
       dirty-equality-proven. Follow-up perf note in #19: `Image.data`→`Arc` for copy-free)
-- [ ] Link detection/underline overlay (R7), `link-url`, `link-previews`
+- [x] Link detection + hover underline + cmd-click open (R7 COMPLETE, T2): OSC8 hyperlinks
+      **and** regex-detected URLs underline on hover; cmd(super)+click opens via `open`
+      (#181/#184/#189 OSC8, #194/#210 regex, #220 click). Deferred: `link-url` config key
+      (T3 wiring) + `link-previews` (hover-preview popups) — separate features, not started
 - [ ] `resize-overlay`, OpenGL backend (R9, Linux)
 
 ## Colors & theming
@@ -94,7 +97,9 @@ items are `[ ]` wholesale unless noted.
 - [x] Styles: block, bar, underline (+ `cursor-style`), hollow when unfocused
 - [x] Bar-at-prompt via shell integration (DECSCUSR)
 - [x] Hidden when scrolled into history
-- [~] `cursor-style-blink` (style set; blink timer not implemented)
+- [~] `cursor-style-blink` (style set; blink *mode* DEC 12 now threads through
+      `SnapshotCursor.blinking` + gates via `FrameOptions.cursor_blink_visible` (#57, T2);
+      blink *timer* animation still not implemented)
 - [x] `cursor-color` config override (seeds startup `Colors.cursor`, live on reload; imports)
 - [ ] `cursor-click-to-move`, `cursor-opacity`
 
