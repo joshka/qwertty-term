@@ -9,6 +9,13 @@
 # Single hand-maintained changelog at the repo root (not per-crate files).
 changelog_path = "./CHANGELOG.md"
 
+# CHANGELOG.md is hand-curated — do NOT let release-plz generate or overwrite it.
+# release-plz's auto-generated sections were terse and noisy (an `### Other`
+# dumping ground, duplicate headings, wrong compare URLs), so ownership of the
+# changelog is human. Release PRs still bump versions and tag; they just leave
+# CHANGELOG.md untouched. Add a new section by hand before cutting a release.
+changelog_update = false
+
 # Only release when a release PR merges (not on every push to main).
 release_always = false
 
@@ -19,6 +26,6 @@ release_always = false
 # `qwertty-term` crate is auto-skipped (no library).
 
 # NOTE: ratatui's sibling setup drives the changelog via a `changelog_config =
-# "cliff.toml"` (git-cliff). Not adopted here yet to avoid reformatting the
-# hand-curated CHANGELOG in the same change — a good follow-up for full
-# consistency with the other repos.
+# "cliff.toml"` (git-cliff). Not adopted here: with `changelog_update = false`
+# the changelog is fully hand-maintained, which we prefer for readable,
+# release-note-quality entries over generated commit dumps.
