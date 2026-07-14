@@ -73,6 +73,27 @@ specific ask, not the blocked one. A red shared CI check blocks everyone — who
 failing crate fixes it first, P0. Cross-thread asks travel as **Inbox** lines in the
 target's status file (append-only; the owner triages into their backlog).
 
+## Autonomy (default posture)
+
+Drive your backlog to done **without waiting for per-item direction** — default to action;
+one "go" means "run the loop until you drain, not until the next item."
+
+- **Decide for yourself:** implementation approach, which item is next, how to slice a PR,
+  verifying upstream defaults, resolving your own rebases/divergence. Just ship them.
+- **Never idle.** Finished an item → immediately take the next unblocked one. Blocked on a
+  sibling → route it (Inbox line / tracking issue) and take a *different* unblocked item.
+  Never sit and wait for a dependency or for another "go."
+- **Escalate only genuine decisions**, and when you do, leave a note and keep moving:
+  a product/scope call that's Josh's; a deviation from upstream semantics (write a PROPOSED
+  ADR, continue elsewhere); an irreversible/outward-facing action beyond merging your own
+  gate-green PRs — publishing, filing issues, deleting, cross-territory edits (route it).
+- **Recycle yourself when context gets long** (near compaction / many turns): write a clean
+  closeout in your status file and note "respawn to continue." A fresh session resumes from
+  status + spec in a few KB — far cheaper than dragging a long transcript. Length, not
+  count, is the token cost; keep threads scoped and recycle rather than running forever.
+- **Stop only when** your backlog is genuinely drained (proper closeout) **or** everything
+  remaining is a real Josh-decision (flag them, stop). Otherwise: keep going.
+
 ## Shared invariants (every thread, non-negotiable)
 
 ### jj discipline — working-copy safety in parallel workspaces (hard-won)
