@@ -1372,6 +1372,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontconfig"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d0e1eb4148faaf675053b7299bc5b4c041c8c0c724cf77844d6be8dd0ac5b9d"
+dependencies = [
+ "yeslogic-fontconfig-sys",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2951,6 +2960,7 @@ dependencies = [
 name = "qwertty-term-font"
 version = "0.3.0"
 dependencies = [
+ "fontconfig",
  "freetype-rs",
  "objc2 0.6.4",
  "objc2-core-foundation",
@@ -4897,6 +4907,17 @@ version = "0.1.0"
 dependencies = [
  "png 0.17.16",
  "ucd-parse",
+]
+
+[[package]]
+name = "yeslogic-fontconfig-sys"
+version = "6.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d8b8abf912b9a29ff112e1671c97c33636903d13a69712037190e6805af4f76"
+dependencies = [
+ "dlib",
+ "once_cell",
+ "pkg-config",
 ]
 
 [[package]]
