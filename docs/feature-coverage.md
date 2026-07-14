@@ -58,10 +58,12 @@ items are `[ ]` wholesale unless noted.
 - [ ] `font-codepoint-map`, `font-style*` name overrides, `grapheme-width-method` config
 - [~] FreeType **face** backend (Linux) shipped — load/shape/rasterize/metrics/synthetic
       bold+italic + query parity, cfg-selected `Face` alias (ADR 003 P2). fontconfig
-      **discovery** module landed (`fontconfig` feature, dlopen): `Descriptor`→`FcPattern`,
-      `FcFontSort`-ranked `discover`/`discover_fallback`/`discover_family_style`, `FcDeferredFace`
-      (verified against real system fonts). Wiring into `collection`/`resolver` + `force-autohint`,
-      `freetype-load-flags` deferred to follow-up slices
+      **discovery wired** (`fontconfig` feature, dlopen; enabled on Linux via the renderer):
+      `Descriptor`→`FcPattern`, `FcFontSort`-ranked `discover`/`discover_fallback`/
+      `discover_family_style`, `FcDeferredFace`, now consumed by `collection` (styled-family
+      members) and `resolver` (codepoint fallback, presentation-aware) — so installed system
+      fonts resolve on Linux, not just the embedded + synthetic chain. Verified end-to-end against
+      real system fonts. `force-autohint`/`freetype-load-flags` + real wght-variation bold deferred
 
 ## Rendering (`src/renderer`, ~60%)
 
@@ -320,7 +322,10 @@ items are `[ ]` wholesale unless noted.
 - [x] Headless CPU render backend + FreeType font stack (ADR 003 P1/P2) — `Engine<Software>`
       renders terminal frames on Linux with no GPU / no CoreText (see Embeddability). Windowed
       GTK app (P4: apprt/OpenGL) is deferred behind ADR 003.
-- [ ] GTK apprt, Wayland/X11, all `gtk-*` (~10 keys), `linux-cgroup*`, fontconfig discovery
+- [~] **fontconfig discovery** wired (ADR 003 P2): styled-family members + codepoint fallback
+      resolve from installed system fonts via fontconfig (dlopen), enabled on Linux through the
+      renderer. `force-autohint`/`freetype-load-flags` FreeType flags still deferred.
+- [ ] GTK apprt, Wayland/X11, all `gtk-*` (~10 keys), `linux-cgroup*`
 
 ## Embeddability / library (a qwertty-term goal beyond Ghostty)
 

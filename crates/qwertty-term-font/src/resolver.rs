@@ -14,8 +14,13 @@
 //! and fallback size-adjustment (`ic_width` rescale).
 
 use crate::collection::{Collection, FontIndex, Style};
+#[cfg(any(
+    all(target_os = "macos", not(feature = "freetype")),
+    feature = "fontconfig"
+))]
+use crate::descriptor::Descriptor;
 #[cfg(all(target_os = "macos", not(feature = "freetype")))]
-use crate::discovery::{self, Descriptor};
+use crate::discovery;
 use crate::presentation::{Presentation, PresentationMode};
 
 /// Resolves codepoints to a [`FontIndex`] against a [`Collection`], the sprite
@@ -29,10 +34,14 @@ pub struct CodepointResolver {
     /// behaves like the F5-reduced cut (sprite + primary, else notdef).
     discover: bool,
     /// The pixel size at which discovered fallback faces are loaded (the render
-    /// size the collection was built for). Only read by the macOS discovery
-    /// path; set on every platform for API uniformity.
+    /// size the collection was built for). Read by the CoreText and fontconfig
+    /// discovery paths; set on every platform for API uniformity (dead only when
+    /// neither discovery backend is compiled in).
     #[cfg_attr(
-        not(all(target_os = "macos", not(feature = "freetype"))),
+        not(any(
+            all(target_os = "macos", not(feature = "freetype")),
+            feature = "fontconfig"
+        )),
         allow(dead_code)
     )]
     size_px: f64,
@@ -207,10 +216,21 @@ impl CodepointResolver {
     /// fallback face, and return its index. Infallible (a discovery/load error
     /// is swallowed and yields `None`).
     ///
-    /// macOS only (CoreText discovery). On other platforms there is no system
-    /// font discovery yet, so resolution stops at the collection's own faces
-    /// (embedded + synthetic); the non-macOS stub below returns `None`.
-    #[cfg(all(target_os = "macos", not(feature = "freetype")))]
+    /// Backed by CoreText discovery on macOS and fontconfig discovery on Linux
+    /// (any `fontconfig`-feature build). Without a discovery backend compiled in,
+    /// resolution stops at the collection's own faces (embedded + synthetic) and
+    /// the stub below returns `None`.
+    ///
+    /// The two backends differ only in how the candidate list is obtained (the
+    /// CoreText path seeds `CTFontCreateForString` from the primary face;
+    /// fontconfig needs no such seed); the presentation-filter + load + add loop
+    /// is identical, since [`crate::deferred::DeferredFace`] and
+    /// [`crate::fontconfig::FcDeferredFace`] expose the same `has_codepoint` /
+    /// `load` surface.
+    #[cfg(any(
+        all(target_os = "macos", not(feature = "freetype")),
+        feature = "fontconfig"
+    ))]
     fn discover_fallback(
         &mut self,
         cp: u32,
@@ -226,8 +246,13 @@ impl CodepointResolver {
             ..Default::default()
         };
 
-        // Discovery uses the primary as the base for CTFontCreateForString.
+        // CoreText discovery uses the primary as the base for
+        // `CTFontCreateForString`; fontconfig encodes the codepoint as a charset
+        // in the pattern and needs no base face.
+        #[cfg(all(target_os = "macos", not(feature = "freetype")))]
         let candidates = discovery::discover_fallback(self.collection.primary(), &desc);
+        #[cfg(feature = "fontconfig")]
+        let candidates = crate::fontconfig::discover_fallback(&desc);
 
         for candidate in candidates {
             // Discovery can't filter by presentation, so verify it here (the
@@ -245,8 +270,11 @@ impl CodepointResolver {
         None
     }
 
-    /// Non-macOS: no system font discovery yet, so step 6 finds nothing.
-    #[cfg(not(all(target_os = "macos", not(feature = "freetype"))))]
+    /// No discovery backend compiled in: step 6 finds nothing.
+    #[cfg(not(any(
+        all(target_os = "macos", not(feature = "freetype")),
+        feature = "fontconfig"
+    )))]
     fn discover_fallback(
         &mut self,
         _cp: u32,
@@ -443,5 +471,86 @@ mod tests {
             face.glyph_index('水').is_some(),
             "resolved face must have 水"
         );
+    }
+}
+
+/// Fontconfig-backed discovery-fallback tests (the Linux font stack). These run
+/// under `--features fontconfig` and exercise the same step-6 wiring the macOS
+/// tests above cover, but through [`crate::fontconfig`] instead of CoreText.
+/// They skip-with-note when libfontconfig can't initialise at runtime (e.g. a
+/// dev mac without it), like the discovery-module tests, so they are meaningful
+/// on the ubuntu CI runner (which has libfontconfig) without being flaky
+/// elsewhere.
+#[cfg(all(test, feature = "fontconfig"))]
+mod fontconfig_tests {
+    use super::*;
+    use crate::Face;
+
+    fn fontconfig_available() -> bool {
+        if fontconfig::Fontconfig::new().is_none() {
+            eprintln!(
+                "note: libfontconfig unavailable at runtime; resolver fontconfig test skipped"
+            );
+            false
+        } else {
+            true
+        }
+    }
+
+    fn resolver_with_discovery() -> CodepointResolver {
+        let face = Face::load_embedded(16.0).expect("load embedded");
+        CodepointResolver::new(Collection::new(face))
+    }
+
+    /// An emoji codepoint the embedded primary lacks resolves to a discovered
+    /// fallback face via fontconfig (the Linux analog of
+    /// `tests::emoji_resolves_via_discovery`). Requires a color emoji font on the
+    /// system (present on the ubuntu runner + typical desktops).
+    #[test]
+    fn emoji_resolves_via_fontconfig_discovery() {
+        if !fontconfig_available() {
+            return;
+        }
+        let mut r = resolver_with_discovery();
+        // U+1F600 GRINNING FACE is not in JetBrains Mono; fontconfig must find a
+        // font that covers it. If the host has no font for it at all, the
+        // resolver returns None — accept that rather than fail (coverage varies
+        // by machine), but when it *does* resolve it must be a fallback slot.
+        if let Some(idx) = r.get_index(0x1F600, Style::Regular) {
+            match idx {
+                FontIndex::Face { style, slot } => {
+                    assert_eq!(style, Style::Regular);
+                    assert!(slot >= 1, "expected a discovered fallback slot, got {slot}");
+                    let face = r.collection().get_face(idx).expect("face present");
+                    assert!(
+                        face.glyph_index('\u{1F600}').is_some(),
+                        "discovered emoji fallback must cover U+1F600"
+                    );
+                }
+                other => panic!("expected a face index, got {other:?}"),
+            }
+        } else {
+            eprintln!("note: no system font covers U+1F600 on this host; emoji check skipped");
+        }
+    }
+
+    /// CJK 水 (U+6C34) resolves to a covering face — the primary if JetBrains
+    /// Mono happens to include it, else a fontconfig-discovered CJK font (the
+    /// Linux analog of `tests::cjk_resolves_via_discovery`).
+    #[test]
+    fn cjk_resolves_via_fontconfig_discovery() {
+        if !fontconfig_available() {
+            return;
+        }
+        let mut r = resolver_with_discovery();
+        if let Some(idx) = r.get_index('水' as u32, Style::Regular) {
+            let face = r.collection().get_face(idx).expect("face present");
+            assert!(
+                face.glyph_index('水').is_some(),
+                "resolved face must have 水"
+            );
+        } else {
+            eprintln!("note: no system font covers 水 on this host; CJK check skipped");
+        }
     }
 }

@@ -1,20 +1,23 @@
 # linux status (Linux port — ADR 003, P2/P3 continuation of T7)
 
-- **Current item:** P2 fontconfig discovery — **S1 (discovery module) gate-green, opening PR.**
-  Next: S2 (wire into `collection`/`resolver` + Linux emoji seed).
-- **Last merged:** (bootstrap — nothing yet this thread; resumes T7's closed P1)
+- **Current item:** P2 fontconfig discovery — **S2 (wiring) gate-green, opening PR.** Next:
+  S3 (T8 CI step for `--features fontconfig`) + `force-autohint`/`freetype-load-flags`.
+- **Last merged:** #245 (S1 — fontconfig discovery module) → `d84360c6` on main.
 - **Blockers:** none.
-- **Claims:** font crate (my territory) — `src/{fontconfig,descriptor,discovery,lib,collection,resolver}.rs`
-  and `Cargo.toml`, for the fontconfig discovery slice.
+- **Claims:** font crate `src/{fontconfig,collection,resolver}.rs` + renderer `Cargo.toml`
+  (Linux fontconfig feature-enable), for the S2 wiring PR.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
 ## Backlog (from T7 handoff §b + mission)
 
-1. **fontconfig discovery** (mission #1) — IN PROGRESS. Slices:
-   - S1: `fontconfig.rs` module + feature + `Descriptor` hoist to `descriptor.rs` (additive).
-   - S2: wire into `collection::discover_family_style` + `resolver::discover_fallback` +
-     Linux emoji seed (embedded Noto vs fontconfig-discover).
-   - S3: T8 CI step (`--features fontconfig`) — route to T8 Inbox.
+1. **fontconfig discovery** (mission #1) — S1 + S2 DONE. Remaining:
+   - S1 ✅ `fontconfig.rs` module + feature + `Descriptor` hoist (#245, merged `d84360c6`).
+   - S2 ✅ wired into `collection::discover_family_style` + `resolver::discover_fallback`;
+     enabled on Linux via renderer. Emoji seed: NO change needed — emoji resolves through the
+     now-wired presentation-aware `discover_fallback` (fontconfig handles emoji preference; the
+     macOS Apple-emoji pre-seed only fixes a CoreText glyph-count tiebreak). (PR opening.)
+   - S3: **T8 CI step** (`cargo clippy/test -p qwertty-term-font --features fontconfig` on the
+     Linux lane) — route to T8 Inbox.
 2. **`force-autohint` / `freetype-load-flags`** config keys (P2; lightly shared w/ app-tails —
    file-claim/Inbox for config-key overlap).
 3. **real wght-variation bold** (FreeType face; deferred synthetic-only today).
@@ -65,3 +68,20 @@
   tests genuinely ran (not skipped) against system fonts. `--features fontconfig` linux cross-build
   can't run locally (freetype needs a linux g++) → relies on the requested T8 CI step (same as
   `--features freetype`). Opening PR.
+- 2026-07-14: **S1 shipped** — #245 merged (rebase) to `d84360c6`; CI green (incl. Linux core,
+  confirming the `Descriptor` hoist compiles on the real Linux target). Rebased S2 onto it;
+  cleaned the post-merge divergent local S1 leftover. Hit + fixed the release-plz version skew
+  (`0.2.0`→`0.3.0`) my new Linux renderer dep block introduced on rebase.
+- 2026-07-14: **S2 done — wired fontconfig discovery into the font stack.** `collection`'s
+  `discover_family_style` and `resolver`'s step-6 `discover_fallback` now have a
+  `#[cfg(feature="fontconfig")]` arm alongside the CoreText one (mutually exclusive: fontconfig
+  implies freetype, CoreText arm requires not-freetype); the loop body is shared since
+  `FcDeferredFace` mirrors `DeferredFace`'s `has_codepoint`/`load`. Enabled the `fontconfig`
+  feature on Linux via a `cfg(target_os="linux")` renderer dep block (dlopen → Linux CI compiles
+  with no libfontconfig; headless/betamax path never triggers discovery so stays lib-free). Added
+  `resolver::fontconfig_tests` (emoji + CJK fallback, skip-with-note if libfontconfig absent).
+  **Gate:** fmt ✓; workspace clippy+test macOS ✓ (2491); vt release ✓ (1568) + paranoid ✓ (1543);
+  offscreen-smoke ✓; `--features fontconfig` clippy+test ✓ (71, real libfontconfig). Probe
+  confirmed discovery returns real covering fonts for A/CJK/snowman/Cyrillic/Hebrew and that the
+  resolver correctly rejects a text-presentation candidate for an emoji-presentation request.
+  Opening PR-2.
