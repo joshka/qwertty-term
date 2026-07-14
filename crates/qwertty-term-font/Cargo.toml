@@ -48,7 +48,7 @@ unicode-properties = { version = "0.1", default-features = false, features = [
 ] }
 # Procedural sprite-glyph rasterizer (box drawing, block elements, etc.). The
 # reduced resolver dispatches sprite codepoints to this crate.
-qwertty-term-sprite = { version = "0.2.0", path = "../qwertty-term-sprite" }
+qwertty-term-sprite = { version = "0.3.0", path = "../qwertty-term-sprite" }
 
 # CoreText/CoreGraphics face loading + rasterization (macOS only). We use the
 # objc2 framework-binding family (objc2 0.6, objc2-* 0.3) rather than the older
@@ -91,4 +91,4 @@ objc2-core-text = { version = "0.3", default-features = false, features = [
 [dev-dependencies]
 # The integration test asserts sprite codepoints route to qwertty-term-sprite; it
 # calls `qwertty_term_sprite::has_codepoint` directly from the test crate.
-qwertty-term-sprite = { version = "0.2.0", path = "../qwertty-term-sprite" }
+qwertty-term-sprite = { version = "0.3.0", path = "../qwertty-term-sprite" }

@@ -17,7 +17,7 @@ name = "qwertty_term_termio"
 [dependencies]
 # The terminal core: Message carries terminal::ScrollViewport 1:1 with
 # upstream (termio/message.zig imports terminal.Terminal.ScrollViewport).
-qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
+qwertty-term-vt = { version = "0.3.0", path = "../qwertty-term-vt" }
 
 # PTY + termios syscalls (plan decision 1: rustix, not portable-pty — we
 # need IUTF8, termios polling, and exact TIOCSWINSZ semantics). `pipe` is the

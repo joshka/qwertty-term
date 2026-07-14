@@ -14,8 +14,8 @@ name = "qwertty_term_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-qwertty-term-vt = { version = "0.2.0", path = "../qwertty-term-vt" }
-qwertty-term-input = { version = "0.2.0", path = "../qwertty-term-input" }
+qwertty-term-vt = { version = "0.3.0", path = "../qwertty-term-vt" }
+qwertty-term-input = { version = "0.3.0", path = "../qwertty-term-input" }
 
 [dev-dependencies]
 # cbindgen drives the drift-check test (tests/header_drift.rs), which
