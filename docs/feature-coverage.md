@@ -57,7 +57,10 @@ items are `[ ]` wholesale unless noted.
 - [ ] `font-codepoint-map`, `font-style*` name overrides, `grapheme-width-method` config
 - [~] FreeType **face** backend (Linux) shipped — load/shape/rasterize/metrics/synthetic
       bold+italic + query parity, cfg-selected `Face` alias (ADR 003 P2). fontconfig
-      discovery, `force-autohint`, `freetype-load-flags` deferred
+      **discovery** module landed (`fontconfig` feature, dlopen): `Descriptor`→`FcPattern`,
+      `FcFontSort`-ranked `discover`/`discover_fallback`/`discover_family_style`, `FcDeferredFace`
+      (verified against real system fonts). Wiring into `collection`/`resolver` + `force-autohint`,
+      `freetype-load-flags` deferred to follow-up slices
 
 ## Rendering (`src/renderer`, ~60%)
 

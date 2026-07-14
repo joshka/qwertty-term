@@ -63,9 +63,19 @@ pub mod constraint;
 pub mod coretext;
 #[cfg(target_os = "macos")]
 pub mod deferred;
+/// The platform-neutral font search query ([`descriptor::Descriptor`]), shared
+/// by both discovery backends (CoreText and fontconfig).
+pub mod descriptor;
 #[cfg(target_os = "macos")]
 pub mod discovery;
 pub mod embedded;
+/// Fontconfig system-font discovery: [`fontconfig::discover`] and friends, the
+/// non-CoreText discovery backend (Linux; ADR 003 P2). Behind the `fontconfig`
+/// Cargo feature (which implies `freetype`, since discovery materializes a
+/// FreeType [`Face`]). Uses the `fontconfig` crate in `dlopen` mode, so
+/// libfontconfig loads at runtime — no link-time system dependency.
+#[cfg(feature = "fontconfig")]
+pub mod fontconfig;
 /// FreeType glyph rasterization: [`freetype::Face`], the non-CoreText face
 /// backend (Linux/software render path, ADR 003 P2). Behind the `freetype`
 /// Cargo feature; FreeType is cross-platform, so this builds on macOS too (for
@@ -116,8 +126,9 @@ pub use freetype::{Error as FaceError, Face};
 pub use collection::{Collection, FontIndex, Style};
 #[cfg(target_os = "macos")]
 pub use deferred::DeferredFace;
-#[cfg(target_os = "macos")]
-pub use discovery::Descriptor;
+pub use descriptor::Descriptor;
+#[cfg(feature = "fontconfig")]
+pub use fontconfig::FcDeferredFace;
 #[cfg(any(target_os = "macos", feature = "freetype"))]
 pub use grid::{AtlasKind, CachedGlyph, Grid};
 #[cfg(any(target_os = "macos", feature = "freetype"))]

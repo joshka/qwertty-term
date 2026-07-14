@@ -25,6 +25,16 @@ name = "qwertty_term_font"
 # cross-platform, so this can also be enabled on macOS to test the FreeType face
 # against the CoreText one. Pulls in the C FreeType library (bundled build).
 freetype = ["dep:freetype-rs"]
+# Fontconfig system-font discovery (the non-CoreText discovery path; ADR 003
+# P2). Implies `freetype` because discovery must materialize a `Face`, and the
+# non-CoreText `Face` is the FreeType one. Off by default; the Linux render path
+# enables it. Uses the `fontconfig` crate's `dlopen` mode, so libfontconfig is
+# loaded at *runtime* — there is no link-time system dependency and `cargo
+# check`/`clippy` compile on any host (cross-target too). Only *running*
+# discovery needs libfontconfig present (every desktop Linux + the ubuntu CI
+# runner has it). FreeType is cross-platform, so `--features fontconfig` also
+# builds/tests the Linux discovery stack on macOS.
+fontconfig = ["dep:fontconfig", "freetype"]
 
 [dependencies]
 ttf-parser = "0.25"
@@ -33,6 +43,12 @@ ttf-parser = "0.25"
 # the C FreeType library; we use its bundled build so no system FreeType is
 # required.
 freetype-rs = { version = "0.36", optional = true }
+# Fontconfig system-font discovery for the non-CoreText path (Linux; ADR 003
+# P2). Optional + feature-gated (see `[features]`). `dlopen` loads libfontconfig
+# at runtime, so no link-time dep / no pkg-config at build time.
+fontconfig = { version = "0.11", optional = true, default-features = false, features = [
+    "dlopen",
+] }
 # Pure-Rust HarfBuzz shaping port (decision 1: rustybuzz-first). 0.20 pins
 # ttf-parser 0.25 transitively, matching our own ttf-parser, so a rustybuzz
 # `Face` and a ttf-parser `Face` read the same font bytes without a version
