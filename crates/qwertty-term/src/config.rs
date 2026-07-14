@@ -360,6 +360,14 @@ pub struct Config {
     /// in `TerminalWindow.swift:129`). Parsed by [`Config::macos_window_buttons`].
     #[serde(rename = "macos-window-buttons")]
     pub macos_window_buttons: Option<String>,
+    /// The window appearance theme: `auto` (default; on macOS, light/dark by the
+    /// terminal background luminosity), `system`, `light`, or `dark`. `ghostty`
+    /// (config-colored titlebar) is a Linux-only upstream mode; on macOS it
+    /// falls back to `system`. Upstream `window-theme` (`Config.zig:2129`, enum
+    /// `WindowTheme` at `Config.zig:8931`; macOS appearance mapping in
+    /// `NSAppearance+Extension.swift`). Parsed by [`Config::window_theme`].
+    #[serde(rename = "window-theme")]
+    pub window_theme: Option<String>,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -451,6 +459,7 @@ impl Default for Config {
             // macOS windows cast a shadow by default (upstream `Config.zig:3335`).
             macos_window_shadow: true,
             macos_window_buttons: None,
+            window_theme: None,
         }
     }
 }
@@ -764,6 +773,14 @@ impl Config {
             .map(MacWindowButtons::parse)
             .unwrap_or_default()
     }
+
+    /// The parsed `window-theme` (default `Auto`).
+    pub fn window_theme(&self) -> WindowTheme {
+        self.window_theme
+            .as_deref()
+            .map(WindowTheme::parse)
+            .unwrap_or_default()
+    }
 }
 
 /// The `[mouse-scroll-multiplier]` config table. Field defaults match
@@ -880,6 +897,39 @@ impl WindowShowTabBar {
         match s.trim().to_ascii_lowercase().as_str() {
             "always" => Self::Always,
             "never" => Self::Never,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// The window appearance theme (`window-theme`, upstream `WindowTheme`,
+/// `Config.zig:8931`, default `auto`). On macOS this maps to an
+/// `NSAppearance` (`NSAppearance+Extension.swift`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowTheme {
+    /// Light or dark by the terminal background luminosity (macOS). The default.
+    #[default]
+    Auto,
+    /// Follow the system appearance (no override).
+    System,
+    /// Force the light (aqua) appearance.
+    Light,
+    /// Force the dark (darkAqua) appearance.
+    Dark,
+    /// Config-colored titlebar — a Linux-only upstream mode; on macOS this
+    /// behaves like `System` (no appearance override).
+    Ghostty,
+}
+
+impl WindowTheme {
+    /// Parse the config value (`auto`/`system`/`light`/`dark`/`ghostty`);
+    /// unknown values fall back to `auto` (upstream's default).
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "system" => Self::System,
+            "light" => Self::Light,
+            "dark" => Self::Dark,
+            "ghostty" => Self::Ghostty,
             _ => Self::Auto,
         }
     }
