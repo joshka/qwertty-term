@@ -1,9 +1,9 @@
 # app-tails status
 
-- **Current item:** PR1 shipped (window-subtitle / window-new-tab-position /
-  window-show-tab-bar). Next: PR2 — `window-step-resize` + `macos-window-shadow` +
-  `macos-window-buttons`.
-- **Last merged:** (PR1 open/merging — see log)
+- **Current item:** PR2 shipping (window-step-resize / macos-window-shadow /
+  macos-window-buttons). Next: PR3 — `macos-titlebar-style` + `window-titlebar-bg/fg` +
+  `window-theme`.
+- **Last merged:** #243 window-subtitle / window-new-tab-position / window-show-tab-bar
 - **Blockers:** none
 - **Claims:** none
 - **Inbox:** (other threads append requests here; owner triages into backlog)
@@ -35,8 +35,12 @@ Renderer/vt-owned (NOT my territory — route via Inbox if picked up): `bold-col
 ## Log
 
 - 2026-07-14: session start; workspace created; T3+T4 closed, tails inherited.
-- 2026-07-14: PR1 — `window-subtitle` (native `NSWindow.subtitle` from cwd),
+- 2026-07-14: PR1 (#243, MERGED) — `window-subtitle` (native `NSWindow.subtitle` from cwd),
   `window-new-tab-position` (`current`/`end` grouping, upstream
   `TerminalController.swift:456`), `window-show-tab-bar` (`auto`/`always`/`never` →
-  `NSWindowTabbingMode`). New `QWERTTY_TERM_SMOKE_WINDOWCHROME` asserts all three; gate green
-  (offscreen + windowchrome smokes pass, release + paranoid lanes green).
+  `NSWindowTabbingMode`). New `QWERTTY_TERM_SMOKE_WINDOWCHROME` asserts all three; gate green.
+- 2026-07-14: PR2 — `window-step-resize` (cell-sized `contentResizeIncrements`,
+  upstream `BaseTerminalController.swift:884`), `macos-window-shadow` (`NSWindow.hasShadow`),
+  `macos-window-buttons` (`visible`/`hidden` traffic-lights, `TerminalWindow.swift:570`).
+  Extended the WINDOWCHROME smoke (now 6 assertions); gate green (release+paranoid, offscreen,
+  windowchrome all pass).

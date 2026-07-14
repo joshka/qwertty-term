@@ -343,6 +343,23 @@ pub struct Config {
     /// `NSWindowTabbingMode`. Parsed by [`Config::window_show_tab_bar`].
     #[serde(rename = "window-show-tab-bar")]
     pub window_show_tab_bar: Option<String>,
+    /// Resize the window in whole-cell increments of the focused surface's cell
+    /// size (`NSWindow.contentResizeIncrements`) instead of pixel increments.
+    /// Upstream `window-step-resize` (`Config.zig:2234`, default `false`;
+    /// applied in `BaseTerminalController.swift:884`).
+    #[serde(rename = "window-step-resize")]
+    pub window_step_resize: bool,
+    /// Whether the window casts a drop shadow (`NSWindow.hasShadow`). Upstream
+    /// `macos-window-shadow` (`Config.zig:3335`, default `true`; applied in
+    /// `TerminalWindow.swift:476`).
+    #[serde(rename = "macos-window-shadow")]
+    pub macos_window_shadow: bool,
+    /// The traffic-light window buttons: `visible` (default) or `hidden` (hide
+    /// close/miniaturize/zoom). Upstream `macos-window-buttons`
+    /// (`Config.zig:3218`, enum `MacWindowButtons` at `Config.zig:8946`; applied
+    /// in `TerminalWindow.swift:129`). Parsed by [`Config::macos_window_buttons`].
+    #[serde(rename = "macos-window-buttons")]
+    pub macos_window_buttons: Option<String>,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -430,6 +447,10 @@ impl Default for Config {
             window_subtitle: None,
             window_new_tab_position: None,
             window_show_tab_bar: None,
+            window_step_resize: false,
+            // macOS windows cast a shadow by default (upstream `Config.zig:3335`).
+            macos_window_shadow: true,
+            macos_window_buttons: None,
         }
     }
 }
@@ -735,6 +756,14 @@ impl Config {
             .map(WindowShowTabBar::parse)
             .unwrap_or_default()
     }
+
+    /// The parsed `macos-window-buttons` policy (default `Visible`).
+    pub fn macos_window_buttons(&self) -> MacWindowButtons {
+        self.macos_window_buttons
+            .as_deref()
+            .map(MacWindowButtons::parse)
+            .unwrap_or_default()
+    }
 }
 
 /// The `[mouse-scroll-multiplier]` config table. Field defaults match
@@ -852,6 +881,28 @@ impl WindowShowTabBar {
             "always" => Self::Always,
             "never" => Self::Never,
             _ => Self::Auto,
+        }
+    }
+}
+
+/// The traffic-light window-button policy (`macos-window-buttons`, upstream
+/// `MacWindowButtons`, `Config.zig:8946`, default `visible`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MacWindowButtons {
+    /// Show the close/miniaturize/zoom buttons. The default.
+    #[default]
+    Visible,
+    /// Hide all three standard window buttons.
+    Hidden,
+}
+
+impl MacWindowButtons {
+    /// Parse the config value (`visible` / `hidden`); unknown values fall back to
+    /// `visible` (upstream's default).
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "hidden" => Self::Hidden,
+            _ => Self::Visible,
         }
     }
 }

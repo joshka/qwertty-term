@@ -126,7 +126,9 @@ items are `[ ]` wholesale unless noted.
       (`willEncodeRestorableState` → JSON `NSString`; `didDecodeRestorableState` → rebuild).
       Session unit tests + smoke cover the tree round-trip and a live `NSKeyedArchiver` coder
       round-trip; macOS actually firing restoration on a real quit+relaunch is manual-verify only
-- [ ] `window-step-resize`
+- [x] `window-step-resize`: when true, `NSWindow.contentResizeIncrements` is set
+      to the focused cell size so the window resizes in whole-cell steps (upstream
+      `BaseTerminalController.swift:884`; windowchrome smoke)
 - [x] `window-subtitle` (`false`/`working-directory`): upstream ships this on GTK
       only; mapped natively onto `NSWindow.subtitle`, tracking the focused pane's
       cwd, re-applied on the pace tick (windowchrome smoke)
@@ -312,7 +314,11 @@ items are `[ ]` wholesale unless noted.
 - [~] `macos-titlebar-style` (tabbed layout works; style variants partial)
 - [ ] `macos-secure-input` (+ indication/auto), `macos-custom-icon`/`-icon*`
 - [ ] `macos-menu-bar`, `macos-applescript`, `macos-shortcuts`, `macos-dock-drop-behavior`
-- [ ] `macos-window-buttons`, `-window-shadow`, `-glass-*`, `-titlebar-proxy-icon`
+- [x] `macos-window-buttons` (`visible`/`hidden`): `hidden` hides the close/
+      miniaturize/zoom traffic-light buttons (upstream `TerminalWindow.swift:570`);
+      `macos-window-shadow` (default true): drives `NSWindow.hasShadow`
+      (upstream `TerminalWindow.swift:476`) — both windowchrome smoke
+- [ ] `-glass-*`, `-titlebar-proxy-icon`
 - [ ] Sparkle `auto-update`, `macos-hidden`
 
 ## Platform: Linux / GTK (headless render path shipped; GTK app not started)
