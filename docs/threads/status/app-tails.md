@@ -1,9 +1,8 @@
 # app-tails status
 
-- **Current item:** PR2 shipping (window-step-resize / macos-window-shadow /
-  macos-window-buttons). Next: PR3 — `macos-titlebar-style` + `window-titlebar-bg/fg` +
-  `window-theme`.
-- **Last merged:** #243 window-subtitle / window-new-tab-position / window-show-tab-bar
+- **Current item:** PR3 shipping (window-theme). Next: PR3b — `macos-titlebar-style`
+  variants (native/transparent/hidden; defer full `tabs` via ADR). Then PR4 — `macos-secure-input`.
+- **Last merged:** #246 window-step-resize / macos-window-shadow / macos-window-buttons
 - **Blockers:** none
 - **Claims:** none
 - **Inbox:** (other threads append requests here; owner triages into backlog)
@@ -37,9 +36,11 @@ renderer, or font internals (coordinate via Inbox).
 
 Planned PR batches (see the task list for detail):
 
-- **PR1 (done):** window-subtitle, window-new-tab-position, window-show-tab-bar.
-- **PR2:** window-step-resize, macos-window-shadow, macos-window-buttons.
-- **PR3:** macos-titlebar-style variants, window-titlebar-background/-foreground, window-theme.
+- **PR1 (done #243):** window-subtitle, window-new-tab-position, window-show-tab-bar.
+- **PR2 (done #246):** window-step-resize, macos-window-shadow, macos-window-buttons.
+- **PR3 (shipping):** window-theme (auto/system/light/dark → NSAppearance).
+  window-titlebar-background/-foreground marked `[—]` GTK-only (gated on window-theme=ghostty).
+- **PR3b:** macos-titlebar-style variants (native/transparent/hidden; defer full `tabs`).
 - **PR4:** macos-secure-input (+indication/auto) — `EnableSecureEventInput` works unbundled.
 - **PR5:** set_tab_title keybind action, clipboard-read/clipboard-write permission gates.
 - **PR6 (triage):** cursor-click-to-move, command-palette, undo/redo, macos-custom-icon
@@ -56,8 +57,13 @@ Renderer/vt-owned (NOT my territory — route via Inbox if picked up): `bold-col
   `window-new-tab-position` (`current`/`end` grouping, upstream
   `TerminalController.swift:456`), `window-show-tab-bar` (`auto`/`always`/`never` →
   `NSWindowTabbingMode`). New `QWERTTY_TERM_SMOKE_WINDOWCHROME` asserts all three; gate green.
-- 2026-07-14: PR2 — `window-step-resize` (cell-sized `contentResizeIncrements`,
+- 2026-07-14: PR2 (#246, MERGED) — `window-step-resize` (cell-sized `contentResizeIncrements`,
   upstream `BaseTerminalController.swift:884`), `macos-window-shadow` (`NSWindow.hasShadow`),
   `macos-window-buttons` (`visible`/`hidden` traffic-lights, `TerminalWindow.swift:570`).
-  Extended the WINDOWCHROME smoke (now 6 assertions); gate green (release+paranoid, offscreen,
-  windowchrome all pass).
+  Extended the WINDOWCHROME smoke (now 6 assertions); gate green.
+- 2026-07-14: PR3 — `window-theme` (`auto`/`system`/`light`/`dark` → per-window
+  `NSAppearance`; `auto` by background luminance, upstream `NSAppearance+Extension.swift`;
+  live on reload). `window-titlebar-background`/`-foreground` marked `[—]` GTK-only. Extended
+  WINDOWCHROME smoke to 7 assertions; gate green. NOTE: hit the squash-merge rebase hazard
+  (my memory) — `jj restore --from main` on conflicted files dropped the window-theme edits;
+  re-applied them cleanly on fresh origin/main. Verify base == origin/main before every push.

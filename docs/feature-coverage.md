@@ -102,7 +102,11 @@ items are `[ ]` wholesale unless noted.
 - [x] `split-divider` (implicit), search highlight colors
 - [x] `palette` per-index overrides (`N=color`, on top of theme; OSC 4 still wins; imports)
 - [~] `bold-color`, `cursor-opacity`, `faint-opacity` (some wired, some not)
-- [ ] `palette-generate`/`palette-harmonious`, `window-theme` auto light/dark
+- [x] `window-theme` (`auto`/`system`/`light`/`dark`): maps to each window's
+      `NSAppearance` (`auto` picks light/dark by terminal-background luminance,
+      matching upstream `NSAppearance+Extension.swift`); live on reload; `ghostty`
+      (config-colored titlebar) is Linux-only → `system` on macOS (windowchrome smoke)
+- [ ] `palette-generate`/`palette-harmonious`
 - [ ] `cell-foreground`/`cell-background`, `background-opacity-cells`
 
 ## Cursor
@@ -142,7 +146,9 @@ items are `[ ]` wholesale unless noted.
 - [x] `window-new-tab-position` (`current`/`end`): a new tab groups against the
       active tab (`current`) or the last tab in the group (`end`), matching
       upstream `TerminalController.swift:456` (windowchrome smoke)
-- [ ] `window-titlebar-background`/`-foreground`
+- [—] `window-titlebar-background`/`-foreground`: GTK-only upstream — both take
+      effect only when `window-theme = ghostty`, itself a Linux-only mode
+      (`Config.zig:2272`/`2279`); not applicable to the macOS titlebar
 - [x] `resize-overlay` (+ `-position`, `-duration`): `cols ⨯ rows` HUD (NSTextField overlay)
       on live resize, positioned per config, auto-hiding after the duration (resize smoke)
 - [ ] `command-palette`, undo/redo (`undo-timeout`)
