@@ -314,8 +314,11 @@ items are `[ ]` wholesale unless noted.
 ## Advanced / tooling
 
 - [x] Differential testing vs `libghostty-vt`, resize-interleaved fuzzing, Miri
-- [x] vtebench lane (ahead of Ghostty 1.3.1 on most suites; behind Ghostty `main` — see
-      `docs/benchmarks/`; no dedicated perf tuning done yet, that's the T1 thread)
+- [x] vtebench lane (T1 perf tuning landed: wins every suite vs Ghostty 1.3.1, and
+      win/tie 6/10 vs Ghostty `main` — region scrolls closed from 1.27–1.47× to 1.13–1.20×
+      by #204. The `unicode` 0.50× is a whole-app render-pipeline artifact, not an engine
+      lead — our wide *engine* is still ~2.6× behind main. See `docs/benchmarks/vtebench-baseline.md`
+      + `docs/analysis/stream-throughput-vs-upstream.md`)
 - [x] `write_scrollback_file`/`write_screen_file`/`write_selection_file` actions
       (copy/paste/open the dumped path)
 - [ ] Inspector / debug overlay
