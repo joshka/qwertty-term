@@ -55,7 +55,9 @@ items are `[ ]` wholesale unless noted.
       underline/strikethrough/overline pos+thickness, cursor thickness/height,
       box-thickness, icon-height → font `Metrics::apply`; imports + live on reload)
 - [ ] `font-codepoint-map`, `font-style*` name overrides, `grapheme-width-method` config
-- [ ] FreeType/fontconfig backend (Linux), `force-autohint`, `freetype-load-flags`
+- [~] FreeType **face** backend (Linux) shipped — load/shape/rasterize/metrics/synthetic
+      bold+italic + query parity, cfg-selected `Face` alias (ADR 003 P2). fontconfig
+      discovery, `force-autohint`, `freetype-load-flags` deferred
 
 ## Rendering (`src/renderer`, ~60%)
 
@@ -288,13 +290,20 @@ items are `[ ]` wholesale unless noted.
 - [ ] `macos-window-buttons`, `-window-shadow`, `-glass-*`, `-titlebar-proxy-icon`
 - [ ] Sparkle `auto-update`, `macos-hidden`
 
-## Platform: Linux / GTK (0% — not started)
+## Platform: Linux / GTK (headless render path shipped; GTK app not started)
 
-- [ ] GTK apprt, Wayland/X11, all `gtk-*` (~10 keys), `linux-cgroup*`, FreeType/fontconfig
+- [x] Headless CPU render backend + FreeType font stack (ADR 003 P1/P2) — `Engine<Software>`
+      renders terminal frames on Linux with no GPU / no CoreText (see Embeddability). Windowed
+      GTK app (P4: apprt/OpenGL) is deferred behind ADR 003.
+- [ ] GTK apprt, Wayland/X11, all `gtk-*` (~10 keys), `linux-cgroup*`, fontconfig discovery
 
 ## Embeddability / library (a qwertty-term goal beyond Ghostty)
 
 - [x] Headless offscreen render + RGBA/PNG readback (`examples/frame-capture`)
+- [x] Headless render on **Linux** — no GPU, no window, no CoreText, no Zig (pure cargo):
+      `Engine<Software>` (CPU compositor) over the FreeType font stack, run on the Linux CI lane
+      (`tests/software_headless.rs`). The betamax headless-Linux artifact — ADR 003 P1/P2
+      (PR-1 #135 trait → PR-2 #172 `Software` backend → PR-3 #187 `Engine<B>` → PR-4 #209 un-gate)
 - [x] VT / fonts / renderer as plain Rust crates, no global state
 - [x] Injectable fonts; deterministic output (betamax reference consumer)
 - [x] Embedding guide + one-call render API (`docs/embedding.md`; `Engine::render` →
