@@ -12,20 +12,22 @@ Estimated completion (crude; LoC/feature-weighted, see caveats):
 
 - **~70%** of the whole port (Ghostty 264k Zig + 22k Swift, all platforms).
 - **~88%** of the macOS daily-driver experience — the core is essentially done.
-- Feature-coverage checklist: **84 `[x]` · 18 `[~]` · 47 `[ ]`** (`docs/feature-coverage.md`).
+- Feature-coverage checklist: **116 `[x]` · 16 `[~]` · 33 `[ ]` · 1 `[—]`**
+  (`docs/feature-coverage.md`; recounted 2026-07-14).
 - 102 PRs merged since 0.1.0 (published 2026-07-08); crates live on crates.io.
 
-| Subsystem | ~% | Note |
-| --------- | -- | ---- |
-| Terminal engine (114k Zig, 43% of all) | ~90% | certified core; XTWINOPS/XTGETTCAP/DECRQSS completeness + tmux remain |
-| Input / keybinds | ~90% | Binding.zig ported; leader/chain + action long-tail landing |
-| Renderer | ~70% | kitty images (R6) complete; **links (R7)**, bg-image, shaders, CVDisplayLink open |
-| macOS app | ~65% | tabs/splits/quick-term/notifications/gestures done; window-state + chrome extras open |
-| Fonts | ~78% | CoreText complete; FreeType/Linux groundwork in progress |
-| Config surface | ~20% | reload + first wiring; **~200 keys mostly unwired** |
-| Linux/GTK | ~10% | renderer compiles on Linux; app shell not started |
+| Subsystem                              | ~%   | Note                                                                                                                                                          |
+| -------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Terminal engine (114k Zig, 43% of all) | ~92% | certified core; VT-completeness tail closed (XTWINOPS/XTGETTCAP/DECRQSS/OSC-21/config-toggle seams, 2026-07-14) — only tmux control mode (Josh-gated) remains |
+| Input / keybinds                       | ~90% | Binding.zig ported; leader/chain + action long-tail landing                                                                                                   |
+| Renderer                               | ~70% | kitty images (R6) complete; **links (R7)**, bg-image, shaders, CVDisplayLink open                                                                             |
+| macOS app                              | ~65% | tabs/splits/quick-term/notifications/gestures done; window-state + chrome extras open                                                                         |
+| Fonts                                  | ~78% | CoreText complete; FreeType/Linux groundwork in progress                                                                                                      |
+| Config surface                         | ~20% | reload + first wiring; **~200 keys mostly unwired**                                                                                                           |
+| Linux/GTK                              | ~10% | renderer compiles on Linux; app shell not started                                                                                                             |
 
 **What's truly missing** (beyond deliberate deferrals like Linux/tmux/inspector):
+
 1. **Clickable links (R7)** — biggest everyday gap; owned by T2.
 2. **Config-option surface** (~200 keys) — cursor color/opacity, `adjust-*` metrics,
    `window-save-state`, window-title templates; owned by T3.
@@ -36,17 +38,46 @@ Estimated completion (crude; LoC/feature-weighted, see caveats):
 Caveat: % by LoC/checkbox is crude — the uncovered third is disproportionately *deliberate*
 deferral, and everything shipped is differential-tested and gated, not stubbed.
 
+### Recertification — VT-engine completeness tail (2026-07-14, vt-tails)
+
+The `Terminal / VT engine` section of `docs/feature-coverage.md` is now **fully `[x]`/`[—]`
+except tmux control mode** (deferred, Josh-gated). Closed this pass (succeeding T5's
+lib-layer parity work):
+
+- **XTGETTCAP** (#241) — ported the full ghostty terminfo capability table (268 caps +
+  `TN`/`Co`/`RGB` specials) with byte-faithful `xtgettcapMap` encoding (`\E`→ESC, leading
+  `^X`→ctrl, `%`-param strings verbatim); `TN` stays `qwertty-term`. Was 6 hardcoded caps.
+  Generated from upstream by `crates/qwertty-term-vt/scripts/gen_terminfo.py`; 11 unit tests
+  (termio-layer reply, no differential oracle).
+- **XTWINOPS** (#244) — report ops 14/16/18/21 t now gated on `params.len()==1` (extra params
+  ignored, matching `stream.zig:2003-2030`); title stack 22/23 confirmed a faithful
+  apprt-level no-op. Unit test + differential corpus case (agrees vs oracle).
+- **DECRQSS** — already at full parity (SGR/DECSCUSR/DECSTBM/DECSLRM); stale checkbox corrected.
+- **OSC 21** kitty color protocol — already fully implemented (#28, set/reset/query); checkbox.
+- **VT config toggles** (#249) — engine seams for all six (app-tails wires the config keys):
+  `set_title_reporting`, `set_kitty_graphics_size_limit` (new); `set_enquiry_response`,
+  `set_osc_color_report_format`, `Options::max_scrollback`, KAM mode-2 via `Terminal::modes`
+  (pre-existing). Seam map handed to app-tails' Inbox.
+- **Tertiary Device Attributes** — the stream-handler delta's flagged `= c` divergence
+  reverified: our `DECRPTUI` reply agrees with the libghostty-vt oracle; locked in with a
+  `reply_diffing/tertiary_da_probe` corpus case.
+
+The `docs/analysis/stream-handler-delta.md` table predates T5+this pass; its "missing" rows
+for OSC/DCS/mouse/XTWINOPS/XTGETTCAP/DECRQSS are now shipped. Remaining true gaps there are
+app/renderer seams (mode-5 reverse, 2026-timer, 1004/2048 initial reports, linefeed-mode) or
+Josh-gated (tmux), not VT-engine core.
+
 ## Phase 0 — foundations
 
-| Item                                                                    | Status          | Notes                                                                                                                                                                                                                                       |
-| ----------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| jj workspace restructure (`work/default` + chunks)                      | done            | 2026-07-06                                                                                                                                                                                                                                  |
-| Cargo workspace skeleton (`crates/qwertty-term-vt`, `crates/spike`, `xtask`) | done            | spike renamed `qwertty-term-spike`, all 67 tests green                                                                                                                                                                                           |
-| libghostty-vt reference build (Zig)                                     | done            | ghostty `2da015cd6`; `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` → `zig-out/lib/libghostty-vt.a`; note: header docs `max_scrollback` as lines but it is BYTES of page memory                                                     |
+| Item                                                                         | Status          | Notes                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| jj workspace restructure (`work/default` + chunks)                           | done            | 2026-07-06                                                                                                                                                                                                                                  |
+| Cargo workspace skeleton (`crates/qwertty-term-vt`, `crates/spike`, `xtask`) | done            | spike renamed `qwertty-term-spike`, all 67 tests green                                                                                                                                                                                      |
+| libghostty-vt reference build (Zig)                                          | done            | ghostty `2da015cd6`; `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` → `zig-out/lib/libghostty-vt.a`; note: header docs `max_scrollback` as lines but it is BYTES of page memory                                                     |
 | Differential harness (`qwertty-term-vt` vs libghostty-vt)                    | done (scaffold) | `crates/vt-diff`, feature `reference` (off by default; trunk green without Zig artifact); `Oracle` trait ready for the Rust side; 7/7 tests incl. 3 spike fixtures matching the reference; analysis: `docs/analysis/libghostty-vt-c-api.md` |
-| Fuzz targets (parser/stream)                                            | done (target)   | `crates/qwertty-term-vt/fuzz` (own workspace); parser+utf8 no-panic target compiles on nightly; campaign run 2026-07-07: 7.9M runs / 121s, zero crashes                                                                                          |
-| Criterion bench skeleton                                                | done            | baselines: ascii ~108 MiB/s, sgr ~104 MiB/s, utf8_mixed ~437 MiB/s (untuned)                                                                                                                                                                |
-| Unicode table codegen (xtask)                                           | done            | `cargo xtask gen-unicode` (UCD 17.0.0 pinned, downloads gitignored); 3-stage LUT matching ghostty's format; **exact parity: 0 mismatches vs ghostty's generated table over all 1,114,112 codepoints**; analysis: `docs/analysis/unicode.md` |
+| Fuzz targets (parser/stream)                                                 | done (target)   | `crates/qwertty-term-vt/fuzz` (own workspace); parser+utf8 no-panic target compiles on nightly; campaign run 2026-07-07: 7.9M runs / 121s, zero crashes                                                                                     |
+| Criterion bench skeleton                                                     | done            | baselines: ascii ~108 MiB/s, sgr ~104 MiB/s, utf8_mixed ~437 MiB/s (untuned)                                                                                                                                                                |
+| Unicode table codegen (xtask)                                                | done            | `cargo xtask gen-unicode` (UCD 17.0.0 pinned, downloads gitignored); 3-stage LUT matching ghostty's format; **exact parity: 0 mismatches vs ghostty's generated table over all 1,114,112 codepoints**; analysis: `docs/analysis/unicode.md` |
 
 ## Milestones
 
@@ -67,10 +98,10 @@ The `qwertty-term-vt` engine is certified against ghostty `2da015cd6`:
   infinite loop (backfill glitch fixture) - all fixed with regression tests.
 - Known deferrals tracked in the ledger; upstream findings drafted in work/upstream/.
 
-| Milestone                                                       | Status              | Notes                                                                                                                                                                                                                                                                                                                                               |
-| --------------------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Differential parity (fixtures + hand streams + 114-case corpus) | **done 2026-07-07** | zero divergences vs libghostty-vt; corpus (11 torture suites + 4 real-app captures) found+fixed 1 engine bug (spacer-tail overwrite panic)                                                                                                                                                                                                          |
-| Spike frontends on qwertty-term-vt engine                            | **done 2026-07-06** | `cargo run -p qwertty-term-spike -- --window`; snapshot read-back API added to qwertty-term-vt (also serves embeddability); spike's old core deleted; was-limitations now closed 2026-07-07: OSC 52 read-back (drainable clipboard events + window auto-copy), dynamic palette (snapshot carries palette/fg/bg, renderer resolves), distinct underline styles |
+| Milestone                                                       | Status              | Notes                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Differential parity (fixtures + hand streams + 114-case corpus) | **done 2026-07-07** | zero divergences vs libghostty-vt; corpus (11 torture suites + 4 real-app captures) found+fixed 1 engine bug (spacer-tail overwrite panic)                                                                                                                                                                                                                    |
+| Spike frontends on qwertty-term-vt engine                       | **done 2026-07-06** | `cargo run -p qwertty-term-spike -- --window`; snapshot read-back API added to qwertty-term-vt (also serves embeddability); spike's old core deleted; was-limitations now closed 2026-07-07: OSC 52 read-back (drainable clipboard events + window auto-copy), dynamic palette (snapshot carries palette/fg/bg, renderer resolves), distinct underline styles |
 
 ## Phase 1 — VT core (`src/terminal/` → `crates/qwertty-term-vt`)
 
