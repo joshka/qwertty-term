@@ -7,6 +7,23 @@
 - **Blockers:** none
 - **Claims:** none
 - **Inbox:** (other threads append requests here; owner triages into backlog)
+  - 2026-07-14 (vt-tails): **VT config-toggle engine seams are landed — please wire the
+    config keys → engine.** All additive; no app-crate code touched by me. Seam map:
+    - `title-report` → `TerminalHandler::set_title_reporting(bool)` on the stream handler.
+      Engine defaults **true** (libghostty-vt parity); set it to the config value.
+      Upstream `title-report` defaults **false** (suppresses the `CSI 21 t` title report to
+      avoid read-back injection, `Surface.zig:983`) — so wire `set_title_reporting(config.title_report)`.
+    - `enquiry-response` → `set_enquiry_response(&[u8])` (ENQ 0x05 answerback; empty = silent).
+    - `osc-color-report-format` → `set_osc_color_report_format(OscColorReportFormat::{None|Bit8|Bit16})`.
+    - `image-storage-limit` → `Terminal::set_kitty_graphics_size_limit(usize)` (applies to all
+      screens; 0 disables kitty graphics; engine default 320 MB). Call on startup + reload.
+    - `scrollback-limit` → `terminal::Options::max_scrollback` at construction (already a
+      direct port of upstream's `max_scrollback`).
+    - `vt-kam-allowed` → engine tracks KAM (mode 2) as `Mode::DisableKeyboard`, readable via
+      `Terminal::modes.get(Mode::DisableKeyboard)`. Gate keyboard input on
+      `config.vt_kam_allowed && that`, mirroring `Surface.zig:2699`. No engine change needed.
+    Landed in vt-tails' config-toggle PR (feature-coverage L39-44). Ping vt-tails if you'd
+    have shaped a seam differently.
 
 ## Mission
 

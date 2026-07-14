@@ -1700,6 +1700,16 @@ impl Terminal {
         }
     }
 
+    /// Set the total kitty-graphics image storage byte limit across all
+    /// screens (config `image-storage-limit`), evicting oldest images as
+    /// needed; `limit == 0` disables kitty graphics and clears stored images.
+    /// The engine defaults to 320 MB per screen (upstream's default); the app
+    /// should call this on startup and config reload. Port of
+    /// `Terminal.setKittyGraphicsSizeLimit` (`Terminal.zig:3243-3255`).
+    pub fn set_kitty_graphics_size_limit(&mut self, limit: usize) {
+        self.screens.set_kitty_image_storage_limit(limit);
+    }
+
     // ---- alt-screen / reset --------------------------------------------
 
     /// Build the [`screen::Options`] a lazily-initialized screen should be

@@ -847,6 +847,35 @@ fn xtwinops_size_report_ignores_extra_params() {
     assert!(s.handler.take_output().is_empty());
 }
 
+// `title-report` config seam: `CSI 21 t` answers by default (libghostty-vt
+// parity), but the app can disable it (upstream's default, gated at the Surface
+// to prevent title read-back injection). Only the 21 t title report is gated;
+// 14/16/18 t geometry reports are unaffected.
+#[test]
+fn title_report_can_be_disabled() {
+    let mut s = term(10, 4);
+    s.feed(b"\x1b]2;secret\x1b\\");
+
+    // Default (enabled) -> reports.
+    s.feed(b"\x1b[21t");
+    assert_eq!(s.handler.take_output(), b"\x1b]lsecret\x1b\\");
+
+    // Disabled -> silent.
+    s.handler.set_title_reporting(false);
+    s.feed(b"\x1b[21t");
+    assert!(s.handler.take_output().is_empty());
+
+    // Geometry reports remain answerable when a cell size is present.
+    s.handler.set_cell_size(9, 18);
+    s.feed(b"\x1b[18t");
+    assert_eq!(s.handler.take_output(), b"\x1b[8;4;10t");
+
+    // Re-enabled -> reports again.
+    s.handler.set_title_reporting(true);
+    s.feed(b"\x1b[21t");
+    assert_eq!(s.handler.take_output(), b"\x1b]lsecret\x1b\\");
+}
+
 // XTMODKEYS `CSI > 4 ; 2 m` enables modify-other-keys mode 2; every other
 // format (and the reset `CSI > m`) clears it. Port of setModifyKeyFormat.
 #[test]

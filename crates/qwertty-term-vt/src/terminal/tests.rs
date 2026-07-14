@@ -8800,3 +8800,33 @@ fn delete_lines_wide_char_at_right_margin_with_full_clear() {
     // violation in clear_cells.
     t.scroll_up(t.rows as usize);
 }
+
+// `image-storage-limit` config seam: `set_kitty_graphics_size_limit` applies a
+// byte limit across all screens. Default is enabled (320 MB); `0` disables
+// kitty graphics; a non-zero value updates the limit. Port of
+// `Terminal.setKittyGraphicsSizeLimit`.
+#[test]
+fn set_kitty_graphics_size_limit_applies_to_all_screens() {
+    let mut t = term(80, 24);
+    // Force the alternate screen into existence so the limit reaches both.
+    t.switch_screen(ScreenKey::Alternate);
+    t.switch_screen(ScreenKey::Primary);
+
+    // Default: kitty graphics enabled with the 320 MB limit.
+    assert!(t.screen().kitty_images.enabled());
+
+    // A custom limit updates the active screen's storage.
+    t.set_kitty_graphics_size_limit(5000);
+    assert_eq!(t.screen().kitty_images.total_limit, 5000);
+    assert!(t.screen().kitty_images.enabled());
+    // ...and the alternate screen too.
+    t.switch_screen(ScreenKey::Alternate);
+    assert_eq!(t.screen().kitty_images.total_limit, 5000);
+    t.switch_screen(ScreenKey::Primary);
+
+    // Zero disables the protocol on every screen.
+    t.set_kitty_graphics_size_limit(0);
+    assert!(!t.screen().kitty_images.enabled());
+    t.switch_screen(ScreenKey::Alternate);
+    assert!(!t.screen().kitty_images.enabled());
+}
