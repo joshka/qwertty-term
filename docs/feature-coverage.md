@@ -26,12 +26,12 @@ items are `[ ]` wholesale unless noted.
 - [x] Kitty unicode placeholders (U=1)
 - [x] OSC 0/1/2 title, 4/104 palette, 7 cwd, 8 hyperlink, 10/11/12 fg/bg/cursor, 52 clipboard
 - [x] OSC 133 shell-integration marks, 22 pointer shape
-- [x] DCS: DECRQSS (partial), XTGETTCAP (partial)
+- [x] DCS: DECRQSS (SGR/DECSCUSR/DECSTBM/DECSLRM), XTGETTCAP (full terminfo cap set)
 - [x] Scrollback engine + viewport pins; Unicode grapheme break + width (UAX #29/#11, exact)
 - [x] Selection model + literal-substring search (no regex, matches upstream)
 - [x] Snapshot/formatter (owned styled grid + reply queue) — the embeddability seam
 - [~] XTWINOPS / title stack (core reports done; some ops stubbed)
-- [~] XTGETTCAP / DECRQSS full capability set
+- [x] XTGETTCAP full terminfo capability set (268 caps + TN/Co/RGB) / DECRQSS at parity
 - [ ] tmux control mode (`4.3k` Zig, deferred)
 - [ ] OSC 21 color query reply (upstream finding filed in `work/upstream/`)
 - [ ] VT config toggles: `title-report`, `enquiry-response`, `vt-kam-allowed` (KAM),
