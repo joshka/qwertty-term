@@ -1527,11 +1527,22 @@ impl<H: Handler> Stream<H> {
                         // Size reports. 21 (title) is always answerable; 14/16/18
                         // (pixel/cell/char geometry) need the cell-size seam and
                         // stay silent until it's set (matching the lib layer,
-                        // whose `size` effect returns null when absent).
-                        14 => self.handler.size_report(SizeReportStyle::Csi14t),
-                        16 => self.handler.size_report(SizeReportStyle::Csi16t),
-                        18 => self.handler.size_report(SizeReportStyle::Csi18t),
-                        21 => self.handler.size_report(SizeReportStyle::Csi21t),
+                        // whose `size` effect returns null when absent). Each is
+                        // gated on `params.len() == 1`: a report op carrying extra
+                        // parameters is ignored, matching upstream
+                        // (`stream.zig:2003-2030`, which `log.warn`s and drops it).
+                        14 if params.len() == 1 => {
+                            self.handler.size_report(SizeReportStyle::Csi14t)
+                        }
+                        16 if params.len() == 1 => {
+                            self.handler.size_report(SizeReportStyle::Csi16t)
+                        }
+                        18 if params.len() == 1 => {
+                            self.handler.size_report(SizeReportStyle::Csi18t)
+                        }
+                        21 if params.len() == 1 => {
+                            self.handler.size_report(SizeReportStyle::Csi21t)
+                        }
                         // 22/23: push/pop title. We only support window title
                         // (param[1] must be 0 or 2); when present, param[2] is
                         // the stack index. Port of the inline `22, 23 => …`

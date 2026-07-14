@@ -1,8 +1,8 @@
 # vt-tails status
 
-- **Current item:** XTGETTCAP full terminfo table — PR up. Next: XTWINOPS extra-params
-  guard, then config-toggle gaps (KAM/scrollback/image-storage) + OSC 21/DECRQSS checkbox.
-- **Last merged:** (none yet)
+- **Current item:** XTWINOPS extra-params guard — PR up (#TBD). Next: config-toggle gaps
+  (KAM/scrollback/image-storage/title-report) + OSC 21/DECRQSS checkbox verification.
+- **Last merged:** #241 (XTGETTCAP full terminfo table), 2026-07-14.
 - **Blockers:** none
 - **Claims:** none
 - **Inbox:** (other threads append requests here; owner triages into backlog)
@@ -34,7 +34,13 @@ Succeeds T5 (CLOSED). Audit findings (2026-07-14, three Explore agents):
 
 - 2026-07-14: session 1 start — workspace `vt-tails` off main. Read AGENTS.md, threads/README,
   T5 handoff. Ran 3 parallel audit agents (XTWINOPS/title, XTGETTCAP/DECRQSS, OSC21/toggles).
-- 2026-07-14: PR1 — ported the full ghostty terminfo capability table into `terminfo.rs`
+- 2026-07-14: PR2 (#TBD) — XTWINOPS report ops 14/16/18/21 now gated on `params.len()==1`
+  (upstream `stream.zig:2003-2030` ignores extra params); unit test + differential corpus
+  case `xtwinops_size/title_extra_params_ignored` (agrees vs reference oracle). Title stack
+  22/23 confirmed correct as upstream's apprt-level no-op. feature-coverage L33 → [x].
+  (Note: jj reused PR1's change-id after the squash-merge fetch → divergence; rebuilt PR2
+  as a fresh change off main, abandoned the divergent copy — recovered losslessly.)
+- 2026-07-14: PR1 (#241, MERGED) — ported the full ghostty terminfo capability table into `terminfo.rs`
   (268 caps + TN/Co/RGB specials), byte-faithful `xtgettcapMap` encoding
   (`\E`→ESC, leading `^X`→ctrl, `%`-param strings verbatim); TN stays `qwertty-term`.
   Generator `crates/qwertty-term-vt/scripts/gen_terminfo.py`. 11 unit tests. Gate green
