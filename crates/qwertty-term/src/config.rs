@@ -320,6 +320,29 @@ pub struct Config {
     /// (upstream `window-position-y`, `Config.zig:2197`).
     #[serde(rename = "window-position-y")]
     pub window_position_y: Option<i32>,
+    /// The window subtitle: `false` (default, no subtitle) or `working-directory`
+    /// (the focused surface's cwd). Upstream `window-subtitle`
+    /// (`Config.zig:2109`, enum `WindowSubtitle` at `Config.zig:5284`) ships this
+    /// on GTK only; we provide the same config surface natively on macOS via
+    /// `NSWindow.subtitle`. Parsed by [`Config::window_subtitle`].
+    #[serde(rename = "window-subtitle")]
+    pub window_subtitle: Option<String>,
+    /// Where a new tab opens relative to the current one: `current` (default,
+    /// immediately after the active tab) or `end` (after the last tab in the
+    /// group). Upstream `window-new-tab-position` (`Config.zig:2242`, enum
+    /// `WindowNewTabPosition` at `Config.zig:9181`; applied in
+    /// `TerminalController.swift:456`). Parsed by
+    /// [`Config::window_new_tab_position`].
+    #[serde(rename = "window-new-tab-position")]
+    pub window_new_tab_position: Option<String>,
+    /// The tab bar visibility policy: `auto` (default, the macOS convention —
+    /// visible only at 2+ tabs), `always` (visible even with one tab), or `never`
+    /// (native tabbing disabled; new tabs open as windows). Upstream
+    /// `window-show-tab-bar` (`Config.zig:2265`, enum `WindowShowTabBar` at
+    /// `Config.zig:9193`) is a GTK feature; we map the same enum onto macOS's
+    /// `NSWindowTabbingMode`. Parsed by [`Config::window_show_tab_bar`].
+    #[serde(rename = "window-show-tab-bar")]
+    pub window_show_tab_bar: Option<String>,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -404,6 +427,9 @@ impl Default for Config {
             window_height: 0,
             window_position_x: None,
             window_position_y: None,
+            window_subtitle: None,
+            window_new_tab_position: None,
+            window_show_tab_bar: None,
         }
     }
 }
@@ -685,6 +711,30 @@ impl Config {
             _ => None,
         }
     }
+
+    /// The parsed `window-subtitle` policy (default `Disabled`).
+    pub fn window_subtitle(&self) -> WindowSubtitle {
+        self.window_subtitle
+            .as_deref()
+            .map(WindowSubtitle::parse)
+            .unwrap_or_default()
+    }
+
+    /// The parsed `window-new-tab-position` (default `Current`).
+    pub fn window_new_tab_position(&self) -> WindowNewTabPosition {
+        self.window_new_tab_position
+            .as_deref()
+            .map(WindowNewTabPosition::parse)
+            .unwrap_or_default()
+    }
+
+    /// The parsed `window-show-tab-bar` policy (default `Auto`).
+    pub fn window_show_tab_bar(&self) -> WindowShowTabBar {
+        self.window_show_tab_bar
+            .as_deref()
+            .map(WindowShowTabBar::parse)
+            .unwrap_or_default()
+    }
 }
 
 /// The `[mouse-scroll-multiplier]` config table. Field defaults match
@@ -728,6 +778,80 @@ impl ConfirmCloseSurface {
             "false" | "never" => Self::Never,
             "always" => Self::Always,
             _ => Self::OnRunning,
+        }
+    }
+}
+
+/// The window subtitle policy (`window-subtitle`, upstream `WindowSubtitle`,
+/// `Config.zig:5284`, default `false`). Upstream ships this on GTK only; we map
+/// the same enum onto `NSWindow.subtitle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowSubtitle {
+    /// No subtitle. The default.
+    #[default]
+    Disabled,
+    /// Show the focused surface's working directory as the subtitle.
+    WorkingDirectory,
+}
+
+impl WindowSubtitle {
+    /// Parse the config value (`false` / `working-directory`); unknown values
+    /// fall back to `false` (disabled).
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "working-directory" => Self::WorkingDirectory,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+/// Where a new tab opens relative to the current one (`window-new-tab-position`,
+/// upstream `WindowNewTabPosition`, `Config.zig:9181`, default `current`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowNewTabPosition {
+    /// Insert the new tab immediately after the active tab. The default.
+    #[default]
+    Current,
+    /// Insert the new tab after the last tab in the group.
+    End,
+}
+
+impl WindowNewTabPosition {
+    /// Parse the config value (`current` / `end`); unknown values fall back to
+    /// `current` (upstream's default).
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "end" => Self::End,
+            _ => Self::Current,
+        }
+    }
+}
+
+/// The tab bar visibility policy (`window-show-tab-bar`, upstream
+/// `WindowShowTabBar`, `Config.zig:9193`, default `auto`). Upstream is a GTK
+/// feature; we map the enum onto macOS's `NSWindowTabbingMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowShowTabBar {
+    /// The macOS convention: the tab bar appears only at 2+ tabs
+    /// (`NSWindowTabbingMode::Automatic`). The default.
+    #[default]
+    Auto,
+    /// Always show the tab bar, even with a single tab
+    /// (`NSWindowTabbingMode::Preferred`).
+    Always,
+    /// Never show the tab bar; native tabbing is disabled so new tabs open as
+    /// windows (`NSWindowTabbingMode::Disallowed`).
+    Never,
+}
+
+impl WindowShowTabBar {
+    /// Parse the config value (`auto` / `always` / `never`); unknown values fall
+    /// back to `auto` (upstream's default).
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "always" => Self::Always,
+            "never" => Self::Never,
+            _ => Self::Auto,
         }
     }
 }

@@ -315,6 +315,9 @@ fn run_window() {
     let smoke_mouseshift = std::env::var_os("QWERTTY_TERM_SMOKE_MOUSESHIFT").is_some();
     // Clear-copy smoke: assert selection-clear-on-copy.
     let smoke_clearcopy = std::env::var_os("QWERTTY_TERM_SMOKE_CLEARCOPY").is_some();
+    // Window-chrome smoke: assert window-show-tab-bar / window-subtitle /
+    // window-new-tab-position wiring.
+    let smoke_windowchrome = std::env::var_os("QWERTTY_TERM_SMOKE_WINDOWCHROME").is_some();
     qwertty_term::app::run(
         &config,
         smoke_ms,
@@ -343,6 +346,7 @@ fn run_window() {
         smoke_wordchars,
         smoke_mouseshift,
         smoke_clearcopy,
+        smoke_windowchrome,
     );
 }
 
