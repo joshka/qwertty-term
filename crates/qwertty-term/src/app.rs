@@ -1607,6 +1607,13 @@ pub struct ControllerState {
     /// The tab bar visibility policy (`window-show-tab-bar`); drives each new
     /// window's `NSWindowTabbingMode`.
     window_show_tab_bar: crate::config::WindowShowTabBar,
+    /// Resize windows in whole-cell increments (`window-step-resize`); sets each
+    /// window's `contentResizeIncrements` to the focused cell size.
+    window_step_resize: bool,
+    /// Whether windows cast a drop shadow (`macos-window-shadow`).
+    macos_window_shadow: bool,
+    /// The traffic-light button policy (`macos-window-buttons`).
+    macos_window_buttons: crate::config::MacWindowButtons,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1875,6 +1882,9 @@ impl Controller {
             window_subtitle: config.window_subtitle(),
             window_new_tab_position: config.window_new_tab_position(),
             window_show_tab_bar: config.window_show_tab_bar(),
+            window_step_resize: config.window_step_resize,
+            macos_window_shadow: config.macos_window_shadow,
+            macos_window_buttons: config.macos_window_buttons(),
         })))
     }
 
@@ -3221,6 +3231,9 @@ impl Controller {
         state.window_subtitle = config.window_subtitle();
         state.window_new_tab_position = config.window_new_tab_position();
         state.window_show_tab_bar = config.window_show_tab_bar();
+        state.window_step_resize = config.window_step_resize;
+        state.macos_window_shadow = config.macos_window_shadow;
+        state.macos_window_buttons = config.macos_window_buttons();
         for tab in state.tabs.values_mut() {
             for surface in tab.surfaces.values_mut() {
                 surface.selection_colors = selection_colors;
@@ -4641,6 +4654,38 @@ impl Controller {
         // Paint the window background the terminal colour so any sub-cell
         // remainder strip is seamless (see the R5 dark-band fix).
         set_window_background(&window, default_bg);
+        // Window chrome config (`macos-window-shadow`, `macos-window-buttons`,
+        // `window-step-resize`) — applied once at creation from the surface's
+        // cell metrics. Step-resize increments are in points (device px / scale).
+        {
+            let (shadow, buttons, step_resize) = {
+                let state = self.0.borrow();
+                (
+                    state.macos_window_shadow,
+                    state.macos_window_buttons,
+                    state.window_step_resize,
+                )
+            };
+            // `macos-window-shadow`: default true; only `false` changes anything
+            // (upstream `TerminalWindow.swift:476`).
+            window.setHasShadow(shadow);
+            // `macos-window-buttons = hidden`: hide close/miniaturize/zoom
+            // (upstream `TerminalWindow.swift:570`).
+            if buttons == crate::config::MacWindowButtons::Hidden {
+                hide_window_buttons(&window);
+            }
+            // `window-step-resize`: resize in whole-cell increments (upstream
+            // `BaseTerminalController.swift:884`). Skip zero cell sizes (Stage
+            // Manager can momentarily report a zero-size window).
+            if step_resize {
+                let scale = window.backingScaleFactor().max(1.0);
+                let inc_w = surface.font.cell_width as f64 / scale;
+                let inc_h = surface.font.cell_height as f64 / scale;
+                if inc_w > 0.0 && inc_h > 0.0 {
+                    window.setContentResizeIncrements(NSSize::new(inc_w, inc_h));
+                }
+            }
+        }
         // `window-save-state`: mark the window (non-)restorable so macOS's native
         // window restoration honors the config. `never` opts every window out.
         let restorable = self.0.borrow().window_save_state != crate::config::WindowSaveState::Never;
@@ -5371,6 +5416,22 @@ fn make_window(
         window.setReleasedWhenClosed(false);
     }
     window
+}
+
+/// Hide the three standard traffic-light window buttons (close/miniaturize/
+/// zoom) for `macos-window-buttons = hidden` (upstream
+/// `TerminalWindow.swift:570-573`).
+fn hide_window_buttons(window: &NSWindow) {
+    use objc2_app_kit::NSWindowButton;
+    for button in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(b) = window.standardWindowButton(button) {
+            b.setHidden(true);
+        }
+    }
 }
 
 /// The `NSPopUpMenuWindowLevel` — high enough to render over the menu bar and
@@ -8344,16 +8405,20 @@ impl AppDelegate {
         self.schedule_selector(0.6, sel!(ghosttyWindowChromeSmoke:));
     }
 
-    /// `window-show-tab-bar` / `window-subtitle` / `window-new-tab-position`
-    /// smoke. Launch with `--window-show-tab-bar=always
-    /// --window-subtitle=working-directory --window-new-tab-position=end`.
-    /// Asserts, in one window session:
+    /// Window-chrome smoke. Launch with `--window-show-tab-bar=always
+    /// --window-subtitle=working-directory --window-new-tab-position=end
+    /// --window-step-resize=true --macos-window-shadow=false
+    /// --macos-window-buttons=hidden`. Asserts, in one window session:
     ///
     /// 1. the first window's tabbing mode is `.preferred` (`show-tab-bar=always`
     ///    forces the tab bar on even with a single tab);
-    /// 2. after an OSC 7 cwd report, the window subtitle tracks that directory
+    /// 2. `macos-window-shadow=false` → the window casts no shadow;
+    /// 3. `macos-window-buttons=hidden` → the traffic-light buttons are hidden;
+    /// 4. `window-step-resize=true` → the content resize increments are the cell
+    ///    size (both > 1 point, not the 1×1 pixel default);
+    /// 5. after an OSC 7 cwd report, the window subtitle tracks that directory
     ///    (`window-subtitle=working-directory`);
-    /// 3. a new tab opened while an *earlier* tab is active still lands at the
+    /// 6. a new tab opened while an *earlier* tab is active still lands at the
     ///    END of the group (`window-new-tab-position=end`) — the assertion that
     ///    distinguishes `end` from `current`.
     ///
@@ -8381,7 +8446,41 @@ impl AppDelegate {
             ));
         }
 
-        // 2. window-subtitle=working-directory → feed OSC 7 and assert the
+        // 2. macos-window-shadow=false → the window casts no shadow.
+        if win_a.hasShadow() {
+            fail("macos-window-shadow=false should clear NSWindow.hasShadow".into());
+        }
+
+        // 3. macos-window-buttons=hidden → all three standard buttons are hidden.
+        for (button, name) in [
+            (objc2_app_kit::NSWindowButton::CloseButton, "close"),
+            (
+                objc2_app_kit::NSWindowButton::MiniaturizeButton,
+                "miniaturize",
+            ),
+            (objc2_app_kit::NSWindowButton::ZoomButton, "zoom"),
+        ] {
+            match win_a.standardWindowButton(button) {
+                Some(b) if b.isHidden() => {}
+                Some(_) => fail(format!(
+                    "macos-window-buttons=hidden should hide the {name} button"
+                )),
+                None => {}
+            }
+        }
+
+        // 4. window-step-resize=true → content resize increments are the cell
+        //    size (both > 1 point, distinct from the 1×1 pixel default).
+        let inc = win_a.contentResizeIncrements();
+        if inc.width <= 1.0 || inc.height <= 1.0 {
+            fail(format!(
+                "window-step-resize=true should set cell-sized resize increments, got \
+                 {}×{}",
+                inc.width, inc.height
+            ));
+        }
+
+        // 5. window-subtitle=working-directory → feed OSC 7 and assert the
         //    subtitle tracks the reported cwd (applied on the next pace tick).
         let dir = "/private/tmp/qwertty-chrome-smoke";
         controller.feed_surface_output(
@@ -8398,7 +8497,7 @@ impl AppDelegate {
             ));
         }
 
-        // 3. window-new-tab-position=end: open tab B, refocus A, then open tab
+        // 6. window-new-tab-position=end: open tab B, refocus A, then open tab
         //    C. With `end`, C joins after the LAST tab (B), so the group order
         //    is [A, B, C] and C's window is last. (`current` would insert C
         //    right after A, making B last instead.)
@@ -8439,9 +8538,11 @@ impl AppDelegate {
 
         println!(
             "OK: window-chrome smoke — tabbingMode=.preferred (window-show-tab-bar=\
-             always), the subtitle tracked the cwd (window-subtitle=working-\
-             directory), and a new tab landed at the group end (window-new-tab-\
-             position=end)."
+             always), no window shadow (macos-window-shadow=false), buttons hidden \
+             (macos-window-buttons=hidden), cell-sized resize increments \
+             (window-step-resize=true), the subtitle tracked the cwd (window-\
+             subtitle=working-directory), and a new tab landed at the group end \
+             (window-new-tab-position=end)."
         );
         std::process::exit(0);
     }
