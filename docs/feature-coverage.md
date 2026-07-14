@@ -184,9 +184,10 @@ items are `[ ]` wholesale unless noted.
       macOS split/search/tab chords are now upstream's exact defaults. Scroll, font-size,
       clipboard, and window/tab-lifecycle (`new_window`/`new_tab`/`close_surface`/
       `close_tab`/`toggle_quick_terminal`/`toggle_fullscreen`) action categories are now
-      dispatched too (e.g. the default ctrl+Enter → fullscreen, a non-menu bind, now works).
-      Remaining: actions needing new engine/selection behavior (`clear_screen`, `select_all`,
-      `jump_to_prompt`, `write_scrollback_file`) + `performable` menu fallthrough.
+      dispatched too (e.g. the default ctrl+Enter → fullscreen, a non-menu bind, now works),
+      plus the `write_*_file` family. Remaining: actions needing new engine/selection
+      behavior (`clear_screen`, `select_all`, `jump_to_prompt`) + `performable` menu
+      fallthrough.
 - [~] `Binding.zig` runtime: **leader-key sequences** (`ctrl+a>c`) **and `chain=`
       multi-action bindings dispatched** (`handle_key_sequence` + `resolve_actions`
       over the `Set`'s `Leader`/`Leaf`/`LeafChained` storage). Remaining: sequence
@@ -250,7 +251,10 @@ items are `[ ]` wholesale unless noted.
 - [x] Minimal TOML config (theme, copy-on-select, font-family, font-size, keybind subset)
 - [x] `theme` resolution via Ghostty theme files
 - [—] Ghostty's custom config format (replaced by TOML — ADR)
-- [ ] `+import-ghostty-config` converter
+- [x] `+import-ghostty-config` converter — Ghostty `key = value` → qwertty-term TOML;
+      data-driven mapping of every real `Config` field (with a drift-guard test),
+      format-mismatch keys flagged as `# needs manual conversion`, unknown keys preserved
+      as comments; the maintainer's real config is the acceptance test
 - [~] `config-reload` action (default `cmd+shift+,`) — re-reads config and re-applies
       keybinds, copy-on-select, scroll-multiplier, **and the theme live** (palette + fg/bg/
       cursor + selection colors pushed into every surface's engine, forced full repaint
@@ -259,7 +263,10 @@ items are `[ ]` wholesale unless noted.
 - [x] `config-file` includes — deferred breadth-first queue, cycle detection,
       `?optional` prefix, relative-to-including-file resolution; generic TOML merge
       (last-wins scalars, append arrays)
-- [ ] `config-default-files`, two-location (XDG + App Support) merge, CLI overrides
+- [x] Two-location merge (XDG + macOS App Support, last-wins) + CLI `--key=value`
+      overrides (highest precedence; captured in a `OnceLock` so they replay on reload;
+      invalid overrides dropped, never fatal)
+- [ ] `config-default-files`
 - [ ] Full option surface (~200 keys) — most map to features listed elsewhere here
 
 ## Notifications, bell, progress
