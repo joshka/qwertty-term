@@ -27,14 +27,23 @@ use crate::presentation::PresentationMode;
 use crate::{Face, FaceError};
 
 /// Discover a styled member of `family` by system font lookup. macOS uses
-/// CoreText discovery; on other platforms (no fontconfig yet) it returns `None`,
-/// so `new_with_family_styles` falls through to the synthetic ladder.
+/// CoreText discovery; Linux (and any `fontconfig`-feature build) uses
+/// fontconfig discovery; without either backend it returns `None`, so
+/// `new_with_family_styles` falls through to the synthetic ladder.
 #[cfg(all(target_os = "macos", not(feature = "freetype")))]
 fn discover_family_style(family: &str, bold: bool, italic: bool, size_px: f64) -> Option<Face> {
     crate::discovery::discover_family_style(family, bold, italic, size_px)
 }
 
-#[cfg(not(all(target_os = "macos", not(feature = "freetype"))))]
+#[cfg(feature = "fontconfig")]
+fn discover_family_style(family: &str, bold: bool, italic: bool, size_px: f64) -> Option<Face> {
+    crate::fontconfig::discover_family_style(family, bold, italic, size_px)
+}
+
+#[cfg(all(
+    not(all(target_os = "macos", not(feature = "freetype"))),
+    not(feature = "fontconfig")
+))]
 fn discover_family_style(_family: &str, _bold: bool, _italic: bool, _size_px: f64) -> Option<Face> {
     None
 }

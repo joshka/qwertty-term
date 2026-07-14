@@ -85,6 +85,19 @@ qwertty-term-font = { version = "0.3.0", path = "../qwertty-term-font", features
     "freetype",
 ] }
 
+# On Linux additionally enable fontconfig system-font discovery (ADR 003 P2), so
+# the collection/resolver can resolve styled family members and codepoint
+# fallbacks from installed system fonts (not just the embedded + synthetic
+# chain). `fontconfig` implies `freetype` and uses dlopen — libfontconfig loads
+# at runtime, so the Linux build/CI compile needs no libfontconfig; only actually
+# *hitting* a discovery path at runtime does (every desktop Linux + the ubuntu
+# runner has it). The headless render/betamax path uses the embedded font and
+# never triggers discovery, so it stays libfontconfig-free.
+[target.'cfg(target_os = "linux")'.dependencies]
+qwertty-term-font = { version = "0.3.0", path = "../qwertty-term-font", features = [
+    "fontconfig",
+] }
+
 [dev-dependencies]
 # The acceptance test (R4) drives a real qwertty-term-vt Terminal through a Stream to
 # produce the snapshot the engine renders.
