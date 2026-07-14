@@ -1,5 +1,13 @@
 # Stream-handler delta audit (`termio/stream_handler.zig` vs our stream/TerminalHandler)
 
+> **Status (2026-07-14):** this table is the *original* T5 Phase-A audit and is now largely
+> historical. The VT-engine "missing" rows (OSC 8, OSC 21, OSC 22, color queries, DSR ?996,
+> XTMODKEYS, XTWINOPS size/title reports, DECRQSS, XTGETTCAP, mouse state/format flags,
+> enquiry, config-toggle seams) have since shipped — see the VT-engine recertification note in
+> `docs/port-status.md` (2026-07-14). The genuinely-open rows are app/renderer seams
+> (mode-5 reverse redraw, 2026 sync-timer, 1004/2048 initial reports, linefeed mode) or the
+> Josh-gated tmux control mode — not VT-engine core.
+
 T5 Phase-A audit (M2-F). Upstream pinned at commit `2da015cd6`
 (`git -C ~/local/ghostty show 2da015cd6:src/termio/stream_handler.zig`, 1,577 LoC — note the
 live checkout may be on a different commit; this audit reads the pinned blob, not the worktree).
