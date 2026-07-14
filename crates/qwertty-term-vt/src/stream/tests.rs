@@ -823,6 +823,30 @@ fn xtwinops_size_reports_gated_on_cell_size() {
     assert_eq!(s.handler.take_output(), b"\x1b[8;24;80t");
 }
 
+// XTWINOPS report ops 14/16/18/21 are gated on `params.len() == 1`: an op
+// carrying extra parameters is ignored, matching upstream (`stream.zig:2003-2030`
+// `log.warn`s and drops it). Guards against a client conflating a size *set*
+// (`CSI 4;h;w t`) with a size *report* op.
+#[test]
+fn xtwinops_size_report_ignores_extra_params() {
+    let mut s = term(80, 24);
+    s.handler.set_cell_size(9, 18);
+    // Bare ops still report (regression guard for the happy path).
+    s.feed(b"\x1b[14t");
+    assert_eq!(s.handler.take_output(), b"\x1b[4;432;720t");
+
+    // Extra parameters -> ignored, no reply.
+    s.feed(b"\x1b[14;2t");
+    assert!(s.handler.take_output().is_empty());
+    s.feed(b"\x1b[16;0;0t");
+    assert!(s.handler.take_output().is_empty());
+    s.feed(b"\x1b[18;99t");
+    assert!(s.handler.take_output().is_empty());
+    // 21 (title) is always answerable but likewise only with exactly one param.
+    s.feed(b"\x1b[21;2t");
+    assert!(s.handler.take_output().is_empty());
+}
+
 // XTMODKEYS `CSI > 4 ; 2 m` enables modify-other-keys mode 2; every other
 // format (and the reset `CSI > m`) clears it. Port of setModifyKeyFormat.
 #[test]

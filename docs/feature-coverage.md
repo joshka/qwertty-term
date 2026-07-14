@@ -30,7 +30,8 @@ items are `[ ]` wholesale unless noted.
 - [x] Scrollback engine + viewport pins; Unicode grapheme break + width (UAX #29/#11, exact)
 - [x] Selection model + literal-substring search (no regex, matches upstream)
 - [x] Snapshot/formatter (owned styled grid + reply queue) — the embeddability seam
-- [~] XTWINOPS / title stack (core reports done; some ops stubbed)
+- [x] XTWINOPS size/title reports (14/16/18/21 t, extra-param-guarded); title stack
+      push/pop (22/23 t) validated as upstream's apprt-level no-op seam
 - [x] XTGETTCAP full terminfo capability set (268 caps + TN/Co/RGB) / DECRQSS at parity
 - [ ] tmux control mode (`4.3k` Zig, deferred)
 - [ ] OSC 21 color query reply (upstream finding filed in `work/upstream/`)
