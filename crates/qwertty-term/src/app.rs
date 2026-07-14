@@ -1241,6 +1241,10 @@ struct Tab {
     /// set-on-change achieves the same no-flicker outcome). `RefCell` because
     /// [`Tab::update_window_title`] takes `&self` from the tick loop.
     last_title: RefCell<String>,
+    /// The window subtitle last applied (`window-subtitle`), so the per-tick
+    /// poll only calls `setSubtitle` on a real change. Empty when the policy is
+    /// `Disabled` or the cwd is unknown.
+    last_subtitle: RefCell<String>,
     /// Whether a bell is currently indicated on this tab's title (a pane rang
     /// since the tab was last focused). Drives the 🔔 title prefix (upstream
     /// `bell-features = title`); cleared when the tab becomes key. `Cell` for
@@ -1419,6 +1423,26 @@ impl Tab {
         *self.last_title.borrow_mut() = title;
     }
 
+    /// Reflect `window-subtitle` in the window subtitle (shown under the title,
+    /// and in the tab tooltip, on macOS). `WorkingDirectory` tracks the focused
+    /// pane's cwd; `Disabled` clears it. Upstream ships this on GTK only
+    /// (`Config.zig:2109`); macOS's `NSWindow.subtitle` gives the same surface
+    /// natively. Set-on-change, like the title, so the ~16ms poll doesn't churn.
+    fn update_window_subtitle(&self, policy: crate::config::WindowSubtitle) {
+        let subtitle = match policy {
+            crate::config::WindowSubtitle::Disabled => String::new(),
+            crate::config::WindowSubtitle::WorkingDirectory => self
+                .focused_surface()
+                .and_then(|s| s.engine().pwd())
+                .unwrap_or_default(),
+        };
+        if *self.last_subtitle.borrow() == subtitle {
+            return;
+        }
+        self.window.setSubtitle(&NSString::from_str(&subtitle));
+        *self.last_subtitle.borrow_mut() = subtitle;
+    }
+
     /// Clear this tab's bell title indicator (called when the tab becomes key /
     /// focused — upstream clears the bell once the user looks at the surface).
     fn clear_bell(&self) {
@@ -1573,6 +1597,16 @@ pub struct ControllerState {
     /// How long the resize overlay lingers after the last resize
     /// (`resize-overlay-duration`).
     resize_overlay_duration: std::time::Duration,
+    /// The window subtitle policy (`window-subtitle`): when
+    /// `WorkingDirectory`, each window's `NSWindow.subtitle` tracks the focused
+    /// surface's cwd.
+    window_subtitle: crate::config::WindowSubtitle,
+    /// Where a new tab opens relative to the current one
+    /// (`window-new-tab-position`): `Current` (after the active tab) or `End`.
+    window_new_tab_position: crate::config::WindowNewTabPosition,
+    /// The tab bar visibility policy (`window-show-tab-bar`); drives each new
+    /// window's `NSWindowTabbingMode`.
+    window_show_tab_bar: crate::config::WindowShowTabBar,
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1838,6 +1872,9 @@ impl Controller {
             resize_overlay_mode: config.resize_overlay(),
             resize_overlay_position: config.resize_overlay_position(),
             resize_overlay_duration: config.resize_overlay_duration(),
+            window_subtitle: config.window_subtitle(),
+            window_new_tab_position: config.window_new_tab_position(),
+            window_show_tab_bar: config.window_show_tab_bar(),
         })))
     }
 
@@ -1983,6 +2020,7 @@ impl Controller {
             next_surface: 1,
             created: std::time::Instant::now(),
             last_title: RefCell::new(String::new()),
+            last_subtitle: RefCell::new(String::new()),
             bell_ringing: Cell::new(false),
             resize_overlay: RefCell::new(None),
             resize_overlay_deadline: Cell::new(None),
@@ -3175,6 +3213,14 @@ impl Controller {
         state.metric_modifiers = metric_modifiers.clone();
         // The forced-title override re-applies to every tab on the next tick.
         state.forced_title = config.forced_title().map(str::to_owned);
+        // Window/tab chrome policies. `window-subtitle` re-applies on the next
+        // pace-tick title sync; `window-new-tab-position` affects the next new
+        // tab; `window-show-tab-bar` drives the next new window's tabbing mode
+        // (existing windows keep their mode until recreated, like other
+        // window-creation-time settings).
+        state.window_subtitle = config.window_subtitle();
+        state.window_new_tab_position = config.window_new_tab_position();
+        state.window_show_tab_bar = config.window_show_tab_bar();
         for tab in state.tabs.values_mut() {
             for surface in tab.surfaces.values_mut() {
                 surface.selection_colors = selection_colors;
@@ -4266,6 +4312,8 @@ impl Controller {
             // The forced-title override (config `title`); cloned out before the
             // per-tab loop so it doesn't alias the `state.tabs` mutable borrow.
             let forced_title = state.forced_title.clone();
+            // `window-subtitle` policy, read before the per-tab loop.
+            let subtitle_policy = state.window_subtitle;
             for (tid, tab) in state.tabs.iter_mut() {
                 let focused = tab.tree.focused();
                 // Whether this tab has more than one pane — the gate for
@@ -4336,6 +4384,7 @@ impl Controller {
                     }
                 }
                 tab.update_window_title(password_focused, forced_title.as_deref());
+                tab.update_window_subtitle(subtitle_policy);
                 // Expire the resize overlay once its lifetime elapses.
                 tab.tick_resize_overlay(now_tick);
             }
@@ -4582,7 +4631,13 @@ impl Controller {
         );
         container.addSubview(&surface.view);
 
-        let window = make_window(mtm, &container);
+        // `window-show-tab-bar` → the new window's tabbing mode.
+        let tabbing_mode = match self.0.borrow().window_show_tab_bar {
+            crate::config::WindowShowTabBar::Auto => NSWindowTabbingMode::Automatic,
+            crate::config::WindowShowTabBar::Always => NSWindowTabbingMode::Preferred,
+            crate::config::WindowShowTabBar::Never => NSWindowTabbingMode::Disallowed,
+        };
+        let window = make_window(mtm, &container, tabbing_mode);
         // Paint the window background the terminal colour so any sub-cell
         // remainder strip is seamless (see the R5 dark-band fix).
         set_window_background(&window, default_bg);
@@ -4638,6 +4693,7 @@ impl Controller {
             next_surface: 1,
             created: std::time::Instant::now(),
             last_title: RefCell::new(String::new()),
+            last_subtitle: RefCell::new(String::new()),
             bell_ringing: Cell::new(false),
             resize_overlay: RefCell::new(None),
             resize_overlay_deadline: Cell::new(None),
@@ -4647,11 +4703,35 @@ impl Controller {
 
         self.0.borrow_mut().tabs.insert(id, tab);
 
-        // Native tabbing: add to the parent's window group if requested.
-        if let Some(parent) = tab_group_parent {
-            let parent_window = self.0.borrow().tabs.get(&parent).map(|t| t.window.clone());
+        // Native tabbing: add to the parent's window group if requested. A
+        // `.disallowed` window (`window-show-tab-bar = never`) never joins a
+        // group — it stays a standalone window (upstream
+        // `TerminalController.swift:453` gates on `tabbingMode != .disallowed`).
+        if let Some(parent) = tab_group_parent
+            && tabbing_mode != NSWindowTabbingMode::Disallowed
+        {
+            let (parent_window, position) = {
+                let state = self.0.borrow();
+                (
+                    state.tabs.get(&parent).map(|t| t.window.clone()),
+                    state.window_new_tab_position,
+                )
+            };
             if let Some(pw) = parent_window {
-                pw.addTabbedWindow_ordered(&window, objc2_app_kit::NSWindowOrderingMode::Above);
+                // `window-new-tab-position`: `End` groups against the *last*
+                // window in the parent's tab group so the new tab lands after
+                // every existing tab; `Current` groups against the parent so it
+                // lands right after the active tab (upstream
+                // `TerminalController.swift:456`). If the parent has no group
+                // yet, both fall back to the parent window itself.
+                let anchor = match position {
+                    crate::config::WindowNewTabPosition::End => pw
+                        .tabGroup()
+                        .and_then(|g| g.windows().iter().last())
+                        .unwrap_or_else(|| pw.clone()),
+                    crate::config::WindowNewTabPosition::Current => pw.clone(),
+                };
+                anchor.addTabbedWindow_ordered(&window, objc2_app_kit::NSWindowOrderingMode::Above);
             }
         }
 
@@ -5244,8 +5324,14 @@ fn make_resize_overlay_field(mtm: MainThreadMarker) -> Retained<objc2_app_kit::N
 }
 
 /// Build an `NSWindow` sized to the initial content, tabbing-enabled, hosting
-/// `content_view` (the tab's split container) as its content view.
-fn make_window(mtm: MainThreadMarker, content_view: &NSView) -> Retained<NSWindow> {
+/// `content_view` (the tab's split container) as its content view. `tabbing_mode`
+/// comes from `window-show-tab-bar` (`Auto`→`.automatic`, `Always`→`.preferred`,
+/// `Never`→`.disallowed`).
+fn make_window(
+    mtm: MainThreadMarker,
+    content_view: &NSView,
+    tabbing_mode: NSWindowTabbingMode,
+) -> Retained<NSWindow> {
     let content = NSRect::new(
         NSPoint::new(0.0, 0.0),
         NSSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
@@ -5274,10 +5360,13 @@ fn make_window(mtm: MainThreadMarker, content_view: &NSView) -> Retained<NSWindo
         // explicitly (below), which groups windows into the same tabbed
         // window regardless of `tabbingMode`; that mode only governs the
         // *implicit* behavior AppKit applies to windows opened without an
-        // explicit group (e.g. Cmd-N's `new_window`). `.preferred` used to be
-        // set here, which forces the tab bar always-on even for a single
-        // window — the reported "empty dark strip" bug.
-        window.setTabbingMode(NSWindowTabbingMode::Automatic);
+        // explicit group (e.g. Cmd-N's `new_window`). The default `.automatic`
+        // keeps a lone window tab-bar-free. `window-show-tab-bar = always`
+        // (`.preferred`) forces the tab bar always-on even for a single window
+        // (what used to be the unconditional default — the reported "empty dark
+        // strip" bug when it wasn't opt-in); `never` (`.disallowed`) suppresses
+        // native tabbing entirely so new tabs open as windows.
+        window.setTabbingMode(tabbing_mode);
         window.setContentView(Some(content_view));
         window.setReleasedWhenClosed(false);
     }
@@ -5702,6 +5791,11 @@ pub struct DelegateIvars {
     /// `selection-clear-on-copy` clears on explicit copy but not copy-on-select.
     /// See [`AppDelegate::run_clearcopy_smoke`].
     smoke_clearcopy: bool,
+    /// Window-chrome smoke (`QWERTTY_TERM_SMOKE_WINDOWCHROME`): assert
+    /// `window-show-tab-bar` (tabbing mode), `window-subtitle` (NSWindow
+    /// subtitle from cwd), and `window-new-tab-position` (new tab lands at the
+    /// group end). See [`AppDelegate::run_windowchrome_smoke`].
+    smoke_windowchrome: bool,
     /// The vsync-synced present clock (a `CADisplayLink` bound to the first
     /// window's display) when running interactively. Retained here so it isn't
     /// deallocated; `None` when the fallback combined `NSTimer` tick is used
@@ -5785,6 +5879,7 @@ define_class!(
             let has_wordchars = self.ivars().smoke_wordchars;
             let has_mouseshift = self.ivars().smoke_mouseshift;
             let has_clearcopy = self.ivars().smoke_clearcopy;
+            let has_windowchrome = self.ivars().smoke_windowchrome;
             let has_type = !self.ivars().smoke_type.borrow().is_empty();
             if has_splits {
                 self.schedule_splits_smoke();
@@ -5832,6 +5927,8 @@ define_class!(
                 self.schedule_mouseshift_smoke();
             } else if has_clearcopy {
                 self.schedule_clearcopy_smoke();
+            } else if has_windowchrome {
+                self.schedule_windowchrome_smoke();
             } else if has_geometry {
                 self.schedule_geometry_smoke();
             } else if has_type {
@@ -6145,6 +6242,13 @@ define_class!(
         fn clearcopy_smoke(&self, _timer: &AnyObject) {
             self.run_clearcopy_smoke();
         }
+
+        /// Window-chrome smoke: assert window-show-tab-bar / window-subtitle /
+        /// window-new-tab-position wiring, exit 0/1.
+        #[unsafe(method(ghosttyWindowChromeSmoke:))]
+        fn windowchrome_smoke(&self, _timer: &AnyObject) {
+            self.run_windowchrome_smoke();
+        }
     }
 );
 
@@ -6180,6 +6284,7 @@ impl AppDelegate {
         smoke_wordchars: bool,
         smoke_mouseshift: bool,
         smoke_clearcopy: bool,
+        smoke_windowchrome: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
             controller,
@@ -6212,6 +6317,7 @@ impl AppDelegate {
             smoke_wordchars,
             smoke_mouseshift,
             smoke_clearcopy,
+            smoke_windowchrome,
             display_link: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -8233,6 +8339,113 @@ impl AppDelegate {
         std::process::exit(0);
     }
 
+    /// Schedule the window-chrome smoke: let the first shell settle, then run.
+    fn schedule_windowchrome_smoke(&self) {
+        self.schedule_selector(0.6, sel!(ghosttyWindowChromeSmoke:));
+    }
+
+    /// `window-show-tab-bar` / `window-subtitle` / `window-new-tab-position`
+    /// smoke. Launch with `--window-show-tab-bar=always
+    /// --window-subtitle=working-directory --window-new-tab-position=end`.
+    /// Asserts, in one window session:
+    ///
+    /// 1. the first window's tabbing mode is `.preferred` (`show-tab-bar=always`
+    ///    forces the tab bar on even with a single tab);
+    /// 2. after an OSC 7 cwd report, the window subtitle tracks that directory
+    ///    (`window-subtitle=working-directory`);
+    /// 3. a new tab opened while an *earlier* tab is active still lands at the
+    ///    END of the group (`window-new-tab-position=end`) — the assertion that
+    ///    distinguishes `end` from `current`.
+    ///
+    /// Exits 0/1.
+    fn run_windowchrome_smoke(&self) {
+        let mtm = self.mtm();
+        let controller = &self.ivars().controller;
+        let fail = windowchrome_fail;
+
+        let Some(tab_a) = controller.active_tab() else {
+            fail("no active tab at window-chrome smoke start".into());
+        };
+        let Some(surface_a) = controller.active_focused_surface() else {
+            fail("no focused surface at window-chrome smoke start".into());
+        };
+        let Some(win_a) = controller.active_window() else {
+            fail("no active window at window-chrome smoke start".into());
+        };
+
+        // 1. window-show-tab-bar=always → the window's tabbing mode is .preferred.
+        let mode = win_a.tabbingMode();
+        if mode != NSWindowTabbingMode::Preferred {
+            fail(format!(
+                "window-show-tab-bar=always should set tabbingMode=.preferred, got {mode:?}"
+            ));
+        }
+
+        // 2. window-subtitle=working-directory → feed OSC 7 and assert the
+        //    subtitle tracks the reported cwd (applied on the next pace tick).
+        let dir = "/private/tmp/qwertty-chrome-smoke";
+        controller.feed_surface_output(
+            tab_a,
+            surface_a,
+            format!("\x1b]7;file://localhost{dir}\x07").as_bytes(),
+        );
+        Self::spin(0.25);
+        let subtitle = win_a.subtitle().to_string();
+        if subtitle != dir {
+            fail(format!(
+                "window-subtitle=working-directory should set the subtitle to the \
+                 cwd {dir:?}, got {subtitle:?}"
+            ));
+        }
+
+        // 3. window-new-tab-position=end: open tab B, refocus A, then open tab
+        //    C. With `end`, C joins after the LAST tab (B), so the group order
+        //    is [A, B, C] and C's window is last. (`current` would insert C
+        //    right after A, making B last instead.)
+        if controller.new_tab_in(tab_a).is_none() {
+            fail("failed to open tab B".into());
+        }
+        Self::spin(0.15);
+        // Refocus tab A (cmd+1 selects the first tab in the group).
+        Self::send_key_equiv(controller, mtm, KEYCODE_1, TAB_MOD_CMD);
+        Self::spin(0.1);
+        if controller.new_tab_in(tab_a).is_none() {
+            fail("failed to open tab C".into());
+        }
+        Self::spin(0.15);
+        let Some(win_c) = controller.active_window() else {
+            fail("no active window after opening tab C".into());
+        };
+        let group = win_a
+            .tabGroup()
+            .unwrap_or_else(|| fail("tab A has no tab group after opening tabs".into()));
+        let count = group.windows().count();
+        if count != 3 {
+            fail(format!("expected 3 tabs in the group, saw {count}"));
+        }
+        let last = group
+            .windows()
+            .iter()
+            .last()
+            .unwrap_or_else(|| fail("empty tab group".into()));
+        if last.windowNumber() != win_c.windowNumber() {
+            fail(format!(
+                "window-new-tab-position=end should place the new tab last; last \
+                 group window #{} != new tab window #{}",
+                last.windowNumber(),
+                win_c.windowNumber()
+            ));
+        }
+
+        println!(
+            "OK: window-chrome smoke — tabbingMode=.preferred (window-show-tab-bar=\
+             always), the subtitle tracked the cwd (window-subtitle=working-\
+             directory), and a new tab landed at the group end (window-new-tab-\
+             position=end)."
+        );
+        std::process::exit(0);
+    }
+
     /// Schedule the title smoke: let the first shell settle, then run.
     fn schedule_title_smoke(&self) {
         self.schedule_selector(0.7, sel!(ghosttyTitleSmoke:));
@@ -9545,6 +9758,12 @@ fn clearcopy_fail(msg: String) -> ! {
     std::process::exit(1);
 }
 
+/// Print a window-chrome smoke failure and exit non-zero.
+fn windowchrome_fail(msg: String) -> ! {
+    eprintln!("FAIL: window-chrome smoke — {msg}");
+    std::process::exit(1);
+}
+
 /// Print a tab-keys smoke failure and exit non-zero. Free `!`-returning fn so it
 /// works inside `Option::unwrap_or_else` closures (which need the never type).
 fn tabkeys_fail(msg: String) -> ! {
@@ -9669,6 +9888,7 @@ pub fn run(
     smoke_wordchars: bool,
     smoke_mouseshift: bool,
     smoke_clearcopy: bool,
+    smoke_windowchrome: bool,
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -9704,6 +9924,7 @@ pub fn run(
         smoke_wordchars,
         smoke_mouseshift,
         smoke_clearcopy,
+        smoke_windowchrome,
     );
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));

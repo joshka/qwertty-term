@@ -122,8 +122,14 @@ items are `[ ]` wholesale unless noted.
       (`willEncodeRestorableState` → JSON `NSString`; `didDecodeRestorableState` → rebuild).
       Session unit tests + smoke cover the tree round-trip and a live `NSKeyedArchiver` coder
       round-trip; macOS actually firing restoration on a real quit+relaunch is manual-verify only
-- [ ] `window-step-resize`, `window-subtitle`
-- [ ] `window-titlebar-background`/`-foreground`, `window-new-tab-position`
+- [ ] `window-step-resize`
+- [x] `window-subtitle` (`false`/`working-directory`): upstream ships this on GTK
+      only; mapped natively onto `NSWindow.subtitle`, tracking the focused pane's
+      cwd, re-applied on the pace tick (windowchrome smoke)
+- [x] `window-new-tab-position` (`current`/`end`): a new tab groups against the
+      active tab (`current`) or the last tab in the group (`end`), matching
+      upstream `TerminalController.swift:456` (windowchrome smoke)
+- [ ] `window-titlebar-background`/`-foreground`
 - [x] `resize-overlay` (+ `-position`, `-duration`): `cols ⨯ rows` HUD (NSTextField overlay)
       on live resize, positioned per config, auto-hiding after the duration (resize smoke)
 - [ ] `command-palette`, undo/redo (`undo-timeout`)
@@ -136,7 +142,10 @@ items are `[ ]` wholesale unless noted.
 - [x] Live tab titles from OSC 0/2 (per-tab window/tab-label sync, ghost-emoji
       fallback after the 500ms grace — title smoke)
 - [ ] `set_tab_title` keybind action (needs the Binding.zig system — T3)
-- [ ] `window-show-tab-bar` policy, `gtk-tabs-location`/`gtk-wide-tabs` (Linux)
+- [x] `window-show-tab-bar` policy (`auto`/`always`/`never`): mapped onto
+      `NSWindowTabbingMode` (`.automatic`/`.preferred`/`.disallowed`) — upstream is
+      a GTK feature; macOS gets the same config surface (windowchrome smoke)
+- [ ] `gtk-tabs-location`/`gtk-wide-tabs` (Linux)
 
 ## Splits (`src/apprt` + Splits, slice 1+2 done)
 
