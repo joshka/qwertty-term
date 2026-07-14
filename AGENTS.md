@@ -1,21 +1,28 @@
 # Agent Guidance
 
-**Start here: `docs/rewrite-prompt.md`** — the driving prompt for this project (a full Rust
-rewrite of Ghostty). Read it, then `docs/roadmap.md` and `docs/handoff.md` for current state,
-then continue from the next incomplete milestone. This file only covers repo mechanics.
+**Start here: `docs/rewrite-prompt.md`** (the constitution for this full Rust rewrite of
+Ghostty), then `docs/threads/README.md` (the parallel-thread model + PR/gate/status
+protocol), then `docs/handoff.md` / `docs/port-status.md` / `docs/feature-coverage.md` for
+current state. This file only covers repo mechanics.
 
 ## Repo layout and version control
 
-- Version control is **jj** (colocated git). The repo root (`~/local/ghostty-rs`) holds only
-  `.git`, `.jj`, and `work/`. All checkouts live under `work/`:
-  - `work/default` — the integration workspace (trunk). Integrate and commit here.
-  - `work/<chunk>` — one jj workspace per parallel work chunk (see the parallel execution
-    model in the rewrite prompt). Created/retired by the orchestrating session.
-  - `work/qwertty/` — shared drop-box with the qwertty project. NOT a jj workspace; never
-    `jj workspace add` over it, never track its files.
-- Advance `main` with `jj bookmark move main --to <rev>` after landing work on trunk.
-- Cargo workspace: `crates/*` + `xtask`. `crates/qwertty-term-vt` is the terminal core (Phase 1);
-  `crates/spike` is the pre-rewrite prototype kept as scaffolding and Phase-2 debug frontend.
+- Version control is **jj** (colocated git). The repo root (`~/local/ghostty-rs`) is a bare
+  store — it holds `.git`, `.jj`, `work/`, and an `AGENTS.md`, but **no checkout** and is NOT
+  a jj workspace. Never run jj/git/cargo at the root (it re-creates a phantom workspace that
+  snapshots everything — see the root `AGENTS.md`).
+- All work happens in per-workspace checkouts under `work/<id>`. Create one from an existing
+  checkout: `cd work/josh && jj workspace add ../<id> --name <id> --revision main`. One
+  writer per checkout; stay in your own, never touch a sibling's.
+- **jj discipline** (full text in `docs/threads/README.md`): `jj st` after every edit burst
+  to snapshot; if the working copy goes stale just `jj workspace update-stale` (it snapshots
+  first — nothing is lost) and recover via `jj op log`; never fall back to git plumbing or
+  scratchpad copies.
+- **Ship via the PR pipeline** (`docs/threads/README.md`): `jj describe` → push a bookmark →
+  `gh pr create` → merge (which advances `main`). Small doc-only changes may land direct to
+  main. `trunk()` (== `main`) is the integration point; keep it green.
+- Cargo workspace: `crates/*` + `xtask` + `examples/*`. `crates/qwertty-term-vt` is the
+  terminal core; `crates/spike` is the pre-rewrite prototype kept as scaffolding.
 
 ## Local Project Rules
 
@@ -30,10 +37,11 @@ then continue from the next incomplete milestone. This file only covers repo mec
 ## Validation
 
 ```bash
-cargo check --workspace
+cargo check --workspace --all-targets
 cargo fmt --check
-cargo clippy --workspace
+cargo clippy --workspace --all-targets
 cargo test --workspace
+cargo test -p qwertty-term-vt --release --all-targets   # release lane — never skip
 ```
 
 For Markdown changes: `markdownlint-cli2 "**/*.md"`.
