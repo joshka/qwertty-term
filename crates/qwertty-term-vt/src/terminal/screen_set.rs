@@ -74,6 +74,17 @@ impl ScreenSet {
         }
     }
 
+    /// Set the kitty-graphics image storage byte limit on every initialized
+    /// screen (primary and, if created, alternate), evicting as needed. Port of
+    /// `Terminal.setKittyGraphicsSizeLimit`'s iteration over `screens.all`
+    /// (`Terminal.zig:3250-3255`).
+    pub fn set_kitty_image_storage_limit(&mut self, limit: usize) {
+        self.primary.set_kitty_image_storage_limit(limit);
+        if let Some(alt) = self.alternate.as_deref_mut() {
+            alt.set_kitty_image_storage_limit(limit);
+        }
+    }
+
     /// The current generation for `key`. Port of `generation`.
     pub fn generation(&self, key: ScreenKey) -> usize {
         match key {

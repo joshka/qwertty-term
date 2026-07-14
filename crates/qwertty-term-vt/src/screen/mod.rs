@@ -1324,6 +1324,14 @@ impl Screen {
         self.assert_integrity();
     }
 
+    /// Set this screen's kitty-graphics image storage byte limit, evicting
+    /// oldest images as needed to fit (or clearing all if `limit == 0`). Port
+    /// of the per-screen `kitty_images.setLimit` call in
+    /// `Terminal.setKittyGraphicsSizeLimit` (`Terminal.zig:3253`).
+    pub fn set_kitty_image_storage_limit(&mut self, limit: usize) {
+        self.kitty_images.set_limit(&mut self.pages, limit);
+    }
+
     /// Physically erase the active area from row `y`. Port of `eraseActive`.
     pub fn erase_active(&mut self, y: CellCountInt) {
         self.pages.erase_active(y);

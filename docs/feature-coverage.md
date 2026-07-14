@@ -34,9 +34,14 @@ items are `[ ]` wholesale unless noted.
       push/pop (22/23 t) validated as upstream's apprt-level no-op seam
 - [x] XTGETTCAP full terminfo capability set (268 caps + TN/Co/RGB) / DECRQSS at parity
 - [ ] tmux control mode (`4.3k` Zig, deferred)
-- [ ] OSC 21 color query reply (upstream finding filed in `work/upstream/`)
-- [ ] VT config toggles: `title-report`, `enquiry-response`, `vt-kam-allowed` (KAM),
-      `osc-color-report-format`, `scrollback-limit`, `image-storage-limit`
+- [x] OSC 21 kitty color protocol (set/reset/query, 8-bit `rgb:` replies) — the query
+      side is our forward-port of upstream `14c829883` (postdates the pin)
+- [x] VT config toggles — engine seams landed (app wires the config keys): `title-report`
+      (`set_title_reporting`), `enquiry-response` (`set_enquiry_response`),
+      `osc-color-report-format` (`set_osc_color_report_format`), `image-storage-limit`
+      (`Terminal::set_kitty_graphics_size_limit`), `scrollback-limit`
+      (`Options::max_scrollback`), `vt-kam-allowed` (KAM mode 2 tracked/readable via
+      `Terminal::modes`)
 
 ## Fonts & text shaping (`src/font`, ~72%)
 

@@ -1883,6 +1883,15 @@ pub struct TerminalHandler {
     /// `corpus/real_apps/tmux_session`). The app should set its full version
     /// string (e.g. `qwertty-term 0.1.0`) via [`set_xtversion`].
     xtversion: String,
+    /// Whether the terminal answers the window-title report query
+    /// (`CSI 21 t`), set via config (`title-report`). Defaults to `true` so the
+    /// engine matches the libghostty-vt reference oracle (which always answers);
+    /// the app should set it to the config value — upstream's `title-report`
+    /// defaults to `false`, gating the reply at the Surface layer
+    /// (`Surface.zig:983`) to avoid title read-back injection. When `false` the
+    /// `CSI 21 t` reply is suppressed; the 14/16/18 t geometry reports are
+    /// unaffected.
+    title_reporting: bool,
 }
 
 /// OSC color-query reply format. Port of `configpkg.Config.OSCColorReportFormat`.
@@ -1944,6 +1953,7 @@ impl TerminalHandler {
             enquiry_response: Vec::new(),
             osc_color_report_format: OscColorReportFormat::Bit16,
             xtversion: String::from("qwertty-term"),
+            title_reporting: true,
         }
     }
 
@@ -1963,6 +1973,14 @@ impl TerminalHandler {
     /// Set the OSC color-query reply format (config `osc-color-report-format`).
     pub fn set_osc_color_report_format(&mut self, format: OscColorReportFormat) {
         self.osc_color_report_format = format;
+    }
+
+    /// Enable or disable answering the window-title report query (`CSI 21 t`),
+    /// per config `title-report`. Defaults to enabled (libghostty-vt parity);
+    /// the app should set it to the config value (upstream defaults it off to
+    /// prevent title read-back injection — `Surface.zig:983`).
+    pub fn set_title_reporting(&mut self, enabled: bool) {
+        self.title_reporting = enabled;
     }
 
     /// Set the XTVERSION (`CSI > q`) reply name. The app should pass its full
@@ -2783,7 +2801,13 @@ impl Handler for TerminalHandler {
         // null `size` effect, which the vt-diff reference also lacks).
         match style {
             SizeReportStyle::Csi21t => {
-                // `OSC l <title> ST` — the window title, empty if unset.
+                // `OSC l <title> ST` — the window title, empty if unset. Gated
+                // on `title_reporting` (config `title-report`): upstream defers
+                // this to the Surface, which drops it when disabled
+                // (`Surface.zig:983`). Default-on preserves reference parity.
+                if !self.title_reporting {
+                    return;
+                }
                 let title = self.terminal.get_title().unwrap_or(b"");
                 let mut resp = Vec::with_capacity(title.len() + 5);
                 resp.extend_from_slice(b"\x1b]l");
