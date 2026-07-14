@@ -6,6 +6,29 @@
 > handoff content was retired 2026-07-06 along with the spike's move to
 > `crates/spike` scaffolding; see git history if needed.
 
+## State + orchestration model (2026-07-14)
+
+**Orchestration is on-demand, not a standing thread.** The fleet self-runs (Autonomy
+posture in `docs/threads/README.md`: threads self-direct, self-merge gate-green PRs,
+recycle on length, keep their `docs/threads/status/<id>.md` current). To orchestrate, a
+**short session** boots from *this file + the status board + `docs/feature-coverage.md`*,
+does a burst (spawn the next queued thread / integrate anything not self-merged / surface a
+decision to Josh), and ends. Don't run a long-lived orchestrator — it's the expensive
+long-context anti-pattern; recycle instead.
+
+**Current state:** 0.3.0 published on crates.io (all 8 crates; release is self-serve via
+release-plz + Trusted Publishing — merge the `chore: release vX` PR to publish). A **0.4.0
+release PR is queued** (merge when ready). feature-coverage ≈ 108 `[x]` / 19 `[~]` / 38
+`[ ]`; ~0 open issues (triage closed them). Repo root is a bare store (see root `AGENTS.md`;
+the `root` jj workspace recurs as a phantom — forget it when seen; real fix is the never-run
+jj-source thread at `~/local/jj/work/`).
+
+**Live threads (each in `work/<id>`, disjoint crates):** `app-tails` (app + config tails),
+`vt-tails` (vt + vt-diff completeness), `linux` (ADR-003 renderer/font/apprt). **Queued:**
+`perf` — waits for `vt-tails` to free the `qwertty-term-vt` crate, then whole-app parity vs
+Ghostty `main`. Priority order: tails → Linux → perf. Recent completed threads: issue-triage,
+changelog (hand-curated + release-plz auto-gen disabled), divergence-hygiene.
+
 ## Thread plan authored (2026-07-10, Fable pass)
 
 The port's completion is now organized as parallel Claude threads — see
