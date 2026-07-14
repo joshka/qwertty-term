@@ -14,6 +14,16 @@ additive.
 
 ## Unreleased — 0.2.0
 
+## [0.3.0](https://github.com/joshka/qwertty-term/compare/qwertty-term-vt-v0.2.0...qwertty-term-vt-v0.3.0) - 2026-07-14
+
+### Fixed
+
+- *(vt)* reject stale-width pages in grow_prune reuse ([#222](https://github.com/joshka/qwertty-term/pull/222))
+
+### Other
+
+- *(vt)* scalar bulk multibyte UTF-8 decode for wide/CJK throughput ([#227](https://github.com/joshka/qwertty-term/pull/227))
+
 ## [0.2.0](https://github.com/joshka/qwertty-term/compare/qwertty-term-sprite-v0.1.0...qwertty-term-sprite-v0.2.0) - 2026-07-13
 
 ### Other
