@@ -7,7 +7,7 @@
 //! the parser).
 //!
 //! Run (nightly + cargo-fuzz required):
-//!   cargo +nightly fuzz run parser -- -max_total_time=60
+//!   cargo +nightly fuzz run parser -- -dict=parser.dict -max_total_time=60
 
 #![no_main]
 
