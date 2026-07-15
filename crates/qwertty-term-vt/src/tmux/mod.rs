@@ -2,10 +2,12 @@
 //! (Ghostty `2da015cd6`). See ADR 004.
 //!
 //! This crate owns the *pure* protocol parsers; the native viewer that maps
-//! notifications to surfaces lives in the app/termio layer. Slice 1 (this
-//! module set) ports the control-mode parser; `layout` and `output` follow
-//! (ADR 004 slices 2–3).
+//! notifications to surfaces lives in the app/termio layer. Slices so far:
+//! `control` (notification parser), `layout` (window-layout parser); `output`
+//! follows (ADR 004 slice 3).
 
 pub mod control;
+pub mod layout;
 
 pub use control::{BufferOverflow, ControlParser, Notification};
+pub use layout::{Checksum, Content, Layout, ParseError};
