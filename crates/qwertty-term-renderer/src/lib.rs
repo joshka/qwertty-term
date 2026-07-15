@@ -86,6 +86,19 @@ pub mod wire;
 #[cfg(target_os = "macos")]
 pub mod metal;
 
+/// The OpenGL GPU backend (ADR 005 P4, slice 1). A third [`gpu::GpuBackend`]
+/// alongside [`metal`] and [`software`], GL 4.3 core over a **surfaceless EGL**
+/// context so it renders offscreen with no display server or real GPU (Mesa
+/// `llvmpipe` in a container). Additive: it changes nothing in the trait or the
+/// other backends. Linux only — the `glow`/`khronos-egl` deps are gated to
+/// `cfg(target_os = "linux")`, so the macOS/default build is untouched.
+///
+/// Port of upstream `src/renderer/OpenGL.zig` + `src/renderer/opengl/` +
+/// `src/renderer/shaders/glsl/*` (commit `2da015cd6`); the GLSL is vendored
+/// verbatim under `src/opengl/shaders/`.
+#[cfg(target_os = "linux")]
+pub mod opengl;
+
 /// The cell engine: builds GPU buffers from a [`snapshot::RenderSnapshot`] and
 /// a `qwertty-term-font` `Grid`, and draws them via a [`gpu::GpuBackend`]. Chunk
 /// R4 (first pixels). Generic over the backend since ADR 003 PR-3

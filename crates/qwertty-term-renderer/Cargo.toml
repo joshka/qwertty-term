@@ -97,6 +97,15 @@ qwertty-term-font = { version = "0.4.0", path = "../qwertty-term-font", features
 qwertty-term-font = { version = "0.4.0", path = "../qwertty-term-font", features = [
     "fontconfig",
 ] }
+# The OpenGL GpuBackend (ADR 005 P4, slice 1). Linux-only so the macOS/default
+# build never links GL/EGL. `glow` is the safe-ish GL 4.3 wrapper the ADR names;
+# `khronos-egl` (with `dynamic`) dlopens libEGL for a *surfaceless* offscreen
+# context — no display server needed (Mesa `llvmpipe` in CI/Docker). All three
+# are already in the workspace lock transitively (via eframe/winit), so these
+# add no new lock entries; the compile needs no libEGL (dlopen), only running an
+# actual GL render path does.
+glow = "0.17"
+khronos-egl = { version = "6", features = ["dynamic"] }
 
 [dev-dependencies]
 # The acceptance test (R4) drives a real qwertty-term-vt Terminal through a Stream to
