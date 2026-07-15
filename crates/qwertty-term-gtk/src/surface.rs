@@ -151,7 +151,17 @@ impl Pty {
         use qwertty_term_termio::size::{GridSize, ScreenSize};
         use qwertty_term_termio::{Config, Subprocess};
 
-        let mut subprocess = Subprocess::init(Config::default());
+        // The pty's shell must inherit our environment (PATH, HOME, SHELL, …);
+        // termio's `execvpe` runs the child with exactly `Config.env` (it does
+        // not merge the parent env), and `Config::default()` leaves it empty —
+        // which gives the shell no PATH, so it can't find any binary. Seed it
+        // from the current process environment (termio still overrides TERM /
+        // COLORTERM / TERMINFO on top).
+        let config = Config {
+            env: std::env::vars().collect(),
+            ..Config::default()
+        };
+        let mut subprocess = Subprocess::init(config);
         subprocess
             .resize(
                 GridSize {
