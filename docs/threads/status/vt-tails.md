@@ -1,8 +1,9 @@
 # vt-tails status
 
-- **Current item:** **tmux control mode — slice 2 (`tmux::layout::Layout`) shipping.**
-  ADR 004 ACCEPTED. Next: slice 3 (`output`), slice 4 (wire the DCS `TmuxRaw` seam).
-- **Last merged:** #257 (slice 1 `ControlParser`). #255 ADR + VT tail already on main.
+- **Current item:** **tmux control mode — slice 3 (`tmux::output`) shipping.** ADR 004
+  ACCEPTED. Next: slice 4 (wire the DCS `TmuxRaw` seam → `Notification` stream) — the last
+  vt-tails slice. Slice 5 (Viewer) is app-tails.
+- **Last merged:** #259 (slice 2 `layout`). #257 (slice 1), #255 (ADR), VT tail on main.
 - **Blockers:** none (slices 1–4 are vt-tails; slice 5 Viewer is app-tails, routed at slice 4).
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
@@ -55,4 +56,12 @@ Open questions (ADR 004, need Josh/app-tails; do NOT block 1–3): build-gate de
   `Layout::parse` (pane / `{}`-horizontal / `[]`-vertical tree via a byte-offset scanner) +
   `parse_with_checksum` + `Checksum` (u16 rotate-add, 4-hex-digit). Rust ownership replaces
   upstream's arena. 24 tests (all ported: nesting, every syntax error, checksum vectors incl.
-  tmux's `bb62`). Next: slice 3 `output`.
+  tmux's `bb62`). #259 merged.
+- 2026-07-14: slice 3 — ported `output.zig` → `src/tmux/output.rs`. Zig's comptime
+  `FormatStruct`/`parseFormatStruct` become a runtime port: a 32-variant `Variable` enum
+  (with `name`/`kind`/`parse`), a `Value` enum (Bool/Usize/Str), `format(vars, delim)` →
+  request string, and `parse_format(vars, s, delim) -> Vec<Value>` positionally aligned with
+  the vars. Zig's per-variable InvalidCharacter/Overflow collapse to one parse-failure
+  (parseFormatStruct did the same); MissingEntry/ExtraEntry/FormatError preserved. 23 tests.
+  (`tmux::ParseError` re-export dropped — `layout` and `output` both define one; use the
+  module-qualified names.) Next: slice 4 — DCS `TmuxRaw` seam wiring.
