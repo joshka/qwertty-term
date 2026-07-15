@@ -1,70 +1,51 @@
 # vt-tails status
 
-- **Current item:** **CLOSED — VT-engine completeness tail is fully green. The Terminal/VT
-  section of `docs/feature-coverage.md` is all `[x]`/`[—]` except tmux (deferred, Josh-gated).**
-- **Last merged:** #249 (config-toggle seams), 2026-07-14. Also #241 (XTGETTCAP), #244 (XTWINOPS).
-- **Blockers:** none.
+- **Current item:** **REOPENED for tmux control mode** (Josh un-gated 2026-07-14). Scoping
+  done → ADR 004 written + slice plan. Next: **slice 1 — port `tmux::ControlParser`
+  (`control.zig`, 839 LoC) + inline tests.** (This session is recycling after the ADR; a
+  fresh session executes the slices with full context — boot from ADR 004 + this file.)
+- **Last merged:** #250 (VT-tail closeout). VT-completeness tail is all `[x]`/`[—]` except tmux.
+- **Blockers:** none (slices 1–3 are unambiguous; open questions in ADR 004 don't block them).
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
-## Handoff
+## Mission (current: tmux control mode — ADR 004)
 
-### What shipped this thread (succeeding T5's lib-layer parity work)
+Port the **pure tmux protocol parsers** into `crates/qwertty-term-vt` (vt-tails). The native
+Viewer + termio wiring is app-tails/termio (ADR 004 slice 5). Verify against `~/local/ghostty`
+@ `2da015cd6`, cite file:line. tmux control mode is NOT a libghostty-vt differential-oracle
+surface → **unit tests are the referee** (like XTGETTCAP/DECRQSS). Zig-port hazards apply.
 
-- **#241 — XTGETTCAP full terminfo table.** Ported the entire ghostty terminfo Source
-  (268 caps + `TN`/`Co`/`RGB` specials) into `crates/qwertty-term-vt/src/terminfo.rs`, with a
-  byte-faithful `xtgettcapMap` value encoding (string caps with a `%` parameter returned
-  verbatim in terminfo source form; otherwise `\E`→ESC and a leading `^X`→control byte). `TN`
-  stays `qwertty-term` (trademark). Rows are generated from upstream by
-  `crates/qwertty-term-vt/scripts/gen_terminfo.py`. XTGETTCAP is a termio-layer reply (the
-  lib-vt oracle ignores DCS) so it's verified by 11 unit tests, not differential corpus.
-- **#244 — XTWINOPS extra-param guard.** Report ops 14/16/18/21 t now require
-  `params.len()==1` (upstream `stream.zig:2003-2030` drops extra-param report ops). Title
-  stack 22/23 t confirmed a faithful apprt-level no-op (upstream lib-vt has no title-stack
-  storage). Unit test + `corpus/xtwinops_size/title_extra_params_ignored` (agrees vs oracle).
-- **#249 — VT config-toggle engine seams.** Added `TerminalHandler::set_title_reporting(bool)`
-  (gates `CSI 21 t`; default true = oracle parity, app sets to config `title-report` which
-  upstream defaults false per `Surface.zig:983`) and `Terminal::set_kitty_graphics_size_limit`
-  (all screens; port of `Terminal.zig:3243`). The other four toggles already had seams:
-  `set_enquiry_response`, `set_osc_color_report_format`, `Options::max_scrollback`,
-  KAM mode 2 via `Terminal::modes`. Seam map handed to app-tails' Inbox (they wire the keys).
-- **DECRQSS / OSC 21** — verified already at full parity (DECRQSS SGR/DECSCUSR/DECSTBM/DECSLRM
-  #27; OSC 21 kitty color set/reset/query #28); corrected the stale feature-coverage checkboxes.
-- **Tertiary DA parity** — reverified the stream-handler delta's flagged `CSI = c` divergence:
-  our `DECRPTUI` reply agrees with the oracle; locked in via `reply_diffing/tertiary_da_probe`
-  (in this closeout PR). Recertification note + totals appended to `docs/port-status.md`;
-  `docs/analysis/stream-handler-delta.md` banner marks the old table historical.
+### tmux backlog (ADR 004 slices — vt-tails owns 1–4; app-tails owns 5)
 
-### What remains (NOT this thread's — routed)
+1. **`tmux::ControlParser`** — `control.zig` (839 LoC): idle/notification/block state machine,
+   `%begin…%end` blocks, `max_bytes` broken-state guard, `Notification` enum. Uses `oniguruma`
+   regex upstream → port matchers to our regex stack or hand-rolled scanners. Port inline tests.
+   **← START HERE.**
+2. **`tmux::layout::Layout`** — `layout.zig` (638 LoC): layout-string parser + tree. Pure.
+3. **`tmux::output`** — `output.zig` (590 LoC): `%output` parse + command encode. Pure.
+4. **Wire the `TmuxRaw` DCS seam** (`dcs.rs` already parses `\ePtmux;…`, currently dropped) →
+   feed control bytes to `ControlParser`, expose the `Notification` stream on the engine's
+   event surface (additive, like clipboard/notification seams). DCS entry tests + fuzz tokens.
+5. **Viewer + termio wiring** (`viewer.zig`, 2,283 LoC) — **app-tails/termio, NOT vt-tails.**
+   Route via app-tails Inbox once 1–4 land.
 
-- **tmux control mode** — DEFERRED, Josh-gated. Do NOT start without Josh's call. Seamed in
-  `dcs.rs` (`TmuxRaw`); `docs/analysis/stream-handler-delta.md` line 166.
-- **App/renderer seams** flagged by the delta (mode-5 reverse redraw, 2026 sync-timer,
-  1004/2048 initial reports on enable, linefeed mode 20, cursor-blink-12 config interplay) —
-  these are app-tails / renderer territory, not VT-engine core.
-- **#178 DECCOLM-with-prompt scrollback push** — T5 handed to T1 (needs a PageList
-  `promptIterator`, T1 territory). Not reopened here.
-- **Config-key wiring** for the six toggles — app-tails (Inbox note left in `app-tails.md`).
+Open questions (ADR 004, need Josh/app-tails; do NOT block 1–3): build-gate default
+(recommend: always-compiled, runtime-inert); Viewer ownership split.
 
-### How a fresh thread resumes
+## Completed (VT-completeness tail — CLOSED before the tmux reopen)
 
-The tail is drained. If reopened, the only in-territory VT work would be optional harness
-strengthening (more oracle dims / sweep vocabulary — low bug-yield per T5) or, on Josh's
-go-ahead, tmux control mode. Verify against `~/local/ghostty` @ `2da015cd6`; the differential
-oracle (`cargo test -p vt-diff --features reference`, ref lib per AGENTS.md) is the referee.
+- #241 XTGETTCAP full terminfo table (268 caps + TN/Co/RGB); #244 XTWINOPS extra-param guard
+  with title-stack verified no-op; #249 six VT config-toggle engine seams; #250 closeout
+  (port-status recert, tertiary-DA parity corpus). DECRQSS + OSC 21 confirmed at parity.
+  Full detail: PR bodies + `docs/port-status.md` recertification note (2026-07-14).
 
 ## Log
 
-- 2026-07-14: session 1 — workspace `vt-tails` off main; read AGENTS.md, threads/README,
-  T5 handoff; ran 3 parallel audit agents (XTWINOPS/title, XTGETTCAP/DECRQSS, OSC21/toggles).
-- 2026-07-14: shipped #241 (XTGETTCAP), #244 (XTWINOPS), #249 (config-toggle seams) — each
-  self-merged gate-green (own territory). feature-coverage VT section → all `[x]`/`[—]` bar tmux.
-- 2026-07-14: jj hazard (recorded so it isn't repeated): twice I skipped `jj new` after a push,
-  so the next PR's edits commingled into the just-pushed change; the squash-merge fetch then
-  flagged divergence, and one rebase surfaced a stale-base revert of a sibling's `handoff.md`
-  and a clobber of app-tails' real status file. All recovered losslessly (rebuild off
-  main@origin, restore paths, resolve conflicts append-only). Lesson: **always `jj new
-  main@origin` before starting the next PR's edits.**
-- 2026-07-14: CLOSED — recertified `docs/port-status.md` (Terminal engine → only tmux remains;
-  checklist recount 116 `[x]` / 16 `[~]` / 33 `[ ]` / 1 `[—]`). Respawn only for tmux (Josh's
-  call) or optional harness work.
+- 2026-07-14: session 1 — VT-completeness tail: audit (3 agents) → shipped #241, #244, #249,
+  #250 (all self-merged gate-green). VT section → all `[x]`/`[—]` except tmux. Recertified
+  port-status. jj lesson saved to memory ([[jj-new-before-next-pr]]).
+- 2026-07-14: Josh un-gated tmux control mode. Scoped upstream `src/terminal/tmux/` (4,363
+  LoC: control 839 / layout 638 / output 590 / viewer 2,283). Wrote **ADR 004** (layering:
+  engine parsers = vt-tails, Viewer = app-tails; 5 PR slices). Recycling after the ADR so a
+  fresh session executes slice 1 (`ControlParser`) with full context budget.
