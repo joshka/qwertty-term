@@ -1,5 +1,14 @@
-# perf status — ACTIVE 2026-07-15 (profile-first pivot: decode → print-scan lever)
+# perf status — 🗄️ RECYCLED 2026-07-15 (print-scan pivot + PR-1 merged; PR-2 next)
 
+> **RECYCLED after the profile-first pivot + PR-1.** Shipped + MERGED **#304** (`6f8735ef`, the
+> pivot docs) and **#305** (`47f42f46`, PR-1 run_len NEON prescan — **+5–8% full-pipeline on the
+> real vtebench cell payloads**, both verified ancestors of origin/main). Retired the NEON UTF-8
+> decode lever on evidence (pipeline is print-bound, not decode-bound). **NEXT = PR-2 simple-cell
+> scan, fully specced below + in `docs/analysis/print-slice-scan.md`.** To resume, spawn a fresh
+> thread off this file; `jj new main@origin` before PR-2 edits (PR-1 is merged — don't stack).
+>
+> ---
+>
 > **ACTIVE (respawn 2026-07-15, Opus).** Profile-first pass over the whole stream→print
 > pipeline **retired the NEON UTF-8 decode lever on evidence** and **promoted a concrete,
 > representative print-scan lever**. Full writeup + numbers: `docs/analysis/print-slice-scan.md`.
@@ -103,13 +112,23 @@
     run_len) is correctness-load-bearing / already-minimal → diminishing returns, higher risk.
     Only pursue with fresh line-level profiling showing a concrete hot spot.
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
-- **Last merged:** **#303** (80% hyperlink load factor, `d0a62c8c`); **#297** (backward-shift
-  deletion, `0babde7a`); **#289** (APC SIMD scan, `50e9814f`); **#287** (APC bulk dispatch,
-  `8fa6772a`); **#283** (`9e51aad3`); **#277** (`2708b267`); **#269** (`36256c78`); **#266**.
+- **Last merged:** **#305** (print run_len NEON prescan, `47f42f46`, +5–8% real cell payloads);
+  **#304** (profile-first pivot docs, `6f8735ef`); **#303** (80% hyperlink load factor, `d0a62c8c`);
+  **#297** (backward-shift deletion, `0babde7a`); **#289** (APC SIMD scan, `50e9814f`); **#287** (APC
+  bulk dispatch, `8fa6772a`); **#283** (`9e51aad3`); **#277** (`2708b267`); **#269** (`36256c78`).
 - **Blockers:** the **scoreboard refresh** remains machine-blocked — needs a genuinely quiet box
-  (WindowServer idle, no sibling GUI app). A directional vibes run this session (loadavg ~7) showed
-  no regression vs the 2026-07-13 baseline. **Workspace:** `work/perf` still live at recycle — a
-  fresh thread can reuse it or re-create; both PRs merged so nothing uncommitted of value remains.
+  (WindowServer idle, no sibling GUI app; re-checked end of this session: CGPDFService 91% +
+  WindowServer 47% + projclean → still contended). **Workspace:** `work/perf` live; both PRs merged,
+  nothing uncommitted of value.
+- **NEXT (top unblocked, fully specced):** **PR-2 — simple-cell scan** (`print.rs` `print_slice_fill`
+  simple-cell/style-run scans, `print.rs:372` + `430`). The second read-only find-first scan (~8–13%
+  of the real cell payloads, next after PR-1's run_len). NEON masked-compare find-first over the
+  destination `u64` cells: load 2 cells/`vld1q_u64`, `vand` with `Cell::SIMPLE_MASK`, `vceq` vs the
+  splatted `check_expected`, find first non-matching lane. **Needs Miri on the pointer walk** (unlike
+  PR-1 it reads `(*base_cell.add(i)).cval()` raw pointers, not a safe slice). Same rigor: boundary
+  test at every 2-lane edge, differential 0-divergence vs `77190bd02`, parser+resize fuzz, before/
+  after A/B. Design + context in `docs/analysis/print-slice-scan.md` ("Decision & plan").
+  `jj new main@origin` first (PR-1 is merged) — do NOT stack on PR-1's change-id.
 
 ## Session — respawn 2026-07-15 part 4 (Opus) — profile-first pivot to print-scan
 
@@ -125,12 +144,18 @@
   (median ~28–31 → NEON-favorable), low-risk (APC-scan precedent). Wrote
   `docs/analysis/print-slice-scan.md`. Landed the analysis + pivot as **#304** (`6f8735ef`, doc-only,
   self-merged gate-green).
-- **Shipped PR-1** (run_len narrow prescan, `latin1_narrow_prefix`). A/B best-of-5: real payloads
-  light_cells +7.6–8.0%, medium_cells +5.3–6.3%, dense_cells +5.2% (ascii/redraw +10–12% synthetic).
-  Full gate green (differential 0-divergence, release+paranoid lanes, parser fuzz 1.04M, Miri scalar,
-  boundary tests). Note: hit the divergent-change hazard (#304 merged carrying change-id `sntkpyso`;
-  local twin held the code) — recovered by restoring from the explicit commit_id + abandoning the
-  twin. Next: PR-2 simple-cell scan.
+- **Shipped + self-merged PR-1** (`#305`, `47f42f46`, run_len narrow prescan `latin1_narrow_prefix`).
+  A/B best-of-5: real payloads light_cells +7.6–8.0%, medium_cells +5.3–6.3%, dense_cells +5.2%
+  (ascii/redraw +10–12% synthetic). Full gate green (differential 0-divergence, release+paranoid
+  lanes, parser fuzz 1.04M, Miri scalar, boundary tests); CI green macOS (NEON) + Linux (scalar
+  fallback); verified ancestor of origin/main. Signing was locked → pushed via
+  `git push origin <hash>:refs/heads/<branch>` (jj push signing workaround).
+- Note: hit the divergent-change hazard (#304 merged carrying change-id `sntkpyso`; the local twin
+  held PR-1's code) — recovered by restoring from the explicit commit_id + abandoning the twin.
+  Lesson (reinforces `jj-new-before-next-PR`): `jj new main@origin` immediately after pushing a PR,
+  before touching the next one's files.
+- **Recycled** here: PR-2 (simple-cell scan) is fully specced above + in the analysis doc. Context
+  was long after the profiling + two PRs; a fresh session resumes PR-2 cheaply from this file.
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
