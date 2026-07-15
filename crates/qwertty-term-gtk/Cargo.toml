@@ -1,0 +1,40 @@
+[package]
+name = "qwertty-term-gtk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GTK4 + libadwaita host for the qwertty-term terminal (Linux windowed app, ADR 005 P4 slice 2): an adw::Application/ApplicationWindow with a GtkGLArea GL surface"
+default-run = "qwertty-term-gtk"
+
+# Linux-only crate. On non-Linux targets the lib compiles to an empty shell and
+# the bin is a stub (no GTK deps present), so `cargo build --workspace` on macOS
+# skips all of the GTK stack and the macOS app crate stays green. All real
+# content is behind `#[cfg(target_os = "linux")]` and every GTK dependency is in
+# a `[target.'cfg(target_os = "linux")']` block.
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lib]
+name = "qwertty_term_gtk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qwertty-term-gtk"
+path = "src/main.rs"
+
+# All GTK/GL deps are Linux-gated so the workspace still resolves and builds on
+# macOS (the deps are simply absent there). Versions per ADR 005 / the GTK plan;
+# `glow` and `libloading` already ride in the workspace lockfile via the
+# renderer's OpenGL backend (slice 1), so only `gtk4`/`libadwaita`/`epoxy` are
+# newly fetched. No `v4_x`/`v1_x` version feature is requested, keeping the
+# baseline at GTK 4.0 / libadwaita 1.0 for maximum distro portability (Debian
+# bookworm ships GTK 4.8 / libadwaita 1.2). GL 4.3 core is forced at runtime via
+# `GLArea::set_required_version`, which is baseline.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { package = "gtk4", version = "0.9" }
+adw = { package = "libadwaita", version = "0.7" }
+glow = "0.17"
+epoxy = "0.1"
+libloading = "0.8"
