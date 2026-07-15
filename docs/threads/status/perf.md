@@ -1,9 +1,12 @@
 # perf status
 
-- **Current item:** Session 2 (respawn) **COMPLETE — RECYCLING.** Shipped + **MERGED PR #277**
-  (bounds-check-free interior UTF-8 decode; cjk decode +41%, full +19%). Backlog for a fresh
-  session (all either gated or big-focused-effort — hence recycling rather than forcing a
-  marginal change on a long context):
+- **Current item:** Session 3 (respawn) **COMPLETE — RECYCLING.** Shipped **PR #283** (tighter
+  wide-cell pair-write in `print_slice_fill`, cjk full +4%, differential-neutral; open for Josh,
+  gate green + Miri). Re-profiled post-#277: decode is no longer the bottleneck (cjk noop ~1200,
+  faster than upstream's full pipeline); `print_slice_fill<wide>` is now ~70% of cjk. #283 took
+  the one clean/low-risk slice of it (the `/2` per-pair division). The wide/CJK path is now
+  well-optimized end to end (decode + print). Remaining backlog for a fresh session (all gated
+  or big-effort — hence recycling):
   - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15 repeatedly: WindowServer 43–44%, loadavg
     ~5–6, Josh's interactive apps active → the render-heavy region suites are contended and
@@ -11,17 +14,16 @@
     `docs/analysis/scroll-region-opt.md`). Run `scripts/bench-vtebench.sh` across all three
     terminals (qt, ghostty-main, ghostty-1.3.1), 3 load-gated rounds each, when loadavg is below
     ~3 and WindowServer is idle; then refresh `docs/benchmarks/vtebench-baseline.md`.
-  - **(2) SIMD NEON UTF-8 decode** — the remaining big decode lever (decode is ~27% of cjk;
-    scalar is now well-optimized after #277 + T1's Lever 5). `std::arch::aarch64` NEON is stable
-    and adds no dependency; gate with `cfg(target_arch="aarch64")` + the existing scalar path as
-    the fallback (all-targets preserved). Large + differential-CRITICAL (SIMD UTF-8 validation
-    must be Table-3-7-exact) → give it its OWN focused session: prototype the vectorized
-    classify+validate, gate on differential + sweep + Miri + a long parser fuzz. Start from
-    `stream.rs decode_until_control_seq` / `decode_wellformed_multibyte`.
-  - **(3) print-side wide lever** (`print_slice_fill<WIDE>`, ~30% of cjk) — assessed
-    marginal/risky (per-wide-cell width lookup is already a minimal STAGE3 byte load; pair
-    writes + simple-check are correctness-load-bearing). Low ROI; skip unless profiling a real
-    consumer shows otherwise.
+  - **(2) SIMD NEON UTF-8 decode** — a decode lever, but NOTE post-#277 decode is NO LONGER the
+    cjk bottleneck (noop ~1200 MiB/s > upstream's full pipeline; the full-pipeline cost is now
+    print-bound). SIMD would raise decode-only throughput (matters for decode-heavy embedded
+    consumers) but won't move cjk *full* much. `std::arch::aarch64` NEON is stable + no
+    dependency; gate `cfg(target_arch="aarch64")` + scalar fallback. Large + differential-
+    CRITICAL → its OWN focused session; lower priority now given the bottleneck moved to print.
+  - **(3) print-side wide lever** (`print_slice_fill<WIDE>`, now ~70% of cjk) — #283 took the
+    clean `/2` slice (+4%). What remains (the per-row simple-check read pass, the width lookup in
+    run_len) is correctness-load-bearing / already-minimal → diminishing returns, higher risk.
+    Only pursue with fresh line-level profiling showing a concrete hot spot.
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
 - **Last merged:** **#277** (unchecked interior UTF-8 decode, `2708b267`); **#269** (change 1 +
   pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
