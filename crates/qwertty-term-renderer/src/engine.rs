@@ -353,6 +353,51 @@ impl<B: GpuBackend> Engine<B> {
         (self.screen_width, self.screen_height)
     }
 
+    /// Adopt a rebuilt font [`Grid`] — after a Cmd-+/- font zoom, a
+    /// backing-scale (display DPI) change, or a `font-family` change. The host
+    /// passes the new grid's cell metrics; the grid itself is handed to the next
+    /// [`update_frame`](Self::update_frame) / [`sync_atlas`](Self::sync_atlas).
+    ///
+    /// Two pieces of engine state survive a rebuild and must be invalidated:
+    ///
+    /// 1. **Cached cell metrics.** The engine caches cell width/height at
+    ///    construction for the projection, the target size, and per-cell
+    ///    placement (`build_uniforms`). Left stale, the next frame places
+    ///    new-sized glyphs on the old cell pitch (overlapping text) and keeps
+    ///    the target at the old pixel size.
+    ///
+    /// 2. **The per-slot atlas-upload trackers.** A rebuild produces a *fresh*
+    ///    atlas whose [`modified`](qwertty_term_font::atlas::Atlas::modified)
+    ///    counter restarts at 0, unrelated to the previous atlas. Each swap-chain
+    ///    slot records the last counter it uploaded (large after a real session),
+    ///    and [`sync_atlas`](Self::sync_atlas) skips the upload when
+    ///    `modified <= recorded`. So the fresh atlas's low counter fails the gate
+    ///    and every slot keeps sampling the STALE old-size atlas — garbled glyphs
+    ///    on screen. (The offscreen readback path hides this: it syncs and draws
+    ///    the same slot from a counter of 0, so its gate always passes.) Reset
+    ///    every slot's tracker to 0 to force a re-upload of the new atlas.
+    ///
+    /// Also drops the shaped-run cache (its advances are size-dependent yet the
+    /// [`RunKey`] does not encode size) and the frame key (forcing a full
+    /// rebuild). Cheap and called only on a font rebuild (never per frame), so
+    /// the invalidation runs unconditionally even when the metrics are unchanged
+    /// (a same-size `font-family` change still swaps the atlas).
+    pub fn on_font_rebuilt(&mut self, cell_width: u32, cell_height: u32) {
+        // Force the fresh atlas to re-upload into every slot (see #2 above).
+        self.grayscale_modified.iter_mut().for_each(|m| *m = 0);
+        self.color_modified.iter_mut().for_each(|m| *m = 0);
+        self.run_cache.clear();
+        self.prev_frame_key = None;
+
+        if self.cell_width == cell_width && self.cell_height == cell_height {
+            return;
+        }
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+        self.screen_width = self.contents.cols() * cell_width as usize;
+        self.screen_height = self.contents.rows() * cell_height as usize;
+    }
+
     /// Number of kitty image textures currently resident in the GPU cache.
     /// Reflects eviction (R6 slice 3): drops when the terminal deletes an image
     /// or `image-storage-limit` evicts one. For tests / diagnostics.

@@ -477,6 +477,14 @@ impl Surface {
         let px = (self.font_size.get() as f64) * self.scale;
         if let Ok(fg) = font::build(family, px, &self.metric_modifiers) {
             self.font = fg;
+            // Tell the render engine the font grid was rebuilt: adopt the new
+            // cell metrics (projection/target/placement) and invalidate its
+            // per-slot atlas-upload trackers, so the fresh atlas re-uploads into
+            // every swap-chain slot. Without this the zoom renders garbled — new
+            // glyph instances sampling the stale old-size atlas.
+            if let Some(render) = self.render.as_mut() {
+                render.on_font_rebuilt(self.font.cell_width, self.font.cell_height);
+            }
             self.reflow();
         }
     }
