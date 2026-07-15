@@ -36,17 +36,28 @@ use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Once;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use glow::HasContext;
-use gtk::glib;
 use gtk::glib::translate::IntoGlib;
+use gtk::{gdk, gio, glib};
 
 use crate::input::gdk_key_to_bytes;
 use crate::surface::{Pty, SurfaceState};
+use qwertty_term::gesture::{DEFAULT_BEHAVIORS, Drag, Geometry, Press, SelectionGesture};
 use qwertty_term_input::key::Action;
 use qwertty_term_input::key_encode::Options as EncodeOptions;
+
+/// Word-boundary codepoints for double-click word selection (the vt default
+/// set, the same one the macOS gesture path passes).
+const WORD_BOUNDARIES: &[u32] = &qwertty_term_vt::screen::DEFAULT_WORD_BOUNDARIES;
+
+/// The click-repeat interval for double/triple-click detection. GDK doesn't
+/// surface the desktop double-click time to us here, so use upstream's fallback
+/// (`Config.zig` `click-repeat-interval` default 500ms; the macOS path reads
+/// `NSEvent.doubleClickInterval` instead — `gesture::os_click_interval`).
+const CLICK_REPEAT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Application id for the GTK/DBus registration.
 const APP_ID: &str = "com.qwertty.TerminalGtk";
@@ -251,6 +262,10 @@ struct Shared {
     pty: RefCell<Option<Pty>>,
     /// Whether the fallback banner was already fed (interactive, no pty).
     banner_fed: RefCell<bool>,
+    /// The mouse selection-gesture state machine (reused from the app crate:
+    /// `qwertty_term::gesture`). Driven by the GLArea's click/drag controllers;
+    /// its output (screen-point bounds) sets the terminal's selection.
+    gesture: RefCell<SelectionGesture>,
     /// Clear-smoke result.
     smoke: RefCell<SmokeOutcome>,
     /// Text-smoke result.
@@ -418,17 +433,24 @@ fn render_interactive(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
     // banner so the window still shows real glyphs.
     let pty_bytes = shared.pty.borrow().as_ref().map(|p| p.drain());
     let feed_banner = pty_bytes.is_none() && !*shared.banner_fed.borrow();
+    let mut replies = Vec::new();
     {
         let mut sref = shared.surface.borrow_mut();
         let surface = sref.as_mut().expect("surface present");
         if let Some(bytes) = pty_bytes {
             surface.feed(&bytes);
+            // The terminal may queue replies (DA/DSR/CPR/…) in response; those
+            // go back to the pty so query-driven programs work.
+            replies = surface.take_pty_replies();
         } else if feed_banner {
             surface.feed(
-                b"qwertty-term (gtk) \xe2\x80\x94 no shell; keyboard input is the next chunk.\r\n",
+                b"qwertty-term (gtk) \xe2\x80\x94 select with the mouse; Ctrl+Shift+C/V to copy/paste.\r\n",
             );
         }
         let _ = surface.render(dst);
+    }
+    if let Some(pty) = shared.pty.borrow().as_ref().filter(|_| !replies.is_empty()) {
+        pty.write(&replies);
     }
     if feed_banner {
         *shared.banner_fed.borrow_mut() = true;
@@ -454,6 +476,17 @@ fn attach_keyboard(gl_area: &gtk::GLArea, shared: Rc<Shared>) {
     let controller = gtk::EventControllerKey::new();
     let area = gl_area.clone();
     controller.connect_key_pressed(move |_ctrl, keyval, keycode, state| {
+        // Clipboard shortcuts take precedence over the encode path: Ctrl+Shift+C
+        // copies the selection, Ctrl+Shift+V pastes. Upstream binds these as the
+        // default `copy_to_clipboard` / `paste_from_clipboard` keybinds
+        // (`Config.zig` defaults; `Surface.zig` `performBindingAction`).
+        if let Some(shortcut) = clipboard_shortcut(keyval, state) {
+            match shortcut {
+                ClipboardShortcut::Copy => copy_selection(&area, &shared),
+                ClipboardShortcut::Paste => paste_clipboard(&area, &shared, false),
+            }
+            return glib::Propagation::Stop;
+        }
         let bytes = gdk_key_to_bytes(
             Action::Press,
             keyval.into_glib(),
@@ -477,6 +510,298 @@ fn attach_keyboard(gl_area: &gtk::GLArea, shared: Rc<Shared>) {
     gl_area.add_controller(controller);
     // The GLArea must hold focus to receive key events.
     gl_area.grab_focus();
+}
+
+/// Which clipboard shortcut a key event is, if any.
+#[derive(Clone, Copy)]
+enum ClipboardShortcut {
+    Copy,
+    Paste,
+}
+
+/// Classify a GDK key event as a clipboard shortcut. Ctrl+Shift+C → Copy,
+/// Ctrl+Shift+V → Paste. Both modifiers are required (plain Ctrl+C stays the
+/// SIGINT the encoder produces).
+fn clipboard_shortcut(keyval: gdk::Key, state: gdk::ModifierType) -> Option<ClipboardShortcut> {
+    let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+    let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+    if !(ctrl && shift) {
+        return None;
+    }
+    match keyval.to_unicode().map(|c| c.to_ascii_lowercase()) {
+        Some('c') => Some(ClipboardShortcut::Copy),
+        Some('v') => Some(ClipboardShortcut::Paste),
+        _ => None,
+    }
+}
+
+/// Map a GLArea pointer position (widget/device pixels — this host has no HiDPI
+/// scaling wired, so they coincide) to an absolute *screen* point the selection
+/// gesture works in: pixel → grid cell ([`crate::mouse::pixel_to_cell`]) →
+/// screen point ([`Engine::window_to_screen_point`] at offset 0). `None` when
+/// the cell maps to unwritten space (a blank pad row), where nothing can be
+/// selected.
+fn screen_point(surface: &SurfaceState, x: f64, y: f64) -> Option<(usize, usize)> {
+    let (cw, ch) = surface.cell_size();
+    let (cols, rows) = surface.grid_size();
+    let (col, row) = crate::mouse::pixel_to_cell(x, y, cw, ch, cols, rows);
+    surface.engine().window_to_screen_point(col, row, 0)
+}
+
+/// Apply a gesture's selection result to the terminal: `Some(bounds)` sets the
+/// selection from the two screen points; `None` clears any selection. Repaints.
+fn apply_selection(
+    area: &gtk::GLArea,
+    shared: &Shared,
+    bounds: Option<((usize, usize), (usize, usize))>,
+) {
+    if let Some(mut sref) = shared.surface.try_borrow_mut().ok().filter(|s| s.is_some()) {
+        let engine = sref.as_mut().expect("surface present").engine_mut();
+        match bounds {
+            Some((a, b)) => {
+                engine.select_screen_points(a, b, false);
+            }
+            None => engine.clear_selection(),
+        }
+    }
+    area.queue_render();
+}
+
+/// Copy the current selection to both the CLIPBOARD and the PRIMARY selection
+/// (the X11/Wayland middle-click buffer). No-op with no selection. Mirrors
+/// upstream's copy path (`Surface.zig` `copyToClipboard` writes both).
+fn copy_selection(area: &gtk::GLArea, shared: &Shared) {
+    let text = shared
+        .surface
+        .borrow()
+        .as_ref()
+        .and_then(|s| s.engine().selection_string());
+    let Some(text) = text else {
+        return;
+    };
+    let display = area.display();
+    display.clipboard().set_text(&text);
+    display.primary_clipboard().set_text(&text);
+}
+
+/// Read a clipboard asynchronously and write the (bracketed-paste-aware) bytes
+/// to the pty. `primary` selects the PRIMARY selection (middle-click paste)
+/// rather than the regular CLIPBOARD. Honors the terminal's bracketed-paste
+/// mode via [`crate::mouse::encode_paste`]. Port of upstream's paste path
+/// (`Surface.zig` reads the clipboard then frames the data for bracketed paste).
+fn paste_clipboard(area: &gtk::GLArea, shared: &Rc<Shared>, primary: bool) {
+    let display = area.display();
+    let clipboard = if primary {
+        display.primary_clipboard()
+    } else {
+        display.clipboard()
+    };
+    let shared = Rc::clone(shared);
+    let area = area.clone();
+    clipboard.read_text_async(gio::Cancellable::NONE, move |res| {
+        let Ok(Some(text)) = res else {
+            return;
+        };
+        let bracketed = shared
+            .surface
+            .borrow()
+            .as_ref()
+            .map(|s| s.engine().bracketed_paste())
+            .unwrap_or(false);
+        let bytes = crate::mouse::encode_paste(text.as_str(), bracketed);
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(pty) = shared.pty.borrow().as_ref() {
+            pty.write(&bytes);
+        }
+        area.queue_render();
+    });
+}
+
+/// Attach the mouse controllers to the GLArea: left-button click+drag for text
+/// selection (driving the reused [`SelectionGesture`]), middle-click paste of
+/// the PRIMARY selection, and right-click for the copy/paste context menu.
+/// Mirrors upstream's per-surface gesture wiring (`class/surface.zig`
+/// `mouseButtonCallback` / `cursorPosCallback`; the context menu is
+/// `SurfaceView_AppKit.swift` `menu(for:)`, reused here as
+/// `qwertty_term::context_menu`).
+fn attach_mouse(gl_area: &gtk::GLArea, shared: Rc<Shared>) {
+    // --- left button: press starts/extends the selection gesture -----------
+    let click = gtk::GestureClick::new();
+    click.set_button(gdk::BUTTON_PRIMARY);
+    {
+        let shared = shared.clone();
+        let area = gl_area.clone();
+        click.connect_pressed(move |_g, _n_press, x, y| {
+            let bounds = {
+                let mut gref = shared.gesture.borrow_mut();
+                let sref = shared.surface.borrow();
+                let Some(surface) = sref.as_ref() else {
+                    return;
+                };
+                let Some(point) = screen_point(surface, x, y) else {
+                    return;
+                };
+                let (cw, _) = surface.cell_size();
+                let engine = surface.engine();
+                let press = Press {
+                    time: Instant::now(),
+                    point,
+                    xpos: x,
+                    ypos: y,
+                    max_distance: cw as f64,
+                    repeat_interval: CLICK_REPEAT_INTERVAL,
+                    alt_screen: engine.alt_screen_active(),
+                    behaviors: DEFAULT_BEHAVIORS,
+                    boundary_codepoints: WORD_BOUNDARIES,
+                };
+                gref.press(engine, &press)
+            };
+            apply_selection(&area, &shared, bounds);
+        });
+    }
+    gl_area.add_controller(click);
+
+    // --- left button drag: extend the selection ----------------------------
+    let drag = gtk::GestureDrag::new();
+    drag.set_button(gdk::BUTTON_PRIMARY);
+    {
+        let shared = shared.clone();
+        let area = gl_area.clone();
+        drag.connect_drag_update(move |g, off_x, off_y| {
+            let Some((sx, sy)) = g.start_point() else {
+                return;
+            };
+            let (x, y) = (sx + off_x, sy + off_y);
+            let bounds = {
+                let mut gref = shared.gesture.borrow_mut();
+                let sref = shared.surface.borrow();
+                let Some(surface) = sref.as_ref() else {
+                    return;
+                };
+                let Some(point) = screen_point(surface, x, y) else {
+                    return;
+                };
+                let (cw, ch) = surface.cell_size();
+                let (cols, rows) = surface.grid_size();
+                let engine = surface.engine();
+                let d = Drag {
+                    point,
+                    xpos: x,
+                    ypos: y,
+                    rectangle: false,
+                    alt_screen: engine.alt_screen_active(),
+                    geometry: Geometry {
+                        columns: cols as u32,
+                        cell_width: cw as u32,
+                        padding_left: 0,
+                        screen_height: (rows * ch) as u32,
+                    },
+                    boundary_codepoints: WORD_BOUNDARIES,
+                };
+                gref.drag(engine, &d)
+            };
+            apply_selection(&area, &shared, bounds);
+        });
+    }
+    {
+        let shared = shared.clone();
+        drag.connect_drag_end(move |g, off_x, off_y| {
+            let point = g.start_point().and_then(|(sx, sy)| {
+                let sref = shared.surface.borrow();
+                let surface = sref.as_ref()?;
+                screen_point(surface, sx + off_x, sy + off_y)
+            });
+            let alt = shared
+                .surface
+                .borrow()
+                .as_ref()
+                .map(|s| s.engine().alt_screen_active())
+                .unwrap_or(false);
+            shared.gesture.borrow_mut().release(point, alt);
+        });
+    }
+    gl_area.add_controller(drag);
+
+    // --- middle button: paste the PRIMARY selection ------------------------
+    let middle = gtk::GestureClick::new();
+    middle.set_button(gdk::BUTTON_MIDDLE);
+    {
+        let shared = shared.clone();
+        let area = gl_area.clone();
+        middle.connect_pressed(move |_g, _n, _x, _y| {
+            paste_clipboard(&area, &shared, true);
+        });
+    }
+    gl_area.add_controller(middle);
+
+    // --- right button: copy/paste context menu -----------------------------
+    // A `gio::SimpleActionGroup` under the `term` prefix backs the menu items;
+    // the menu model is the reused `qwertty_term::context_menu` (Copy is only
+    // present when there's a selection).
+    let actions = gio::SimpleActionGroup::new();
+    let copy_action = gio::SimpleAction::new("copy", None);
+    {
+        let shared = shared.clone();
+        let area = gl_area.clone();
+        copy_action.connect_activate(move |_a, _p| copy_selection(&area, &shared));
+    }
+    let paste_action = gio::SimpleAction::new("paste", None);
+    {
+        let shared = shared.clone();
+        let area = gl_area.clone();
+        paste_action.connect_activate(move |_a, _p| paste_clipboard(&area, &shared, false));
+    }
+    actions.add_action(&copy_action);
+    actions.add_action(&paste_action);
+    gl_area.insert_action_group("term", Some(&actions));
+
+    let popover = gtk::PopoverMenu::builder().has_arrow(false).build();
+    popover.set_parent(gl_area);
+
+    let right = gtk::GestureClick::new();
+    right.set_button(gdk::BUTTON_SECONDARY);
+    {
+        let shared = shared.clone();
+        let popover = popover.clone();
+        right.connect_pressed(move |_g, _n, x, y| {
+            let has_selection = shared
+                .surface
+                .borrow()
+                .as_ref()
+                .map(|s| s.engine().selection_string().is_some())
+                .unwrap_or(false);
+            // Copy is sensitive only with a selection (mirrors the menu model's
+            // `context_items(has_selection)` gating).
+            copy_action.set_enabled(has_selection);
+            popover.set_menu_model(Some(&context_menu_model(has_selection)));
+            popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.popup();
+        });
+    }
+    gl_area.add_controller(right);
+}
+
+/// Build the right-click menu model from the reused
+/// [`qwertty_term::context_menu`] item list, mapping its Copy/Paste actions to
+/// the GLArea's `term.copy` / `term.paste` actions. Splits/close from the app
+/// crate's model are dropped (no tabs/splits in this host yet).
+fn context_menu_model(has_selection: bool) -> gio::Menu {
+    use qwertty_term::context_menu::{ContextAction, ContextItem, context_items};
+    let menu = gio::Menu::new();
+    for item in context_items(has_selection) {
+        if let ContextItem::Action(action) = item {
+            let name = match action {
+                ContextAction::Copy => "term.copy",
+                ContextAction::Paste => "term.paste",
+                // Splits/close aren't wired in this host; skip them.
+                _ => continue,
+            };
+            menu.append(Some(action.title()), Some(name));
+        }
+    }
+    menu
 }
 
 /// Build the GLArea and its parent window, wiring the realize/render/resize
@@ -573,6 +898,8 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
         Mode::Interactive => {
             // Wire keyboard input: keystrokes → encoded bytes → pty.
             attach_keyboard(&gl_area, shared.clone());
+            // Wire mouse selection, clipboard, and the right-click menu.
+            attach_mouse(&gl_area, shared.clone());
             // Repaint at ~60fps so pty output shows promptly (no dirty-tracking
             // wakeup yet). Cheap: a full redraw of a small grid.
             let area = gl_area.clone();

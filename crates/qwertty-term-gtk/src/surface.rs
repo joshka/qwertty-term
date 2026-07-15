@@ -14,20 +14,32 @@
 //! known bytes) or from a pty running the user's shell ([`Pty::spawn`], the
 //! interactive path). Keyboard input the other direction is the next chunk.
 
+use qwertty_term::engine::Engine as TermEngine;
+use qwertty_term::selection::{SelectionColors, tint_selection};
 use qwertty_term_font::grid::Grid;
 use qwertty_term_font::{CodepointResolver, Collection, Face, Metrics};
 use qwertty_term_renderer::engine::{Engine, FrameOptions};
 use qwertty_term_renderer::opengl::OpenGL;
 use qwertty_term_renderer::snapshot::FullSnapshot;
-use qwertty_term_vt::stream::{Stream, TerminalHandler};
-use qwertty_term_vt::terminal::{Options, Terminal};
 
-/// The per-surface renderer core: engine + grid + terminal, sized to the
-/// GLArea.
+/// The per-surface renderer core: GPU engine + font grid + the terminal
+/// [`TermEngine`], sized to the GLArea.
+///
+/// The vt terminal is the macOS app crate's [`qwertty_term::engine::Engine`]
+/// wrapper (not the raw vt [`Stream`](qwertty_term_vt::stream::Stream)) so the
+/// GTK host reuses its whole platform-free selection surface: `select_*` /
+/// `screen_range` / `selection_string` / `bracketed_paste`, and the
+/// `snapshot_window` → [`tint_selection`] → [`FullSnapshot::from_window`] render
+/// path that draws highlighted selected cells (the same path the macOS view
+/// uses — `qwertty-term/src/app.rs:765-798`). This is the reuse the P4 selection
+/// slice is built on.
 pub struct SurfaceState {
-    engine: Engine<OpenGL>,
+    /// The GPU renderer (`Engine<OpenGL>`), renamed from `engine` so it doesn't
+    /// collide with the terminal [`TermEngine`].
+    renderer: Engine<OpenGL>,
     grid: Grid,
-    stream: Stream<TerminalHandler>,
+    /// The terminal + selection state (app-crate wrapper over the vt terminal).
+    engine: TermEngine,
     cols: usize,
     rows: usize,
     cell_w: usize,
@@ -59,19 +71,14 @@ impl SurfaceState {
         let rows = (height_px.max(1) as usize / cell_h.max(1)).max(1);
 
         let backend = OpenGL::from_glow(gl);
-        let engine = Engine::with_backend_for_grid(backend, &grid).ok()?;
+        let renderer = Engine::with_backend_for_grid(backend, &grid).ok()?;
 
-        let terminal = Terminal::new(Options {
-            cols: cols as u16,
-            rows: rows as u16,
-            ..Default::default()
-        });
-        let stream = Stream::new(TerminalHandler::new(terminal));
+        let engine = TermEngine::new(cols, rows);
 
         Some(Self {
-            engine,
+            renderer,
             grid,
-            stream,
+            engine,
             cols,
             rows,
             cell_w,
@@ -89,14 +96,32 @@ impl SurfaceState {
         (self.cell_w, self.cell_h)
     }
 
+    /// The terminal engine (selection queries, `bracketed_paste`, …).
+    pub fn engine(&self) -> &TermEngine {
+        &self.engine
+    }
+
+    /// The terminal engine, mutably (drive the selection: `select_screen_points`,
+    /// `clear_selection`, …).
+    pub fn engine_mut(&mut self) -> &mut TermEngine {
+        &mut self.engine
+    }
+
     /// Feed raw pty/VT bytes into the terminal. Returns whether anything was
     /// fed (so the caller can `queue_render` only on change).
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
             return false;
         }
-        self.stream.feed(bytes);
+        self.engine.write(bytes);
         true
+    }
+
+    /// Drain any reply bytes the terminal queued in response to fed input
+    /// (DA/DSR/CPR/DECRQSS/…), destined for the pty master. The interactive
+    /// path writes these back so query-driven programs (vim, tmux) work.
+    pub fn take_pty_replies(&mut self) -> Vec<u8> {
+        self.engine.take_output()
     }
 
     /// Capture the live screen, rebuild this frame's GPU buffers + atlas, and
@@ -109,16 +134,34 @@ impl SurfaceState {
     /// `GL_DRAW_FRAMEBUFFER_BINDING`). Must run with that framebuffer bound and
     /// the GL context current.
     pub fn render(&mut self, dst: Option<glow::NativeFramebuffer>) -> Result<(), String> {
-        let snap = FullSnapshot::capture_live(self.stream.terminal());
-        self.engine
+        // Resolve the selection range first (immutable borrow), then take the
+        // window snapshot and overlay the selection tint CPU-side before wrapping
+        // it in a `FullSnapshot` — the exact render path the macOS view runs
+        // (`qwertty-term/src/app.rs:765-798`). No scrollback UI is wired, so the
+        // window is always `snapshot_window(0)`.
+        let range = self
+            .engine
+            .selection()
+            .and_then(|(start, end, rect)| self.engine.screen_range(start, end, rect));
+        let mut window = self.engine.snapshot_window(0);
+        if let Some(range) = range {
+            // No theme is wired in the GTK host yet, so highlight selected cells
+            // with inverse video (the terminal-convention unthemed selection).
+            tint_selection(&mut window, range, SelectionColors::Inverse);
+        }
+        let snap = FullSnapshot::from_window(window);
+
+        self.renderer
             .update_frame(&snap, &mut self.grid, FrameOptions::default());
-        self.engine
+        self.renderer
             .sync_atlas(&self.grid)
             .map_err(|e| e.to_string())?;
         // Point the OpenGL backend's present at the GLArea's framebuffer, then
         // draw + blit into it in one call.
-        self.engine.backend().set_default_framebuffer(dst);
-        self.engine.draw_and_present().map_err(|e| e.to_string())?;
+        self.renderer.backend().set_default_framebuffer(dst);
+        self.renderer
+            .draw_and_present()
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 }
