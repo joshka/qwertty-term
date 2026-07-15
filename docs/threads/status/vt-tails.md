@@ -1,9 +1,8 @@
 # vt-tails status
 
-- **Current item:** **tmux control mode — slice 1 (`tmux::ControlParser`) shipping.** ADR 004
-  ACCEPTED (Josh confirmed recommendations: always-compiled/runtime-inert; Viewer = app-tails).
-  Next: slice 2 (`layout::Layout`), slice 3 (`output`), slice 4 (wire the DCS `TmuxRaw` seam).
-- **Last merged:** #255 (ADR 004). VT-completeness tail (#241/#244/#249/#250) already on main.
+- **Current item:** **tmux control mode — slice 2 (`tmux::layout::Layout`) shipping.**
+  ADR 004 ACCEPTED. Next: slice 3 (`output`), slice 4 (wire the DCS `TmuxRaw` seam).
+- **Last merged:** #257 (slice 1 `ControlParser`). #255 ADR + VT tail already on main.
 - **Blockers:** none (slices 1–4 are vt-tails; slice 5 Viewer is app-tails, routed at slice 4).
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
@@ -51,4 +50,9 @@ Open questions (ADR 004, need Josh/app-tails; do NOT block 1–3): build-gate de
   runtime-inert; Viewer = app-tails). Slice 1 — ported `control.zig` → `src/tmux/control.rs`
   (`ControlParser` state machine + `Notification` enum); the oniguruma matchers are hand-rolled
   byte scanners (no regex dep). 26 tests (18 ported + 8 edge: idle/broken/exit/overflow/greedy
-  splits). Next: slice 2 `layout::Layout`.
+  splits). #257 merged.
+- 2026-07-14: slice 2 — ported `layout.zig` → `src/tmux/layout.rs`: recursive-descent
+  `Layout::parse` (pane / `{}`-horizontal / `[]`-vertical tree via a byte-offset scanner) +
+  `parse_with_checksum` + `Checksum` (u16 rotate-add, 4-hex-digit). Rust ownership replaces
+  upstream's arena. 24 tests (all ported: nesting, every syntax error, checksum vectors incl.
+  tmux's `bb62`). Next: slice 3 `output`.
