@@ -1,12 +1,32 @@
 # linux status (Linux port — ADR 003, P2/P3 continuation of T7)
 
-- **Current item:** P2 fontconfig discovery — **S2 (wiring) gate-green, opening PR.** Next:
-  S3 (T8 CI step for `--features fontconfig`) + `force-autohint`/`freetype-load-flags`.
-- **Last merged:** #245 (S1 — fontconfig discovery module) → `d84360c6` on main.
-- **Blockers:** none.
-- **Claims:** font crate `src/{fontconfig,collection,resolver}.rs` + renderer `Cargo.toml`
-  (Linux fontconfig feature-enable), for the S2 wiring PR.
+- **Current item:** mission #1 (fontconfig discovery) **DONE + merged** (S1 #245, S2 #248).
+  Next unblocked: **`force-autohint`/`freetype-load-flags`** (FreeType-side plumbing; config-key
+  parsing is T3's — coordinate) then **#42** (un-gate pixel tests on Linux CI).
+- **Last merged:** #248 (S2 — fontconfig wiring into collection/resolver) → `000477ff` on main.
+- **Blockers:** none. (Session note: 1Password SSH-signing locked mid-session once, blocking
+  pushes; recovered/retried. If pushes fail with `op-ssh-sign: failed to fill whole buffer`,
+  the agent needs an interactive unlock.)
+- **Claims:** none held (S1+S2 merged).
 - **Inbox:** (other threads append requests here; owner triages into backlog)
+
+## Next-item pointers (respawn crib)
+
+- **`force-autohint`/`freetype-load-flags`:** give `freetype::Face` a load-flags field, apply in
+  `rasterize`/`rasterize_constrained` (`FT_LOAD_FORCE_AUTOHINT` etc.), default = upstream
+  `face/freetype.zig` load flags. Config-key *parsing* is **T3**; do the FreeType plumbing
+  additively + route the config wiring to T3's Inbox (coordination, not a hard block).
+- **#42:** un-gate the ~9 `#[cfg(target_os="macos")]` renderer pixel tests
+  (`crates/qwertty-term-renderer/tests/*_pixels.rs`) to also run over `Engine<Software>` on
+  Linux CI — mirror `tests/software_headless.rs`. Pure coverage, my territory.
+- **GATED (P4):** windowed Linux renderer (OpenGL R9 / software-to-window) + GTK4 apprt + OS
+  glue. ADR 003 defers behind a separate Josh greenlight — **flag Josh, do not start**.
+- **Local fontconfig validation:** libfontconfig isn't on the dev mac by default (tests
+  skip-with-note). To run them: symlink `/opt/homebrew/opt/fontconfig/lib/libfontconfig.1.dylib`
+  to `DIR/libfontconfig.dylib.1` (note the odd dlopen name order), then run with
+  `DYLD_FALLBACK_LIBRARY_PATH=DIR cargo test -p qwertty-term-font --features fontconfig`. Linux
+  `--features fontconfig` can't cross-build locally (freetype needs a Linux g++) → rely on CI.
+  (See the `fontconfig-local-validation` memory.)
 
 ## Backlog (from T7 handoff §b + mission)
 
