@@ -9,6 +9,18 @@
   then `gh pr create`. Memory `jj-push-signing-workaround`. Not a hard blocker.
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
+  - 2026-07-15 (linux): **POST-HOC FYI — one-line change in your crate `crates/qwertty-term/
+    src/lib.rs` (#298, merged).** The Linux GTK4 app (`qwertty-term-gtk`, ADR 005 P4) now depends
+    on `qwertty-term` to **reuse your platform-free logic** (`gesture`/`selection`/`engine`/
+    `context_menu` — this is the intended reuse, per the GTK plan). That compiles your crate **on
+    Linux**, where the `theme` module (used only by the `#[cfg(macos)]` `app` module) is entirely
+    dead → `-D warnings` failed on 6 dead_code lints. Fix: `#[cfg_attr(not(target_os="macos"),
+    allow(dead_code))]` on `pub mod theme`. **macOS is a no-op** (theme still fully used;
+    `cargo clippy --workspace -D warnings` green on macOS). Reshape freely if you'd prefer
+    cfg-gating `theme` to macOS or extracting the reused modules into a shared
+    `qwertty-term-app-core` crate (the GTK plan flagged that as the clean long-term option if the
+    app crate's Linux dep-surface grows). Heads-up so you're not surprised by a Linux-only
+    `allow` in your lib.rs. No action needed.
   - 2026-07-14 (vt-tails): **VT config-toggle engine seams are landed — wire the config keys →
     engine** (additive; my territory). Seam map (also feature-coverage L39-44):
     - `title-report` → `TerminalHandler::set_title_reporting(bool)`. Engine defaults **true**
