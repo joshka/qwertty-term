@@ -378,18 +378,24 @@ impl Terminal {
                 }
 
                 if WIDE {
-                    // Only whole (wide, spacer_tail) pairs can be written.
-                    let pair_end = k + (simple - k) / 2 * 2;
-                    let mut idx = k;
-                    while idx < pair_end {
-                        let bits = wide_bits | ((cps[printed + idx / 2] as u64) << cp_shift);
+                    // Only whole (wide, spacer_tail) pairs can be written. `k`
+                    // is always even in the WIDE path (every write advances by a
+                    // full pair), so iterate by codepoint with a running cell
+                    // pointer rather than recomputing `idx / 2` each step.
+                    let pairs = (simple - k) / 2;
+                    let cp_start = printed + k / 2;
+                    // SAFETY: `k <= simple <= cell_count`, and `cell_count`
+                    // cells from `base_cell` are within the current row.
+                    let mut dst = unsafe { base_cell.add(k) };
+                    for p in 0..pairs {
+                        let bits = wide_bits | ((cps[cp_start + p] as u64) << cp_shift);
                         unsafe {
-                            *base_cell.add(idx) = Cell::from_cval(bits);
-                            *base_cell.add(idx + 1) = Cell::from_cval(spacer_tail_bits);
+                            *dst = Cell::from_cval(bits);
+                            *dst.add(1) = Cell::from_cval(spacer_tail_bits);
+                            dst = dst.add(2);
                         }
-                        idx += 2;
                     }
-                    k = pair_end;
+                    k += pairs * 2;
                 } else {
                     for idx in k..simple {
                         let bits = template_bits | ((cps[printed + idx] as u64) << cp_shift);
