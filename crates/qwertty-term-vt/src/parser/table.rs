@@ -10,8 +10,15 @@
 //! Construction order is load-bearing and mirrors the Zig source exactly:
 //! the "anywhere" transitions are written first, then per-state blocks;
 //! later writes overwrite earlier ones (notably `osc_string` claims
-//! `0x20..=0xFF`, overriding the anywhere C1 transitions so OSC strings can
-//! carry raw UTF-8). Unwritten cells default to "stay in state, no action".
+//! `0x20..=0xFF` and `dcs_passthrough` claims `0x80..=0xFF`, overriding the
+//! anywhere C1 transitions so OSC/DCS strings can carry raw UTF-8). Unwritten
+//! cells default to "stay in state, no action".
+//!
+//! The `dcs_passthrough` high-byte override is a deliberate deviation from the
+//! upstream `parse_table.zig`, which only added the `0x20..=0xFF` override to
+//! `osc_string` (`5e800df27`) and left `dcs_passthrough` terminating on C1
+//! bytes -- a latent bug that truncates tmux control-mode (`ESC P 1000 p`)
+//! `%output` payloads containing UTF-8. See the `dcs_passthrough` block.
 
 use super::State;
 
@@ -281,6 +288,18 @@ const fn gen_table() -> [[Transition; STATE_COUNT]; 256] {
         range(t, 0x1C, 0x1F, source, source, A::Put);
         range(t, 0x20, 0x7E, source, source, A::Put);
         single(t, 0x7F, source, source, A::Ignore);
+
+        // High bytes: mirror `osc_string`'s `0x20..=0xFF` override (see the
+        // header note and the `osc_string` block below). Without this the
+        // anywhere C1 rules (`0x80..=0x8F` -> ground execute, `0x9C` -> ground,
+        // plus the `0x90`/`0x9B`/`0x9D`/`0x9E`/`0x9F` introducers) would
+        // terminate the DCS the instant a byte >= 0x80 appears, truncating a
+        // passthrough body that carries raw UTF-8 / 8-bit data (e.g. tmux
+        // control-mode `%output`, where an emoji's trailing `0x80` continuation
+        // byte silently ends control mode). Put them through to the DCS handler
+        // instead. Real 7-bit ST (`ESC \`) and `0x18`/`0x1A` still terminate,
+        // since those bytes are outside `0x80..=0xFF` and keep their rules.
+        range(t, 0x80, 0xFF, source, source, A::Put);
     }
 
     // csi_param
@@ -434,10 +453,45 @@ mod tests {
         assert_eq!(tr.state as u8, State::OscString as u8);
         assert_eq!(tr.action, TransitionAction::OscPut);
 
-        // ...while everywhere else 0x9C returns to ground
+        // dcs_passthrough mirrors osc_string for high bytes: 0x9C is a Put
+        // (a UTF-8 continuation byte) that stays in DcsPassthrough rather than
+        // terminating the DCS. This is what lets tmux control-mode %output
+        // carry raw UTF-8 without truncation.
         let tr = TABLE[0x9C][State::DcsPassthrough as usize];
+        assert_eq!(tr.state as u8, State::DcsPassthrough as u8);
+        assert_eq!(tr.action, TransitionAction::Put);
+
+        // ...while everywhere else (e.g. escape) 0x9C returns to ground
+        let tr = TABLE[0x9C][State::Escape as usize];
         assert_eq!(tr.state as u8, State::Ground as u8);
         assert_eq!(tr.action, TransitionAction::None);
+
+        // The full 0x80..=0xFF range is Put in DcsPassthrough, including the
+        // C1 introducers (0x90 DCS, 0x9B CSI, 0x9D OSC) and 0x80 (the emoji
+        // continuation byte that used to terminate control mode).
+        for c in [0x80u8, 0x90, 0x9B, 0x9D, 0x9F, 0xA6, 0xF0, 0xFF] {
+            let tr = TABLE[c as usize][State::DcsPassthrough as usize];
+            assert_eq!(
+                tr.state as u8,
+                State::DcsPassthrough as u8,
+                "byte {c:#04x} should stay in DcsPassthrough"
+            );
+            assert_eq!(tr.action, TransitionAction::Put, "byte {c:#04x} should Put");
+        }
+
+        // 7-bit ST (ESC) and CAN/SUB still leave DcsPassthrough as before.
+        assert_eq!(
+            TABLE[0x1B][State::DcsPassthrough as usize].state as u8,
+            State::Escape as u8
+        );
+        assert_eq!(
+            TABLE[0x18][State::DcsPassthrough as usize].state as u8,
+            State::Ground as u8
+        );
+        assert_eq!(
+            TABLE[0x1A][State::DcsPassthrough as usize].state as u8,
+            State::Ground as u8
+        );
 
         // sos_pm_apc_string high bytes default to no-op self transition
         let tr = TABLE[0xA0][State::SosPmApcString as usize];
