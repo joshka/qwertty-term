@@ -378,6 +378,10 @@ struct Surface {
     /// [`ReconcilePlan`](crate::tmux_reconcile::ReconcilePlan) for the native
     /// tab/split layer (ADR 006 slice 5c). `None` for an ordinary shell pane.
     tmux: Option<crate::tmux_session::TmuxSession>,
+    /// The app's configured palette/theme (the same `Colors` this surface's own
+    /// engine was built with). Threaded into [`TmuxSession::new`] so tmux panes
+    /// render on the user's theme, not the engine default (ADR 006 theme fix).
+    startup_colors: qwertty_term_vt::terminal::Colors,
     /// Set on a **display-only** tmux pane surface (ADR 006 slice 5b-native):
     /// this surface renders a `Terminal` it does *not* own — the one the control
     /// surface's [`TmuxSession`] Viewer owns for this tmux pane. The render pass
@@ -693,7 +697,9 @@ impl Surface {
                 .iter()
                 .any(|n| matches!(n, Notification::Enter))
         {
-            self.tmux = Some(crate::tmux_session::TmuxSession::new());
+            self.tmux = Some(crate::tmux_session::TmuxSession::new(
+                self.startup_colors.clone(),
+            ));
         }
         let Some(update) = self.tmux.as_mut().map(|s| s.ingest(notifications)) else {
             return (None, false);
@@ -1862,6 +1868,14 @@ pub struct ControllerState {
     /// are created as windows appear, removed on `RemoveTab`, and the whole
     /// session's tabs are torn down on control-mode `Exit`.
     tmux_tabs: HashMap<(TabId, SurfaceId), HashMap<usize, TabId>>,
+    /// Control-surface tabs whose window is currently hidden because their
+    /// `tmux -CC` session is live (ADR 006 slice 5d polish, mirroring upstream:
+    /// once control mode owns the screen the user should see only the tmux
+    /// window tabs, not the raw `tmux -CC` control surface). Hidden when the
+    /// session's first native tab is created; the window is restored (and this
+    /// entry cleared) on control-mode exit. The control surface keeps being
+    /// pumped while hidden — it still drives the in-band control protocol.
+    tmux_hidden_controls: std::collections::HashSet<TabId>,
 }
 
 /// The subset of VT config toggles applied to a surface's engine (the setters
@@ -2166,6 +2180,7 @@ impl Controller {
             scrollback_limit: config.scrollback_limit,
             vt_kam_allowed: config.vt_kam_allowed,
             tmux_tabs: HashMap::new(),
+            tmux_hidden_controls: std::collections::HashSet::new(),
         })))
     }
 
@@ -2252,6 +2267,10 @@ impl Controller {
                 for tab in tabs {
                     self.close_tab(tab);
                 }
+                // Control mode ended: bring the original `tmux -CC` control tab
+                // back into view (it was hidden while the session owned the
+                // screen).
+                self.restore_control_tab(event.tab);
                 continue;
             }
             let Some(plan) = event.plan else {
@@ -2300,6 +2319,70 @@ impl Controller {
                     }
                 }
             }
+            // Now that at least one tmux window tab exists, hide the raw
+            // `tmux -CC` control tab so the user sees only the tmux windows
+            // (upstream behaviour). No-op once already hidden.
+            let has_native_tab = self
+                .0
+                .borrow()
+                .tmux_tabs
+                .get(&key)
+                .is_some_and(|m| !m.is_empty());
+            if has_native_tab {
+                self.hide_control_tab(event.tab);
+            }
+        }
+    }
+
+    /// Hide the `tmux -CC` control surface's window while its control-mode
+    /// session is live (ADR 006 slice 5d polish). The window is ordered out (its
+    /// native tab disappears from the group) but the surface keeps being pumped,
+    /// so the in-band control protocol continues. Idempotent — tracked in
+    /// [`ControllerState::tmux_hidden_controls`].
+    fn hide_control_tab(&self, control_tab: TabId) {
+        let window = {
+            let mut state = self.0.borrow_mut();
+            if !state.tmux_hidden_controls.insert(control_tab) {
+                return; // already hidden
+            }
+            state.tabs.get(&control_tab).map(|t| t.window.clone())
+        };
+        if let Some(window) = window {
+            window.orderOut(None);
+            // The render display link was bound to this window's view; a link
+            // pauses for an occluded view, so re-point it at a visible window
+            // (the tmux tab) or the render loop stalls.
+            self.rebind_render_clock();
+        }
+    }
+
+    /// Restore a previously [hidden](Self::hide_control_tab) control tab's window
+    /// on control-mode exit. No-op if it was never hidden.
+    fn restore_control_tab(&self, control_tab: TabId) {
+        let window = {
+            let mut state = self.0.borrow_mut();
+            if !state.tmux_hidden_controls.remove(&control_tab) {
+                return; // was not hidden
+            }
+            state.tabs.get(&control_tab).map(|t| t.window.clone())
+        };
+        if let Some(window) = window {
+            window.makeKeyAndOrderFront(None);
+            self.rebind_render_clock();
+        }
+    }
+
+    /// Ask the app delegate to re-point the render display link at a visible
+    /// window after a control tab's visibility changed. Reached through the
+    /// shared [`AppDelegate`] (the render clock lives there). No-op when the
+    /// delegate isn't an [`AppDelegate`] or render is pace-timer driven.
+    fn rebind_render_clock(&self) {
+        let mtm = self.0.borrow().mtm;
+        if let Some(delegate) = NSApplication::sharedApplication(mtm)
+            .delegate()
+            .and_then(|d| d.downcast::<AppDelegate>().ok())
+        {
+            delegate.rebind_display_link();
         }
     }
 
@@ -2878,11 +2961,23 @@ impl Controller {
     pub fn active_screen_text(&self) -> Option<String> {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
-        state
-            .tabs
-            .get(&tab)
-            .and_then(|t| t.focused_surface())
-            .map(|s| s.engine().screen_dump())
+        let t = state.tabs.get(&tab)?;
+        let focused = t.tree.focused();
+        let s = t.surfaces.get(&focused)?;
+        // A display-only tmux pane surface has an empty own engine; its rendered
+        // content lives in the control surface's Viewer-owned pane `Terminal`.
+        // Read that back so the type-smoke (and any screen-text probe) sees what
+        // the pane actually shows (ADR 006 slice 5d).
+        if let Some(src) = s.display_source() {
+            return state
+                .tabs
+                .get(&src.control_tab)
+                .and_then(|ct| ct.surfaces.get(&src.control_surface))
+                .and_then(|cs| cs.tmux_session())
+                .and_then(|sess| sess.pane_terminal(focused))
+                .map(|term| term.plain_string());
+        }
+        Some(s.engine().screen_dump())
     }
 
     /// The active tab's most recently *presented* frame coverage: the max
@@ -2908,6 +3003,18 @@ impl Controller {
         let state = self.0.borrow();
         let tab = state.registry.active()?;
         state.tabs.get(&tab).map(|t| t.window.clone())
+    }
+
+    /// Any tab window currently visible on screen. Used to rebind the render
+    /// display link off a window that was ordered out (a hidden tmux control
+    /// tab), so the render loop keeps ticking against a window that presents.
+    fn first_visible_window(&self) -> Option<Retained<NSWindow>> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .values()
+            .map(|t| t.window.clone())
+            .find(|w| w.isVisible())
     }
 
     /// The active tab's *focused* pane view (smoke/test only): used to force it
@@ -4185,11 +4292,17 @@ impl Controller {
         let cfg = state.input_config;
         let clear_on_typing = state.selection_clear_on_typing;
         let vt_kam_allowed = state.vt_kam_allowed;
-        if let Some(s) = state
-            .tabs
-            .get_mut(&tab)
-            .and_then(|t| t.surfaces.get_mut(&surface))
-        {
+        // Encode against the target surface. For a display-only tmux pane the
+        // encoded bytes can't go to a pty (it has none) — they are returned here
+        // and routed to tmux below, after the surface borrow drops.
+        let routed: Option<(DisplaySource, Vec<u8>)> = {
+            let Some(s) = state
+                .tabs
+                .get_mut(&tab)
+                .and_then(|t| t.surfaces.get_mut(&surface))
+            else {
+                return;
+            };
             // KAM (ANSI mode 2): when `vt-kam-allowed` and the program has
             // enabled `disable_keyboard`, drop the keystroke entirely — the
             // program has asked the terminal to stop accepting keyboard input
@@ -4200,19 +4313,59 @@ impl Controller {
             }
             let opts = s.engine().key_encode_options();
             let bytes = crate::input::translate::encode_raw(raw, &cfg, opts);
-            if !bytes.is_empty() {
-                // A key that produced bytes snaps the viewport back to the live
-                // area (upstream `scroll-to-bottom.keystroke`, default on). Only
-                // scrolled-back panes are affected; this pane is the focused
-                // (first-responder) one that received the key.
-                s.snap_to_bottom();
-                // `selection-clear-on-typing`: a real keystroke drops any
-                // selection (upstream clears it on typed input).
-                if clear_on_typing {
-                    s.engine().clear_selection();
-                    s.gesture.reset();
+            if bytes.is_empty() {
+                return;
+            }
+            // A key that produced bytes snaps the viewport back to the live
+            // area (upstream `scroll-to-bottom.keystroke`, default on). Only
+            // scrolled-back panes are affected; this pane is the focused
+            // (first-responder) one that received the key.
+            s.snap_to_bottom();
+            // `selection-clear-on-typing`: a real keystroke drops any
+            // selection (upstream clears it on typed input).
+            if clear_on_typing {
+                s.engine().clear_selection();
+                s.gesture.reset();
+            }
+            match s.display_source() {
+                None => {
+                    s.send_pty(&bytes);
+                    None
                 }
-                s.send_pty(&bytes);
+                // A display-only tmux pane surface: route below.
+                Some(src) => Some((src, bytes)),
+            }
+        };
+        if let Some((src, bytes)) = routed {
+            self.route_keys_to_tmux(&mut state, src, surface, &bytes);
+        }
+    }
+
+    /// Deliver already-encoded key bytes for a display-only tmux pane surface to
+    /// its tmux session (ADR 006 slice 5d). The pane has no pty; the control
+    /// surface's [`TmuxSession`] turns the bytes into a `send-keys` control
+    /// command, which is written to the control pty (control mode is in-band).
+    /// `pane_surface` is the display-only surface's own id (the Reconciler's
+    /// stable pane→surface key). No-op if the control surface/session is gone.
+    fn route_keys_to_tmux(
+        &self,
+        state: &mut ControllerState,
+        src: DisplaySource,
+        pane_surface: SurfaceId,
+        bytes: &[u8],
+    ) {
+        if let Some(cs) = state
+            .tabs
+            .get_mut(&src.control_tab)
+            .and_then(|t| t.surfaces.get_mut(&src.control_surface))
+        {
+            let commands = cs
+                .tmux
+                .as_mut()
+                .map(|sess| sess.send_keys(pane_surface, bytes))
+                .unwrap_or_default();
+            for cmd in &commands {
+                cs.send_pty(cmd);
             }
         }
     }
@@ -4223,11 +4376,14 @@ impl Controller {
         let mut state = self.0.borrow_mut();
         let clear_on_typing = state.selection_clear_on_typing;
         let vt_kam_allowed = state.vt_kam_allowed;
-        if let Some(s) = state
-            .tabs
-            .get_mut(&tab)
-            .and_then(|t| t.surfaces.get_mut(&surface))
-        {
+        let routed: Option<DisplaySource> = {
+            let Some(s) = state
+                .tabs
+                .get_mut(&tab)
+                .and_then(|t| t.surfaces.get_mut(&surface))
+            else {
+                return;
+            };
             // KAM: committed text is keyboard input; suppress it while the
             // program has disabled the keyboard (see `encode_key_to_surface`).
             if vt_kam_allowed && s.engine().keyboard_disabled() {
@@ -4239,7 +4395,17 @@ impl Controller {
                 s.engine().clear_selection();
                 s.gesture.reset();
             }
-            s.send_pty(text.as_bytes());
+            match s.display_source() {
+                None => {
+                    s.send_pty(text.as_bytes());
+                    None
+                }
+                // Display-only tmux pane surface: route the text to tmux below.
+                Some(src) => Some(src),
+            }
+        };
+        if let Some(src) = routed {
+            self.route_keys_to_tmux(&mut state, src, surface, text.as_bytes());
         }
     }
 
@@ -5369,6 +5535,9 @@ impl Controller {
             .map(|c| (c.r, c.g, c.b))
             .unwrap_or((0x18, 0x18, 0x18));
 
+        // Keep a copy of the configured palette for this surface's tmux session
+        // (if it ever runs `tmux -CC`); the original is moved into the engine.
+        let tmux_colors = startup_colors.clone();
         let mut engine_inner =
             Engine::with_options(cols, rows, startup_colors, vt_toggles.scrollback_limit);
         vt_toggles.apply(&mut engine_inner);
@@ -5385,7 +5554,7 @@ impl Controller {
         };
         let render = RenderEngine::new(cw, ch).ok();
 
-        let frame_dump = crate::frame_dump::FrameDump::from_env();
+        let frame_dump = crate::frame_dump::FrameDump::from_env(tab.0, surface.0);
         let capture_present =
             frame_dump.is_some() || std::env::var_os("QWERTTY_TERM_ASSERT_PRESENT").is_some();
 
@@ -5450,6 +5619,7 @@ impl Controller {
             progress_deadline: None,
             progress_layer: None,
             tmux: None,
+            startup_colors: tmux_colors,
             display,
         })
     }
@@ -10626,9 +10796,22 @@ impl AppDelegate {
         let Some(window) = self.ivars().controller.active_window() else {
             return false;
         };
+        self.bind_display_link(&window)
+    }
+
+    /// Bind (or rebind) the render [`CADisplayLink`] to `window`'s content view,
+    /// replacing any current link. Factored out of [`start_display_link`] so the
+    /// link can be re-pointed at a different window when the one it was bound to
+    /// is ordered out (a display link pauses for its occluded view). Returns
+    /// `false` when the window has no screen-backed content view.
+    fn bind_display_link(&self, window: &NSWindow) -> bool {
         let Some(view) = window.contentView() else {
             return false;
         };
+        // Drop the previous link (if any) before creating the new one.
+        if let Some(old) = self.ivars().display_link.borrow_mut().take() {
+            old.invalidate();
+        }
         // SAFETY: main thread; `self` (the target) outlives the link, retained
         // in `display_link` below; `ghosttyRenderTick:` is implemented on this
         // class. The link auto-associates with the view's display and re-tracks
@@ -10642,6 +10825,27 @@ impl AppDelegate {
         }
         *self.ivars().display_link.borrow_mut() = Some(link);
         true
+    }
+
+    /// Re-point the render display link at a currently-visible window. Called
+    /// when a tmux control tab is hidden/restored: the link was bound to that
+    /// window's view and a `CADisplayLink` pauses for an occluded view, which
+    /// would otherwise stall the whole render loop. No-op when render is driven
+    /// by the pace `NSTimer` (no link exists — GUI smokes / no screen-backed
+    /// window). Falls back to the pace timer if no visible window remains.
+    pub(crate) fn rebind_display_link(&self) {
+        if self.ivars().display_link.borrow().is_none() {
+            return;
+        }
+        match self.ivars().controller.first_visible_window() {
+            Some(window) if self.bind_display_link(&window) => {}
+            _ => {
+                if let Some(old) = self.ivars().display_link.borrow_mut().take() {
+                    old.invalidate();
+                }
+                self.start_pace_timer();
+            }
+        }
     }
 
     /// Schedule a one-shot auto-exit `ms` milliseconds out (smoke mode).

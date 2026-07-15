@@ -50,7 +50,7 @@ fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// `tmux_viewer::tests::viewer_with_window`, but through the session reducer so
 /// the outgoing commands + reconcile plan are exercised too.
 fn session_with_window(layout: &str) -> (TmuxSession, SessionUpdate) {
-    let mut s = TmuxSession::new();
+    let mut s = TmuxSession::new(Colors::default());
 
     // Enter: nothing to do yet (Viewer created; StartupBlock).
     let u = s.ingest([Notification::Enter]);
@@ -79,7 +79,7 @@ fn session_with_window(layout: &str) -> (TmuxSession, SessionUpdate) {
 
 #[test]
 fn immediate_exit_signals_teardown() {
-    let mut s = TmuxSession::new();
+    let mut s = TmuxSession::new(Colors::default());
     let u = s.ingest([Notification::Exit]);
     assert!(u.exit);
     assert!(u.plan.is_none());
@@ -213,7 +213,7 @@ fn exit_after_a_session_signals_teardown_without_a_plan() {
 fn commands_are_emitted_in_order_across_a_batch() {
     // Feeding the whole startup handshake as one batch still yields the version
     // query first, then (after its response) list-windows — order preserved.
-    let mut s = TmuxSession::new();
+    let mut s = TmuxSession::new(Colors::default());
     let u = s.ingest([
         Notification::Enter,
         block_end(""),      // StartupBlock -> StartupSession
@@ -223,4 +223,29 @@ fn commands_are_emitted_in_order_across_a_batch() {
     assert_eq!(u.commands.len(), 2, "version query then list-windows");
     assert!(bytes_contains(&u.commands[0], b"display-message"));
     assert!(bytes_contains(&u.commands[1], b"list-windows"));
+}
+
+#[test]
+fn send_keys_maps_surface_to_pane_and_emits_send_keys() {
+    let (mut s, _u) = session_with_window("b7dd,83x44,0,0,0");
+    // Drain the pane-0 capture queue (4 captures + list-panes) so the command
+    // queue is idle and send-keys emits immediately.
+    for _ in 0..5 {
+        s.ingest([block_end("")]);
+    }
+
+    let s0 = s.surface_of(0).expect("pane 0 has a surface");
+    let cmds = s.send_keys(s0, b"hi\r");
+    let blob = cmds.concat();
+    assert!(
+        bytes_contains(&blob, b"send-keys -t %0 -H 68 69 d\n"),
+        "unexpected send-keys bytes: {:?}",
+        String::from_utf8_lossy(&blob)
+    );
+
+    // An unbound surface id resolves to no pane, so no command is produced.
+    assert!(
+        s.send_keys(crate::splits::SurfaceId(4242), b"x").is_empty(),
+        "input for an unbound surface should yield no command"
+    );
 }

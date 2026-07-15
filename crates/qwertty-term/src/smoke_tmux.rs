@@ -130,6 +130,15 @@ impl FakeServer {
                 payload.push_str(&format!("$0 @{} 83 44 {}\n", id, Self::layout(body)));
             }
             self.send_block(engine, &payload);
+        } else if let Some((pane_id, text)) = parse_send_keys(command) {
+            // Keyboard input (ADR 006 slice 5d). Ack the write with an empty
+            // block, then echo the printable keys back as the pane's `%output`,
+            // mimicking a shell echoing typed input — so the smoke can assert the
+            // keystroke reached the right pane terminal end to end.
+            self.send_block(engine, "");
+            if !text.is_empty() {
+                self.send_line(engine, &format!("%output %{pane_id} {text}"));
+            }
         } else if contains(command, b"capture-pane") || contains(command, b"list-panes") {
             // Content-capture / pane-state: an empty block is a valid response
             // and keeps the command queue advancing (the live path we assert is
@@ -138,6 +147,28 @@ impl FakeServer {
         }
         // Any other command: ignore (none are emitted by the Viewer today).
     }
+}
+
+/// Parse a `send-keys -t %<id> -H <hex…>` command into `(pane_id, text)`,
+/// decoding the hex codepoints and keeping only printable ASCII (enough to
+/// prove the input round-trip). Returns `None` for any other command.
+fn parse_send_keys(command: &[u8]) -> Option<(usize, String)> {
+    let s = std::str::from_utf8(command).ok()?.trim();
+    let rest = s.strip_prefix("send-keys -t %")?;
+    let (id_str, rest) = rest.split_once(' ')?;
+    let pane_id: usize = id_str.parse().ok()?;
+    let hexes = rest.strip_prefix("-H")?.trim();
+    let mut text = String::new();
+    for tok in hexes.split_whitespace() {
+        if let Some(c) = u32::from_str_radix(tok, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .filter(|c| (' '..='~').contains(c))
+        {
+            text.push(c);
+        }
+    }
+    Some((pane_id, text))
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -179,7 +210,7 @@ fn drive(
 /// diagnostic on any assertion failure.
 pub fn run() -> Result<(), String> {
     let mut engine = Engine::new(83, 44);
-    let mut session = TmuxSession::new();
+    let mut session = TmuxSession::new(qwertty_term_vt::terminal::Colors::default());
     let mut native = NativeTabs::default();
     let mut server = FakeServer::new();
 
@@ -302,6 +333,52 @@ pub fn run() -> Result<(), String> {
         .plain_string();
     if term1.contains("hello-from-pane-3") {
         return Err("pane 3's output bled into pane 1's surface/terminal".to_string());
+    }
+
+    // --- Input: send-keys routes typed bytes to the focused pane -----------
+    // ADR 006 slice 5d: a display-only tmux pane has no pty, so a keystroke is
+    // encoded and handed to `TmuxSession::send_keys`, which emits a `send-keys`
+    // control command on the control pty. Drive it end to end: encode "hi\r"
+    // for pane 1's surface, play tmux (ack + echo), and assert it landed in
+    // pane 1's terminal (and not pane 3's).
+    let cmds = session.send_keys(s1, b"hi\r");
+    if cmds.is_empty() {
+        return Err("send_keys produced no control command for pane 1".to_string());
+    }
+    let joined: Vec<u8> = cmds.concat();
+    // The exact wire form: `send-keys -t %1 -H 68 69 d` (h, i, CR).
+    if !contains(&joined, b"send-keys -t %1 -H 68 69 d") {
+        return Err(format!(
+            "unexpected send-keys command bytes: {:?}",
+            String::from_utf8_lossy(&joined)
+        ));
+    }
+    for cmd in &cmds {
+        server.respond(&mut engine, cmd);
+    }
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    let text1 = session
+        .pane_terminal(s1)
+        .ok_or("pane 1 terminal missing after input")?
+        .plain_string();
+    if !text1.contains("hi") {
+        return Err(format!(
+            "typed input did not reach pane 1's terminal; screen = {text1:?}"
+        ));
+    }
+    let text3 = session
+        .pane_terminal(s3)
+        .ok_or("pane 3 terminal missing after input")?
+        .plain_string();
+    if text3.contains("hi") {
+        return Err("pane 1's input bled into pane 3's terminal".to_string());
+    }
+    // Input for an unbound surface id yields no command (defensive).
+    if !session
+        .send_keys(crate::splits::SurfaceId(9999), b"x")
+        .is_empty()
+    {
+        return Err("send_keys for an unknown surface should yield no command".to_string());
     }
 
     // --- A 2nd %window-add @2 opens a 2nd native tab ----------------------

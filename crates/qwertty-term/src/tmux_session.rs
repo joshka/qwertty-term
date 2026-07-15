@@ -43,7 +43,7 @@
 //! Reconciler's stable map to the Viewer's pane `Terminal` to snapshot. See the
 //! ADR 006 "5c surface-binding" section for the display-only-surface design.
 
-use qwertty_term_vt::terminal::Terminal;
+use qwertty_term_vt::terminal::{Colors, Terminal};
 use qwertty_term_vt::tmux::Notification;
 
 use crate::splits::SurfaceId;
@@ -91,9 +91,14 @@ pub struct TmuxSession {
 
 impl TmuxSession {
     /// A fresh session. Construct this on the [`Notification::Enter`] the engine
-    /// surfaces when a pane enters tmux control mode.
-    pub fn new() -> TmuxSession {
-        TmuxSession::default()
+    /// surfaces when a pane enters tmux control mode. `colors` is the app's
+    /// configured palette, seeded into every pane `Terminal` so tmux panes match
+    /// the user's theme (ADR 006 theme fix).
+    pub fn new(colors: Colors) -> TmuxSession {
+        TmuxSession {
+            viewer: Viewer::new(colors),
+            reconciler: Reconciler::default(),
+        }
     }
 
     /// Feed a drained batch of notifications through the Viewer, collecting the
@@ -155,5 +160,27 @@ impl TmuxSession {
     /// should be dropped along with its native tabs.
     pub fn is_defunct(&self) -> bool {
         self.viewer.is_defunct()
+    }
+
+    /// Route keyboard input for the tmux pane a native [`SurfaceId`] renders,
+    /// returning the control-pty command bytes to write (ADR 006 slice 5d).
+    ///
+    /// A display-only tmux pane surface has no pty; its key encoder output
+    /// (`bytes`, UTF-8) is delivered to tmux as a `send-keys` control command on
+    /// the control pty — the same channel [`SessionUpdate::commands`] uses. The
+    /// surface id is resolved to its pane id through the Reconciler's stable map;
+    /// input for an unbound surface (or before steady state) yields no commands.
+    pub fn send_keys(&mut self, surface: SurfaceId, bytes: &[u8]) -> Vec<Vec<u8>> {
+        let Some(pane_id) = self.reconciler.pane_of_surface(surface) else {
+            return Vec::new();
+        };
+        self.viewer
+            .send_keys(pane_id, bytes)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Command(b) => Some(b),
+                _ => None,
+            })
+            .collect()
     }
 }

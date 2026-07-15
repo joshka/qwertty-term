@@ -64,7 +64,7 @@ fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// layout is `layout` (with checksum), returning the Viewer. The window listing
 /// response uses session `$0`, window `@0`, size `83x44`.
 fn viewer_with_window(layout: &str) -> Viewer {
-    let mut v = Viewer::new();
+    let mut v = Viewer::new(Colors::default());
     // Startup block.
     let a = v.next(block_end(""));
     assert!(a.is_empty());
@@ -89,7 +89,7 @@ fn viewer_with_window(layout: &str) -> Viewer {
 
 #[test]
 fn immediate_exit() {
-    let mut v = Viewer::new();
+    let mut v = Viewer::new(Colors::default());
     let a = v.next(Notification::Exit);
     assert!(has_exit(&a));
     assert!(v.is_defunct());
@@ -100,7 +100,7 @@ fn immediate_exit() {
 
 #[test]
 fn startup_advances_through_states() {
-    let mut v = Viewer::new();
+    let mut v = Viewer::new(Colors::default());
     // StartupBlock: only a block advances us; other notifications are ignored.
     assert!(v.next(Notification::SessionsChanged).is_empty());
     assert!(v.next(block_end("")).is_empty());
@@ -359,4 +359,73 @@ fn ignored_steady_state_notifications_are_noops() {
         .is_empty()
     );
     assert_eq!(v.pane_count(), 1);
+}
+
+// ---- send-keys (ADR 006 slice 5d input) ------------------------------------
+
+/// A full checksummed layout string for `body` (mirrors the smoke helper).
+fn checksummed(body: &str) -> String {
+    let c = qwertty_term_vt::tmux::Checksum::calculate(body.as_bytes()).as_string();
+    format!("{},{}", String::from_utf8_lossy(&c), body)
+}
+
+/// Feed empty block responses until the capture-pane/list-panes queue drains to
+/// an idle steady state (no further command emitted).
+fn drain_to_idle(v: &mut Viewer) {
+    for _ in 0..100 {
+        if !has_command(&v.next(block_end(""))) {
+            return;
+        }
+    }
+    panic!("command queue did not drain to idle");
+}
+
+#[test]
+fn send_keys_emits_hex_send_keys_for_a_known_pane_when_idle() {
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    // Idle queue: the send-keys command is emitted immediately. "hi\r" -> the
+    // codepoints h(68) i(69) CR(d), each a hex arg to `send-keys -H`.
+    let a = v.send_keys(0, b"hi\r");
+    let cmd = command_bytes(&a).expect("send-keys command");
+    assert!(
+        bytes_contains(&cmd, b"send-keys -t %0 -H 68 69 d\n"),
+        "unexpected send-keys bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+}
+
+#[test]
+fn send_keys_defers_while_a_command_is_in_flight() {
+    // A capture command is in flight straight after startup (queue non-empty).
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    // The send-keys is queued behind it, so nothing is emitted right now.
+    assert!(!has_command(&v.send_keys(0, b"x")));
+    // Draining the capture queue eventually emits the deferred send-keys, and
+    // its %begin/%end reply correlates (queue advances, no panic).
+    let mut saw = false;
+    for _ in 0..100 {
+        let a = v.next(block_end(""));
+        match command_bytes(&a) {
+            Some(cmd) if bytes_contains(&cmd, b"send-keys -t %0 -H 78\n") => {
+                saw = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(saw, "deferred send-keys was never emitted");
+}
+
+#[test]
+fn send_keys_ignores_unknown_pane_pre_steady_and_empty_input() {
+    // Not yet in steady state: no command.
+    let mut fresh = Viewer::new(Colors::default());
+    assert!(fresh.send_keys(0, b"x").is_empty());
+    // Steady state, but an unknown pane id or empty input yields no command.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    assert!(v.send_keys(999, b"x").is_empty());
+    assert!(v.send_keys(0, b"").is_empty());
 }

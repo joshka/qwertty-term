@@ -54,7 +54,7 @@
 use std::collections::VecDeque;
 
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
-use qwertty_term_vt::terminal::{Options, Terminal};
+use qwertty_term_vt::terminal::{Colors, Options, Terminal};
 use qwertty_term_vt::tmux::Notification;
 use qwertty_term_vt::tmux::layout::{Content, Layout};
 use qwertty_term_vt::tmux::output::{self, Value, Variable};
@@ -153,6 +153,13 @@ enum Command {
     PaneState,
     /// `display-message`: fetch the tmux server version.
     TmuxVersion,
+    /// `send-keys`: deliver keyboard input to a pane (ADR 006 slice 5d). The
+    /// `keys` are Unicode codepoints (from the app's key encoder, decoded from
+    /// its UTF-8 output) sent via `send-keys -H` so raw control bytes and
+    /// escape sequences pass through unmodified. Unlike the other commands this
+    /// is a *write*: its `%begin`/`%end` response carries no data we consume, it
+    /// only advances the command queue.
+    SendKeys { pane_id: usize, keys: Vec<u32> },
 }
 
 impl Command {
@@ -187,6 +194,18 @@ impl Command {
                 cmd.extend_from_slice(&output::format(TMUX_VERSION_VARS, TMUX_VERSION_DELIM));
                 cmd.extend_from_slice(b"'\n");
                 cmd
+            }
+            // `send-keys -t %<id> -H <hex codepoints…>`: each key is one
+            // hexadecimal Unicode codepoint. `-H` bypasses tmux key-name lookup
+            // so bytes like CR (`d`) / ESC (`1b`) and full escape sequences are
+            // delivered to the pane verbatim.
+            Command::SendKeys { pane_id, keys } => {
+                let mut cmd = format!("send-keys -t %{pane_id} -H");
+                for k in keys {
+                    cmd.push_str(&format!(" {k:x}"));
+                }
+                cmd.push('\n');
+                cmd.into_bytes()
             }
         }
     }
@@ -243,13 +262,17 @@ pub struct Pane {
 }
 
 impl Pane {
-    fn new(width: usize, height: usize) -> Pane {
+    fn new(width: usize, height: usize, colors: &Colors) -> Pane {
         Pane {
             // placeholder id; set by the caller.
             id: 0,
             stream: Stream::new(TerminalHandler::new(Terminal::new(Options {
                 cols: clamp_cells(width),
                 rows: clamp_cells(height),
+                // Seed the pane terminal with the app's configured palette/theme
+                // so tmux panes match ordinary shell panes instead of rendering
+                // on the engine default background (ADR 006 theme fix).
+                colors: colors.clone(),
                 ..Default::default()
             }))),
             state: None,
@@ -295,18 +318,23 @@ pub struct Viewer {
     /// to preserve insertion order deterministically — pane counts are tiny and
     /// this mirrors upstream's insertion-ordered `AutoArrayHashMap`.
     panes: Vec<Pane>,
+    /// The app's configured palette/theme, applied to every pane `Terminal` on
+    /// creation so tmux panes honour the user's colors (ADR 006 theme fix).
+    /// Retained across a `%session-changed` reset.
+    colors: Colors,
 }
 
 impl Default for Viewer {
     fn default() -> Self {
-        Self::new()
+        Self::new(Colors::default())
     }
 }
 
 impl Viewer {
     /// Create a fresh Viewer in the `StartupBlock` state. Call this when the
-    /// engine reports [`Notification::Enter`]. Port of `Viewer.init`.
-    pub fn new() -> Viewer {
+    /// engine reports [`Notification::Enter`]. Port of `Viewer.init`. `colors`
+    /// is the app's configured palette, seeded into every pane `Terminal`.
+    pub fn new(colors: Colors) -> Viewer {
         Viewer {
             state: State::StartupBlock,
             session_id: 0,
@@ -314,6 +342,7 @@ impl Viewer {
             command_queue: VecDeque::new(),
             windows: Vec::new(),
             panes: Vec::new(),
+            colors,
         }
     }
 
@@ -468,6 +497,48 @@ impl Viewer {
         actions
     }
 
+    /// Queue keyboard input for a pane and return the command(s) to send now.
+    /// ADR 006 slice 5d: control mode has no pane pty, so input is delivered as
+    /// a `send-keys` control command on the same control pty.
+    ///
+    /// `bytes` is the app key encoder's output (UTF-8); it is decoded into
+    /// Unicode codepoints and sent via `send-keys -H`. The command is threaded
+    /// through the same in-flight command queue as every other control command
+    /// so its `%begin`/`%end` reply correlates correctly (a stray reply would
+    /// otherwise be mis-attributed to whatever command was in flight). When the
+    /// queue is idle the command is emitted immediately; otherwise it is emitted
+    /// once the in-flight command completes.
+    ///
+    /// Returns an empty vec (no action) when not in steady state, the pane is
+    /// unknown, or `bytes` decodes to nothing.
+    pub fn send_keys(&mut self, pane_id: usize, bytes: &[u8]) -> Vec<Action> {
+        if self.state != State::CommandQueue {
+            return Vec::new();
+        }
+        if !self.panes.iter().any(|p| p.id == pane_id) {
+            return Vec::new();
+        }
+        let keys: Vec<u32> = String::from_utf8_lossy(bytes)
+            .chars()
+            .map(|c| c as u32)
+            .collect();
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let was_idle = self.command_queue.is_empty();
+        self.command_queue
+            .push_back(Command::SendKeys { pane_id, keys });
+        if was_idle {
+            // Nothing in flight: emit now; its %begin/%end will pop it.
+            vec![Action::Command(
+                self.command_queue.front().expect("just pushed").to_bytes(),
+            )]
+        } else {
+            // A command is in flight; next_command emits this once it completes.
+            Vec::new()
+        }
+    }
+
     // ---- command responses -------------------------------------------------
 
     fn received_command_output(&mut self, actions: &mut Vec<Action>, content: &[u8]) {
@@ -486,6 +557,10 @@ impl Viewer {
                 self.received_pane_visible(id, alternate, content)
             }
             Command::TmuxVersion => self.received_tmux_version(content),
+            // A `send-keys` write: tmux's reply carries nothing to apply; the
+            // pop above already advanced the queue. The pane's echo (if any)
+            // arrives separately as `%output`.
+            Command::SendKeys { .. } => {}
         }
     }
 
@@ -652,7 +727,7 @@ impl Viewer {
             if let Some(pos) = old.iter().position(|p| p.id == *id) {
                 rebuilt.push(old.remove(pos));
             } else {
-                let mut pane = Pane::new(*width, *height);
+                let mut pane = Pane::new(*width, *height, &self.colors);
                 pane.id = *id;
                 rebuilt.push(pane);
             }
@@ -691,7 +766,8 @@ impl Viewer {
     /// `sessionChanged`.
     fn session_changed(&mut self, actions: &mut Vec<Action>, session_id: usize) {
         let version = std::mem::take(&mut self.tmux_version);
-        *self = Viewer::new();
+        let colors = self.colors.clone();
+        *self = Viewer::new(colors);
         self.tmux_version = version;
         self.session_id = session_id;
         self.state = State::CommandQueue;
