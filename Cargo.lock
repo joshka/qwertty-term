@@ -3377,6 +3377,7 @@ dependencies = [
  "libadwaita",
  "libloading",
  "qwertty-term-font",
+ "qwertty-term-input",
  "qwertty-term-renderer",
  "qwertty-term-termio",
  "qwertty-term-vt",
