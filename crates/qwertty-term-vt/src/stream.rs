@@ -585,6 +585,17 @@ pub trait Handler {
     // ---- APC ------------------------------------------------------------
     fn apc_start(&mut self) {}
     fn apc_put(&mut self, byte: u8) {}
+    /// Feed a run of consecutive APC-string payload bytes at once. The default
+    /// loops [`Handler::apc_put`]; the concrete [`TerminalHandler`] overrides it
+    /// with the batched [`apc::Handler::feed_slice`] fast path. This is the sink
+    /// for the stream's bulk APC-string path ([`Stream::consume_apc_string`]),
+    /// which spares megabyte-scale kitty-graphics payloads the per-byte VT state
+    /// machine + dispatch. Port of upstream's `apc_put_slice` action (f6f79acce).
+    fn apc_put_slice(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.apc_put(byte);
+        }
+    }
     fn apc_end(&mut self) {}
 
     // ---- DCS ------------------------------------------------------------
@@ -851,6 +862,23 @@ impl<H: Handler> Stream<H> {
                     }
                 }
 
+                // Bulk-consume APC-string payload bytes into a single
+                // `apc_put_slice`. APC payloads (e.g. kitty graphics images) can
+                // be megabytes of base64, so per-byte dispatch through the VT
+                // state machine + handler is far too slow. Port of upstream's
+                // `sos_pm_apc_string` fast path in `consumeUntilGround`
+                // (f6f79acce). Unlike upstream this is unguarded: our `Handler`
+                // has no per-byte `vtRaw`/inspector hook (the CSI fast paths
+                // above are likewise unconditional), so batching is transparent.
+                if self.parser.state() == State::SosPmApcString {
+                    offset += self.consume_apc_string(&input[offset..]);
+                    if offset >= input.len() {
+                        return;
+                    }
+                    // The next byte exits the string state; the per-byte path
+                    // below handles it (emitting apc_end as today).
+                }
+
                 self.next_non_utf8(input[offset]);
                 offset += 1;
             }
@@ -880,6 +908,40 @@ impl<H: Handler> Stream<H> {
             }
             // Loop: re-check decoder-partial / non-ground / more input.
         }
+    }
+
+    /// Bulk-consume APC-string payload bytes and dispatch them as a single
+    /// [`Handler::apc_put_slice`]. Returns the number of bytes consumed. Stops
+    /// at the first byte that is not an apc_put byte in the parse table, leaving
+    /// it for the caller to process through the state machine: CAN (0x18), SUB
+    /// (0x1A), ESC (0x1B) exit or abort the string state, and 0x80..=0xFF are
+    /// ignored by the table (not payload), so none can be bulk-consumed. This is
+    /// the exact complement of the `SosPmApcString` `ApcPut` transitions in
+    /// `parser::table` (0x00..=0x17, 0x19, 0x1C..=0x7F). Port of upstream
+    /// `consumeApcString` (f6f79acce; SIMD scan added in 8c523ed03).
+    ///
+    /// The parser state is intentionally *not* stepped for the consumed run:
+    /// apc_put bytes are `SosPmApcString -> SosPmApcString` self-transitions with
+    /// no collect/param side effects, so scanning + one slice dispatch is
+    /// byte-for-byte equivalent to feeding each through `Parser::next`.
+    fn consume_apc_string(&mut self, input: &[u8]) -> usize {
+        debug_assert_eq!(self.parser.state(), State::SosPmApcString);
+
+        let mut end = 0;
+        while end < input.len() {
+            match input[end] {
+                // Not apc_put bytes: CAN/SUB/ESC and most C1 exit or abort the
+                // state; 0x80..=0xFF are ignored by the table.
+                0x18 | 0x1A | 0x1B | 0x80..=0xFF => break,
+                // Everything else is an apc_put byte.
+                _ => end += 1,
+            }
+        }
+
+        if end > 0 {
+            self.handler.apc_put_slice(&input[..end]);
+        }
+        end
     }
 
     /// Bulk-decode ground-state bytes into `self.cp_buf` until the next ESC
@@ -3030,6 +3092,9 @@ impl Handler for TerminalHandler {
     }
     fn apc_put(&mut self, byte: u8) {
         self.apc_handler.feed(byte);
+    }
+    fn apc_put_slice(&mut self, bytes: &[u8]) {
+        self.apc_handler.feed_slice(bytes);
     }
     fn apc_end(&mut self) {
         // Port of `stream_terminal.Handler.apcEnd`. Finalize the APC handler;

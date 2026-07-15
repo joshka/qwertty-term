@@ -309,6 +309,91 @@ impl Handler {
         }
     }
 
+    /// Bulk analogue of [`Handler::feed`]: feed a run of consecutive APC-string
+    /// payload bytes at once, byte-for-byte equivalent to calling
+    /// [`Handler::feed`] on each. The identify state machine resolves the
+    /// protocol from the leading bytes (only the first few bytes of a command),
+    /// then the remainder of the run is appended to the recognized protocol's
+    /// buffer with a single `extend_from_slice` instead of a push per byte.
+    /// Port of the bulk `feed` path in upstream `apc.zig` (f6f79acce); the
+    /// stream drives it via [`crate::stream::Handler::apc_put_slice`].
+    pub fn feed_slice(&mut self, bytes: &[u8]) {
+        let mut i = 0;
+
+        // The identify state resolves the protocol from the leading bytes and
+        // can change state on any byte (`G`, `;`, or identify-buffer overflow),
+        // so drive it one byte at a time until we leave it.
+        while i < bytes.len() && matches!(self.state, State::Identify { .. }) {
+            self.feed(bytes[i]);
+            i += 1;
+        }
+
+        let rest = &bytes[i..];
+        if rest.is_empty() {
+            return;
+        }
+
+        match &mut self.state {
+            // `apc_put_slice` only fires inside SosPmApcString (after `start`),
+            // so Inactive is unreachable here; mirror `feed`'s guard defensively.
+            State::Inactive => debug_assert!(false, "feed_slice called before start"),
+
+            // Still identifying (ran out of bytes above) or ignoring: no data.
+            State::Identify { .. } | State::Ignore => {}
+
+            State::Kitty {
+                data,
+                max_bytes,
+                in_data,
+                data_len,
+            } => {
+                let mut rest = rest;
+                // The control section (key=value pairs) before the first
+                // top-level `;` is unbounded. Append up to and including that
+                // `;` if it is in this run; otherwise append the whole run and
+                // stay in the control section.
+                if !*in_data {
+                    match rest.iter().position(|&b| b == b';') {
+                        Some(j) => {
+                            data.extend_from_slice(&rest[..=j]);
+                            *in_data = true;
+                            rest = &rest[j + 1..];
+                        }
+                        None => {
+                            data.extend_from_slice(rest);
+                            return;
+                        }
+                    }
+                }
+                // Payload (data) section: subject to `max_bytes`. Per-byte
+                // `feed` sets Ignore on the first byte for which
+                // `data_len >= max_bytes`, dropping that byte and the rest of
+                // the run; the bulk form appends exactly the headroom.
+                let remaining_cap = max_bytes.saturating_sub(*data_len);
+                if rest.len() <= remaining_cap {
+                    data.extend_from_slice(rest);
+                    *data_len += rest.len();
+                } else {
+                    data.extend_from_slice(&rest[..remaining_cap]);
+                    *data_len = *max_bytes;
+                    self.state = State::Ignore;
+                }
+            }
+
+            State::Glyph { data, max_bytes } => {
+                // Per-byte `feed` sets Ignore on the first byte for which
+                // `data.len() >= max_bytes`, dropping that byte and the rest.
+                let remaining_cap = max_bytes.saturating_sub(data.len());
+                if rest.len() <= remaining_cap {
+                    data.extend_from_slice(rest);
+                } else {
+                    data.extend_from_slice(&rest[..remaining_cap]);
+                    self.state = State::Ignore;
+                }
+            }
+        }
+    }
+
     /// Called on APC end (`Handler.end`, `apc.zig:116-147`). Always resets to
     /// inactive afterward.
     pub fn end(&mut self) -> Option<Command> {
@@ -522,5 +607,89 @@ mod tests {
             h.feed(*byte);
         }
         assert!(h.end().is_none());
+    }
+
+    /// The bulk `feed_slice` path must be byte-for-byte equivalent to feeding
+    /// each byte through `feed`, including when the run is split into multiple
+    /// slices at arbitrary boundaries (identify / in_data / data_len state
+    /// carries across `apc_put_slice` dispatches). Covers the kitty control +
+    /// payload sections (incl. embedded ';' and non-payload runs), the glyph
+    /// prefix, ignored/unknown commands, and identify-buffer overflow. Analogue
+    /// of upstream's "apc bulk slice" / boundary-match tests (f6f79acce).
+    #[test]
+    fn feed_slice_matches_feed() {
+        let cases: &[&[u8]] = &[
+            b"Gf=24,s=10,v=20;aGVsbG8=",
+            b"Ga=T,q=2;",
+            b"G;;;payload;with;semicolons",
+            b"Gf=1;",
+            b"G",
+            b"25a1;1;s=1;AAAA",
+            b"25a1;q;cp=e0a0",
+            b"Xignored garbage 1234567890",
+            b"",
+            b"toolongidentifyprefixnosemicolon",
+        ];
+        for case in cases {
+            let expected = {
+                let mut h = Handler::new();
+                h.start();
+                for &b in *case {
+                    h.feed(b);
+                }
+                h.end()
+            };
+
+            // One bulk slice.
+            let mut single = Handler::new();
+            single.start();
+            single.feed_slice(case);
+            assert_eq!(single.end(), expected, "single slice: {case:?}");
+
+            // Split into two slices at every boundary.
+            for split in 0..=case.len() {
+                let mut h = Handler::new();
+                h.start();
+                h.feed_slice(&case[..split]);
+                h.feed_slice(&case[split..]);
+                assert_eq!(h.end(), expected, "split at {split}: {case:?}");
+            }
+        }
+    }
+
+    /// `feed_slice` must match `feed` exactly at the kitty payload `max_bytes`
+    /// cap — including the boundary where the run exactly fills the cap (stays)
+    /// versus overflows by one (drops to Ignore) — across every slice split.
+    #[test]
+    fn feed_slice_matches_feed_at_max_bytes() {
+        // 'G' identifies kitty, 'f=1;' ends the (unbounded) control section,
+        // then 16 payload bytes exercise the cap at slice granularity.
+        let input = b"Gf=1;0123456789ABCDEF";
+        for cap in [0usize, 1, 5, 15, 16, 17, 100] {
+            let expected = {
+                let mut h = Handler::new();
+                h.set_max_bytes(Protocol::Kitty, cap);
+                h.start();
+                for &b in input {
+                    h.feed(b);
+                }
+                h.end()
+            };
+
+            let mut single = Handler::new();
+            single.set_max_bytes(Protocol::Kitty, cap);
+            single.start();
+            single.feed_slice(input);
+            assert_eq!(single.end(), expected, "cap {cap} single slice");
+
+            for split in 0..=input.len() {
+                let mut h = Handler::new();
+                h.set_max_bytes(Protocol::Kitty, cap);
+                h.start();
+                h.feed_slice(&input[..split]);
+                h.feed_slice(&input[split..]);
+                assert_eq!(h.end(), expected, "cap {cap} split at {split}");
+            }
+        }
     }
 }
