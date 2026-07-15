@@ -103,3 +103,50 @@ Renderer/vt-owned (NOT my territory — route via Inbox if needed): `bold-color`
 - 2026-07-14: CLOSEOUT — recycling for context length. 3 PRs merged, gate green throughout.
   **Respawn to continue** from this file + `docs/threads/t3-config-keybinds.md`/`t4-app-polish.md`
   specs. First action next session: wire the vt-tails Inbox config toggles.
+- 2026-07-15: tmux control-mode Viewer — **ADR 006 (`docs/adr/006-tmux-viewer.md`) + slice 5a**
+  shipped as PR **#276** (gate-green: workspace check/test, vt release + paranoid lanes, clippy,
+  fmt, offscreen smoke, markdownlint). ADR ratified by Josh 2026-07-15 → **ACCEPTED, Option (a):
+  tmux window → native tab, tmux pane → split within that tab.** Slice 5a is the headless,
+  AppKit-free `qwertty_term::tmux_viewer::Viewer` (notification reducer + command-queue state
+  machine + session→windows→panes tree + layout→`PaneRect` geometry + `%output` routing to
+  per-pane `Terminal`s; queryable via `windows()`/`pane()`/`pane_rects()`; 10 unit tests).
+  **#276 is LEFT OPEN for Josh/user to merge** (agent self-merge was policy-blocked — the
+  original task said leave it open). Slices 5b+ unblocked once it lands.
+
+## tmux Viewer slice 5b handoff (fresh agent — design ready to implement)
+
+**Do NOT stack on #276's branch** (unmerged → jj divergence hazard, memory
+`jj-new-before-next-pr`). Start after #276 merges: `jj git fetch && jj new main@origin`. 5b is
+**model → native-surface reconciliation** only — NOT control-pty wiring (that's 5c).
+
+**Pure core to build first (fully unit-testable, no AppKit):**
+
+- **rect-tree → SplitTree converter** — walk the tmux `Layout` tree (from `Viewer::windows()[i].layout`),
+  not the flattened `PaneRect`s, so structure is preserved:
+  - `Content::Pane(id)` → `Node::Leaf(surface_of(id))` where `surface_of: usize -> splits::SurfaceId`.
+  - `Content::Horizontal(children)` → right-leaning binary chain of
+    `Split{ axis: Axis::Horizontal, ratio, .. }`; `ratio = child_width / sum(remaining_widths)`
+    (tmux Horizontal `{…}` = side-by-side = SplitTree `Axis::Horizontal`; they align).
+  - `Content::Vertical(children)` → same with `Axis::Vertical`, ratios from child **heights**
+    (tmux Vertical `[…]` = stacked).
+  - n-ary → binary: for `[c0, c1, … cn]` build `Split(axis, ratio=dim(c0)/sum(dim(c0..cn)), c0, recurse(c1..cn))`.
+  - `clamp_ratio(..)` every ratio into `[0.1, 0.9]` (helper already in `splits.rs`).
+  - Needs one additive public ctor in `splits.rs`: `SplitTree::from_node(root: Node, focused: SurfaceId)`
+    (fields are private; `Node`/`Split`/`Axis` are already public). Low-risk additive change; splits.rs
+    is not touched by the window-chrome PRs.
+- **reconciler / diff** — map `Viewer::windows()` (stable, ordered by window id) to native tabs
+  keyed by `window_id`. Produce a plan: `CreateTab(window_id)`, `RemoveTab(window_id)`,
+  `ReplaceSplitTree(window_id, SplitTree)`. Maintain a stable `pane_id -> SurfaceId` map per Viewer
+  so a `%layout-change` **reuses** surfaces for surviving pane ids, **creates** for new ones,
+  **drops** removed ones (mirror `Viewer::sync_layouts`'s pane diff). Assert the resulting tab set
+  and each tab's `SplitTree::surfaces()` / `SplitTree::layout(rect, divider)` in unit tests.
+
+**Native/AppKit part (entangled with 5c — recommend folding together):** tmux pane surfaces are NOT
+pty-backed — a pane has no independent shell; its bytes arrive via `%output` fed to the pane's owned
+`Terminal` inside the Viewer. So actually *binding* a reconciled `SplitTree` to live NSWindow tabs +
+renderer surfaces needs the control-pty drain (5c) to exist. Build+ship the pure converter+reconciler
+(above) as 5b, then do 5b-native + 5c together. Offscreen split smoke can assert the reconciled
+structure once surfaces render.
+
+**First-native-slice policy:** leave the 5b PR OPEN for Josh's review unless it is fully gate-green
+AND carries a smoke proving tabs/splits reconcile on-screen.
