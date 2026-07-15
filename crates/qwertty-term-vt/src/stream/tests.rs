@@ -1483,6 +1483,28 @@ fn fastpath_wide_cjk_and_emoji_bulk() {
 }
 
 #[test]
+fn fastpath_multibyte_fast_tail_boundary() {
+    // Exercises the split between the bounds-check-free interior region
+    // (`i + 4 <= len`) and the checked tail: short CJK/emoji buffers where the
+    // last 1-3 codepoints fall in the tail, plus a truncated trailing sequence
+    // that must defer to the DFA. `assert_fastpath_equiv` feeds whole, per-byte,
+    // and chunked, so every fast/tail boundary and mid-sequence chunk split is
+    // covered against the byte-at-a-time reference.
+    let cases: &[&[u8]] = &[
+        "世".as_bytes(),         // 3 bytes: tail-only (i+4 > len from start)
+        "世界".as_bytes(),       // 6 bytes: fast (1 cp) then tail (1 cp)
+        "世界你".as_bytes(),     // 9 bytes
+        "🙂".as_bytes(),         // 4 bytes: exactly the fast-region threshold
+        "a世界🙂b".as_bytes(),   // mixed ascii/wide/emoji around the boundary
+        b"\xe4\xb8",             // truncated 3-byte lead+cont: defers to DFA
+        b"\xe4\xb8\x96\xe4\xb8", // complete cp (世) then truncated tail
+    ];
+    for input in cases {
+        assert_fastpath_equiv(10, 4, input);
+    }
+}
+
+#[test]
 fn fastpath_esc_at_run_boundary() {
     // ESC immediately after a printable run (the common case): scan stops on
     // ESC without consuming it, feed drives the escape via the scalar path.
