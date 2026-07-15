@@ -1,0 +1,467 @@
+//! R6 slice 1 acceptance test: KITTY IMAGE PIXELS.
+//!
+//! Drives a real `qwertty_term_vt::Terminal` through a `Stream`, transmitting a
+//! solid-color RGBA image via the kitty graphics protocol (an `icat`-style
+//! direct transmit-and-display), then snapshots, renders an offscreen frame,
+//! and reads the pixels back — asserting the image's cells are its color and
+//! cells outside the placement are background. Exercises the whole slice-1
+//! path: `resolve_placements` (vt) → `FullSnapshot` → texture upload → the
+//! `image` pipeline draw.
+//!
+//! Skips gracefully (`SKIP:`) when no Metal device is present.
+
+#![cfg(target_os = "macos")]
+
+use base64::Engine as _;
+use qwertty_term_font::coretext::Face;
+use qwertty_term_font::grid::Grid;
+use qwertty_term_font::{CodepointResolver, Collection, Metrics};
+use qwertty_term_renderer::engine::{Engine, FrameOptions};
+use qwertty_term_renderer::metal::Metal;
+use qwertty_term_renderer::snapshot::{FullSnapshot, RenderSnapshot};
+use qwertty_term_vt::stream::{Stream, TerminalHandler};
+use qwertty_term_vt::terminal::{Options, Terminal};
+
+#[derive(Debug, Clone, Copy)]
+struct Px {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+struct Frame {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    cell_w: usize,
+    cell_h: usize,
+}
+
+impl Frame {
+    fn px(&self, x: usize, y: usize) -> Px {
+        let i = (y * self.width + x) * 4;
+        Px {
+            b: self.pixels[i],
+            g: self.pixels[i + 1],
+            r: self.pixels[i + 2],
+        }
+    }
+
+    fn cell_center(&self, col: usize, row: usize) -> Px {
+        let x = col * self.cell_w + self.cell_w / 2;
+        let y = row * self.cell_h + self.cell_h / 2;
+        self.px(x.min(self.width - 1), y.min(self.height - 1))
+    }
+}
+
+fn make_grid(face: Face) -> Grid {
+    let metrics = Metrics::calc(face.face_metrics());
+    let resolver = CodepointResolver::new(Collection::new(face));
+    Grid::new(resolver, metrics).expect("grid")
+}
+
+/// Build a kitty transmit-and-display APC for a direct RGBA image, scaled to
+/// `cols`×`rows` cells: `ESC _ G a=T,f=32,s=W,v=H,c=cols,r=rows,i=id ; <b64> ESC \`.
+fn transmit_and_display_rgba(
+    id: u32,
+    w: u32,
+    h: u32,
+    cols: u32,
+    rows: u32,
+    rgba: &[u8],
+) -> Vec<u8> {
+    let payload = base64::engine::general_purpose::STANDARD.encode(rgba);
+    format!("\x1b_Ga=T,f=32,s={w},v={h},c={cols},r={rows},i={id};{payload}\x1b\\").into_bytes()
+}
+
+#[test]
+fn kitty_image_offscreen_readback() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping kitty-image test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 20u16;
+    let rows = 6u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    // The kitty placement geometry (`Placement::pixel_size`) divides the
+    // terminal's pixel size by its cell count to get the cell size; set them to
+    // match the renderer's cell metrics so a `c`/`r`-scaled image lines up on
+    // the grid. In the app these come from the window's pixel size.
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    // Home the cursor, then transmit + display a 2×2 solid-red image scaled to
+    // a 6×3 cell block (top-left at 0,0). Solid color → linear upscaling stays
+    // red everywhere, so any covered cell center reads red.
+    let red = [255u8, 0, 0, 255].repeat(4); // 2x2 RGBA
+    let img_cols = 6u32;
+    let img_rows = 3u32;
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    stream.feed(b"\x1b[H");
+    stream.feed(&transmit_and_display_rgba(
+        1, 2, 2, img_cols, img_rows, &red,
+    ));
+    let term = stream.handler.terminal;
+
+    let snapshot = FullSnapshot::capture(&term, 0);
+    // The image must have resolved into the snapshot: 1 placement, 1 image.
+    assert_eq!(
+        snapshot.kitty_placements().len(),
+        1,
+        "expected one resolved kitty placement"
+    );
+    assert_eq!(snapshot.kitty_images().len(), 1, "expected one kitty image");
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    engine.update_frame(&snapshot, &mut grid, FrameOptions::default());
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+
+    let (sw, sh) = engine.screen_size();
+    assert_eq!(pixels.len(), sw * sh * 4, "readback size");
+    let frame = Frame {
+        pixels,
+        width: sw,
+        height: sh,
+        cell_w: cw as usize,
+        cell_h: ch as usize,
+    };
+
+    // Cells inside the 6×3 placement are red.
+    for &(col, row) in &[(0usize, 0usize), (2, 1), (5, 2), (0, 2), (5, 0)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            p.r > 180 && p.g < 70 && p.b < 70,
+            "cell ({col},{row}) should be image-red, got {p:?}"
+        );
+    }
+
+    // Cells outside the placement are the (black) background.
+    for &(col, row) in &[(10usize, 4usize), (7, 1), (0, 4)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            p.r < 40 && p.g < 40 && p.b < 40,
+            "cell ({col},{row}) should be background, got {p:?}"
+        );
+    }
+}
+
+/// R6 slice 3 end-to-end: deleting an image evicts its GPU texture from the
+/// cache (memory reclaim) while the surviving image keeps rendering.
+#[test]
+fn kitty_image_eviction_on_delete() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping eviction test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 20u16;
+    let rows = 8u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    // Image 1 (red) at rows 0..=2; image 2 (green) at rows 4..=6.
+    let red = [255u8, 0, 0, 255].repeat(4);
+    let green = [0u8, 255, 0, 255].repeat(4);
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    stream.feed(b"\x1b[H");
+    stream.feed(&transmit_and_display_rgba(1, 2, 2, 4, 3, &red));
+    stream.feed(b"\x1b[5;1H");
+    stream.feed(&transmit_and_display_rgba(2, 2, 2, 4, 3, &green));
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    let opts = FrameOptions::default();
+    let render = |engine: &mut Engine, term: &Terminal, grid: &mut Grid| -> Frame {
+        let snap = FullSnapshot::capture(term, 0);
+        engine.update_frame(&snap, grid, opts);
+        engine.sync_atlas(grid).expect("sync atlas");
+        let pixels = engine.draw_frame().expect("draw frame");
+        let (sw, sh) = engine.screen_size();
+        Frame {
+            pixels,
+            width: sw,
+            height: sh,
+            cell_w: cw as usize,
+            cell_h: ch as usize,
+        }
+    };
+    let is_red = |p: Px| p.r > 180 && p.g < 70 && p.b < 70;
+    let is_green = |p: Px| p.g > 180 && p.r < 70 && p.b < 70;
+
+    // Both images resident + drawn.
+    let f1 = render(&mut engine, &stream.handler.terminal, &mut grid);
+    assert_eq!(engine.image_cache_len(), 2, "both textures cached");
+    assert!(is_red(f1.cell_center(1, 1)), "image 1 red");
+    assert!(is_green(f1.cell_center(1, 5)), "image 2 green");
+
+    // Delete image 1 → its texture is evicted; image 2 survives.
+    stream.feed(b"\x1b_Ga=d,d=I,i=1\x1b\\");
+    let f2 = render(&mut engine, &stream.handler.terminal, &mut grid);
+    assert_eq!(engine.image_cache_len(), 1, "image 1 texture evicted");
+    assert!(!is_red(f2.cell_center(1, 1)), "image 1 no longer drawn");
+    assert!(is_green(f2.cell_center(1, 5)), "image 2 still green");
+
+    // Delete all → cache fully drained.
+    stream.feed(b"\x1b_Ga=d,d=A\x1b\\");
+    let _ = render(&mut engine, &stream.handler.terminal, &mut grid);
+    assert_eq!(engine.image_cache_len(), 0, "all textures evicted");
+}
+
+/// R6 slice 2 end-to-end: an image scrolled partly above the viewport renders
+/// only its visible bottom rows (top clipped by the GPU), and the resolver
+/// reports the expected negative `grid_row`. Exercises the scrollback-offset
+/// threading through `capture` → resolve → draw.
+#[test]
+fn kitty_image_scrolled_clips_top() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping scrolled kitty-image test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 20u16;
+    let rows = 6u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    // A 4-cell-tall red image at home (screen rows 0..=3), then scroll it up.
+    let red = [255u8, 0, 0, 255].repeat(4);
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    stream.feed(b"\x1b[H");
+    stream.feed(&transmit_and_display_rgba(1, 2, 2, 6, 4, &red));
+    for _ in 0..10 {
+        stream.feed(b"scroll\r\n");
+    }
+    let term = stream.handler.terminal;
+
+    // Offset that puts the window top on the image's 3rd row (top_y = 2): the
+    // image's first two rows clip above, rows 2..=3 show at frame rows 0..=1.
+    let total = term.screen().pages.total_rows();
+    let scrollback_len = total - usize::from(rows);
+    let offset = scrollback_len - 2;
+
+    let snapshot = FullSnapshot::capture(&term, offset);
+    assert_eq!(snapshot.kitty_placements().len(), 1, "one placement");
+    // The resolver reports the clipped (negative) row.
+    assert_eq!(
+        snapshot.kitty_placements()[0].instance.grid_pos[1],
+        -2.0,
+        "top two rows are clipped above the window"
+    );
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    engine.update_frame(&snapshot, &mut grid, FrameOptions::default());
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+    let (sw, sh) = engine.screen_size();
+    let frame = Frame {
+        pixels,
+        width: sw,
+        height: sh,
+        cell_w: cw as usize,
+        cell_h: ch as usize,
+    };
+
+    // The visible bottom of the image (frame rows 0..=1) is red.
+    for &(col, row) in &[(0usize, 0usize), (3, 0), (5, 1), (0, 1)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            p.r > 180 && p.g < 70 && p.b < 70,
+            "cell ({col},{row}) should be visible image-red, got {p:?}"
+        );
+    }
+    // Below the clipped image (frame rows 2+) is scrollback text/background, not
+    // the image color.
+    for &(col, row) in &[(3usize, 2usize), (3, 3)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            !(p.r > 150 && p.g < 90 && p.b < 90),
+            "cell ({col},{row}) below the image should not be image-red, got {p:?}"
+        );
+    }
+}
+
+/// R6 slice 5: the LIVE-APP render path — `Terminal::snapshot_window` →
+/// `FullSnapshot::from_window` (no `&Terminal` held at render time, unlike
+/// `capture`) — now carries kitty image data and draws it. This is the path
+/// `crates/qwertty-term/src/app.rs` uses; before slice 5 it drew no images.
+#[test]
+fn kitty_image_via_from_window_live_app_path() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping from_window test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 20u16;
+    let rows = 6u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    let red = [255u8, 0, 0, 255].repeat(4);
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    stream.feed(b"\x1b[H");
+    stream.feed(&transmit_and_display_rgba(1, 2, 2, 6, 3, &red));
+    let term = stream.handler.terminal;
+
+    // The app path: take the owned window (this is all it holds across the lock
+    // release), then wrap it — no live terminal at render time.
+    let window = term.snapshot_window(0);
+    let snapshot = FullSnapshot::from_window(window);
+    assert_eq!(
+        snapshot.kitty_placements().len(),
+        1,
+        "from_window carries the resolved placement (slice 5)"
+    );
+    assert_eq!(
+        snapshot.kitty_images().len(),
+        1,
+        "from_window carries the image"
+    );
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    engine.update_frame(&snapshot, &mut grid, FrameOptions::default());
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+    let (sw, sh) = engine.screen_size();
+    let frame = Frame {
+        pixels,
+        width: sw,
+        height: sh,
+        cell_w: cw as usize,
+        cell_h: ch as usize,
+    };
+
+    // The image renders red on the live-app path.
+    for &(col, row) in &[(0usize, 0usize), (3, 1), (5, 2)] {
+        let p = frame.cell_center(col, row);
+        assert!(
+            p.r > 180 && p.g < 70 && p.b < 70,
+            "cell ({col},{row}) should be image-red via from_window, got {p:?}"
+        );
+    }
+}
+
+/// R6 slice 4: z-order buckets. A solid image with `z < 0` draws *below* text
+/// (a full-block glyph over it stays visible), while `z >= 0` draws *above* text
+/// (the image covers the glyph). Same glyph, opposite layering by z.
+#[test]
+fn kitty_image_z_order_below_and_above_text() {
+    let backend = match Metal::new() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SKIP: no Metal device ({e}); skipping z-order test");
+            return;
+        }
+    };
+
+    let text_face = Face::load_embedded(16.0).expect("embedded JetBrains Mono");
+    let metrics = Metrics::calc(text_face.face_metrics());
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut grid = make_grid(text_face);
+
+    let cols = 10u16;
+    let rows = 3u16;
+    let mut term = Terminal::new(Options {
+        cols,
+        rows,
+        ..Default::default()
+    });
+    term.width_px = u32::from(cols) * cw;
+    term.height_px = u32::from(rows) * ch;
+
+    // A 1×1 red pixel, displayed as one cell at the cursor with the given z.
+    let display = |col_1: u32, z: i32, id: u32| -> Vec<u8> {
+        let payload = base64::engine::general_purpose::STANDARD.encode([255u8, 0, 0, 255]);
+        format!("\x1b[1;{col_1}H\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,z={z},i={id};{payload}\x1b\\")
+            .into_bytes()
+    };
+
+    let mut stream = Stream::new(TerminalHandler::new(term));
+    // Full-block glyphs across row 0 (fills each cell with the fg color).
+    stream.feed("█████████".as_bytes());
+    stream.feed(&display(3, -1, 1)); // below text at 0-indexed col 2
+    stream.feed(&display(7, 1, 2)); // above text at 0-indexed col 6
+    let term = stream.handler.terminal;
+
+    let snapshot = FullSnapshot::capture(&term, 0);
+    assert_eq!(snapshot.kitty_placements().len(), 2, "two placements");
+
+    let mut engine = Engine::with_backend(backend, cw, ch).expect("engine");
+    engine.update_frame(&snapshot, &mut grid, FrameOptions::default());
+    engine.sync_atlas(&grid).expect("sync atlas");
+    let pixels = engine.draw_frame().expect("draw frame");
+    let (sw, sh) = engine.screen_size();
+    let frame = Frame {
+        pixels,
+        width: sw,
+        height: sh,
+        cell_w: cw as usize,
+        cell_h: ch as usize,
+    };
+
+    // Below-text (z=-1) at col 2: the block glyph draws OVER the red image →
+    // the cell shows the (light) glyph, not red.
+    let below = frame.cell_center(2, 0);
+    assert!(
+        below.r > 120 && below.g > 120 && below.b > 120,
+        "z<0 image is below text: block glyph stays visible (light), got {below:?}"
+    );
+    // Above-text (z=1) at col 6: the red image draws OVER the block glyph →
+    // the cell shows red.
+    let above = frame.cell_center(6, 0);
+    assert!(
+        above.r > 180 && above.g < 70 && above.b < 70,
+        "z>=0 image is above text: image covers the glyph (red), got {above:?}"
+    );
+}

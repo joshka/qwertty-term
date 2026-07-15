@@ -1,0 +1,801 @@
+//! The terminal `NSView`: hosts the render layer and conforms to
+//! `NSTextInputClient` for the full macOS keyDown → `interpretKeyEvents` →
+//! `insertText`/`setMarkedText` input dance (chunk R5).
+//!
+//! Structure follows the spike's `GhosttySpikeInputView`
+//! (`spikes/appkit-input/src/view.rs`), promoted to production: the view backs
+//! its `layer` with the renderer's [`IOSurfaceLayer`], accepts first responder,
+//! and routes every encoded keystroke to the owning tab's PTY via the shared
+//! [`Controller`]. Preedit state is stored (for a future inline render) and the
+//! IME committed-text path sends composed text to the PTY.
+//!
+//! The view holds a `*const` back-reference to the [`Controller`] and its own
+//! [`TabId`]; both are only touched on the main thread (AppKit guarantees
+//! keyDown/draw run there), so the raw pointer is sound.
+
+#![cfg(target_os = "macos")]
+
+use std::cell::RefCell;
+
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSCursor, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSTextInputClient, NSTrackingArea,
+    NSTrackingAreaOptions, NSView,
+};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSAttributedStringKey, NSPoint, NSRange, NSRangePointer, NSRect,
+    NSSize, NSString, NSUInteger,
+};
+use objc2_quartz_core::{CALayer, kCAGravityBottomLeft};
+
+use crate::app::Controller;
+use crate::input::keymap::key_from_macos_keycode;
+use crate::input::preedit::Preedit;
+use crate::input::translate::RawKeyEvent;
+use crate::splits::SurfaceId;
+use crate::tabkeys::TabMods;
+use crate::tabs::TabId;
+
+/// Interior state for the terminal input view.
+pub struct Ivars {
+    /// Preedit / marked-text state machine.
+    preedit: RefCell<Preedit>,
+    /// The tab this view renders/inputs for.
+    tab: TabId,
+    /// The surface (pane) this view *is* — one `TerminalView` per split pane.
+    /// Keystrokes/mouse route to exactly this surface, so a split tab's input
+    /// isolation is automatic: only the first-responder view (the focused pane)
+    /// receives events.
+    surface: SurfaceId,
+    /// Back-reference to the shared controller. Main-thread-only access.
+    controller: *const Controller,
+    /// The render layer hosted by this view (also assigned as `self.layer`).
+    layer: Retained<qwertty_term_renderer::metal::IOSurfaceLayer>,
+}
+
+define_class!(
+    // SAFETY:
+    // - Superclass `NSView` has no subclassing requirement we violate: we add an
+    //   ivar and implement key handling + `NSTextInputClient`.
+    // - No `Drop` touches the objc runtime unsafely.
+    #[unsafe(super(NSView))]
+    #[name = "QwerttyTermTerminalView"]
+    #[ivars = Ivars]
+    #[thread_kind = MainThreadOnly]
+    pub struct TerminalView;
+
+    impl TerminalView {
+        /// `keyDown:` — mirror upstream's structure: open the accumulator so IME
+        /// `insertText` accumulates, run `interpretKeyEvents` (which drives the
+        /// input context / dead-key / IME callbacks), then encode.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            // `mouse-hide-while-typing`: hide the cursor until the next mouse
+            // move (AppKit auto-reveals it). Cheap; gated on the config.
+            self.maybe_hide_cursor_while_typing();
+
+            let raw = raw_from_nsevent(event, false);
+
+            // User `text:` keybinds intercept HERE, before `interpretKeyEvents`
+            // and the encoder — the same "before the encoder" discipline the tab
+            // / split chords use in `performKeyEquivalent:`, but for chords like
+            // `shift+enter` that reliably arrive as `keyDown:` (not key
+            // equivalents). A matched binding sends its literal bytes and
+            // consumes the event, so e.g. `shift+enter=text:\x1b\r` sends ESC CR
+            // instead of the IME/encoder's plain CR. Only exact-match chords
+            // resolve, so unbound keys fall straight through unchanged.
+            if self.try_handle_text_keybind(event) {
+                return;
+            }
+
+            self.ivars().preedit.borrow_mut().begin_key_event();
+
+            // SAFETY: standard NSResponder call on the main thread.
+            unsafe {
+                let events = NSArray::from_slice(&[event]);
+                let _: () = msg_send![self, interpretKeyEvents: &*events];
+            }
+
+            self.finish_key_event(&raw);
+        }
+
+        /// `performKeyEquivalent:` — intercept the built-in tab-navigation
+        /// chords *before* `keyDown:` and the PTY encoder ever see them.
+        ///
+        /// This is the interception point (not `keyDown:`) for two reasons that
+        /// the task's correctness notes call out:
+        ///
+        /// 1. On macOS, `ctrl+tab` / `ctrl+shift+tab` are frequently consumed as
+        ///    key equivalents (or by the window's tab group) and never reach
+        ///    `keyDown:`. `performKeyEquivalent:` runs earlier in the responder
+        ///    chain and reliably catches them.
+        /// 2. Returning `true` tells AppKit the event is fully handled, so it is
+        ///    NOT forwarded to `keyDown:` → the encoder. That is exactly what
+        ///    keeps `ctrl+tab` from ever sending `\t` / a CSI-u sequence to the
+        ///    shell (real Ghostty consumes these chords).
+        ///
+        /// Crucially, the keybind `Set` only matches the *exact* bound chords, so
+        /// plain Tab, Shift+Tab, and Ctrl+I do not resolve here: we return `false`
+        /// and AppKit proceeds to `keyDown:` → the encoder unchanged.
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            // Leader-key sequences (`ctrl+a>c`) get first crack: a leader key, or
+            // any key while a sequence is in progress, is consumed here. Only when
+            // the key is not sequence-related do we fall to the single-chord lookup
+            // (search / split / tab), which must fire whether the search field or
+            // the terminal is first responder.
+            self.try_handle_keybind_sequence(event) || self.try_handle_keybind_chord(event)
+        }
+
+        /// Accept first responder so we receive key events.
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        /// The view draws via its layer (no `drawRect:`).
+        #[unsafe(method(wantsUpdateLayer))]
+        fn wants_update_layer(&self) -> bool {
+            true
+        }
+
+        /// Flip the coordinate system so (0,0) is top-left, matching terminal
+        /// mouse-report pixel space (and the render grid's row order).
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            // Click focuses this pane first (so a click on an unfocused split
+            // both focuses it and starts any selection/mouse-report there), then
+            // routes the press. Focusing makes this view the first responder, so
+            // subsequent keystrokes go to this pane.
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.with_controller(|c| c.focus_surface_in_tab(tab, surface));
+            self.route_mouse(event, MouseKind::Down, Some(MouseBtn::Left));
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            self.route_mouse(event, MouseKind::Up, Some(MouseBtn::Left));
+        }
+
+        /// Middle-click (and other extra buttons). Button 2 is the middle
+        /// button: when the program is capturing the mouse, report it;
+        /// otherwise run `middle-click-action` (primary-paste). Other extra
+        /// buttons only matter for mouse reporting.
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            if reporting {
+                self.route_mouse(event, MouseKind::Down, Some(MouseBtn::Middle));
+                return;
+            }
+            // Middle button only (buttonNumber 2); ignore 4th/5th buttons here.
+            if event.buttonNumber() == 2 {
+                self.with_controller(|c| {
+                    c.focus_surface_in_tab(tab, surface);
+                    c.middle_click(tab, surface);
+                });
+            }
+        }
+
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            if reporting {
+                self.route_mouse(event, MouseKind::Up, Some(MouseBtn::Middle));
+            }
+        }
+
+        /// The mouse entered this pane's view. With `focus-follows-mouse`, focus
+        /// this pane (in the key window only — the tracking area is
+        /// `activeInKeyWindow`). A no-op if it's already focused.
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let follows = self
+                .with_controller(|c| c.focus_follows_mouse())
+                .unwrap_or(false);
+            if follows {
+                self.with_controller(|c| c.focus_surface_in_tab(tab, surface));
+            }
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            // When the program is capturing the mouse, a right-click belongs to
+            // it — report it and skip any app-side action (AppKit already got a
+            // nil from `menuForEvent:` so no menu shows).
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            if reporting {
+                self.route_mouse(event, MouseKind::Down, Some(MouseBtn::Right));
+                return;
+            }
+            // Focus this pane, then run the direct right-click action
+            // (paste/copy/copy-or-paste). The `context-menu` case never reaches
+            // here — `menuForEvent:` returns a menu and AppKit shows it instead;
+            // `ignore` is a no-op.
+            self.with_controller(|c| {
+                c.focus_surface_in_tab(tab, surface);
+                c.right_click_direct(tab, surface);
+            });
+        }
+
+        /// AppKit asks for the context menu on right-click (and ctrl+left-click).
+        /// Return the pane's menu only when `right-click-action = context-menu`
+        /// and the program isn't capturing the mouse; otherwise nil so the
+        /// normal right-mouse path runs. Building a non-nil menu makes AppKit
+        /// display it and suppress `rightMouseDown:`.
+        #[unsafe(method_id(menuForEvent:))]
+        fn menu_for_event(&self, _event: &NSEvent) -> Option<Retained<NSMenu>> {
+            use crate::context_menu::RightClickAction;
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            let action = self
+                .with_controller(|c| c.right_click_action())
+                .unwrap_or_default();
+            let reporting = self
+                .with_controller(|c| c.surface_reporting_active(tab, surface))
+                .unwrap_or(false);
+            // Single tail expression (the method_id macro rewrites the return,
+            // so avoid early `return None`).
+            if action == RightClickAction::ContextMenu && !reporting {
+                let has_selection = self
+                    .with_controller(|c| c.surface_has_selection(tab, surface))
+                    .unwrap_or(false);
+                Some(self.build_context_menu(has_selection))
+            } else {
+                None
+            }
+        }
+
+        /// Context-menu item click: recover the [`ContextAction`] from the
+        /// sender's tag and run it against this pane.
+        ///
+        /// [`ContextAction`]: crate::context_menu::ContextAction
+        #[unsafe(method(ghosttyContextMenuAction:))]
+        fn context_menu_action(&self, sender: &AnyObject) {
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let Some(action) = crate::context_menu::ContextAction::from_tag(tag) else {
+                return;
+            };
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.with_controller(|c| c.context_menu_action(tab, surface, action));
+        }
+
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) {
+            self.route_mouse(event, MouseKind::Up, Some(MouseBtn::Right));
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.route_mouse(event, MouseKind::Drag, Some(MouseBtn::Left));
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            // Route the raw vertical delta through the controller's wheel-scroll
+            // ladder (mouse reporting → alternate-scroll cursor keys → scrollback
+            // viewport). `scrollingDeltaY` is positive-up (matching upstream's
+            // "positive is up" convention; macOS natural-scrolling inversion is
+            // already applied by AppKit). Precision (trackpad) deltas are pixels;
+            // non-precision are wheel ticks — the ladder scales each accordingly.
+            let dy = event.scrollingDeltaY();
+            if dy == 0.0 {
+                return;
+            }
+            let precision = event.hasPreciseScrollingDeltas();
+            let mods = mods_from_flags(event.modifierFlags());
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.with_controller(|c| {
+                c.wheel_to_surface(tab, surface, dy, precision, mods)
+            });
+        }
+    }
+
+    unsafe impl NSTextInputClient for TerminalView {
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text(&self, string: &AnyObject, _replacement_range: NSRange) {
+            let s = any_to_string(string);
+            let sent = {
+                let mut preedit = self.ivars().preedit.borrow_mut();
+                // Commit: inside a keyDown it accumulates (drained in
+                // finish_key_event); outside, send immediately.
+                preedit.commit(&s).map(str::to_owned)
+            };
+            if let Some(text) = sent {
+                self.send_text(&text);
+            }
+        }
+
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(
+            &self,
+            string: &AnyObject,
+            _selected_range: NSRange,
+            _replacement_range: NSRange,
+        ) {
+            let s = any_to_string(string);
+            self.ivars().preedit.borrow_mut().set_marked(&s);
+        }
+
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            self.ivars().preedit.borrow_mut().unmark();
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            self.ivars().preedit.borrow().is_composing()
+        }
+
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            let len = self.ivars().preedit.borrow().marked_text().len();
+            if len == 0 {
+                NSRange::new(NSUInteger::MAX, 0)
+            } else {
+                NSRange::new(0, len)
+            }
+        }
+
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            // NSTextInputClient's marked-text selection, not the terminal's
+            // mouse selection (that's engine-side; see crate::selection /
+            // crate::app::Controller::mouse_to_tab). This app never has a
+            // selected range within IME marked text, so always report empty.
+            NSRange::new(NSUInteger::MAX, 0)
+        }
+
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn valid_attributes_for_marked_text(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::new()
+        }
+
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        fn attributed_substring(
+            &self,
+            _range: NSRange,
+            _actual_range: NSRangePointer,
+        ) -> Option<Retained<NSAttributedString>> {
+            None
+        }
+
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, _range: NSRange, _actual_range: NSRangePointer) -> NSRect {
+            // IME box placement from real cell geometry is a follow-on; the
+            // preedit state machine is what R5 wires. Return a zero rect.
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))
+        }
+
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index_for_point(&self, _point: NSPoint) -> NSUInteger {
+            0
+        }
+
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command_by_selector(&self, _selector: Sel) {
+            // Suppress the default NSBeep for unhandled selectors.
+        }
+    }
+);
+
+impl TerminalView {
+    /// Allocate the view for `tab`, wired to `controller`, hosting a fresh
+    /// [`HostLayer`](qwertty_term_renderer::metal::IOSurfaceLayer).
+    ///
+    /// # Safety
+    /// `controller` must outlive the view (the app owns both for the process
+    /// lifetime) and only be dereferenced on the main thread.
+    pub fn new(
+        mtm: objc2::MainThreadMarker,
+        tab: TabId,
+        surface: SurfaceId,
+        controller: *const Controller,
+    ) -> Retained<Self> {
+        let layer = qwertty_term_renderer::metal::IOSurfaceLayer::new();
+        let this = Self::alloc(mtm).set_ivars(Ivars {
+            preedit: RefCell::new(Preedit::new()),
+            tab,
+            surface,
+            controller,
+            layer,
+        });
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+
+        // Host the render layer: layer-backed view whose layer is our IOSurface
+        // layer.
+        this.setWantsLayer(true);
+        let calayer: &CALayer = this.ivars().layer.as_layer();
+        this.setLayer(Some(calayer));
+
+        // Tracking area for `focus-follows-mouse` (delivers `mouseEntered:`).
+        // `InVisibleRect` auto-tracks the view's bounds, so no
+        // `updateTrackingAreas` bookkeeping; `ActiveInKeyWindow` limits it to the
+        // focused window.
+        let options = NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::ActiveInKeyWindow
+            | NSTrackingAreaOptions::InVisibleRect;
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                mtm.alloc(),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+                options,
+                Some(&this),
+                None,
+            )
+        };
+        this.addTrackingArea(&tracking);
+        this
+    }
+
+    /// The tab this view belongs to.
+    pub fn tab(&self) -> TabId {
+        self.ivars().tab
+    }
+
+    /// The surface (pane) this view is.
+    pub fn surface(&self) -> SurfaceId {
+        self.ivars().surface
+    }
+
+    /// The host layer to present into.
+    pub fn host_layer(&self) -> &qwertty_term_renderer::metal::IOSurfaceLayer {
+        &self.ivars().layer
+    }
+
+    /// Pin the presented surface flush to the *visual top* of the view.
+    ///
+    /// The surface is sized to a whole number of cells, so it is up to one cell
+    /// shorter than the view; the leftover strip is uncovered layer area. The
+    /// renderer's layer defaults to `kCAGravityTopLeft`, but this view returns
+    /// `isFlipped == true`, which makes AppKit set the backing layer's
+    /// `geometryFlipped = true` — inverting the layer's Y axis. In that flipped
+    /// geometry, `kCAGravityTopLeft` pins contents to the layer's max-Y corner,
+    /// which is the *visual bottom*, so the uncovered strip lands at the *top* —
+    /// exactly the reported dark band directly under the titlebar.
+    ///
+    /// Setting `kCAGravityBottomLeft` here pins contents to the layer's min-Y
+    /// corner in flipped geometry = the *visual top*, so the surface sits flush
+    /// under the titlebar (matching real Ghostty) and the sub-cell remainder
+    /// moves to the bottom edge — where a terminal's partial last row belongs,
+    /// and where the window's terminal-coloured background makes it invisible.
+    ///
+    /// Called once at view attachment; must run on the main thread.
+    pub fn pin_surface_to_top(&self) {
+        // SAFETY: `kCAGravityBottomLeft` is a valid contents-gravity constant;
+        // main-thread call at attachment time.
+        unsafe {
+            self.ivars()
+                .layer
+                .as_layer()
+                .setContentsGravity(kCAGravityBottomLeft);
+        }
+    }
+
+    /// Whether the host layer's `contentsGravity` is the visual-top-pinning value
+    /// installed by [`Self::pin_surface_to_top`] (smoke/test only).
+    pub fn surface_pinned_to_top(&self) -> bool {
+        let gravity = self.ivars().layer.as_layer().contentsGravity();
+        // SAFETY: `kCAGravityBottomLeft` is a valid framework NSString constant.
+        let want: &NSString = unsafe { kCAGravityBottomLeft };
+        gravity.to_string() == want.to_string()
+    }
+
+    /// If `event` is one of the built-in tab-navigation chords, run its action
+    /// against the controller and return `true` (consuming the event so it never
+    /// reaches the PTY encoder). Otherwise return `false` so AppKit keeps
+    /// dispatching (→ `keyDown:` → encoder). Called from `performKeyEquivalent:`.
+    ///
+    /// Uses the *physical* keycode (layout-independent) for the digit keys, so
+    /// `cmd+1..9` work on non-US layouts — matching upstream's `physical:one..`.
+    /// Feed the event to the leader-key sequence state machine (see
+    /// [`crate::app::Controller::handle_key_sequence`]). Returns `true` if it was
+    /// consumed (started/continued/completed/aborted a sequence).
+    fn try_handle_keybind_sequence(&self, event: &NSEvent) -> bool {
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| c.handle_key_sequence(tab, surface, key, mods))
+            .unwrap_or(false)
+    }
+
+    fn try_handle_keybind_chord(&self, event: &NSEvent) -> bool {
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        // One lookup against the unified keybind `Set` (default keymap + user
+        // config), replacing the former separate search / split / tab tables. The
+        // `Set` holds at most one binding per trigger, so there's no cross-table
+        // precedence to preserve. A resolved tab/split/search chord is consumed;
+        // anything else (menu / byte actions) returns false and falls through to
+        // `keyDown:`. `end_search` self-gates on an open search bar so a plain
+        // Escape still reaches the PTY encoder.
+        self.with_controller(|c| c.handle_keybind_chord(tab, surface, key, mods))
+            .unwrap_or(false)
+    }
+
+    /// If `event` matches a user `text:` keybind, send its bytes to this
+    /// surface's pty (via the controller) and return `true` (consuming it before
+    /// the encoder). Otherwise `false`. Uses the same layout-independent physical
+    /// keycode + four-modifier bitset the built-in tables use. Called at the top
+    /// of `keyDown:`.
+    fn try_handle_text_keybind(&self, event: &NSEvent) -> bool {
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| c.try_text_keybind_to_surface(tab, surface, key, mods))
+            .unwrap_or(false)
+    }
+
+    /// Encode any committed text + the key event, then close the per-keyDown
+    /// window. Split out so it can be driven by synthetic raw data in tests.
+    fn finish_key_event(&self, raw: &RawKeyEvent) {
+        let committed = self.ivars().preedit.borrow_mut().end_key_event();
+        let composing = {
+            let p = self.ivars().preedit.borrow();
+            p.is_composing() || !committed.is_empty()
+        };
+
+        if !committed.is_empty() {
+            for t in &committed {
+                self.send_text(t);
+            }
+            return;
+        }
+        if composing {
+            // Still composing: key consumed by the IME, don't encode.
+            return;
+        }
+
+        // Normal key: encode via the controller (which reads this surface's live
+        // terminal encode options + user option-as-alt config). Routed to *this*
+        // surface — input isolation is automatic because only the focused pane's
+        // view is first responder.
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| c.encode_key_to_surface(tab, surface, raw));
+    }
+
+    /// Send already-composed text to this surface's PTY (IME commit path).
+    /// Bracketed if the program enabled bracketed paste is handled at the
+    /// controller.
+    fn send_text(&self, text: &str) {
+        let text = text.to_owned();
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(move |c| c.send_text_to_surface(tab, surface, &text));
+    }
+
+    /// Convert a mouse `NSEvent` to top-left device-pixel coordinates and route
+    /// it through the controller (which drops it unless the program enabled
+    /// mouse reporting). The view is flipped, so `locationInWindow` converted to
+    /// view space already has a top-left origin; scale to device pixels.
+    fn route_mouse(&self, event: &NSEvent, kind: MouseKind, button: Option<MouseBtn>) {
+        let win_pt = event.locationInWindow();
+        let view_pt = self.convertPoint_fromView(win_pt, None);
+        let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(2.0);
+        let x = (view_pt.x * scale) as f32;
+        let y = (view_pt.y * scale) as f32;
+
+        let mods = mods_from_flags(event.modifierFlags());
+        let (action, pressed) = match kind {
+            MouseKind::Down => (qwertty_term_input::mouse::Action::Press, Some(true)),
+            MouseKind::Up => (qwertty_term_input::mouse::Action::Release, Some(false)),
+            MouseKind::Drag => (qwertty_term_input::mouse::Action::Motion, None),
+        };
+        let btn = button.map(MouseBtn::to_input);
+        let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+        self.with_controller(|c| {
+            c.mouse_to_surface(tab, surface, action, btn, mods, x, y, pressed)
+        });
+    }
+
+    /// Run `f` with the controller, if the back-pointer is set.
+    fn with_controller<R>(&self, f: impl FnOnce(&Controller) -> R) -> Option<R> {
+        let ptr = self.ivars().controller;
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: main-thread-only; the controller outlives the view.
+        Some(f(unsafe { &*ptr }))
+    }
+
+    /// If `mouse-hide-while-typing` is on, hide the cursor until the mouse next
+    /// moves (upstream `mouse-hide-while-typing`; AppKit's
+    /// `setHiddenUntilMouseMoves(true)` is exactly this behavior — it
+    /// auto-reveals on the next move, so no manual show path is needed).
+    fn maybe_hide_cursor_while_typing(&self) {
+        if self.with_controller(|c| c.mouse_hide_while_typing()) == Some(true) {
+            NSCursor::setHiddenUntilMouseMoves(true);
+        }
+    }
+
+    /// Build the right-click context menu for this pane from the pure
+    /// [`context_items`](crate::context_menu::context_items) model. Each
+    /// actionable item targets this view's `ghosttyContextMenuAction:` selector
+    /// and carries the action's tag; separators are inserted verbatim.
+    fn build_context_menu(&self, has_selection: bool) -> Retained<NSMenu> {
+        let mtm = self.mtm();
+        let menu = NSMenu::new(mtm);
+        let empty = NSString::from_str("");
+        for item in crate::context_menu::context_items(has_selection) {
+            match item {
+                crate::context_menu::ContextItem::Separator => {
+                    menu.addItem(&NSMenuItem::separatorItem(mtm));
+                }
+                crate::context_menu::ContextItem::Action(action) => {
+                    let title = NSString::from_str(action.title());
+                    // SAFETY: standard NSMenuItem construction on the main
+                    // thread; the selector is implemented on this class.
+                    let menu_item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            mtm.alloc(),
+                            &title,
+                            Some(sel!(ghosttyContextMenuAction:)),
+                            &empty,
+                        )
+                    };
+                    menu_item.setTag(action.tag());
+                    // SAFETY: the target (this view) outlives the transient
+                    // context menu; main-thread call.
+                    unsafe { menu_item.setTarget(Some(self)) };
+                    menu.addItem(&menu_item);
+                }
+            }
+        }
+        menu
+    }
+}
+
+/// Extract a [`RawKeyEvent`] from a real `NSEvent`. Mirrors the field reads in
+/// upstream `NSEvent+Extension.swift::ghosttyKeyEvent` + `ghosttyCharacters`,
+/// including the raw `NX_DEVICER*` right-side modifier bits.
+fn raw_from_nsevent(event: &NSEvent, is_up: bool) -> RawKeyEvent {
+    let keycode: u16 = event.keyCode();
+    let is_repeat: bool = if is_up { false } else { event.isARepeat() };
+    let flags: NSEventModifierFlags = event.modifierFlags();
+    let raw_flags = flags.0 as u64;
+
+    let characters = event.characters();
+    let unshifted = event.charactersByApplyingModifiers(NSEventModifierFlags::empty());
+
+    let text = characters
+        .map(|s| filter_ghostty_characters(&s.to_string()))
+        .unwrap_or_default();
+    let unshifted_codepoint = unshifted
+        .and_then(|s| s.to_string().chars().next())
+        .map(|c| c as u32)
+        .unwrap_or(0);
+
+    RawKeyEvent {
+        keycode,
+        is_repeat,
+        is_up,
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        option: flags.contains(NSEventModifierFlags::Option),
+        command: flags.contains(NSEventModifierFlags::Command),
+        caps_lock: flags.contains(NSEventModifierFlags::CapsLock),
+        // Right-side device bits from the raw modifier mask (upstream
+        // `ghosttyMods` reads these NX_DEVICER*KEYMASK bits directly).
+        shift_right: raw_flags & NX_DEVICERSHIFTKEYMASK != 0,
+        ctrl_right: raw_flags & NX_DEVICERCTLKEYMASK != 0,
+        option_right: raw_flags & NX_DEVICERALTKEYMASK != 0,
+        command_right: raw_flags & NX_DEVICERCMDKEYMASK != 0,
+        text,
+        unshifted_codepoint,
+    }
+}
+
+// The right-side device modifier masks (`<IOKit/hidsystem/IOLLEvent.h>`),
+// carried in the low bits of `NSEvent.modifierFlags`. objc2's safe surface
+// doesn't name them, so we test the raw bits like upstream `ghosttyMods`.
+const NX_DEVICERSHIFTKEYMASK: u64 = 0x0000_0004;
+const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
+const NX_DEVICERALTKEYMASK: u64 = 0x0000_0040;
+const NX_DEVICERCMDKEYMASK: u64 = 0x0000_0010;
+
+/// Which kind of pointer transition a mouse handler represents.
+#[derive(Clone, Copy)]
+enum MouseKind {
+    Down,
+    Up,
+    Drag,
+}
+
+/// The buttons the view reports, mapped onto `qwertty_term_input`'s button set.
+/// Wheel up/down are handled separately by the wheel-scroll ladder
+/// (`scroll_wheel` → `Controller::wheel_to_surface`), which re-uses the
+/// xterm button-4/5 encoding internally, so this covers only the pressable
+/// buttons.
+#[derive(Clone, Copy)]
+enum MouseBtn {
+    Left,
+    Right,
+    Middle,
+}
+
+impl MouseBtn {
+    fn to_input(self) -> qwertty_term_input::mouse::Button {
+        use qwertty_term_input::mouse::Button;
+        match self {
+            MouseBtn::Left => Button::Left,
+            MouseBtn::Right => Button::Right,
+            MouseBtn::Middle => Button::Middle,
+        }
+    }
+}
+
+/// Build `qwertty_term_input` [`Mods`](qwertty_term_input::key_mods::Mods) from
+/// NSEvent modifier flags (shift/ctrl/alt/super only — what mouse encoding
+/// uses).
+fn mods_from_flags(flags: NSEventModifierFlags) -> qwertty_term_input::key_mods::Mods {
+    qwertty_term_input::key_mods::Mods {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        super_: flags.contains(NSEventModifierFlags::Command),
+        ..Default::default()
+    }
+}
+
+/// Build the tab-keybind [`TabMods`] from NSEvent modifier flags. Distinct from
+/// [`mods_from_flags`] (which yields the encoder's `qwertty_term_input` mods): this is
+/// the four-modifier bitset the built-in tab table matches on.
+fn tab_mods_from_flags(flags: NSEventModifierFlags) -> TabMods {
+    TabMods {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        super_: flags.contains(NSEventModifierFlags::Command),
+    }
+}
+
+/// Port of `NSEvent.ghosttyCharacters`: drop single control chars (the encoder
+/// handles those) and PUA function-key codepoints.
+fn filter_ghostty_characters(chars: &str) -> String {
+    let mut it = chars.chars();
+    if let (Some(c), true) = (it.next(), it.clone().next().is_none()) {
+        let cp = c as u32;
+        if cp < 0x20 {
+            return String::new();
+        }
+        if (0xF700..=0xF8FF).contains(&cp) {
+            return String::new();
+        }
+    }
+    chars.to_string()
+}
+
+/// Extract a Rust `String` from an NSString/NSAttributedString `id`.
+fn any_to_string(obj: &AnyObject) -> String {
+    // SAFETY: `obj` is the `id` AppKit passed to insertText/setMarkedText; it's
+    // always an NSString or NSAttributedString.
+    unsafe {
+        let is_attr: bool = {
+            let cls = objc2::class!(NSAttributedString);
+            msg_send![obj, isKindOfClass: cls]
+        };
+        if is_attr {
+            let s: Retained<NSString> = msg_send![obj, string];
+            s.to_string()
+        } else {
+            let s: &NSString = &*(obj as *const AnyObject as *const NSString);
+            s.to_string()
+        }
+    }
+}

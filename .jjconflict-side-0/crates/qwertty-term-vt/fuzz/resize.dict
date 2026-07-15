@@ -1,0 +1,56 @@
+# libFuzzer dictionary for the resize-interleaved target.
+#
+# These are the escape-sequence tokens most likely to interact badly with a
+# grid resize: alt-screen enter/exit, cursor absolute positioning to corners,
+# scroll-region (DECSTBM) and margin (DECSLRM) setup, and origin/wraparound
+# modes. Feeding them as dictionary entries lets libFuzzer splice whole tokens
+# into feed-op chunks instead of rediscovering them byte by byte.
+#
+# NB: these are the *payload* bytes; the target's wire format wraps them in a
+# feed op (tag 0x00 + length prefix), which libFuzzer builds via mutation.
+#
+# Pass with: cargo +nightly fuzz run resize -- -dict=resize.dict
+
+# Alt screen enter/exit.
+alt_1049_enter="\x1b[?1049h"
+alt_1049_exit="\x1b[?1049l"
+alt_1047_enter="\x1b[?1047h"
+alt_1047_exit="\x1b[?1047l"
+alt_47_enter="\x1b[?47h"
+alt_47_exit="\x1b[?47l"
+alt_1048_save="\x1b[?1048h"
+alt_1048_restore="\x1b[?1048l"
+
+# Cursor absolute positioning, including far-corner clamp.
+cup_home="\x1b[H"
+cup_far="\x1b[999;999H"
+cup_11="\x1b[1;1H"
+cup_row="\x1b[500;1H"
+cup_col="\x1b[1;500H"
+
+# Scroll region and margins.
+decstbm="\x1b[5;20r"
+decstbm_reset="\x1b[r"
+decslrm="\x1b[10;60s"
+
+# Modes that change resize/reflow behavior.
+origin_on="\x1b[?6h"
+origin_off="\x1b[?6l"
+wraparound_on="\x1b[?7h"
+wraparound_off="\x1b[?7l"
+lrmargin_on="\x1b[?69h"
+lrmargin_off="\x1b[?69l"
+deccolm_132="\x1b[?3h"
+deccolm_80="\x1b[?3l"
+
+# Erase / scroll that move content across resizes.
+erase_display="\x1b[2J"
+erase_line="\x1b[2K"
+scroll_up="\x1b[3S"
+scroll_down="\x1b[3T"
+
+# A wide (CJK) glyph and a newline, for right-edge reflow. libFuzzer's
+# dictionary parser only understands \xHH, \\ and \" escapes, so the CR/LF are
+# written in hex.
+wide_cjk="\xe3\x81\x82"
+crlf="\x0d\x0a"

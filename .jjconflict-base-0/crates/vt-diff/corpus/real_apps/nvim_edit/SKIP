@@ -1,0 +1,1 @@
+Same underlying divergence as reply_diffing/decrqss_sgr_scope: nvim issues DECRQSS $qm on startup, which the Rust core answers (upstream's core Terminal.zig does not). See regression_decrqss_answered_by_core_engine in tests/corpus.rs.

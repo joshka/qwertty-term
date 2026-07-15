@@ -1,0 +1,27 @@
+# Manifest of shell-integration scripts adapted from upstream Ghostty's
+# `src/shell-integration/` at pinned commit `2da015cd6`
+# (`2da015cd6ac06cedc89e09756e895d2c1715205d`). Plan decision 5
+# (`docs/plans/m2-termio.md`): these are shell code, not Zig. The scripts are
+# vendored from upstream, then renamed from Ghostty runtime variables and helper
+# file names to Qwertty Term's runtime contract.
+#
+# Regenerate after a deliberate re-vendor or runtime-name edit with:
+#   cd crates/qwertty-term-termio/resources/shell-integration
+#   find . -type f | sort | while read -r f; do
+#     rel="${f#./}"; hash=$(shasum -a 256 "$f" | awk '{print $1}')
+#     size=$(wc -c < "$f" | tr -d ' ')
+#     echo "$hash  $size  $rel"
+#   done
+#
+# `tests/shell_integration_scripts.rs` fails loudly if the vendored tree
+# drifts from this manifest.
+#
+# format: <sha256>  <size-bytes>  <path relative to shell-integration/>
+26b23dbd90d9e921bee653594eff1ccbccd31ee29e6b469d065df5cbb35c0f68  4229  README.md
+6a0c99361df6444bcc7bee656ccacc44a4bab1d36a7b3b481f970254c5c966b1  14606  bash/bash-preexec.sh
+2082d235a7617d869cb428c7238230cdc9f5b4399bb9e25966c8503adca2e856  10370  bash/qwertty-term.bash
+47499fec02e5cc91a7b2ecfc9ef25d3fe3da5a196dcfc577138c783c74eb3247  4214  elvish/lib/qwertty-term-integration.elv
+542cc845f8ec2fa4a4cf94c9ac177370ce2c8abe63686a1432e4a7a2937f5228  6961  fish/vendor_conf.d/qwertty-term-shell-integration.fish
+ae85ba1534872c9f46dcac36e1c6290ec828825b91682459ab2036c012a16d56  1766  nushell/vendor/autoload/qwertty-term.nu
+fb0085cc22b84f2f0859bfa76a4bc8b2a79be3e93ddcc1a5272c2f72a3ec27fc  2763  zsh/.zshenv
+2c9b5a59785fba76468d1fc63f1a297660bc72cfff40ecb1773908145d7a5893  19491  zsh/qwertty-term-integration

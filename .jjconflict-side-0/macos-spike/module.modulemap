@@ -1,0 +1,7 @@
+// Clang module map so `import CQwerttyTerm` in Swift pulls in the cbindgen header.
+// This is the minimal ceremony to consume a C ABI from Swift without an Xcode
+// project (the spike is a single swiftc invocation; see build.sh).
+module CQwerttyTerm {
+  header "../crates/qwertty-term-ffi/include/qwertty_term.h"
+  export *
+}

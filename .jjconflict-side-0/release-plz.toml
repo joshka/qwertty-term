@@ -1,0 +1,31 @@
+# release-plz configuration — https://release-plz.dev/docs/config
+#
+# The eight crates share ONE workspace version (`version.workspace = true` in the
+# root Cargo.toml) and release together, under a single root CHANGELOG.md.
+# release-plz opens a release PR (version bump + changelog); merging it publishes
+# every crate in dependency order. Nothing publishes without merging that PR.
+
+[workspace]
+# Single hand-maintained changelog at the repo root (not per-crate files).
+changelog_path = "./CHANGELOG.md"
+
+# CHANGELOG.md is hand-curated — do NOT let release-plz generate or overwrite it.
+# release-plz's auto-generated sections were terse and noisy (an `### Other`
+# dumping ground, duplicate headings, wrong compare URLs), so ownership of the
+# changelog is human. Release PRs still bump versions and tag; they just leave
+# CHANGELOG.md untouched. Add a new section by hand before cutting a release.
+changelog_update = false
+
+# Only release when a release PR merges (not on every push to main).
+release_always = false
+
+# `semver_check` is left at its default (enabled): the release-pr job installs
+# cargo-semver-checks (see the workflow), so release-plz detects API-breaking
+# changes and bumps the version accordingly — e.g. the `SnapshotCursor` field
+# addition (#57) is a break, so it lands 0.2.0 rather than 0.1.1. The binary
+# `qwertty-term` crate is auto-skipped (no library).
+
+# NOTE: ratatui's sibling setup drives the changelog via a `changelog_config =
+# "cliff.toml"` (git-cliff). Not adopted here: with `changelog_update = false`
+# the changelog is fully hand-maintained, which we prefer for readable,
+# release-note-quality entries over generated commit dumps.

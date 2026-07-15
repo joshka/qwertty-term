@@ -1,0 +1,32 @@
+# libFuzzer dictionary for the `parser` (arbitrary-bytes feed-path) target.
+#
+# Whole-token hints for escape-sequence families that are expensive for the
+# fuzzer to rediscover byte by byte. Splicing these in lets libFuzzer reach
+# deeper parser states (DCS hooks, tmux control-mode lines) far faster.
+#
+# libFuzzer's dictionary parser only understands \xHH, \\ and \" escapes, so
+# ESC (0x1b), CR (0x0d) and LF (0x0a) are written in hex.
+#
+# Pass with: cargo +nightly fuzz run parser -- -dict=parser.dict
+
+# --- DCS entry/exit ------------------------------------------------------
+# tmux control mode enter (ESC P 1000 p) and the ST (ESC \) that exits it.
+tmux_enter="\x1bP1000p"
+st="\x1b\\"
+
+# Other DCS hooks the handler recognizes, for coverage next to the tmux seam.
+xtgettcap="\x1bP+q"
+decrqss="\x1bP$q"
+
+# --- tmux control-mode notification lines (DCS body) ---------------------
+# Fed as the body between `\x1bP1000p` and ST; the trailing LF completes a line.
+tmux_output="%output %1 "
+tmux_begin="%begin "
+tmux_end="%end "
+tmux_error="%error "
+tmux_layout_change="%layout-change "
+tmux_window_add="%window-add @1"
+tmux_window_renamed="%window-renamed @1 "
+tmux_session_changed="%session-changed $1 "
+tmux_sessions_changed="%sessions-changed"
+tmux_lf="\x0a"

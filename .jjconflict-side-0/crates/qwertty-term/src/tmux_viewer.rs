@@ -1,0 +1,792 @@
+//! Headless tmux control-mode Viewer model (ADR 004 slice 5a / ADR 006).
+//!
+//! Port of the *pure, AppKit-free* core of Ghostty's
+//! `src/terminal/tmux/viewer.zig` (`2da015cd6`, ~2,283 LoC). A [`Viewer`] is a
+//! tmux control-mode client: it consumes the engine's decoded
+//! [`Notification`](qwertty_term_vt::tmux::Notification) stream (drained from
+//! `stream::TerminalHandler::take_tmux_notifications`), maintains the tmux
+//! **session → windows → panes** tree, owns a per-tmux-pane
+//! [`Terminal`](qwertty_term_vt::terminal::Terminal), routes `%output` bytes to
+//! the right pane, and emits [`Action`]s telling the caller what to do next
+//! (send a command to tmux, re-render surfaces, or tear down).
+//!
+//! This is the **testable core** of the native Viewer. It contains no AppKit,
+//! no `NSWindow`, no focus/resize wiring — that native half (slice 5b+) reads
+//! this model through its query accessors ([`Viewer::windows`],
+//! [`Viewer::pane`], [`Viewer::pane_rects`]) and maps tmux windows/panes to
+//! native tabs/splits. See ADR 006 for the tab/split UX mapping (PROPOSED) and
+//! the full slice breakdown.
+//!
+//! ## Lifecycle
+//!
+//! The Viewer is created on [`Notification::Enter`] (the DCS `\ePtmux;` seam)
+//! and destroyed on [`Notification::Exit`] / when it becomes defunct, exactly
+//! as upstream's `stream_handler.zig` owns a `?*Viewer` keyed on the tmux
+//! enter/exit notifications. Between those, every notification is fed to
+//! [`Viewer::next`], which returns the actions to apply before the next input.
+//!
+//! ## Faithful vs deferred (slice 5a vs 5b)
+//!
+//! The notification **reducer**, the **command-queue** correlation state
+//! machine (`%begin`/`%end` block ↔ the command that triggered it), window/pane
+//! **tree** maintenance, **layout** application (pane geometry), and live
+//! **`%output`** routing are ported faithfully and unit-tested here.
+//!
+//! Applying a captured pane's *content* and *terminal state* to its
+//! `Terminal` is only partially done in 5a, to stay within the engine's public
+//! API (no engine-internal edits):
+//!
+//! - **`%output`** (the live path) is fed straight into the pane's stream —
+//!   faithful and the important case.
+//! - **`capture-pane` visible** content is fed into the pane's (primary) stream
+//!   so the initial screen is populated and queryable.
+//! - **`capture-pane` history** (scrollback) and **alternate-screen** captures
+//!   are correlated by the state machine but not yet written into the
+//!   `Terminal` — that needs a screen-history / alternate-screen write path
+//!   that is not part of the engine's public surface today (slice 5b).
+//! - **`list-panes` state** (cursor position/shape, terminal modes, scroll
+//!   region, tab stops) is parsed into a queryable [`PaneState`] but not yet
+//!   applied to the `Terminal`'s cursor/modes (slice 5b).
+//!
+//! These deferrals are behavioural refinements of an *already-correct* control
+//! flow; the divergences are documented so slice 5b can close them.
+
+use std::collections::VecDeque;
+
+use qwertty_term_vt::stream::{Stream, TerminalHandler};
+use qwertty_term_vt::terminal::{Options, Terminal};
+use qwertty_term_vt::tmux::Notification;
+use qwertty_term_vt::tmux::layout::{Content, Layout};
+use qwertty_term_vt::tmux::output::{self, Value, Variable};
+
+#[cfg(test)]
+mod tests;
+
+/// The variables requested by `list-windows -F`, in order. Port of upstream
+/// `Format.list_windows.vars`.
+const LIST_WINDOWS_VARS: &[Variable] = &[
+    Variable::SessionId,
+    Variable::WindowId,
+    Variable::WindowWidth,
+    Variable::WindowHeight,
+    Variable::WindowLayout,
+];
+
+/// The delimiter for the `list-windows` format (a space — none of the requested
+/// values contain one).
+const LIST_WINDOWS_DELIM: u8 = b' ';
+
+/// The variables requested by `list-panes -F`, in order. Port of upstream
+/// `Format.list_panes.vars`. The delimiter is `;`.
+const LIST_PANES_VARS: &[Variable] = &[
+    Variable::PaneId,
+    Variable::CursorX,
+    Variable::CursorY,
+    Variable::CursorFlag,
+    Variable::CursorShape,
+    Variable::CursorColour,
+    Variable::CursorBlinking,
+    Variable::AlternateOn,
+    Variable::AlternateSavedX,
+    Variable::AlternateSavedY,
+    Variable::InsertFlag,
+    Variable::WrapFlag,
+    Variable::KeypadFlag,
+    Variable::KeypadCursorFlag,
+    Variable::OriginFlag,
+    Variable::MouseAllFlag,
+    Variable::MouseAnyFlag,
+    Variable::MouseButtonFlag,
+    Variable::MouseStandardFlag,
+    Variable::MouseUtf8Flag,
+    Variable::MouseSgrFlag,
+    Variable::FocusFlag,
+    Variable::BracketedPaste,
+    Variable::ScrollRegionUpper,
+    Variable::ScrollRegionLower,
+    Variable::PaneTabs,
+];
+
+const LIST_PANES_DELIM: u8 = b';';
+
+/// The variables requested by `display-message -p` for the tmux version.
+const TMUX_VERSION_VARS: &[Variable] = &[Variable::Version];
+const TMUX_VERSION_DELIM: u8 = b' ';
+
+/// An action the caller (native layer / termio) must perform as a result of
+/// feeding a notification. Port of `viewer.zig`'s `Action` union.
+///
+/// Upstream's `windows` action carries a `[]const Window` slice; because this
+/// model is queryable, [`Action::WindowsChanged`] is a *signal* and the caller
+/// reads the current tree via [`Viewer::windows`] / [`Viewer::pane_rects`].
+/// This avoids threading borrowed slices through the reducer's return value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// tmux closed the control-mode connection (or the Viewer became defunct).
+    /// The caller should tear down the native surfaces for this Viewer.
+    Exit,
+
+    /// Send these bytes to tmux verbatim (they already include the trailing
+    /// newline). Port of `Action.command`.
+    Command(Vec<u8>),
+
+    /// The window/pane tree changed (windows added/removed, panes
+    /// added/removed, or a layout changed). The caller diffs the new tree
+    /// (via [`Viewer::windows`]) against its native surfaces. Window IDs are
+    /// stable for a Viewer's lifetime, matching tmux. Port of `Action.windows`.
+    WindowsChanged,
+}
+
+/// A command the Viewer has sent to tmux and is waiting for a `%begin`/`%end`
+/// block response for. Port of `viewer.zig`'s `Command` union. Only one command
+/// is in flight at a time (the head of the queue), so responses correlate
+/// unambiguously.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Command {
+    /// `list-windows`: refresh the whole window list + layouts.
+    ListWindows,
+    /// `capture-pane` history (scrollback) for a pane, on the given screen.
+    PaneHistory { id: usize, alternate: bool },
+    /// `capture-pane` visible area for a pane, on the given screen.
+    PaneVisible { id: usize, alternate: bool },
+    /// `list-panes`: capture cursor/mode state for all panes.
+    PaneState,
+    /// `display-message`: fetch the tmux server version.
+    TmuxVersion,
+}
+
+impl Command {
+    /// Format this command into the exact bytes to send to tmux, including the
+    /// trailing newline. Port of `Command.formatCommand`.
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Command::ListWindows => {
+                let mut cmd = b"list-windows -F '".to_vec();
+                cmd.extend_from_slice(&output::format(LIST_WINDOWS_VARS, LIST_WINDOWS_DELIM));
+                cmd.extend_from_slice(b"'\n");
+                cmd
+            }
+            // -p stdout, -e SGR escapes, -q quiet, -a alternate, -S -/-E -1 = full history.
+            Command::PaneHistory { id, alternate } => {
+                let alt = if *alternate { "-a " } else { "" };
+                format!("capture-pane -p -e -q {alt}-S - -E -1 -t %{id}\n").into_bytes()
+            }
+            // Same, without -S/-E = visible area only.
+            Command::PaneVisible { id, alternate } => {
+                let alt = if *alternate { "-a " } else { "" };
+                format!("capture-pane -p -e -q {alt}-t %{id}\n").into_bytes()
+            }
+            Command::PaneState => {
+                let mut cmd = b"list-panes -F '".to_vec();
+                cmd.extend_from_slice(&output::format(LIST_PANES_VARS, LIST_PANES_DELIM));
+                cmd.extend_from_slice(b"'\n");
+                cmd
+            }
+            Command::TmuxVersion => {
+                let mut cmd = b"display-message -p '".to_vec();
+                cmd.extend_from_slice(&output::format(TMUX_VERSION_VARS, TMUX_VERSION_DELIM));
+                cmd.extend_from_slice(b"'\n");
+                cmd
+            }
+        }
+    }
+}
+
+/// A tmux window in the current session. Port of `viewer.zig`'s `Window`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    /// Stable tmux window id (`@<n>`).
+    pub id: usize,
+    /// Window width/height in cells (from `list-windows`).
+    pub width: usize,
+    pub height: usize,
+    /// The parsed layout tree (pane geometry).
+    pub layout: Layout,
+}
+
+/// The geometry of one pane within a window, in cells, derived from the layout
+/// tree. This is what the native layer (slice 5b) turns into split ratios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneRect {
+    pub pane_id: usize,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Parsed `list-panes` state for a pane. A queryable snapshot; applying these
+/// to the pane's `Terminal` cursor/modes is slice 5b (see the module docs).
+/// Only the fields the native layer needs first are surfaced; the full
+/// `list-panes` line is still parsed so the response is consumed positionally.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PaneState {
+    pub cursor_x: usize,
+    pub cursor_y: usize,
+    /// Cursor visibility (`cursor_flag`).
+    pub cursor_visible: bool,
+    /// Cursor shape as reported by tmux (`block`/`underline`/`bar`/`default`).
+    pub cursor_shape: String,
+    /// Whether the pane is on its alternate screen.
+    pub alternate_on: bool,
+}
+
+/// A tmux pane: an owned engine terminal fed by that pane's `%output`. Port of
+/// `viewer.zig`'s `Pane`.
+pub struct Pane {
+    /// Stable tmux pane id (`%<n>`).
+    id: usize,
+    /// The engine stream + terminal this pane's bytes drive.
+    stream: Stream<TerminalHandler>,
+    /// The most recent parsed `list-panes` state, if any.
+    state: Option<PaneState>,
+}
+
+impl Pane {
+    fn new(width: usize, height: usize) -> Pane {
+        Pane {
+            // placeholder id; set by the caller.
+            id: 0,
+            stream: Stream::new(TerminalHandler::new(Terminal::new(Options {
+                cols: clamp_cells(width),
+                rows: clamp_cells(height),
+                ..Default::default()
+            }))),
+            state: None,
+        }
+    }
+
+    /// The engine terminal for this pane (for the renderer / snapshotting).
+    pub fn terminal(&self) -> &Terminal {
+        self.stream.terminal()
+    }
+
+    /// The most recent parsed `list-panes` state, if captured.
+    pub fn state(&self) -> Option<&PaneState> {
+        self.state.as_ref()
+    }
+}
+
+/// The Viewer state machine's phase. Port of `viewer.zig`'s `State`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    /// Just entered control mode; waiting for the initial `%begin`/`%end` block.
+    StartupBlock,
+    /// Got the initial block; waiting for `%session-changed` for the session id.
+    StartupSession,
+    /// Steady state: process command responses + live notifications.
+    CommandQueue,
+    /// tmux closed the connection; ignore everything.
+    Defunct,
+}
+
+/// A headless tmux control-mode Viewer. See the module docs. Port of
+/// `viewer.zig`'s `Viewer` (pure core).
+pub struct Viewer {
+    state: State,
+    session_id: usize,
+    tmux_version: Vec<u8>,
+    /// Commands sent and awaiting a block response, in FIFO order. Only the
+    /// head is in flight. Port of `command_queue` (a `CircBuf`).
+    command_queue: VecDeque<Command>,
+    /// The windows in the current session. Order matches `list-windows`.
+    windows: Vec<Window>,
+    /// The panes in the current session, keyed by pane id. A `Vec` (not a map)
+    /// to preserve insertion order deterministically — pane counts are tiny and
+    /// this mirrors upstream's insertion-ordered `AutoArrayHashMap`.
+    panes: Vec<Pane>,
+}
+
+impl Default for Viewer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Viewer {
+    /// Create a fresh Viewer in the `StartupBlock` state. Call this when the
+    /// engine reports [`Notification::Enter`]. Port of `Viewer.init`.
+    pub fn new() -> Viewer {
+        Viewer {
+            state: State::StartupBlock,
+            session_id: 0,
+            tmux_version: Vec::new(),
+            command_queue: VecDeque::new(),
+            windows: Vec::new(),
+            panes: Vec::new(),
+        }
+    }
+
+    // ---- query API (the native layer / slice 5b reads through these) -------
+
+    /// The windows in the current session, in `list-windows` order.
+    pub fn windows(&self) -> &[Window] {
+        &self.windows
+    }
+
+    /// The current tmux session id (`$<n>`), or 0 before the first
+    /// `%session-changed`.
+    pub fn session_id(&self) -> usize {
+        self.session_id
+    }
+
+    /// The tmux server version string (e.g. `3.5a`), empty until captured.
+    pub fn tmux_version(&self) -> &[u8] {
+        &self.tmux_version
+    }
+
+    /// The pane with the given id, if tracked.
+    pub fn pane(&self, id: usize) -> Option<&Pane> {
+        self.panes.iter().find(|p| p.id == id)
+    }
+
+    /// The number of tracked panes.
+    pub fn pane_count(&self) -> usize {
+        self.panes.len()
+    }
+
+    /// Whether the Viewer has become defunct (tmux exited). Once defunct it
+    /// ignores all further input and should be dropped.
+    pub fn is_defunct(&self) -> bool {
+        self.state == State::Defunct
+    }
+
+    /// The geometry of every pane in the given window, flattened from its
+    /// layout tree (each leaf carries its own x/y/width/height in cells). The
+    /// native layer turns these rects into split ratios. Returns an empty vec
+    /// for an unknown window id.
+    pub fn pane_rects(&self, window_id: usize) -> Vec<PaneRect> {
+        let mut out = Vec::new();
+        if let Some(w) = self.windows.iter().find(|w| w.id == window_id) {
+            collect_pane_rects(&w.layout, &mut out);
+        }
+        out
+    }
+
+    // ---- reducer -----------------------------------------------------------
+
+    /// Feed one decoded tmux notification and return the actions to apply
+    /// before the next input. Never fails: unrecoverable states transition to
+    /// defunct and emit [`Action::Exit`]. Port of `Viewer.next` / `nextTmux`.
+    pub fn next(&mut self, n: Notification) -> Vec<Action> {
+        match self.state {
+            State::Defunct => Vec::new(),
+            State::StartupBlock => self.next_startup_block(n),
+            State::StartupSession => self.next_startup_session(n),
+            State::CommandQueue => self.next_command(n),
+        }
+    }
+
+    fn next_startup_block(&mut self, n: Notification) -> Vec<Action> {
+        match n {
+            // Enter is only emitted by the DCS seam before a Viewer exists.
+            Notification::Enter => Vec::new(),
+            Notification::Exit => self.defunct(),
+            // Any initial block (even an error) advances us; now we wait for
+            // %session-changed for the initial session id.
+            Notification::BlockEnd(_) | Notification::BlockErr(_) => {
+                self.state = State::StartupSession;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn next_startup_session(&mut self, n: Notification) -> Vec<Action> {
+        match n {
+            Notification::Enter => Vec::new(),
+            Notification::Exit => self.defunct(),
+            Notification::SessionChanged { id, .. } => {
+                self.session_id = id;
+                // Queue the startup commands and send the first one.
+                self.enter_command_queue(&[Command::TmuxVersion, Command::ListWindows])
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn next_command(&mut self, n: Notification) -> Vec<Action> {
+        debug_assert_eq!(self.state, State::CommandQueue);
+
+        let mut actions: Vec<Action> = Vec::new();
+        // A command slot is available if nothing is in flight, or once the
+        // in-flight command completes / the queue is reset below.
+        let mut command_consumed = self.command_queue.is_empty();
+
+        match n {
+            Notification::Enter => {}
+            Notification::Exit => return self.defunct(),
+
+            Notification::BlockEnd(content) => {
+                self.received_command_output(&mut actions, &content);
+                command_consumed = true;
+            }
+            Notification::BlockErr(content) => {
+                self.received_command_output(&mut actions, &content);
+                command_consumed = true;
+            }
+
+            Notification::Output { pane_id, data } => {
+                self.received_output(pane_id, &data);
+            }
+
+            Notification::SessionChanged { id, .. } => {
+                self.session_changed(&mut actions, id);
+                command_consumed = true;
+            }
+
+            Notification::LayoutChange {
+                window_id, layout, ..
+            } => {
+                self.layout_changed(&mut actions, window_id, &layout);
+            }
+
+            Notification::WindowAdd { .. } => {
+                // Refresh the whole window list to pick up the new window.
+                self.command_queue.push_back(Command::ListWindows);
+            }
+
+            // The active pane changed: we drive our own focus, so ignore.
+            Notification::WindowPaneChanged { .. } => {}
+            // A session was created/destroyed elsewhere: we'll get exit or
+            // session_changed for our own; ignore otherwise.
+            Notification::SessionsChanged => {}
+            // We don't use window names yet.
+            Notification::WindowRenamed { .. } => {}
+            // Other clients; nothing to do.
+            Notification::ClientDetached { .. } | Notification::ClientSessionChanged { .. } => {}
+        }
+
+        // Send the next queued command, but only if the in-flight slot is free.
+        if self.state == State::CommandQueue
+            && command_consumed
+            && let Some(cmd) = self.command_queue.front()
+        {
+            actions.push(Action::Command(cmd.to_bytes()));
+        }
+
+        actions
+    }
+
+    // ---- command responses -------------------------------------------------
+
+    fn received_command_output(&mut self, actions: &mut Vec<Action>, content: &[u8]) {
+        let Some(command) = self.command_queue.pop_front() else {
+            // Unexpected block output with no pending command; ignore.
+            return;
+        };
+
+        match command {
+            Command::ListWindows => self.received_list_windows(actions, content),
+            Command::PaneState => self.received_pane_state(content),
+            Command::PaneHistory { id, alternate } => {
+                self.received_pane_history(id, alternate, content)
+            }
+            Command::PaneVisible { id, alternate } => {
+                self.received_pane_visible(id, alternate, content)
+            }
+            Command::TmuxVersion => self.received_tmux_version(content),
+        }
+    }
+
+    fn received_tmux_version(&mut self, content: &[u8]) {
+        let line = trim_ascii_ws(content);
+        if line.is_empty() {
+            return;
+        }
+        match output::parse_format(TMUX_VERSION_VARS, line, TMUX_VERSION_DELIM) {
+            Ok(values) => {
+                if let Some(Value::Str(v)) = values.into_iter().next() {
+                    self.tmux_version = v;
+                }
+            }
+            Err(_) => { /* leave version unset; non-fatal */ }
+        }
+    }
+
+    fn received_list_windows(&mut self, actions: &mut Vec<Action>, content: &[u8]) {
+        let mut windows: Vec<Window> = Vec::new();
+        for line_raw in content.split(|&b| b == b'\n') {
+            let line = trim_ascii_ws(line_raw);
+            if line.is_empty() {
+                continue;
+            }
+            let values = match output::parse_format(LIST_WINDOWS_VARS, line, LIST_WINDOWS_DELIM) {
+                Ok(v) => v,
+                // A malformed line aborts the whole refresh (upstream returns
+                // the error); keep the prior window state.
+                Err(_) => return,
+            };
+            let (
+                Some(&Value::Usize(window_id)),
+                Some(&Value::Usize(width)),
+                Some(&Value::Usize(height)),
+            ) = (values.get(1), values.get(2), values.get(3))
+            else {
+                return;
+            };
+            let Some(Value::Str(layout_str)) = values.get(4) else {
+                return;
+            };
+            let layout = match Layout::parse_with_checksum(layout_str) {
+                Ok(l) => l,
+                Err(_) => return,
+            };
+            windows.push(Window {
+                id: window_id,
+                width,
+                height,
+                layout,
+            });
+        }
+
+        // Signal the caller, then sync panes against the new window set.
+        actions.push(Action::WindowsChanged);
+        self.sync_layouts(windows);
+    }
+
+    fn received_pane_state(&mut self, content: &[u8]) {
+        for line_raw in content.split(|&b| b == b'\n') {
+            let line = trim_ascii_ws(line_raw);
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(values) = output::parse_format(LIST_PANES_VARS, line, LIST_PANES_DELIM) else {
+                // Malformed line; skip it (non-fatal for the rest).
+                continue;
+            };
+            let Some(&Value::Usize(pane_id)) = values.first() else {
+                continue;
+            };
+            let state = PaneState {
+                cursor_x: usize_at(&values, 1),
+                cursor_y: usize_at(&values, 2),
+                cursor_visible: bool_at(&values, 3),
+                cursor_shape: str_at(&values, 4),
+                alternate_on: bool_at(&values, 7),
+            };
+            if let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id) {
+                pane.state = Some(state);
+            }
+        }
+    }
+
+    fn received_pane_history(&mut self, id: usize, alternate: bool, _content: &[u8]) {
+        // Scrollback / alternate-screen capture application is slice 5b (needs a
+        // screen-history write path not in the engine's public API). We only
+        // consume the response here so the command queue advances. `id`/
+        // `alternate` are retained for that future application.
+        let _ = (id, alternate);
+    }
+
+    fn received_pane_visible(&mut self, id: usize, alternate: bool, content: &[u8]) {
+        // Only the primary-screen visible capture is applied in 5a. The
+        // alternate screen needs an explicit screen switch (slice 5b).
+        if alternate {
+            return;
+        }
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+            pane.stream.feed(content);
+        }
+    }
+
+    fn received_output(&mut self, id: usize, data: &[u8]) {
+        // The live path: route the pane's bytes straight into its terminal.
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+            pane.stream.feed(data);
+        }
+        // Output for an untracked pane is dropped (matches upstream).
+    }
+
+    // ---- layout / pane syncing ---------------------------------------------
+
+    fn layout_changed(&mut self, actions: &mut Vec<Action>, window_id: usize, layout_str: &[u8]) {
+        if !self.windows.iter().any(|w| w.id == window_id) {
+            // Layout change for a window we don't know about; ignore.
+            return;
+        }
+        let layout = match Layout::parse_with_checksum(layout_str) {
+            Ok(l) => l,
+            // Upstream becomes defunct on a parse failure here.
+            Err(_) => {
+                self.state = State::Defunct;
+                actions.push(Action::Exit);
+                return;
+            }
+        };
+        if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
+            window.layout = layout;
+        }
+
+        // The window set is unchanged (same ids), but panes may be added/removed.
+        actions.push(Action::WindowsChanged);
+        let windows = self.windows.clone();
+        self.sync_layouts(windows);
+    }
+
+    /// Rebuild the pane set from the given windows' layouts: reuse existing
+    /// panes (preserving their terminals), create panes for new ids, drop
+    /// removed ones, and queue capture commands for the additions. Port of
+    /// `syncLayouts` + `initLayout`.
+    fn sync_layouts(&mut self, windows: Vec<Window>) {
+        // Collect the (id, width, height) of every pane leaf across all windows,
+        // in layout order, de-duplicated (first occurrence wins).
+        let mut leaves: Vec<(usize, usize, usize)> = Vec::new();
+        for w in &windows {
+            collect_leaves(&w.layout, &mut leaves);
+        }
+
+        // Which ids are new (not currently tracked)?
+        let added: Vec<usize> = leaves
+            .iter()
+            .filter(|(id, _, _)| !self.panes.iter().any(|p| p.id == *id))
+            .map(|(id, _, _)| *id)
+            .collect();
+
+        // Rebuild the pane list in new-layout order: move existing panes over,
+        // create fresh ones for new ids. Anything left in `old` is dropped
+        // (removed panes), freeing their terminals.
+        let mut old: Vec<Pane> = std::mem::take(&mut self.panes);
+        let mut rebuilt: Vec<Pane> = Vec::with_capacity(leaves.len());
+        for (id, width, height) in &leaves {
+            if let Some(pos) = old.iter().position(|p| p.id == *id) {
+                rebuilt.push(old.remove(pos));
+            } else {
+                let mut pane = Pane::new(*width, *height);
+                pane.id = *id;
+                rebuilt.push(pane);
+            }
+        }
+        self.panes = rebuilt;
+
+        // Queue capture commands for each added pane (primary + alternate,
+        // history + visible), then a single pane_state if anything was added.
+        for id in &added {
+            self.command_queue.push_back(Command::PaneHistory {
+                id: *id,
+                alternate: false,
+            });
+            self.command_queue.push_back(Command::PaneVisible {
+                id: *id,
+                alternate: false,
+            });
+            self.command_queue.push_back(Command::PaneHistory {
+                id: *id,
+                alternate: true,
+            });
+            self.command_queue.push_back(Command::PaneVisible {
+                id: *id,
+                alternate: true,
+            });
+        }
+        if !added.is_empty() {
+            self.command_queue.push_back(Command::PaneState);
+        }
+
+        self.windows = windows;
+    }
+
+    /// Handle `%session-changed` in steady state: completely reset, emit an
+    /// empty-windows signal, and restart the `list-windows` flow. Port of
+    /// `sessionChanged`.
+    fn session_changed(&mut self, actions: &mut Vec<Action>, session_id: usize) {
+        let version = std::mem::take(&mut self.tmux_version);
+        *self = Viewer::new();
+        self.tmux_version = version;
+        self.session_id = session_id;
+        self.state = State::CommandQueue;
+
+        // Signal callers to clear all surfaces, then restart the window listing.
+        actions.push(Action::WindowsChanged);
+        self.command_queue.push_back(Command::ListWindows);
+    }
+
+    // ---- helpers -----------------------------------------------------------
+
+    /// Queue `commands` and return the action to send the first. Precondition:
+    /// not already in the command-queue state. Port of `enterCommandQueue`.
+    fn enter_command_queue(&mut self, commands: &[Command]) -> Vec<Action> {
+        debug_assert_ne!(self.state, State::CommandQueue);
+        debug_assert!(!commands.is_empty());
+        let first = commands[0].to_bytes();
+        for cmd in commands {
+            self.command_queue.push_back(cmd.clone());
+        }
+        self.state = State::CommandQueue;
+        vec![Action::Command(first)]
+    }
+
+    fn defunct(&mut self) -> Vec<Action> {
+        self.state = State::Defunct;
+        vec![Action::Exit]
+    }
+}
+
+/// Recursively collect every pane leaf's (id, width, height), first-occurrence
+/// wins. Port of `initLayout`'s recursion (geometry-only).
+fn collect_leaves(layout: &Layout, out: &mut Vec<(usize, usize, usize)>) {
+    match &layout.content {
+        Content::Pane(id) => {
+            if !out.iter().any(|(existing, _, _)| existing == id) {
+                out.push((*id, layout.width, layout.height));
+            }
+        }
+        Content::Horizontal(children) | Content::Vertical(children) => {
+            for child in children {
+                collect_leaves(child, out);
+            }
+        }
+    }
+}
+
+/// Recursively collect every pane leaf's absolute rect.
+fn collect_pane_rects(layout: &Layout, out: &mut Vec<PaneRect>) {
+    match &layout.content {
+        Content::Pane(id) => out.push(PaneRect {
+            pane_id: *id,
+            x: layout.x,
+            y: layout.y,
+            width: layout.width,
+            height: layout.height,
+        }),
+        Content::Horizontal(children) | Content::Vertical(children) => {
+            for child in children {
+                collect_pane_rects(child, out);
+            }
+        }
+    }
+}
+
+/// Clamp a layout dimension (cells, `usize`) into the engine's `CellCountInt`
+/// (`u16`), keeping at least 1 (a zero-dimension terminal is invalid). tmux
+/// dimensions are small in practice; this guards adversarial input.
+fn clamp_cells(n: usize) -> u16 {
+    n.clamp(1, u16::MAX as usize) as u16
+}
+
+/// Trim leading/trailing ASCII whitespace (space, tab, CR, LF) — mirrors
+/// upstream's `std.mem.trim(u8, …, " \t\r\n")`.
+fn trim_ascii_ws(s: &[u8]) -> &[u8] {
+    let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
+    let start = s.iter().position(|&b| !is_ws(b)).unwrap_or(s.len());
+    let end = s.iter().rposition(|&b| !is_ws(b)).map_or(start, |i| i + 1);
+    &s[start..end]
+}
+
+fn usize_at(values: &[Value], i: usize) -> usize {
+    match values.get(i) {
+        Some(Value::Usize(v)) => *v,
+        _ => 0,
+    }
+}
+
+fn bool_at(values: &[Value], i: usize) -> bool {
+    matches!(values.get(i), Some(Value::Bool(true)))
+}
+
+fn str_at(values: &[Value], i: usize) -> String {
+    match values.get(i) {
+        Some(Value::Str(v)) => String::from_utf8_lossy(v).into_owned(),
+        _ => String::new(),
+    }
+}

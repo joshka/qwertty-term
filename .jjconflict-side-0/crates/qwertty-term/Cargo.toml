@@ -1,0 +1,122 @@
+[package]
+name = "qwertty-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native macOS AppKit host for the qwertty-term terminal: NSApplication/NSWindow with native tabs, a Metal-rendered NSView, an NSTextInputClient input path, and a menu bar"
+default-run = "qwertty-term"
+
+[lib]
+name = "qwertty_term"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qwertty-term"
+path = "src/main.rs"
+
+[dependencies]
+qwertty-term-vt = { version = "0.4.0", path = "../qwertty-term-vt" }
+qwertty-term-input = { version = "0.4.0", path = "../qwertty-term-input" }
+qwertty-term-font = { version = "0.4.0", path = "../qwertty-term-font" }
+qwertty-term-renderer = { version = "0.4.0", path = "../qwertty-term-renderer" }
+# The real terminal IO stack (M2 chunk E): rustix PTY + the two-stage read
+# pipeline + the ADR-002 mailbox writer loop. Replaces the interim
+# `portable-pty` path (`src/pty.rs`, now deleted).
+qwertty-term-termio = { version = "0.4.0", path = "../qwertty-term-termio" }
+# Small TOML config (theme / copy-on-select / font-size), a trimmed copy of the
+# spike's config module (the spike's is `pub(crate)`, so it can't be reused via
+# a path dep without modifying the spike).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+base64 = "0.22.1"
+
+[dev-dependencies]
+# Read-back decoder for the frame-dump PNG unit test (verifies our tiny
+# dependency-free PNG encoder produces valid, correctly-swizzled output).
+# Already in the workspace lock (eframe/spike pull it in), so no new fetch.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# The AppKit host proper. objc2 family pinned to the workspace-standard versions
+# (objc2 0.6 / objc2-* 0.3.2), matching qwertty-term-renderer and qwertty-term-font so the
+# whole app shares one toolchain.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSAppearance",
+    "NSWindowRestoration",
+    "NSUserInterfaceItemIdentification",
+    "NSWindowTabGroup",
+    "NSScreen",
+    "NSAnimation",
+    "NSAnimationContext",
+    "NSAlert",
+    "NSButton",
+    "block2",
+    "NSToolbar",
+    "NSView",
+    "NSTrackingArea",
+    "NSEvent",
+    "NSCursor",
+    "NSBezierPath",
+    "NSText",
+    "NSTextField",
+    "NSControl",
+    "NSVisualEffectView",
+    "NSTextInputClient",
+    "NSMenu",
+    "NSMenuItem",
+    "NSColor",
+    "NSColorSpace",
+    "NSRunningApplication",
+    "NSPasteboard",
+    "NSGraphics",
+    "objc2-quartz-core",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSString",
+    "NSCoder",
+    "NSData",
+    "NSKeyedArchiver",
+    "NSAttributedString",
+    "NSGeometry",
+    "NSRange",
+    "NSValue",
+    "NSArray",
+    "NSNotification",
+    "NSThread",
+    "NSObjCRuntime",
+    "NSProcessInfo",
+    "NSDate",
+    "NSTimer",
+    "NSRunLoop",
+    "NSUserDefaults",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "CALayer",
+    "CAMediaTimingFunction",
+    "CATransaction",
+    "CADisplayLink",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGColor",
+] }
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFRunLoop",
+] }

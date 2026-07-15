@@ -1,0 +1,1 @@
+line1\r\n\e[22;2t\e[1;38;5;196mline2\e[0m\e[23;2t\r\nline3

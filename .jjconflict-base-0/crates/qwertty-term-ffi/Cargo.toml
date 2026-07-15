@@ -1,0 +1,28 @@
+[package]
+name = "qwertty-term-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C ABI (cdylib + staticlib) over the qwertty-term engine, mirroring upstream include/ghostty.h shapes for a Swift/AppKit shell"
+
+[lib]
+name = "qwertty_term_ffi"
+# `staticlib` links into the Swift/AppKit driver; `cdylib` is the eventual
+# dynamic-link target for the app bundle. `rlib` keeps the crate testable from
+# Rust (the C ABI is exercised in-process, like vt-diff binds libghostty-vt).
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+qwertty-term-vt = { version = "0.4.0", path = "../qwertty-term-vt" }
+qwertty-term-input = { version = "0.4.0", path = "../qwertty-term-input" }
+
+[dev-dependencies]
+# cbindgen drives the drift-check test (tests/header_drift.rs), which
+# regenerates the header via the cbindgen *library* API and diffs it against
+# the checked-in copy. A dev-dependency (not build-dependency) so the test can
+# link it; the header is NOT regenerated at build time, so a missing/older
+# cbindgen never breaks `cargo build`.
+# NOTE: >= 0.28 is REQUIRED — earlier cbindgen does not parse the Rust 2024
+# `#[unsafe(no_mangle)]` attribute and silently skips every extern fn.
+cbindgen = "0.29"
