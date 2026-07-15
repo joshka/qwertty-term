@@ -1,9 +1,11 @@
 # perf status
 
-- **Current item:** Session 1 — **#266 (change 2) MERGED**; executing the Josh-approved pin
-  bump `2da015cd6`→`77190bd02` + landing change 1. Oracle rebuilt & installed at the default
-  path, authoritative pin docs bumped, font/sprite tracked → change-1 PR next.
-- **Last merged:** **#266** (change 2, rebase-merged as `0fb53969` on main, 2026-07-15).
+- **Current item:** Session 1 **COMPLETE** — both scroll-region PRs merged + frozen pin bumped
+  `2da015cd6`→`77190bd02`. All four vtebench region-scroll suites now addressed at the code
+  level (change 2 = top-region, change 1 = bottom-region). Remaining: a quiet-machine vtebench
+  refresh to publish the scoreboard, + the font/sprite pin-delta verification (tracked in
+  `issues.md`). Next perf lane (unblocked): wide/CJK engine gap (`docs/analysis/perf.md`).
+- **Last merged:** **#269** (change 1 + pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
 - **Blockers:** none.
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
@@ -118,12 +120,15 @@ New tests: `hand_scroll_region_fast_path` (vt-diff, wide+deep), `index_region_sc
   path to zero blank). Full gate + oracle + Miri + resize-fuzz green; whole-app A/B vs
   clean-main parent shows `scrolling_top_region` 0.62× (~1.6× faster), no regression. CI
   running on #266 (markdownlint pass; Linux + macOS pending at handoff).
-- 2026-07-14: **session 1 CLOSEOUT — respawn to continue.** State: PR #266 OPEN (not
-  self-merged — engine hot-path change worth a look + a Josh pin-bump decision is attached;
-  see Blockers/ESCALATION above). A fresh session resumes from this status file + the spec:
-  (1) if #266 CI is green and Josh is OK, self-merge it per policy; (2) the bottom-region
-  suites are Josh-gated (pin bump vs. optimize cursor_scroll_above — his call); (3) the next
-  unblocked perf lane is the wide/CJK engine gap (unicode engine-only ~2.6× behind upstream —
-  SIMD UTF-8 decode / tighter wide-print; T1's deferred items in `docs/analysis/perf.md`), or
-  optimizing the scrollback-creating `cursor_scroll_above` path (bottom-region, semantics-
-  preserving alternative to change 1). Bench harness + method: `docs/analysis/scroll-region-opt.md`.
+- 2026-07-14: session 1 — shipped #266 (change 2). Escalated the frozen-pin question for the
+  bottom-region suites (change 1 is post-pin semantics).
+- 2026-07-15: Josh approved the pin bump + "merge 266 and do the recommended steps." Executed:
+  merged **#266** (change 2, `0fb53969`); sized the pin bump (14 commits, only change-1 VT
+  divergences); ported **change 1** (index + scroll_up no_scrollback gates + non-zero-blank
+  fill); **bumped the oracle** to `77190bd02` (built in `~/local/ghostty-pin77190`, installed
+  the lib into the default path, old lib backed up to `zig-out/lib-backup-2da015cd6/`); bumped
+  the authoritative pin docs (AGENTS.md / handoff.md / vt-diff ffi.rs); tracked the 3
+  font/sprite cursor-height commits in `issues.md`; merged **#269** (change 1 + pin bump,
+  `36256c78`). Verified green vs the new oracle: generative sweep 259→0, differential + corpus
+  + afl, release + paranoid (1618), Miri, resize fuzz 76k. **All 4 region-scroll suites now
+  addressed.** Next: quiet-machine vtebench scoreboard refresh; then the wide/CJK engine gap.
