@@ -14,6 +14,17 @@
     engine was verified green against the new-pin differential oracle; these font/sprite
     commits are render/sprite territory (T2 / sprite) and should be checked for parity by that
     owner. Refs: `docs/analysis/scroll-region-opt.md`, AGENTS.md pin note.
+  - 2026-07-15 (perf): ✅ **RESOLVED — reference oracle was stale; reinstalled `77190bd02`.**
+    `~/local/ghostty/zig-out/lib/libghostty-vt.a` was dated **Jul 7** (the old `2da015cd6`-era
+    artifact) despite `ffi.rs`/`AGENTS.md` documenting pin `77190bd02` — the prior pin-bump
+    session's install had updated only the symlinks/xcframework, not the actual `.a`/`.dylib` (a
+    partial install). Net: main's generative sweep was red at **259 scrollback-class divergences**
+    (`ref scrollback_rows: N` vs `rust: 0`), orthogonal to any hyperlink/grapheme work. **Fix:**
+    the correct `77190bd02` build already existed un-installed in `~/local/ghostty-pin77190/
+    zig-out/lib` (Jul 15 08:50); installed its `.a`/`.dylib` into `~/local/ghostty/zig-out/lib`
+    (stale ones backed up to `lib-backup-stale-jul7-2da015cd6/`). Default `vt-diff --features
+    reference` now passes at **0 divergences** — zero-divergence invariant restored fleet-wide.
+    Ref: `docs/analysis/hash-map-backward-shift.md`.
 
 ## Disposition table (all verified vs current main before closing)
 
