@@ -1,12 +1,21 @@
-# perf status
+# perf status — 🗄️ ARCHIVED 2026-07-15
 
-- **Current item:** Session 3 (respawn) **COMPLETE — RECYCLING.** Shipped **PR #283** (tighter
-  wide-cell pair-write in `print_slice_fill`, cjk full +4%, differential-neutral; open for Josh,
-  gate green + Miri). Re-profiled post-#277: decode is no longer the bottleneck (cjk noop ~1200,
-  faster than upstream's full pipeline); `print_slice_fill<wide>` is now ~70% of cjk. #283 took
-  the one clean/low-risk slice of it (the `/2` per-pair division). The wide/CJK path is now
-  well-optimized end to end (decode + print). Remaining backlog for a fresh session (all gated
-  or big-effort — hence recycling):
+> **Thread retired.** The competitive-perf mission is complete: **all four vtebench
+> region-scroll suites closed** (the last DoD gap) and the **wide/CJK engine path optimized end
+> to end**. Shipped + merged: **#266** (region-scroll change 2), **#269** (change 1 + frozen-pin
+> bump `2da015cd6`→`77190bd02`), **#277** (unchecked interior UTF-8 decode, cjk decode +41%),
+> **#283** (wide-cell pair-write, cjk +4%). The `perf` jj workspace was forgotten + deleted and
+> this session archived. **To resume perf work, spawn a fresh thread** off this file — the two
+> remaining items are (1) the whole-app vtebench **scoreboard refresh** (the mission's final
+> "Done" deliverable, BLOCKED only on a quiet machine — run `scripts/bench-vtebench.sh` across qt
+> + ghostty-main + ghostty-1.3.1 when loadavg < ~3 and WindowServer is idle, then refresh
+> `docs/benchmarks/vtebench-baseline.md`) and (2) an optional **SIMD NEON decode** lever (no
+> longer the cjk-full bottleneck post-#277 — a decode-heavy-embedded nicety for its own focused
+> session). Oracle infra to keep: the installed `77190bd02` lib at `~/local/ghostty/zig-out/lib`
+> and the `~/local/ghostty-pin77190` build worktree. Full history + resume detail below.
+
+- **Current item:** 🗄️ **ARCHIVED** (see banner above). Thread retired after #266/#269/#277/#283
+  all merged + the pin bump. Remaining backlog for a fresh thread (all gated or big-effort):
   - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15 repeatedly: WindowServer 43–44%, loadavg
     ~5–6, Josh's interactive apps active → the render-heavy region suites are contended and
@@ -25,9 +34,9 @@
     run_len) is correctness-load-bearing / already-minimal → diminishing returns, higher risk.
     Only pursue with fresh line-level profiling showing a concrete hot spot.
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
-- **Last merged:** **#277** (unchecked interior UTF-8 decode, `2708b267`); **#269** (change 1 +
-  pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
-- **Blockers:** none.
+- **Last merged:** **#283** (wide pair-write, `9e51aad3`); **#277** (unchecked interior UTF-8
+  decode, `2708b267`); **#269** (change 1 + pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
+- **Blockers:** none. **Workspace:** forgotten + deleted (thread retired).
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
