@@ -123,16 +123,22 @@ impl SurfaceState {
     }
 }
 
-/// A pty child feeding the terminal — the interactive path's byte source.
+/// A pty child feeding the terminal — the interactive path's byte source and
+/// the keystroke sink.
 ///
 /// Spawns the user's shell (via `qwertty-term-termio`'s POSIX
 /// [`Subprocess`](qwertty_term_termio::Subprocess)) on a pty sized to the grid,
 /// and a reader thread that appends the child's output to a shared buffer the
 /// GTK main loop drains (a lock-and-poll wakeup, so no glib channel-version
-/// churn). Writing keystrokes back is the next (keyboard) chunk.
+/// churn). Keystrokes go the other way: [`Pty::write`] sends the encoder's
+/// bytes to the pty master (a clone of the master fd kept for writing, since
+/// the reader thread owns its own clone).
 pub struct Pty {
     /// Bytes read from the pty master, awaiting a drain on the main thread.
     buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// The pty master, for writing keystrokes to the child. A clone of the fd
+    /// the reader thread reads from (the master is bidirectional).
+    writer: std::fs::File,
     /// Kept alive so the child isn't dropped/reaped while the window lives.
     _subprocess: qwertty_term_termio::Subprocess,
 }
@@ -159,6 +165,9 @@ impl Pty {
             )
             .ok()?;
         let master = subprocess.start().ok()?;
+        // Clone the master fd: one handle for the reader thread, one for
+        // writing keystrokes back (the pty master is bidirectional).
+        let writer = std::fs::File::from(master.try_clone().ok()?);
 
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = std::sync::Arc::clone(&buf);
@@ -183,6 +192,7 @@ impl Pty {
 
         Some(Self {
             buf,
+            writer,
             _subprocess: subprocess,
         })
     }
@@ -193,6 +203,18 @@ impl Pty {
         match self.buf.lock() {
             Ok(mut b) => std::mem::take(&mut *b),
             Err(_) => Vec::new(),
+        }
+    }
+
+    /// Write encoded keystroke bytes to the pty master (the child's stdin).
+    /// Best-effort: a short write or error is ignored (the child may have
+    /// exited). Called on the GTK main thread from the key handler.
+    pub fn write(&self, bytes: &[u8]) {
+        use std::io::Write;
+        // `File::write_all` takes `&mut File`, but `write` on the underlying fd
+        // is a plain syscall; clone the handle so the shared `&self` API holds.
+        if let Ok(mut w) = self.writer.try_clone() {
+            let _ = w.write_all(bytes);
         }
     }
 }

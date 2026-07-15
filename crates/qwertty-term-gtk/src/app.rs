@@ -41,8 +41,12 @@ use std::time::Duration;
 use adw::prelude::*;
 use glow::HasContext;
 use gtk::glib;
+use gtk::glib::translate::IntoGlib;
 
+use crate::input::gdk_key_to_bytes;
 use crate::surface::{Pty, SurfaceState};
+use qwertty_term_input::key::Action;
+use qwertty_term_input::key_encode::Options as EncodeOptions;
 
 /// Application id for the GTK/DBus registration.
 const APP_ID: &str = "com.qwertty.TerminalGtk";
@@ -431,6 +435,50 @@ fn render_interactive(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
     }
 }
 
+/// Attach a [`gtk::EventControllerKey`] to the GLArea and translate each
+/// `key-pressed` into pty bytes: GDK keyval/keycode/`ModifierType` →
+/// [`qwertty_term_input::key::KeyEvent`] → `key_encode::encode` →
+/// [`Pty::write`]. Mirrors upstream's `EventControllerKey` wiring
+/// (`class/surface.zig:3644` binds `key_pressed`; the handler is `keyEvent`,
+/// `class/surface.zig:1240`).
+///
+/// TODO(ime): full IME / dead-key / compose needs a `GtkIMMulticontext`
+/// filtering the event first (`class/surface.zig:1246-1334`). This is the
+/// direct keyval→bytes path only; the seam is [`crate::input`].
+///
+/// The encoder options are the default (legacy encoder, normal cursor/keypad
+/// modes). TODO(modes): thread live terminal state (DECCKM, kitty flags) from
+/// the `SurfaceState`'s `Terminal` into [`EncodeOptions`] so app-cursor-mode
+/// arrows and the kitty protocol encode correctly.
+fn attach_keyboard(gl_area: &gtk::GLArea, shared: Rc<Shared>) {
+    let controller = gtk::EventControllerKey::new();
+    let area = gl_area.clone();
+    controller.connect_key_pressed(move |_ctrl, keyval, keycode, state| {
+        let bytes = gdk_key_to_bytes(
+            Action::Press,
+            keyval.into_glib(),
+            keycode,
+            state.bits(),
+            &EncodeOptions::default(),
+        );
+        match bytes {
+            Some(bytes) => {
+                if let Some(pty) = shared.pty.borrow().as_ref() {
+                    pty.write(&bytes);
+                }
+                // Repaint promptly so the shell's echo shows without waiting
+                // for the next tick.
+                area.queue_render();
+                glib::Propagation::Stop
+            }
+            None => glib::Propagation::Proceed,
+        }
+    });
+    gl_area.add_controller(controller);
+    // The GLArea must hold focus to receive key events.
+    gl_area.grab_focus();
+}
+
 /// Build the GLArea and its parent window, wiring the realize/render/resize
 /// signals for `mode`.
 fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
@@ -505,9 +553,11 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
     }
 
     // resize: cache the new size. Mirrors glareaResize (surface.zig:3365-3423).
-    // Per-surface resize (re-grid the terminal + pty winsize + engine target) is
-    // deferred to the keyboard/interaction chunk; the surface is sized once at
-    // first init.
+    // TODO(resize): per-surface resize (re-grid the `Terminal`, `TIOCSWINSZ` on
+    // the pty via `Subprocess::resize`, resize the `Engine<OpenGL>` target) is
+    // still deferred — the surface is sized once at first init. Wiring it needs
+    // a re-grid path on `SurfaceState`; kept out of the keyboard chunk to stay
+    // small. See upstream `glareaResize` (surface.zig:3365).
     gl_area.connect_resize(|_area, _width, _height| {});
 
     let window = adw::ApplicationWindow::builder()
@@ -521,6 +571,8 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
 
     match mode {
         Mode::Interactive => {
+            // Wire keyboard input: keystrokes → encoded bytes → pty.
+            attach_keyboard(&gl_area, shared.clone());
             // Repaint at ~60fps so pty output shows promptly (no dirty-tracking
             // wakeup yet). Cheap: a full redraw of a small grid.
             let area = gl_area.clone();

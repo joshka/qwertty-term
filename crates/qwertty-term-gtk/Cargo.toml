@@ -45,6 +45,10 @@ libloading = "0.8"
 qwertty-term-vt = { version = "0.4.0", path = "../qwertty-term-vt" }
 qwertty-term-font = { version = "0.4.0", path = "../qwertty-term-font" }
 qwertty-term-renderer = { version = "0.4.0", path = "../qwertty-term-renderer" }
+# The platform-free key-input model: GDK key events are translated into
+# `KeyEvent`s and encoded to pty bytes via `key_encode::encode` (the same
+# encoder the macOS app uses). Reused verbatim — no new logic added there.
+qwertty-term-input = { version = "0.4.0", path = "../qwertty-term-input" }
 # The POSIX pty/subprocess for the interactive shell (SURFACE INIT). The
 # headless text smoke drives the vt Terminal directly, so this is only exercised
 # by an interactive launch (`run`), not by validation.
