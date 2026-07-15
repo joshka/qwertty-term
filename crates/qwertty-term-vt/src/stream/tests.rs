@@ -2119,3 +2119,44 @@ fn apc_bulk_slice_matches_scalar() {
         assert_eq!(bulk.handler.ended, scalar.handler.ended, "ended: {case:?}");
     }
 }
+
+/// The SIMD prescan in `consume_apc_string` must land on exactly the same
+/// boundary as the scalar loop when a non-apc_put byte (CAN/SUB/ESC or a C1
+/// byte) falls just before, on, or after each 16-byte vector edge. Port of
+/// upstream's "apc vector boundaries match scalar path" test (8c523ed03).
+#[test]
+fn apc_vector_boundaries_match_scalar() {
+    let positions = [1usize, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65];
+    let controls = [0x18u8, 0x1A, 0x1B, 0x80, 0xFF];
+
+    for position in positions {
+        for control in controls {
+            // ESC _ G  <`position` payload bytes>  <control>  ESC \
+            let mut input = Vec::with_capacity(position + 8);
+            input.extend_from_slice(b"\x1b_G");
+            input.extend(std::iter::repeat_n(b'a', position));
+            input.push(control);
+            input.extend_from_slice(b"\x1b\\");
+
+            let mut bulk = Stream::new(ApcSpy::default());
+            bulk.feed(&input);
+            let mut scalar = Stream::new(ApcSpy::default());
+            for &b in &input {
+                scalar.next(b);
+            }
+
+            assert_eq!(
+                bulk.handler.buf, scalar.handler.buf,
+                "payload differs at position {position}, control {control:#x}"
+            );
+            assert_eq!(
+                bulk.handler.started, scalar.handler.started,
+                "started differs at position {position}, control {control:#x}"
+            );
+            assert_eq!(
+                bulk.handler.ended, scalar.handler.ended,
+                "ended differs at position {position}, control {control:#x}"
+            );
+        }
+    }
+}
