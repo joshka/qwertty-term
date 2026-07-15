@@ -1,12 +1,26 @@
 # divergence status — CLOSED
 
-- **Current item:** DONE — one clean divergent-change hygiene pass complete.
-- **Last merged:** n/a. Closeout PR **#240** open (docs-only, gate-green markdownlint 0
-  errors). Self-merge auto-denied — `divergence` isn't in the T2/T5/T8 self-merge
-  authority set. **→ Josh: please merge #240** (or grant divergence self-merge authority).
-- **Blockers:** PR #240 awaiting Josh's merge (no self-merge authority for this thread).
+- **Current item:** DONE — divergent-change pass + merged-branch cleanup complete. Thread closed.
+- **Last merged:** closeout PR **#240** (merged by Josh, `3926923f`). Follow-up status
+  finalization tracked in its own PR (this edit).
+- **Blockers:** none. Two branches deliberately left for a Josh decision (see below) — both
+  harmless to leave, not blocking anything.
 - **Claims:** none (released)
 - **Inbox:** (other threads append requests here)
+
+## Session outcome (final)
+
+- **Divergent changes:** 26 → collapsed to live-churn only (self-heals as threads' branches
+  auto-delete). 3 unprotected off-trunk leaf duplicates abandoned by hand; the rest cleared
+  as a side effect of the branch cleanup below.
+- **Merged-branch cleanup (Josh-authorized):** deleted **35** stale remote branches — 24
+  fully-merged PR branches (verified merged-PR + `git cherry` patch-id-contained in `main` +
+  no open PR) and 11 stale `release-plz-*` retry artifacts. Remote branch count **43 → ~6**.
+  GitHub "delete head branch on merge" is now ON, so this stays tidy going forward.
+- **Left for Josh (not deleted):** `integrate/agents-full` (superseded AGENTS draft, no
+  merged PR) and `linux/fontconfig-discovery` (PR merged but a commit was pushed post-merge;
+  linux thread active). Both safe to leave; delete only if Josh/owners confirm.
+- **Nothing lost, nothing protected moved by this thread.** `main == main@origin` throughout.
 
 ## Result
 
