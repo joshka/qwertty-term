@@ -11,6 +11,60 @@ workspace version and release together. This project adheres to
 bump (`0.x.0`) may carry breaking changes and a patch bump (`0.x.y`) is
 additive.
 
+## [0.4.0](https://github.com/joshka/qwertty-term/compare/qwertty-term-v0.3.0...qwertty-term-v0.4.0) - 2026-07-15
+
+### Added
+
+- **Linux font discovery (ADR 003 P2):** a fontconfig-backed system-font
+  discovery module, wired into the font collection and resolver, plus a FreeType
+  `Face::load_by_name` path and configurable glyph load flags
+  (`freetype-load-flags` / `force-autohint`). Linux can now find and load system
+  fonts by name and tune hinting.
+  ([#245](https://github.com/joshka/qwertty-term/pull/245),
+  [#248](https://github.com/joshka/qwertty-term/pull/248),
+  [#260](https://github.com/joshka/qwertty-term/pull/260),
+  [#264](https://github.com/joshka/qwertty-term/pull/264))
+- **Window appearance & layout options (app):**
+  - `window-theme` — `auto`/`system`/`light`/`dark`, mapped to `NSAppearance`.
+    ([#251](https://github.com/joshka/qwertty-term/pull/251))
+  - `window-step-resize`, `macos-window-shadow`, and `macos-window-buttons`.
+    ([#246](https://github.com/joshka/qwertty-term/pull/246))
+  - `window-subtitle`, `window-new-tab-position`, and `window-show-tab-bar`.
+    ([#243](https://github.com/joshka/qwertty-term/pull/243))
+- **tmux control mode — parser groundwork (ADR 004):** the pure control-mode
+  protocol parsers land in `qwertty-term-vt` — the notification state machine,
+  the window-layout parser + pane checksum, and format-variable parse/encode.
+  These are compiled-in but runtime-inert until a `tmux -CC` session begins; the
+  native viewer that renders tmux windows as tabs/splits is still to come.
+  ([#257](https://github.com/joshka/qwertty-term/pull/257),
+  [#259](https://github.com/joshka/qwertty-term/pull/259),
+  [#261](https://github.com/joshka/qwertty-term/pull/261))
+- **VT config seams:** `title-report` and `image-storage-limit` engine seams so
+  the app can wire those configuration keys through to the terminal.
+  ([#249](https://github.com/joshka/qwertty-term/pull/249))
+
+### Changed
+
+- **XTGETTCAP:** terminfo capability queries now answer the full ghostty
+  terminfo table (268 capabilities plus the `TN`/`Co`/`RGB` query specials),
+  up from 6 hardcoded answers.
+  ([#241](https://github.com/joshka/qwertty-term/pull/241))
+- **Performance:** scrolling within a DECSTBM scroll region now uses an in-place
+  fast path (ported from upstream Ghostty `cursorScrollRegionUp`), avoiding a
+  pin walk, cursor re-resolution, and per-cell clear on every region scroll.
+  ([#266](https://github.com/joshka/qwertty-term/pull/266))
+
+### Fixed
+
+- **Font zoom:** re-upload the glyph atlas and adopt fresh cell metrics on a font
+  rebuild (`cmd`-`+`/`-` zoom, display-scale, or `font-family` change), fixing
+  garbled/doubled glyphs in the live window.
+  ([#253](https://github.com/joshka/qwertty-term/pull/253))
+- **XTWINOPS:** size and title report ops (`CSI 14/16/18/21 t`) are gated on
+  exactly one parameter, so `CSI 14;2 t` no longer emits a spurious report
+  (matching upstream).
+  ([#244](https://github.com/joshka/qwertty-term/pull/244))
+
 ## [0.3.0](https://github.com/joshka/qwertty-term/compare/qwertty-term-v0.2.0...qwertty-term-v0.3.0) - 2026-07-14
 
 ### Added
