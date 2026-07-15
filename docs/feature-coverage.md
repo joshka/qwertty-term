@@ -344,12 +344,12 @@ items are `[ ]` wholesale unless noted.
 - [~] **fontconfig discovery** wired (ADR 003 P2): styled-family members + codepoint fallback
       resolve from installed system fonts via fontconfig (dlopen), enabled on Linux through the
       renderer. `force-autohint`/`freetype-load-flags` FreeType flags still deferred.
-- [~] **Linux pixel-test coverage** (#42): the renderer's acceptance pixel tests
-      (`bold_italic_pixels`, `sprite_specimen`, `text_baseline`, `default_fg_ink` embedded case)
-      un-gated onto the `Software` backend, so they run on the Linux CI lane over FreeType — real
-      Linux glyph/sprite/baseline coverage beyond the headless smoke. Deferred (need Software
-      color/image or `load_by_name`): `emoji_pixels`, `kitty_image_pixels`, `ligature_pixels`,
-      cursor tests; `first_pixels` stays the Metal-readback proof.
+- [~] **Linux pixel-test coverage** (#42): the renderer's acceptance pixel tests run on the Linux
+      CI lane over the `Software` backend + FreeType — real glyph/sprite/baseline/ligature coverage
+      beyond the headless smoke. Un-gated: `bold_italic_pixels`, `sprite_specimen`, `text_baseline`,
+      `default_fg_ink` (both cases), `ligature_pixels` (via FreeType `load_by_name`). Deferred
+      (need Software color/image compositing): `emoji_pixels`, `kitty_image_pixels`, cursor tests;
+      `first_pixels` stays the Metal IOSurface-readback proof.
 - [ ] GTK apprt, Wayland/X11, all `gtk-*` (~10 keys), `linux-cgroup*`
 
 ## Embeddability / library (a qwertty-term goal beyond Ghostty)

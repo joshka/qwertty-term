@@ -151,13 +151,10 @@ fn embedded_default_fg_inks_on_theme() {
     assert_default_fg_visible(face, "embedded");
 }
 
-// `Face::load_by_name` (system font lookup by family name) exists only on the
-// CoreText face; the FreeType face has no `load_by_name` yet (it would be a
-// fontconfig `discover_family` + load — a follow-up). The renderer uses the
-// CoreText face iff `target_os = "macos"` (it enables the font crate's FreeType
-// backend only off-macOS), so this named-family case is macOS-gated; the
-// embedded case above runs on every backend.
-#[cfg(target_os = "macos")]
+// `Face::load_by_name` now exists on both faces (CoreText, and FreeType via
+// fontconfig discovery — #42/#260), so this named-family case runs on every
+// backend; it skips-if-not-installed (on a miss `load_by_name` falls back to the
+// embedded face, which the family-name check below rejects).
 #[test]
 fn named_family_default_fg_inks_on_theme() {
     // A name-loaded system family — the path that went dark in the field. Skip

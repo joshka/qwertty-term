@@ -11,18 +11,21 @@
 //! ligate — renders identically shaped vs unshaped, proving the diff above is
 //! the ligature and not shaping noise.
 //!
-//! Rendering here is the font crate's real CoreText rasterization
+//! Rendering here is the font crate's real glyph rasterization
 //! (`Face::rasterize`) composited into a cell strip and read back — an offscreen
 //! readback without a GPU. (The renderer's live engine shapes one cell at a time
 //! for the monospace scope, so cross-cell ligatures are exercised here through
 //! the run shaper directly; wiring multi-cell run shaping into the engine is a
 //! separate, out-of-territory change.)
 //!
-//! Skips (`SKIP:`) if FiraCode Nerd Font Mono isn't installed.
-#![cfg(target_os = "macos")]
+//! Not OS-gated: it runs over the `Face` platform alias (CoreText on macOS,
+//! FreeType on Linux) and `Face::load_by_name` (fontconfig discovery on Linux,
+//! #42) — so it exercises named-family shaping on both. Skips (`SKIP:`) if
+//! FiraCode Nerd Font Mono isn't installed (the common case on CI, where
+//! `load_by_name` falls back to the embedded face → family-name check misses).
 
 use qwertty_term_font::Shaper;
-use qwertty_term_font::coretext::{Face, PixelFormat};
+use qwertty_term_font::{Bitmap, Face, PixelFormat};
 
 const FAMILY: &str = "FiraCode Nerd Font Mono";
 const SIZE_PX: f64 = 32.0;
@@ -60,7 +63,7 @@ impl Strip {
     /// Blit a rasterized glyph bitmap into the strip at cell `col`, baseline-ish
     /// placement (bearing applied), clamped to the strip bounds. Only the alpha
     /// (coverage) channel is composited — this is grayscale text.
-    fn blit(&mut self, col: usize, bmp: &qwertty_term_font::coretext::Bitmap) {
+    fn blit(&mut self, col: usize, bmp: &Bitmap) {
         if bmp.format != PixelFormat::Alpha8 {
             return; // text glyphs are Alpha8; skip color (not expected here)
         }
