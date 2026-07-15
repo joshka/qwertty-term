@@ -10,6 +10,10 @@
 //!   renderer → IOSurface readback), print the result, and exit `0` on success
 //!   (or on a graceful skip when no Metal device is present), non-zero on
 //!   failure. No window.
+//! - `--tmux-smoke`: run the headless tmux control-mode smoke (ADR 006 slice
+//!   5c) — drive a synthetic `tmux -CC` byte stream through a real engine +
+//!   `TmuxSession`, assert the native tab/split reconciliation and `%output`
+//!   routing, and exit `0`/`1`. No GPU or window, so it runs on any platform.
 //!
 //! The `QWERTTY_TERM_SMOKE_MS` environment variable, if set to a positive integer
 //! in window mode, schedules a clean auto-exit after that many milliseconds —
@@ -130,6 +134,7 @@ fn main() {
 
     match mode {
         Mode::OffscreenSmoke => run_offscreen_smoke(),
+        Mode::TmuxSmoke => run_tmux_smoke(),
         Mode::Window => run_window(),
         Mode::ImportGhosttyConfig { path } => run_import_ghostty_config(path),
     }
@@ -139,6 +144,8 @@ fn main() {
 enum Mode {
     Window,
     OffscreenSmoke,
+    /// The headless tmux control-mode smoke (ADR 006 slice 5c). No GPU/window.
+    TmuxSmoke,
     /// Convert a Ghostty config to qwertty-term TOML on stdout. `path` is the
     /// source file; `None` means the default Ghostty config location.
     ImportGhosttyConfig {
@@ -156,6 +163,7 @@ fn parse_mode(args: impl Iterator<Item = String>) -> Mode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--offscreen-smoke" => return Mode::OffscreenSmoke,
+            "--tmux-smoke" => return Mode::TmuxSmoke,
             "--window" => return Mode::Window,
             "+import-ghostty-config" => {
                 // An optional positional source path (skip any trailing flags).
@@ -218,6 +226,22 @@ fn run_offscreen_smoke() {
         }
         Err(e) => {
             eprintln!("FAIL: offscreen smoke: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Run the headless tmux control-mode smoke (ADR 006 slice 5c). No GPU or
+/// window needed, so it runs on any platform. Exit `0` on success, `1` on a
+/// verified failure.
+fn run_tmux_smoke() {
+    match qwertty_term::smoke_tmux::run() {
+        Ok(()) => {
+            println!("OK: tmux control-mode smoke reconciled tabs/splits + routed %output");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("FAIL: tmux control-mode smoke: {e}");
             std::process::exit(1);
         }
     }

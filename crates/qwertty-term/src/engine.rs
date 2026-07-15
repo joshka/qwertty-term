@@ -130,6 +130,16 @@ impl Engine {
         self.stream.handler.take_command_boundaries()
     }
 
+    /// Drain the tmux control-mode notifications decoded on the DCS `1000p`
+    /// seam (`\eP1000p … \e\\`) since the last drain, in order. Empty unless the
+    /// pane is running `tmux -CC`. The app feeds these to a per-surface
+    /// [`TmuxSession`](crate::tmux_session::TmuxSession) which drives the native
+    /// tab/split reconciliation and writes tmux commands back to this pane's pty
+    /// (ADR 006 slice 5c). Mirrors the other `take_*` event drains.
+    pub fn take_tmux_notifications(&mut self) -> Vec<qwertty_term_vt::tmux::Notification> {
+        self.stream.handler.take_tmux_notifications()
+    }
+
     /// Drain the most recent OSC 9;4 ConEmu progress report, if one arrived
     /// since the last drain. The app renders it as an in-surface progress bar
     /// (gated by `progress-style`; see `crate::progress`).
@@ -1229,6 +1239,29 @@ mod tests {
             small.scrollback_len()
         );
         assert_eq!(small.scrollback_len(), 0, "zero limit keeps no scrollback");
+    }
+
+    #[test]
+    fn take_tmux_notifications_drains_control_mode_seam() {
+        use qwertty_term_vt::tmux::Notification;
+        let mut engine = Engine::new(80, 24);
+        // No control mode entered yet.
+        assert!(engine.take_tmux_notifications().is_empty());
+        // `ESC P 1000 p` enters control mode; a `%output %1 hi` line; ST exits.
+        engine.write(b"\x1bP1000p%output %1 hi\n\x1b\\");
+        assert_eq!(
+            engine.take_tmux_notifications(),
+            vec![
+                Notification::Enter,
+                Notification::Output {
+                    pane_id: 1,
+                    data: b"hi".to_vec(),
+                },
+                Notification::Exit,
+            ]
+        );
+        // Drained.
+        assert!(engine.take_tmux_notifications().is_empty());
     }
 
     #[test]

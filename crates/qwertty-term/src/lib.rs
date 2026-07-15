@@ -46,6 +46,18 @@ pub mod tmux_viewer;
 // tab/split intent (Option (a)); creates no native surfaces. Platform-agnostic.
 pub mod tmux_reconcile;
 
+// tmux control-mode session driver (ADR 006 slice 5c). Owns a Viewer + a
+// Reconciler and turns a drained notification stream into outgoing control-pty
+// command bytes + a native-surface ReconcilePlan. Headless and platform-agnostic
+// (the app's per-surface control-mode lifecycle wraps it).
+pub mod tmux_session;
+
+// Headless tmux control-mode smoke (ADR 006 slice 5c, `--tmux-smoke`). Drives a
+// synthetic `tmux -CC` byte stream through a real Engine + TmuxSession and
+// asserts the native tab/split reconciliation + %output routing. No GPU/AppKit,
+// so it runs anywhere (unlike the Metal `smoke`).
+pub mod smoke_tmux;
+
 // The real terminal IO stack binding (M2 chunk E). `qwertty-term-termio` is POSIX
 // (rustix/libc fork+pty), so gate on unix; the app itself is macOS-only.
 #[cfg(unix)]
