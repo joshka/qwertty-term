@@ -37,6 +37,9 @@ pub mod splits;
 pub mod tabkeys;
 pub mod tabs;
 pub mod theme;
+// Headless tmux control-mode Viewer model (ADR 006 / ADR 004 slice 5a). Pure,
+// AppKit-free — consumes the engine's tmux notification stream. Platform-agnostic.
+pub mod tmux_viewer;
 
 // The real terminal IO stack binding (M2 chunk E). `qwertty-term-termio` is POSIX
 // (rustix/libc fork+pty), so gate on unix; the app itself is macOS-only.
