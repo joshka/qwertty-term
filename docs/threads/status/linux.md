@@ -1,10 +1,10 @@
 # linux status (Linux port — ADR 003, P2/P3 continuation of T7)
 
-- **Current item:** FreeType `LoadFlags` (`freetype-load-flags`/`force-autohint`) plumbing —
-  gate-green, shipping. Next: real wght-variation bold; then deferred pixel tests
-  (emoji/kitty/cursor — need Software color/image compositing).
-- **Last merged:** #262 (#42 slice 2 — ligature + named-family pixel tests on Linux) → `030d2dcc`.
-  (Also this session: S1 #245, S2 #248, #254 status, #258 #42-slice1, #260 load_by_name.)
+- **Current item:** **PAUSED for recycle — mission #1 (fontconfig discovery) + #42 (Linux pixel
+  coverage) COMPLETE, all merged.** Next backlog item = real wght-variation bold (needs unsafe
+  `freetype-sys` FFI — see crib); respawn to continue.
+- **Last merged:** #264 (FreeType `LoadFlags`) → `39ef05fe`. Session PRs (all merged): #245, #248,
+  #254, #258, #260, #262, #264.
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
@@ -63,13 +63,36 @@
 
 ## Next-item pointers (respawn crib)
 
-- **`force-autohint`/`freetype-load-flags`:** give `freetype::Face` a load-flags field, apply in
-  `rasterize`/`rasterize_constrained` (`FT_LOAD_FORCE_AUTOHINT` etc.), default = upstream
-  `face/freetype.zig` load flags. Config-key *parsing* is **T3**; do the FreeType plumbing
-  additively + route the config wiring to T3's Inbox (coordination, not a hard block).
-- **#42:** un-gate the ~9 `#[cfg(target_os="macos")]` renderer pixel tests
-  (`crates/qwertty-term-renderer/tests/*_pixels.rs`) to also run over `Engine<Software>` on
-  Linux CI — mirror `tests/software_headless.rs`. Pure coverage, my territory.
+**DONE this session (all merged):** mission #1 = fontconfig discovery (#245 module, #248 wiring),
+FreeType `load_by_name` (#260), FreeType `LoadFlags` (#264); #42 Linux pixel coverage (#258
+slice 1: bold_italic/sprite/text_baseline/default_fg embedded; #262 slice 2: ligature +
+named_family). Plus status closeouts (#254 + this one).
+
+**Remaining backlog (pick top-down):**
+
+- **real wght-variation bold** (font crate, `freetype.rs`). Today `load_embedded_bold` uses
+  *synthetic* bold (1px dilation) because FreeType wght-instance selection isn't wired; CoreText
+  uses the real `wght=700` axis. Not a correctness gap — synthetic works — but a quality
+  refinement. **Deserves fresh context (unsafe cross-crate FFI).** API is scouted:
+  - freetype-rs 0.36 has no safe var/MM API, but exposes `Face::raw_mut() -> &mut ffi::FT_FaceRec`
+    (`face.rs:349`); cast to `*mut FT_FaceRec` = `FT_Face`.
+  - `freetype-sys` 0.20 (add as a direct dep; already in the lock) exposes
+    `FT_Set_Var_Design_Coordinates(face, num_coords, coords: *mut FT_Fixed)` (`lib.rs:1195`) and
+    `FT_Set_Named_Instance(face, idx)` (`lib.rs:1240`). Coords are 16.16 fixed (`700 * 65536`).
+  - Verify freetype-rs's `ffi` types ARE freetype-sys's (same crate) so `raw_mut() as *mut
+    FT_FaceRec` typechecks; else the cast won't compile.
+  - wght axis index: query `FT_Get_MM_Var`/`FT_Done_MM_Var` to find the `wght` axis robustly
+    (don't hardcode index 0 — fine for the single-axis embedded JBMono but not for arbitrary
+    fonts). Set coords BEFORE `set_pixel_sizes`/glyph load.
+  - Then update `Face::wght()` to return `Some(700.0)` and drop synthetic bold for real-bold
+    faces. Test: real-bold 'H' ink > regular 'H' ink AND differs from the synthetic-bold bitmap.
+- **Deferred #42 pixel tests** (`emoji_pixels`, `kitty_image_pixels`, cursor tests) — blocked on
+  **Software-backend color-glyph + kitty-image compositing** (renderer/`software.rs`, T7-noted
+  deferred features). Do those first, then un-gate the tests.
+- **Deferred Software-backend features** (renderer/`software.rs`): color/emoji glyph atlas,
+  kitty image compositing, `padding_extend` edges, linear-space blending. Larger; renderer core-ish.
+- **`monochrome` FreeType load flag** — deferred with the color-glyph work (needs the 1-bit
+  bitmap unpack path); the `LoadFlags` struct is ready to grow the field.
 - **GATED (P4):** windowed Linux renderer (OpenGL R9 / software-to-window) + GTK4 apprt + OS
   glue. ADR 003 defers behind a separate Josh greenlight — **flag Josh, do not start**.
 - **Local fontconfig validation:** libfontconfig isn't on the dev mac by default (tests
