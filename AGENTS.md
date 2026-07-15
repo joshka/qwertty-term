@@ -2,8 +2,14 @@
 
 qwertty-term is a full Rust rewrite of [Ghostty](https://ghostty.org): a native macOS
 terminal emulator plus a family of reusable, embeddable crates. It is a byte-faithful port
-of Ghostty's Zig (pinned at commit `2da015cd6`, source at `~/local/ghostty`), verified by
-differential testing against the original.
+of Ghostty's Zig (pinned at commit `77190bd02`, source at `~/local/ghostty`), verified by
+differential testing against the original. (The pin was bumped from `2da015cd6` →
+`77190bd02` on 2026-07-15 to adopt the scroll-region optimizations; the 14-commit delta is
+mostly perf commits already mirrored as new work, plus the scroll-region `no_scrollback`
+semantics. Per-file provenance comments that cite `2da015cd6` record where that code was
+*originally* ported from and are left as historical notes; the differential **oracle** —
+the authority — is now built at `77190bd02`. The three font/sprite cursor-height commits in
+the delta are tracked for separate verification in `docs/threads/status/issues.md`.)
 
 **Start here:** `docs/rewrite-prompt.md` (the constitution), then `docs/threads/README.md`
 (the parallel-thread model + PR/gate/status protocol), then `docs/handoff.md` /

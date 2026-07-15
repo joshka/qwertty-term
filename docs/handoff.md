@@ -179,9 +179,11 @@ formatter differential vs ghostty_formatter_* is clean; trunk ~993 lib tests.
   `crates/spike` (old prototype, kept as Phase-2 debug frontend), `xtask`
   (`gen-unicode` codegen). Remaining Phase 0 items (fuzz targets, criterion skeleton)
   ride along with the Parser.zig chunk.
-- **Reference library**: build with
-  `cd ~/local/ghostty && mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true`; then
-  `cargo test -p vt-diff --features reference`. Ghostty commit ported against: `2da015cd6`.
+- **Reference library**: build at the pin commit with
+  `cd ~/local/ghostty && git checkout 77190bd02 && mise exec zig@0.15.2 -- zig build
+  -Demit-lib-vt=true -Doptimize=ReleaseFast`; then `cargo test -p vt-diff --features reference`.
+  Ghostty commit pinned/ported against: `77190bd02` (bumped from `2da015cd6` on 2026-07-15 for
+  the scroll-region optimizations — see AGENTS.md and `docs/analysis/scroll-region-opt.md`).
 - **Unicode done at exact parity** (0 mismatches over all codepoints vs ghostty's
   generated table); regenerate tables with `cargo xtask gen-unicode`.
 - **Analysis docs so far**: `docs/analysis/libghostty-vt-c-api.md`, `docs/analysis/unicode.md`.

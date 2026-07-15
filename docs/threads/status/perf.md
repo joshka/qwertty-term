@@ -1,22 +1,54 @@
 # perf status
 
-- **Current item:** Session 1 — **region-scroll fast path shipped as PR #266** (open for
-  visibility; gate + oracle + Miri + fuzz all green; whole-app A/B done). **Awaiting Josh** on
-  the frozen-pin decision for the bottom-region suites (see below). See `## Session 1`.
-- **Last merged:** none yet (PR #266 open — <https://github.com/joshka/qwertty-term/pull/266>)
-- **ESCALATION (Josh):** closing the two `scrolling_bottom_*` suites needs upstream 77190bd02's
-  **change 1** (skip scrollback creation on no-scrollback screens), which is a **semantic**
-  change vs our frozen pin `2da015cd6` (fails the differential oracle — proven). Options:
-  (a) **pin bump** to ≥ 77190bd02 (moves the frozen oracle forward), or (b) a separate PR
-  optimizing the scrollback-creating `cursor_scroll_above` path without changing its result.
-  Which do you want? Details in `docs/analysis/scroll-region-opt.md`.
-- **Last merged:** (none yet this thread; succeeds T1's engine-perf lane — #227 last)
-- **Blockers:** none
-- **Claims:** (2026-07-14, PR: cursor_scroll_region_up port) `crates/qwertty-term-vt/src/`
-  `terminal/mod.rs` (index() region routing), `screen/mod.rs` (new
-  `cursor_scroll_region_up`), `pagelist/mod.rs` (new `shift_tracked_pins_region_up`),
-  `page/page_impl.rs` (new `rotate_rows_once_left`). All were vt-tails territory; vt-tails
-  CLOSED (no claims). Additive new fns + one routing rewrite in index(). Drop on merge.
+- **Current item:** Session 1 — **#266 (change 2) MERGED**; executing the Josh-approved pin
+  bump `2da015cd6`→`77190bd02` + landing change 1. Oracle rebuilt & installed at the default
+  path, authoritative pin docs bumped, font/sprite tracked → change-1 PR next.
+- **Last merged:** **#266** (change 2, rebase-merged as `0fb53969` on main, 2026-07-15).
+- **Blockers:** none.
+
+## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
+
+**Done (this session):** de-risked + built + code-ported the VT-engine half.
+
+- Sized it: `2da015cd6..77190bd02` = **14 commits**, most already ported by T1 as new perf work
+  (behavior-identical → oracle-neutral). Built the new-pin oracle at
+  **`/Users/joshka/local/ghostty-pin77190/zig-out/lib`** (git worktree of `~/local/ghostty` at
+  `77190bd02`; do NOT delete — the change-1 gate needs it). Against it, ONLY the change-1
+  scroll-region divergences appear (259); curated corpus + afl + hand differential all green →
+  **no other semantic delta for the vt engine**.
+- Ported change 1 (commit `kwzluoswxpsu`): the `no_scrollback` gate in `index()`
+  (`!no_scrollback || bottom==0`) AND `scroll_up`/CSI-S (`!no_scrollback || bottom==rows-1`),
+  plus restored `cursor_scroll_region_up`'s non-zero-blank (`fill_cells`) branch to match
+  upstream's full `cursorScrollRegionUp`. Result: **generative sweep 259→0 vs the 77190bd02
+  oracle** (x2), differential + afl green, release lane + 1618 lib tests green. (Change 1's only
+  observable difference — transient scrollback on a no-scrollback screen — is invisible to
+  visible-grid tests, so all in-crate tests passed unchanged; it's user-visible-identical.)
+
+**DONE (Josh authorized "merge 266 … and do the recommended steps"):**
+
+1. ✅ **Shared oracle bumped.** Built libghostty-vt at `77190bd02` in a `~/local/ghostty`
+   worktree (`~/local/ghostty-pin77190`) and installed the lib set into the default path
+   `~/local/ghostty/zig-out/lib/` (old `2da015cd6`-era `.a` backed up to
+   `zig-out/lib-backup-2da015cd6/`). The source checkout at `~/local/ghostty` (repro commit
+   `38e49a232`, uncommitted files) was left untouched — only the built artifact in `zig-out`.
+   Default `cargo test -p vt-diff --features reference` now runs the change-1 code GREEN with
+   no env override. (To rebuild reproducibly: `cd ~/local/ghostty && git checkout 77190bd02 &&
+   zig build -Demit-lib-vt=true -Doptimize=ReleaseFast`.)
+2. ✅ **Authoritative pin docs bumped** to `77190bd02`: `AGENTS.md` (with a bump note),
+   `docs/handoff.md` (build recipe), `crates/vt-diff/src/ffi.rs` (C-API source-of-truth). The
+   226 historical per-file "ported from `2da015cd6`" provenance comments are left as-is (they
+   record original port origin; the differential oracle is the authority).
+3. ✅ **font/sprite tracked** in `docs/threads/status/issues.md` Inbox (3 cursor-height commits
+   `cabbdee32`/`dac341cad`/`e8f3f6c43` owed a T2/sprite parity check).
+
+Full analysis: `docs/analysis/scroll-region-opt.md`.
+
+## Claims
+
+- (2026-07-14, PR #266 + change-1 commit) `crates/qwertty-term-vt/src/`: `terminal/mod.rs`
+  (index() + scroll_up region routing), `screen/mod.rs` (`cursor_scroll_region_up`),
+  `pagelist/mod.rs` (`shift_tracked_pins_region_up`), `page/page_impl.rs`
+  (`rotate_rows_once_left`). All were vt-tails territory; vt-tails CLOSED. Drop on merge.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
 ## Standing state (from orientation, 2026-07-14)

@@ -97,10 +97,19 @@ region-scroll ms are ~3–4× the 2026-07-13 scoreboard purely from current mach
 (both builds show it), not a code change — re-run the three-way scoreboard on a quiet machine
 before refreshing the published table.
 
-## Follow-up: the bottom-region suites remain (frozen-pin blocker)
+## Change 1 (pin bump 2da015cd6 → 77190bd02) — ported, pending oracle infra
 
-`scrolling_bottom_region` / `_small_region` are `top == 0` regions on the alt screen; closing
-their ~1.20× gap needs **change 1**, which is post-pin semantics. Options are (a) a pin bump to
-`>= 77190bd02` (Josh's call — moves the frozen oracle forward), or (b) optimizing the
-scrollback-creating `cursor_scroll_above` path itself without changing its result (separate,
-larger PR). Flagged in `docs/threads/status/perf.md`.
+Josh approved the pin bump. Change 1 (the `no_scrollback` scrollback-skip) is now **ported**
+in the follow-up jj commit `kwzluoswxpsu` (stacked on #266): the gate in `index()`
+(`!no_scrollback || bottom==0`) and `scroll_up`/CSI-S (`!no_scrollback || bottom==rows-1`), plus
+`cursor_scroll_region_up` restored to handle a non-zero blank (matching upstream's full
+`cursorScrollRegionUp`). Verified **green against a freshly-built `77190bd02` oracle**
+(`/Users/joshka/local/ghostty-pin77190/zig-out/lib`): generative sweep 259→0, differential +
+afl + release lane + 1618 lib tests all green. Sizing showed the 14-commit range introduces no
+other VT-engine semantic delta (corpus/afl/hand tests were already green pre-change-1).
+
+**Remaining to land it** (coordinated, not perf-scoped — see `docs/threads/status/perf.md`):
+rebuild the shared oracle `~/local/ghostty/zig-out/lib` at `77190bd02`; decide the provenance
+scope (`2da015cd6` × 226 across 55+ files); verify the 3 font/sprite cursor-height commits with
+those owners. Until the shared oracle moves, the change-1 commit's default `--features
+reference` gate is red, so it is held (not pushed) rather than merged.
