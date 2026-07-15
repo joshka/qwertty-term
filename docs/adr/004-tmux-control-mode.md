@@ -1,7 +1,7 @@
 # ADR 004: tmux control mode — scope, layering, and PR slices
 
-- Status: **ACCEPTED** (Josh 2026-07-14: "start tmux control mode" + "confirm adr
-  recommendations"). Both open questions are resolved in favour of the recommendations:
+- Status: **ACCEPTED** (ratified by Josh 2026-07-14 — "start tmux control mode" + "confirm
+  adr recommendations"). Both open questions are resolved in favour of the recommendations:
   (1) tmux control mode ships **always-compiled, runtime-inert** until a `\ePtmux;` entry
   arrives (no Cargo feature, no config gate for the engine parsers); (2) the native **Viewer
   (slice 5) is app-tails territory** — vt-tails delivers slices 1–4 (the pure parsers + the
