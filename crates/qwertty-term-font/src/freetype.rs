@@ -68,6 +68,41 @@ struct Synthetic {
     italic: bool,
 }
 
+/// FreeType glyph-loading hint controls — the reduced analog of upstream's
+/// `FreetypeLoadFlags` (`face/freetype.zig:355-386`), driven by the
+/// `freetype-load-flags` and `force-autohint` config keys. The **config-key
+/// parsing** is the config/app thread's job; this is the face-side capability
+/// plus its default. Applied in [`Face::rasterize`] via
+/// [`Face::glyph_load_flags`].
+///
+/// The `monochrome` flag (1-bit rendering) is intentionally **not** included
+/// yet: the FreeType face always renders grayscale AA, and the mono bitmap
+/// unpack path is deferred with the color-glyph work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadFlags {
+    /// Use the font's own (bytecode) hinting (`hinting`). Upstream default: on.
+    /// Ignored (forced off) for constrained glyphs.
+    pub hinting: bool,
+    /// Prefer the auto-hinter even when the font ships its own hints
+    /// (`force-autohint`, `FT_LOAD_FORCE_AUTOHINT`). Upstream default: off.
+    pub force_autohint: bool,
+    /// Allow the auto-hinter at all (`autohint`); `false` →
+    /// `FT_LOAD_NO_AUTOHINT`. Upstream default: on.
+    pub autohint: bool,
+}
+
+impl Default for LoadFlags {
+    fn default() -> LoadFlags {
+        // Upstream default set (`Config.zig` `freetype-load-flags`): hinting +
+        // autohint on, force-autohint off.
+        LoadFlags {
+            hinting: true,
+            force_autohint: false,
+            autohint: true,
+        }
+    }
+}
+
 pub struct Face {
     face: freetype::Face,
     /// The font bytes, kept for the `ttf-parser` metric derivation and for
@@ -77,6 +112,8 @@ pub struct Face {
     /// Subface index within a `.ttc`/`.otc` collection (0 for a single face).
     face_index: u32,
     synthetic: Synthetic,
+    /// Glyph-load hint controls (`freetype-load-flags` / `force-autohint`).
+    load_flags: LoadFlags,
 }
 
 impl Face {
@@ -106,7 +143,40 @@ impl Face {
             size_px,
             face_index,
             synthetic: Synthetic::default(),
+            load_flags: LoadFlags::default(),
         })
+    }
+
+    /// Return this face configured with the given glyph-load hint controls
+    /// (`freetype-load-flags` / `force-autohint`). Builder-style so the config
+    /// layer can set it at face construction: `Face::load_...(..)?.with_load_flags(f)`.
+    pub fn with_load_flags(mut self, load_flags: LoadFlags) -> Face {
+        self.load_flags = load_flags;
+        self
+    }
+
+    /// The glyph-load hint controls in effect for this face.
+    pub fn load_flags(&self) -> LoadFlags {
+        self.load_flags
+    }
+
+    /// Build the FreeType `LoadFlag` bitset for a glyph load, mirroring upstream
+    /// `glyphLoadFlags` (`face/freetype.zig:355-386`). `constrained` (Nerd Font
+    /// icon / emoji cover-fit) forces hinting off, matching upstream
+    /// (`do_hinting = hinting and !constrained`).
+    fn glyph_load_flags(&self, constrained: bool) -> LoadFlag {
+        let do_hinting = self.load_flags.hinting && !constrained;
+        let mut flags = LoadFlag::DEFAULT | LoadFlag::TARGET_NORMAL;
+        if !do_hinting {
+            flags |= LoadFlag::NO_HINTING;
+        }
+        if self.load_flags.force_autohint {
+            flags |= LoadFlag::FORCE_AUTOHINT;
+        }
+        if !self.load_flags.autohint {
+            flags |= LoadFlag::NO_AUTOHINT;
+        }
+        flags
     }
 
     /// Load the embedded JetBrains Mono fallback at `size_px`.
@@ -175,9 +245,14 @@ impl Face {
 
     /// An independent copy of this face at `size_px`, byte-backed as before but
     /// with synthetic flags reset (matches `coretext::Face::try_clone`, used by
-    /// the collection's alias-to-regular / synthesize-on-a-fresh-copy paths).
+    /// the collection's alias-to-regular / synthesize-on-a-fresh-copy paths). The
+    /// configured [`LoadFlags`] are preserved (they are a face-level config, not
+    /// a per-glyph synthetic style).
     pub fn try_clone(&self, size_px: f64) -> Result<Face, Error> {
-        Self::load_from_bytes_indexed(&self.bytes, size_px, self.face_index)
+        Ok(
+            Self::load_from_bytes_indexed(&self.bytes, size_px, self.face_index)?
+                .with_load_flags(self.load_flags),
+        )
     }
 
     /// The pixel size this face was loaded at.
@@ -347,7 +422,7 @@ impl Face {
 
         let load = self
             .face
-            .load_glyph(glyph_id, LoadFlag::DEFAULT)
+            .load_glyph(glyph_id, self.glyph_load_flags(false))
             .map_err(|_| Error::NoSuchGlyph);
         let slot = self.face.glyph();
         let render = slot
@@ -590,6 +665,56 @@ mod tests {
             "sheared glyph should be at least as wide: italic {} vs regular {}",
             italic.width,
             regular.width
+        );
+    }
+
+    /// Default `LoadFlags` match upstream (hinting + autohint on, force-autohint
+    /// off), and `glyph_load_flags` maps them to the right FreeType bits —
+    /// including forcing hinting off for constrained glyphs.
+    #[test]
+    fn load_flags_default_and_mapping() {
+        let face = Face::load_embedded(16.0).unwrap();
+        assert_eq!(face.load_flags(), LoadFlags::default());
+        assert_eq!(
+            LoadFlags::default(),
+            LoadFlags {
+                hinting: true,
+                force_autohint: false,
+                autohint: true,
+            }
+        );
+
+        // Default, unconstrained: hinting on → no NO_HINTING; auto-hinter allowed
+        // → no NO_AUTOHINT; not forced → no FORCE_AUTOHINT.
+        let f = face.glyph_load_flags(false);
+        assert!(!f.contains(LoadFlag::NO_HINTING));
+        assert!(!f.contains(LoadFlag::NO_AUTOHINT));
+        assert!(!f.contains(LoadFlag::FORCE_AUTOHINT));
+
+        // Constrained forces hinting off regardless of the config.
+        assert!(face.glyph_load_flags(true).contains(LoadFlag::NO_HINTING));
+
+        // force-autohint + autohint off flips exactly those two bits.
+        let tuned = Face::load_embedded(16.0)
+            .unwrap()
+            .with_load_flags(LoadFlags {
+                hinting: true,
+                force_autohint: true,
+                autohint: false,
+            });
+        let tf = tuned.glyph_load_flags(false);
+        assert!(tf.contains(LoadFlag::FORCE_AUTOHINT));
+        assert!(tf.contains(LoadFlag::NO_AUTOHINT));
+        assert!(!tf.contains(LoadFlag::NO_HINTING), "hinting still on");
+
+        // The tuned flags still rasterize a real glyph (the plumbing doesn't
+        // break rendering), and survive try_clone.
+        let gid = tuned.glyph_index('H').unwrap();
+        assert!(!tuned.rasterize(gid).unwrap().is_blank(), "H still inks");
+        assert_eq!(
+            tuned.try_clone(24.0).unwrap().load_flags(),
+            tuned.load_flags(),
+            "try_clone preserves load flags"
         );
     }
 

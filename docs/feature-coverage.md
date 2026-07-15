@@ -70,7 +70,9 @@ items are `[ ]` wholesale unless noted.
       fonts resolve on Linux, not just the embedded + synthetic chain. Verified end-to-end against
       real system fonts. FreeType `Face::load_by_name` (named-family lookup) added via
       `fontconfig::discover_family` with the CoreText family-match + embedded-fallback semantics.
-      `force-autohint`/`freetype-load-flags` + real wght-variation bold deferred
+      FreeType `LoadFlags` (`hinting`/`force-autohint`/`autohint`) honored during rasterization
+      (upstream `glyphLoadFlags` semantics; config-key parsing awaits the Linux apprt/T3 — FYI
+      filed). Deferred: `monochrome` load flag, real wght-variation bold
 
 ## Rendering (`src/renderer`, ~60%)
 
