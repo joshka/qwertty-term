@@ -1,14 +1,14 @@
 # perf status
 
-- **Current item:** Session 1 **COMPLETE — RECYCLING (respawn to continue).** Both scroll-region
-  PRs merged + frozen pin bumped `2da015cd6`→`77190bd02`; all four region-scroll suites addressed
-  at the code level (change 2 = top-region, change 1 = bottom-region). Backlog for a fresh
-  session: **(1)** whole-app vtebench scoreboard refresh — BLOCKED on a quiet machine (checked
-  2026-07-15 09:35: WindowServer 44% CPU, loadavg 6.09 → region suites still contended; re-check
-  and run when quiet, per `docs/analysis/scroll-region-opt.md`). **(2)** wide/CJK engine gap
-  (the real remaining engine deficit, ~2.6× behind upstream engine-only): SIMD UTF-8 decode /
-  tighter wide-print — T1's deferred items in `docs/analysis/perf.md` ("Still deferred after
-  Lever 5"); profile-first via `vt-diff/examples/profile_streams` (cjk/utf8, NOOP=1 attribution).
+- **Current item:** Session 2 (respawn) — shipped **PR #277** (bounds-check-free interior UTF-8
+  decode: cjk decode+dispatch +41%, cjk full +19%; open for Josh, gate green vs the 77190bd02
+  oracle, Miri + 877k-run parser fuzz clean). Backlog: **(1)** whole-app vtebench scoreboard
+  refresh — still BLOCKED on a quiet machine (checked 2026-07-15: WindowServer 44%, loadavg
+  ~5, interactive apps active → region suites still contended). **(2)** wide/CJK: decode is now
+  well-optimized (scalar); next print-side lever is `print_slice_fill<WIDE>` (~30% of cjk;
+  per-wide-cell width lookup + pair writes — marginal/risky, defer). True **SIMD** UTF-8 decode
+  (`std::arch` NEON + scalar fallback; stable + dependency-free but a large, differential-
+  critical effort) is the remaining big decode lever — best as its own focused session.
   **(3)** font/sprite pin-delta verification (routed to T2/sprite in `issues.md`).
 - **Last merged:** **#269** (change 1 + pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
 - **Blockers:** none.
