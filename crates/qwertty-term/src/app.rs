@@ -1626,6 +1626,52 @@ pub struct ControllerState {
     /// `NSAppearance` (light/dark, `auto` by background luminosity, or `None`
     /// to follow the system).
     window_theme: crate::config::WindowTheme,
+    /// Whether to answer the `CSI 21 t` window-title report query
+    /// (`title-report`, default false). Applied to every surface's vt handler
+    /// on build + reload (the engine defaults it on for lib parity).
+    title_report: bool,
+    /// The ENQ (`0x05`) answerback bytes (`enquiry-response`, empty = silent).
+    /// Applied to every surface's vt handler on build + reload.
+    enquiry_response: Vec<u8>,
+    /// The OSC 4/10/11 color-query reply format (`osc-color-report-format`).
+    /// Applied to every surface's vt handler on build + reload.
+    osc_color_report_format: qwertty_term_vt::stream::OscColorReportFormat,
+    /// The per-screen image-storage byte limit (`image-storage-limit`, `0`
+    /// disables image protocols). Applied to every surface's terminal on
+    /// build + reload.
+    image_storage_limit: usize,
+    /// The per-surface scrollback byte limit (`scrollback-limit`). Applied at
+    /// surface construction; a reload only affects new surfaces (upstream).
+    scrollback_limit: usize,
+    /// Whether KAM (ANSI mode 2) may suppress keyboard input (`vt-kam-allowed`,
+    /// default false). When true and the program has enabled KAM, keyboard
+    /// input to the pty is dropped (upstream `Surface.zig:2699`).
+    vt_kam_allowed: bool,
+}
+
+/// The subset of VT config toggles applied to a surface's engine (the setters
+/// at build + reload, plus the construction-only scrollback limit). Bundled so
+/// [`Controller::build_surface`] and [`Controller::reload_config`] apply them
+/// identically. Mirrors the per-key seams the `qwertty-term-vt` engine exposes.
+#[derive(Clone)]
+struct VtToggles {
+    title_report: bool,
+    enquiry_response: Vec<u8>,
+    osc_color_report_format: qwertty_term_vt::stream::OscColorReportFormat,
+    image_storage_limit: usize,
+    scrollback_limit: usize,
+}
+
+impl VtToggles {
+    /// Apply the live setters (everything except the construction-only
+    /// scrollback limit) to `engine`. Called on the freshly built engine and
+    /// on every existing engine during `reload_config`.
+    fn apply(&self, engine: &mut Engine) {
+        engine.set_title_reporting(self.title_report);
+        engine.set_enquiry_response(&self.enquiry_response);
+        engine.set_osc_color_report_format(self.osc_color_report_format);
+        engine.set_kitty_graphics_size_limit(self.image_storage_limit);
+    }
 }
 
 /// The reserved [`TabId`] for the quick-terminal surface. Uses the top of the
@@ -1898,6 +1944,12 @@ impl Controller {
             macos_window_shadow: config.macos_window_shadow,
             macos_window_buttons: config.macos_window_buttons(),
             window_theme: config.window_theme(),
+            title_report: config.title_report,
+            enquiry_response: config.enquiry_response_bytes().to_vec(),
+            osc_color_report_format: config.osc_color_report_format(),
+            image_storage_limit: config.image_storage_limit as usize,
+            scrollback_limit: config.scrollback_limit,
+            vt_kam_allowed: config.vt_kam_allowed,
         })))
     }
 
@@ -2791,6 +2843,20 @@ impl Controller {
         }
     }
 
+    /// Drain a surface's engine reply queue (DSR/DA/CPR/title/color replies
+    /// destined for the pty). Smoke/test only — the window-chrome smoke feeds a
+    /// query sequence and asserts on (or on the absence of) the reply to verify
+    /// a VT config toggle reached the engine.
+    pub fn take_surface_reply(&self, tab: TabId, surface: SurfaceId) -> Vec<u8> {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.surfaces.get(&surface))
+            .map(|s| s.engine().take_output())
+            .unwrap_or_default()
+    }
+
     /// Poison a surface's engine lock (smoke/test only) by spawning a thread that
     /// panics while holding it — reproducing the field-observed cascade where the
     /// io-reader/parse thread crashes mid-lock. The controller must survive: the
@@ -3248,6 +3314,23 @@ impl Controller {
         state.macos_window_shadow = config.macos_window_shadow;
         state.macos_window_buttons = config.macos_window_buttons();
         state.window_theme = config.window_theme();
+        // VT config toggles. The four live setters re-apply to every existing
+        // surface's engine below; `scrollback-limit` is construction-only, so a
+        // reload only affects new surfaces (upstream `Config.zig:1387`);
+        // `vt-kam-allowed` is read per-keystroke, so updating the field suffices.
+        state.title_report = config.title_report;
+        state.enquiry_response = config.enquiry_response_bytes().to_vec();
+        state.osc_color_report_format = config.osc_color_report_format();
+        state.image_storage_limit = config.image_storage_limit as usize;
+        state.scrollback_limit = config.scrollback_limit;
+        state.vt_kam_allowed = config.vt_kam_allowed;
+        let vt_toggles = VtToggles {
+            title_report: state.title_report,
+            enquiry_response: state.enquiry_response.clone(),
+            osc_color_report_format: state.osc_color_report_format,
+            image_storage_limit: state.image_storage_limit,
+            scrollback_limit: state.scrollback_limit,
+        };
         // `window-theme` re-applies live to every existing window (appearance is
         // freely settable at runtime).
         let theme = state.window_theme;
@@ -3264,6 +3347,7 @@ impl Controller {
                 surface.metric_modifiers = metric_modifiers.clone();
                 let (mut engine, _recovered) = lock_or_recover(&surface.engine);
                 engine.set_colors(startup_colors.clone());
+                vt_toggles.apply(&mut engine);
             }
         }
 
@@ -3492,11 +3576,20 @@ impl Controller {
         let mut state = self.0.borrow_mut();
         let cfg = state.input_config;
         let clear_on_typing = state.selection_clear_on_typing;
+        let vt_kam_allowed = state.vt_kam_allowed;
         if let Some(s) = state
             .tabs
             .get_mut(&tab)
             .and_then(|t| t.surfaces.get_mut(&surface))
         {
+            // KAM (ANSI mode 2): when `vt-kam-allowed` and the program has
+            // enabled `disable_keyboard`, drop the keystroke entirely — the
+            // program has asked the terminal to stop accepting keyboard input
+            // (upstream `Surface.zig:2699`). Keybindings already ran upstream in
+            // `performKeyEquivalent:`, so this only suppresses the encoder path.
+            if vt_kam_allowed && s.engine().keyboard_disabled() {
+                return;
+            }
             let opts = s.engine().key_encode_options();
             let bytes = crate::input::translate::encode_raw(raw, &cfg, opts);
             if !bytes.is_empty() {
@@ -3521,11 +3614,17 @@ impl Controller {
     pub fn send_text_to_surface(&self, tab: TabId, surface: SurfaceId, text: &str) {
         let mut state = self.0.borrow_mut();
         let clear_on_typing = state.selection_clear_on_typing;
+        let vt_kam_allowed = state.vt_kam_allowed;
         if let Some(s) = state
             .tabs
             .get_mut(&tab)
             .and_then(|t| t.surfaces.get_mut(&surface))
         {
+            // KAM: committed text is keyboard input; suppress it while the
+            // program has disabled the keyboard (see `encode_key_to_surface`).
+            if vt_kam_allowed && s.engine().keyboard_disabled() {
+                return;
+            }
             s.snap_to_bottom();
             // `selection-clear-on-typing`: committed text is typed input.
             if clear_on_typing {
@@ -4540,6 +4639,7 @@ impl Controller {
             dim_fill,
             mods,
             word_boundaries,
+            vt_toggles,
         ) = {
             let s = self.0.borrow();
             (
@@ -4551,6 +4651,13 @@ impl Controller {
                 s.unfocused_dim_fill,
                 s.metric_modifiers.clone(),
                 s.word_boundaries.clone(),
+                VtToggles {
+                    title_report: s.title_report,
+                    enquiry_response: s.enquiry_response.clone(),
+                    osc_color_report_format: s.osc_color_report_format,
+                    image_storage_limit: s.image_storage_limit,
+                    scrollback_limit: s.scrollback_limit,
+                },
             )
         };
 
@@ -4567,7 +4674,10 @@ impl Controller {
             .map(|c| (c.r, c.g, c.b))
             .unwrap_or((0x18, 0x18, 0x18));
 
-        let engine = Arc::new(Mutex::new(Engine::with_colors(cols, rows, startup_colors)));
+        let mut engine_inner =
+            Engine::with_options(cols, rows, startup_colors, vt_toggles.scrollback_limit);
+        vt_toggles.apply(&mut engine_inner);
+        let engine = Arc::new(Mutex::new(engine_inner));
         let io = TabIo::spawn(Arc::clone(&engine), cols as u16, rows as u16, cw, ch, cwd).ok()?;
         let render = RenderEngine::new(cw, ch).ok();
 
@@ -8618,13 +8728,32 @@ impl AppDelegate {
             ));
         }
 
+        // 8. VT config toggle wiring (`title-report`): the smoke runs with the
+        //    default config (title-report unset → false), so the app must have
+        //    called `set_title_reporting(false)` on the surface's engine,
+        //    overriding the engine's libghostty-vt parity default of *true*.
+        //    Feed `CSI 21 t` (window-title report) and assert the engine emits
+        //    NO reply — if the wiring were missing, the default-true engine
+        //    would answer `ESC ] l … ST` (upstream `Surface.zig:983`).
+        //    Drain first to clear any startup replies, then query.
+        let _ = controller.take_surface_reply(tab_a, surface_a);
+        controller.feed_surface_output(tab_a, surface_a, b"\x1b[21t");
+        let reply = controller.take_surface_reply(tab_a, surface_a);
+        if !reply.is_empty() {
+            fail(format!(
+                "title-report defaults false, so CSI 21 t must produce no reply; the \
+                 app did not override the engine's parity default (got {reply:?})"
+            ));
+        }
+
         println!(
             "OK: window-chrome smoke — tabbingMode=.preferred (window-show-tab-bar=\
              always), no window shadow (macos-window-shadow=false), buttons hidden \
              (macos-window-buttons=hidden), cell-sized resize increments \
              (window-step-resize=true), darkAqua appearance (window-theme=dark), the \
-             subtitle tracked the cwd (window-subtitle=working-directory), and a new \
-             tab landed at the group end (window-new-tab-position=end)."
+             subtitle tracked the cwd (window-subtitle=working-directory), a new \
+             tab landed at the group end (window-new-tab-position=end), and CSI 21 t \
+             was suppressed (title-report=false wired to the engine)."
         );
         std::process::exit(0);
     }

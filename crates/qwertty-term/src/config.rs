@@ -368,6 +368,46 @@ pub struct Config {
     /// `NSAppearance+Extension.swift`). Parsed by [`Config::window_theme`].
     #[serde(rename = "window-theme")]
     pub window_theme: Option<String>,
+    /// Enable answering the window-title report query (`CSI 21 t`). Default
+    /// **false** — the reply can leak sensitive information and, with a
+    /// maliciously crafted title, enable code execution, so upstream gates it
+    /// off (upstream `title-report`, `Config.zig:2389`, applied in
+    /// `Surface.zig:983`). The engine defaults this on for libghostty-vt
+    /// parity, so the app must set it explicitly (see
+    /// [`crate::engine::Engine::set_title_reporting`]).
+    #[serde(rename = "title-report")]
+    pub title_report: bool,
+    /// The answerback string sent when the terminal receives `ENQ` (`0x05`)
+    /// from the running program. Empty (the default) sends nothing. Upstream
+    /// `enquiry-response` (`Config.zig:3735`).
+    #[serde(rename = "enquiry-response")]
+    pub enquiry_response: Option<String>,
+    /// The reply format for OSC 4/10/11 color queries: `none` (no reply),
+    /// `8-bit` (unscaled `rr/gg/bb`), or `16-bit` (scaled `rrrr/gggg/bbbb`,
+    /// the default). Upstream `osc-color-report-format` (`Config.zig:2919`,
+    /// enum `OSCColorReportFormat` at `Config.zig:8924`). Parsed by
+    /// [`Config::osc_color_report_format`].
+    #[serde(rename = "osc-color-report-format")]
+    pub osc_color_report_format: Option<String>,
+    /// The maximum bytes of image data (e.g. Kitty graphics) per terminal
+    /// screen, `u32` (max 4 GiB). Default 320 MB; `0` disables image protocols.
+    /// Applied per screen, so the effective per-surface limit is double.
+    /// Upstream `image-storage-limit` (`Config.zig:2398`).
+    #[serde(rename = "image-storage-limit")]
+    pub image_storage_limit: u32,
+    /// The maximum bytes of scrollback retained per terminal surface. Default
+    /// 10 MB (upstream `scrollback-limit`, `Config.zig:1387`). When the limit
+    /// is reached the oldest lines are pruned. Applied at surface construction;
+    /// a reload only affects new surfaces (matching upstream).
+    #[serde(rename = "scrollback-limit")]
+    pub scrollback_limit: usize,
+    /// Allow the "KAM" mode (ANSI mode 2, `disable_keyboard`) to suppress
+    /// keyboard input at the running program's request. Default **false**
+    /// (upstream `vt-kam-allowed`, `Config.zig:2927`; the gate lives in
+    /// `Surface.zig:2699`). Rarely wanted; leave off unless you know you need
+    /// KAM.
+    #[serde(rename = "vt-kam-allowed")]
+    pub vt_kam_allowed: bool,
 }
 
 /// The default `unfocused-split-opacity` (upstream `Config.zig:1071`).
@@ -460,6 +500,20 @@ impl Default for Config {
             macos_window_shadow: true,
             macos_window_buttons: None,
             window_theme: None,
+            // Title reporting off by default — the reply is a security risk
+            // (upstream `title-report` false, `Config.zig:2389`).
+            title_report: false,
+            // No ENQ answerback unless configured (upstream `Config.zig:3735`).
+            enquiry_response: None,
+            // OSC color queries reply 16-bit by default (upstream
+            // `Config.zig:2919`).
+            osc_color_report_format: None,
+            // 320 MB of image storage per screen (upstream `Config.zig:2398`).
+            image_storage_limit: 320 * 1000 * 1000,
+            // 10 MB of scrollback per surface (upstream `Config.zig:1387`).
+            scrollback_limit: 10_000_000,
+            // KAM keyboard-disable is off by default (upstream `Config.zig:2927`).
+            vt_kam_allowed: false,
         }
     }
 }
@@ -635,6 +689,31 @@ impl Config {
             .as_deref()
             .map(ConfirmCloseSurface::parse)
             .unwrap_or_default()
+    }
+
+    /// The parsed `osc-color-report-format` (default `Bit16`). Maps to the
+    /// engine's [`OscColorReportFormat`](qwertty_term_vt::stream::OscColorReportFormat);
+    /// an unknown value falls back to the default.
+    pub fn osc_color_report_format(&self) -> qwertty_term_vt::stream::OscColorReportFormat {
+        use qwertty_term_vt::stream::OscColorReportFormat;
+        match self
+            .osc_color_report_format
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("none") => OscColorReportFormat::None,
+            Some("8-bit") => OscColorReportFormat::Bit8,
+            _ => OscColorReportFormat::Bit16,
+        }
+    }
+
+    /// The `enquiry-response` answerback bytes (empty when unset).
+    pub fn enquiry_response_bytes(&self) -> &[u8] {
+        self.enquiry_response
+            .as_deref()
+            .map(str::as_bytes)
+            .unwrap_or(&[])
     }
 
     /// The parsed `window-save-state` mode (default `Default`).
@@ -1199,6 +1278,21 @@ const EXAMPLE_CONFIG: &str = r##"# qwertty-term config
 # window-height = 0
 # window-position-x = 100
 # window-position-y = 50
+
+# VT protocol toggles. title-report answers CSI 21 t window-title queries
+# (default false — a security risk). enquiry-response is the answerback sent on
+# ENQ (0x05); empty = silent. osc-color-report-format is the OSC 4/10/11 color
+# reply form: none / 8-bit / 16-bit (default). image-storage-limit is the bytes
+# of image data (Kitty graphics) per screen (default 320MB; 0 disables images).
+# scrollback-limit is the bytes of scrollback per surface (default 10MB; only
+# affects new surfaces). vt-kam-allowed lets ANSI mode 2 (KAM) disable keyboard
+# input at the program's request (default false).
+# title-report = false
+# enquiry-response = ""
+# osc-color-report-format = "16-bit"
+# image-storage-limit = 320000000
+# scrollback-limit = 10000000
+# vt-kam-allowed = false
 "##;
 
 /// CLI `--key=value` overrides captured once at startup and replayed on every
@@ -1785,6 +1879,69 @@ mod tests {
             parse("").unwrap().confirm_close_surface(),
             ConfirmCloseSurface::OnRunning
         );
+    }
+
+    #[test]
+    fn vt_toggle_defaults_match_upstream() {
+        use qwertty_term_vt::stream::OscColorReportFormat;
+        let c = parse("").unwrap();
+        // Upstream defaults verified at ghostty `2da015cd6`:
+        assert!(!c.title_report); // Config.zig:2389
+        assert_eq!(c.enquiry_response_bytes(), b""); // Config.zig:3735
+        assert_eq!(c.osc_color_report_format(), OscColorReportFormat::Bit16); // Config.zig:2919
+        assert_eq!(c.image_storage_limit, 320 * 1000 * 1000); // Config.zig:2398
+        assert_eq!(c.scrollback_limit, 10_000_000); // Config.zig:1387
+        assert!(!c.vt_kam_allowed); // Config.zig:2927
+    }
+
+    #[test]
+    fn parses_vt_toggle_keys() {
+        use qwertty_term_vt::stream::OscColorReportFormat;
+        assert!(parse("title-report = true\n").unwrap().title_report);
+        assert_eq!(
+            parse("enquiry-response = \"PONG\"\n")
+                .unwrap()
+                .enquiry_response_bytes(),
+            b"PONG"
+        );
+        assert_eq!(
+            parse("osc-color-report-format = \"none\"\n")
+                .unwrap()
+                .osc_color_report_format(),
+            OscColorReportFormat::None
+        );
+        assert_eq!(
+            parse("osc-color-report-format = \"8-bit\"\n")
+                .unwrap()
+                .osc_color_report_format(),
+            OscColorReportFormat::Bit8
+        );
+        assert_eq!(
+            parse("osc-color-report-format = \"16-bit\"\n")
+                .unwrap()
+                .osc_color_report_format(),
+            OscColorReportFormat::Bit16
+        );
+        // Unknown value falls back to the 16-bit default.
+        assert_eq!(
+            parse("osc-color-report-format = \"nonsense\"\n")
+                .unwrap()
+                .osc_color_report_format(),
+            OscColorReportFormat::Bit16
+        );
+        assert_eq!(
+            parse("image-storage-limit = 1048576\n")
+                .unwrap()
+                .image_storage_limit,
+            1_048_576
+        );
+        assert_eq!(
+            parse("scrollback-limit = 500000\n")
+                .unwrap()
+                .scrollback_limit,
+            500_000
+        );
+        assert!(parse("vt-kam-allowed = true\n").unwrap().vt_kam_allowed);
     }
 
     #[test]

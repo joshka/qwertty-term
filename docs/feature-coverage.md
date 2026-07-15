@@ -37,12 +37,14 @@ items are `[ ]` wholesale unless noted.
       app-tails slice 5
 - [x] OSC 21 kitty color protocol (set/reset/query, 8-bit `rgb:` replies) — the query
       side is our forward-port of upstream `14c829883` (postdates the pin)
-- [x] VT config toggles — engine seams landed (app wires the config keys): `title-report`
-      (`set_title_reporting`), `enquiry-response` (`set_enquiry_response`),
-      `osc-color-report-format` (`set_osc_color_report_format`), `image-storage-limit`
+- [x] VT config toggles — wired end-to-end (TOML config key → `ControllerState` →
+      engine setter, applied at surface build + live on reload): `title-report`
+      (`set_title_reporting`, app default false overrides the engine's lib-parity true),
+      `enquiry-response` (`set_enquiry_response`), `osc-color-report-format`
+      (`set_osc_color_report_format`), `image-storage-limit`
       (`Terminal::set_kitty_graphics_size_limit`), `scrollback-limit`
-      (`Options::max_scrollback`), `vt-kam-allowed` (KAM mode 2 tracked/readable via
-      `Terminal::modes`)
+      (`Options::max_scrollback`, construction-only per upstream), `vt-kam-allowed`
+      (KAM mode 2 gates the key-input path in `encode_key_to_surface`/`send_text_to_surface`)
 
 ## Fonts & text shaping (`src/font`, ~72%)
 
