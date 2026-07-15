@@ -114,6 +114,39 @@ impl Face {
         Self::load_from_bytes(crate::embedded::JETBRAINS_MONO_VARIABLE, size_px)
     }
 
+    /// Load a system font by family `name` at `size_px`, mirroring
+    /// [`coretext::Face::load_by_name`](crate::coretext::Face::load_by_name):
+    /// discover the family (here via fontconfig) and, if the resolved family
+    /// case-insensitively matches `name`, return it; otherwise fall back to the
+    /// embedded JetBrains Mono for determinism (fontconfig always resolves *some*
+    /// font for a bad name, so the match check is what rejects a silent
+    /// substitute — the same guard the CoreText path uses).
+    ///
+    /// Without the `fontconfig` feature there is no discovery backend on this
+    /// face, so this always returns the embedded fallback (the API still exists
+    /// for parity with the CoreText face, which callers reach through the
+    /// `Face` alias).
+    #[cfg(feature = "fontconfig")]
+    pub fn load_by_name(name: &str, size_px: f64) -> Result<Face, Error> {
+        if !name.is_empty()
+            && let Some(face) = crate::fontconfig::discover_family(name, size_px)
+        {
+            let resolved = face.family_name().to_lowercase();
+            let want = name.to_lowercase();
+            if resolved.contains(&want) || want.contains(&resolved) {
+                return Ok(face);
+            }
+        }
+        Self::load_embedded(size_px)
+    }
+
+    /// Without a discovery backend: always the embedded fallback (see the
+    /// `fontconfig`-enabled variant for the real lookup).
+    #[cfg(not(feature = "fontconfig"))]
+    pub fn load_by_name(_name: &str, size_px: f64) -> Result<Face, Error> {
+        Self::load_embedded(size_px)
+    }
+
     /// Embedded bold. **Approximate:** the embedded JetBrains Mono is a variable
     /// font with no separate bold file and FreeType `wght`-instance selection
     /// isn't wired yet, so this is the regular face with synthetic bold applied
@@ -557,6 +590,23 @@ mod tests {
             "sheared glyph should be at least as wide: italic {} vs regular {}",
             italic.width,
             regular.width
+        );
+    }
+
+    /// `load_by_name` with a family that surely isn't installed falls back to the
+    /// embedded JetBrains Mono. This holds on both feature configs: without
+    /// `fontconfig` it's the embedded path directly; with `fontconfig` the
+    /// family-match guard rejects fontconfig's silent substitute for the bogus
+    /// name. (The positive discovery path is covered by the `fontconfig` module's
+    /// own tests.)
+    #[test]
+    fn load_by_name_bogus_falls_back_to_embedded() {
+        let face = Face::load_by_name("this-font-does-not-exist-qwertty-xyz", 16.0)
+            .expect("load_by_name always yields a face");
+        assert!(
+            face.family_name().to_lowercase().contains("jetbrains"),
+            "a bogus family must fall back to embedded JetBrains Mono, got {:?}",
+            face.family_name()
         );
     }
 }
