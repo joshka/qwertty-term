@@ -225,6 +225,40 @@ fn parse_block_terminator(line_raw: &[u8]) -> Option<BlockTerminator> {
     Some(terminator)
 }
 
+/// Decode tmux control-mode `%output` escaping. tmux writes each control /
+/// non-printable byte (and backslash) in `%output` data as a backslash followed
+/// by exactly three octal digits (`\ooo`, e.g. ESC → `\033`, LF → `\012`,
+/// backslash → `\134`). Everything else is passed through verbatim. The pane
+/// terminal needs the raw bytes, so `Notification::Output.data` is the decoded
+/// form (matching upstream's `// unescaped` intent). A backslash not followed by
+/// three octal digits is left as-is (defensive; tmux always emits the escaped
+/// form).
+fn unescape_output(data: &[u8]) -> Vec<u8> {
+    let is_octal = |b: u8| (b'0'..=b'7').contains(&b);
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == b'\\'
+            && i + 3 < data.len()
+            && is_octal(data[i + 1])
+            && is_octal(data[i + 2])
+            && is_octal(data[i + 3])
+        {
+            // 3 octal digits -> one byte. Compute in u16 to avoid an overflow
+            // panic on a malformed `\4xx`+ escape (real tmux only emits 0-255).
+            let v = ((data[i + 1] - b'0') as u16) << 6
+                | ((data[i + 2] - b'0') as u16) << 3
+                | (data[i + 3] - b'0') as u16;
+            out.push(v as u8);
+            i += 4;
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Parse a single notification line (without trailing CR) into a
 /// [`Notification`], or `None` if it doesn't match a recognized shape. This is
 /// the hand-rolled equivalent of `parseNotification`'s per-command regexes.
@@ -238,7 +272,7 @@ fn parse_line(line: &[u8]) -> Option<Notification> {
         }
         return Some(Notification::Output {
             pane_id,
-            data: data.to_vec(),
+            data: unescape_output(data),
         });
     }
 

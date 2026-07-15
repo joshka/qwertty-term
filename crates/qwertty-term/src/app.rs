@@ -2505,6 +2505,22 @@ impl Controller {
             frames
         };
 
+        // One-shot diagnostic: confirm this path (which draws tmux panes from
+        // the Viewer's terminals) actually runs on the live render loop. Fires
+        // the first time >=1 pane is drawn. If you see this line, the display
+        // link is rendering tmux panes; if the panes are still blank after it,
+        // the problem is downstream (snapshot/draw), not the missing call.
+        if !frames.is_empty() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "qwertty-term[tmux]: rendering {} pane(s) from viewer terminals",
+                    frames.len()
+                );
+            }
+        }
+
         // Phase 2: draw each snapshot through its own surface (mutable).
         let mut state = self.0.borrow_mut();
         for f in frames {
@@ -4998,15 +5014,31 @@ impl Controller {
     /// thread maintain, and presents it at the display refresh — so high-fps
     /// content is subsampled evenly (smooth) instead of on a drifting timer.
     pub fn tick_render(&self) {
-        let mut state = self.0.borrow_mut();
-        for tab in state.tabs.values_mut() {
-            let focused = tab.tree.focused();
-            let is_split = tab.tree.len() > 1;
-            for (sid, surface) in tab.surfaces.iter_mut() {
-                surface.render(*sid == focused, is_split);
-                surface.sync_progress_layer();
+        {
+            let mut state = self.0.borrow_mut();
+            for tab in state.tabs.values_mut() {
+                let focused = tab.tree.focused();
+                let is_split = tab.tree.len() > 1;
+                for (sid, surface) in tab.surfaces.iter_mut() {
+                    // Display-only tmux panes have no engine of their own; they
+                    // are drawn from the Viewer's pane terminals in
+                    // `render_tmux_panes` below. Rendering them here would just
+                    // present their empty engine, so skip them.
+                    if surface.display_source().is_some() {
+                        surface.sync_progress_layer();
+                        continue;
+                    }
+                    surface.render(*sid == focused, is_split);
+                    surface.sync_progress_layer();
+                }
             }
         }
+        // Draw the display-only tmux pane surfaces from their bound
+        // Viewer-owned pane terminals. `tick_impl(true)` (the fallback pace
+        // timer) already did this; the display-link render path was missing it,
+        // which left tmux panes blank on machines where the display link drives
+        // rendering (i.e. normally). ADR 006 slice 5b-native.
+        self.render_tmux_panes();
     }
 
     fn tick_impl(&self, render_panes: bool) {
