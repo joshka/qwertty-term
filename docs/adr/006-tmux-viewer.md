@@ -150,14 +150,21 @@ from the model's `PaneRect`s).
 
 ### PR slice breakdown (the whole Viewer)
 
-1. **5a — headless model** (this PR): `tmux_viewer::Viewer`, unit-tested. No
+1. **5a — headless model** (landed): `tmux_viewer::Viewer`, unit-tested. No
    AppKit.
-2. **5b — surface reconciliation**: `WindowsChanged` -> create/destroy native
-   tabs (option a) and translate `PaneRect`s -> `SplitTree`; bind pane
-   `Terminal`s to `Surface`s so panes render. Offscreen split smoke.
-3. **5c — control pty wiring** (termio): construct the Viewer on `Enter`, drain
-   `take_tmux_notifications` each frame, write `Command` bytes back to the tmux
-   pty, tear down on `Exit`. This is the "make it live" slice.
+2. **5b — reconcile logic** (landed): `layout_to_split_tree` + `Reconciler` ->
+   `ReconcilePlan` (`CreateTab`/`RemoveTab`/`SetSplitTree`) + `SplitTree::from_node`.
+   Unit-tested. The **native application** of a plan (creating `NSWindow` tabs +
+   display-only pane surfaces) is **5b-native**, deferred — see "5c
+   surface-binding" below.
+3. **5c — control-mode lifecycle** (landed, this PR): a new
+   `Engine::take_tmux_notifications` drain plus `tmux_session::TmuxSession`.
+   `Surface::pump` constructs the session on
+   `Enter`, drains notifications each tick, writes `Command` bytes back to the
+   control pty, and tears down on `Exit`; the `ReconcilePlan` rides out on
+   `PumpResult`. The "make it live" slice. Headless `--tmux-smoke` verifies it.
+   **5b-native** (turning the plan into real native tabs/display-only surfaces)
+   is the remaining follow-up — see "5c surface-binding".
 4. **5d — input + focus + resize**: route keyboard/mouse to the active pane
    (tmux `send-keys`), track active window/pane focus, propagate native resize to
    tmux.
@@ -168,6 +175,65 @@ from the model's `PaneRect`s).
 6. **5f — polish**: pane titles (`%window-renamed`), pane resize -> tmux
    `resize-pane`, detach/exit UX, and robustness for out-of-order startup
    notifications (upstream's noted TODO).
+
+### 5c surface-binding (the display-only-surface design)
+
+Slice 5c makes control mode **live**: a pane running `tmux -CC` now drives the
+whole model + IO loop. What landed, and the deliberate seam left for the native
+tab creation, is recorded here so reviewers see the design decision.
+
+**Landed (live + headlessly verified):**
+
+- `Engine::take_tmux_notifications()` exposes the engine's DCS `1000p`
+  notification drain to the app (mirrors the other `take_*` event drains).
+- `tmux_session::TmuxSession` (headless) owns a `Viewer` + a `Reconciler` and
+  reduces a drained notification batch into a `SessionUpdate { commands, plan,
+  exit }` via one `ingest` call. It also resolves a native `SurfaceId` back to
+  the Viewer's pane `Terminal` (`pane_terminal`) — the render seam.
+- `Surface` gains an `Option<TmuxSession>`. `Surface::pump` drains
+  `take_tmux_notifications` alongside the existing per-tick drains, constructs
+  the session on the `Enter` the DCS seam emits, feeds every notification,
+  **writes the session's outgoing command bytes back to that same surface's
+  pty** (control mode is in-band on the control pty), and drops the session on
+  `Exit`. The reconcile `plan` + `exit` ride out on `PumpResult`; the controller
+  applies them after the per-surface borrow drops
+  (`Controller::apply_tmux_reconciles`).
+- A headless smoke (`--tmux-smoke`) drives a synthetic `tmux -CC` byte stream
+  through a real engine + session (a fake tmux server answers the session's
+  commands with `%begin`/`%end` blocks over the same in-band stream) and asserts
+  the native tabs, each window's split tree, and that `%output` reached the
+  right pane `Terminal`. No GPU/window, so it runs anywhere.
+
+**The novel piece — display-only pane surfaces (deferred to 5b-native):** a tmux
+pane surface is **not** pty-backed. Its bytes arrive via `%output` from the
+Viewer, and its `Terminal` is owned by the Viewer's `Pane`, not by a
+`Surface { engine: Arc<Mutex<Engine>>, io: TabIo }`. Every existing `Surface`
+field and `build_surface` assume a pty + a private engine, so a Viewer-backed
+pane is a **new construction mode**. The chosen design (to implement in
+5b-native, not blindly here where AppKit behaviour can't be exercised):
+
+- Introduce a `Surface` source seam — the minimal form is a display-only
+  surface that holds **no `TabIo`** and renders a `Terminal` it does **not**
+  own. Two viable shapes: (a) the render path snapshots
+  `controller.tmux_session(control_surface).pane_terminal(surface_id)` by
+  reference each frame (no engine duplication; the Viewer stays the single
+  owner/feeder of pane bytes — preferred, matches upstream's "the Viewer hands
+  out surfaces"); or (b) each pane's engine becomes a shared
+  `Arc<Mutex<Engine>>` that the session feeds instead of an owned `Stream`
+  (simpler render path, but couples the headless Viewer to the app engine and
+  duplicates the ownership). **(a) is preferred.**
+- `Controller::apply_tmux_reconciles` then turns each `ReconcileOp` into native
+  intent: `CreateTab` → spawn a display-only tab, `RemoveTab` → close it,
+  `SetSplitTree` → set the tab's `SplitTree` (already the exact type the
+  Reconciler emits) and bind each leaf to its pane `Terminal`;
+  `dropped_surfaces` frees the renderer surfaces of closed panes. The control
+  surface itself is hidden while its session is live (upstream behaviour).
+
+Until 5b-native lands, `apply_tmux_reconciles` records each reconciliation (so a
+live `tmux -CC` session is observable and the seam is explicit) and the pane
+`Terminal`s are already populated by `%output` and reachable via
+`TmuxSession::pane_terminal`. Focus / resize / input routing stay in 5d, and
+capture-content fidelity in 5e, unchanged.
 
 ## Consequences
 

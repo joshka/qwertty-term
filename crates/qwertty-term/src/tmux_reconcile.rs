@@ -176,6 +176,17 @@ impl Reconciler {
         self.surfaces.get(&pane_id).copied()
     }
 
+    /// The tmux pane id a native [`SurfaceId`] is bound to, if any — the reverse
+    /// of [`surface_of`](Self::surface_of). The native layer (slice 5b-native)
+    /// uses this to resolve a split-tree leaf back to the Viewer's pane
+    /// `Terminal` it must render. Surface ids are unique, so at most one pane
+    /// matches.
+    pub fn pane_of_surface(&self, surface: SurfaceId) -> Option<usize> {
+        self.surfaces
+            .iter()
+            .find_map(|(pane_id, sid)| (*sid == surface).then_some(*pane_id))
+    }
+
     /// The current native tab set (window ids), in reconcile order.
     pub fn tabs(&self) -> &[usize] {
         &self.tabs

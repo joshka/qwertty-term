@@ -356,6 +356,14 @@ struct Surface {
     /// The lazily-created `CALayer` that draws the progress bar as a bottom
     /// strip over this pane's terminal content. `None` until the first bar.
     progress_layer: Option<Retained<CALayer>>,
+    /// The live tmux control-mode session, present only while this surface is
+    /// running `tmux -CC` (constructed on the `Enter` the DCS `1000p` seam
+    /// emits, dropped on `Exit`). [`Surface::pump`] drains
+    /// `take_tmux_notifications` into it, writes its outgoing command bytes back
+    /// to this surface's own pty (control mode is in-band), and surfaces its
+    /// [`ReconcilePlan`](crate::tmux_reconcile::ReconcilePlan) for the native
+    /// tab/split layer (ADR 006 slice 5c). `None` for an ordinary shell pane.
+    tmux: Option<crate::tmux_session::TmuxSession>,
 }
 
 /// Lock an engine mutex, recovering a poisoned lock instead of panicking.
@@ -390,6 +398,25 @@ struct PumpResult {
     command_finished: Option<(Option<i32>, std::time::Duration)>,
     /// The latest OSC 9;4 progress report observed this tick, if any.
     progress_report: Option<qwertty_term_vt::osc::ProgressReport>,
+    /// A tmux control-mode native-surface reconcile plan produced this tick, if
+    /// the window/pane tree changed (ADR 006 slice 5c). The controller applies
+    /// it to native tabs/splits after the per-surface borrow drops.
+    tmux_plan: Option<crate::tmux_reconcile::ReconcilePlan>,
+    /// tmux left control mode this tick (`Exit`): the controller tears down the
+    /// native tabs bound to this surface's session.
+    tmux_exit: bool,
+}
+
+/// One tmux control-mode reconcile event, collected during the per-surface
+/// pump loop and applied to native tabs after that borrow drops (ADR 006 slice
+/// 5c). `plan` is the native tab/split intent; `exit` tears the session's tabs
+/// down. `pane_count` is a snapshot for the diagnostic log.
+struct TmuxReconcileEvent {
+    tab: TabId,
+    surface: SurfaceId,
+    plan: Option<crate::tmux_reconcile::ReconcilePlan>,
+    pane_count: usize,
+    exit: bool,
 }
 
 impl Surface {
@@ -503,7 +530,7 @@ impl Surface {
         // `take_output`/`take_bell` lock the engine; if the parse thread poisoned
         // the lock, `engine()` recovers it and flips `dead`, so re-check before
         // touching io. Drain both under one lock.
-        let (out, bell, notification, boundaries, progress_report) = {
+        let (out, bell, notification, boundaries, progress_report, tmux_notifications) = {
             let mut engine = self.engine();
             (
                 engine.take_output(),
@@ -511,6 +538,7 @@ impl Surface {
                 engine.take_notification(),
                 engine.take_command_boundaries(),
                 engine.take_progress_report(),
+                engine.take_tmux_notifications(),
             )
         };
         if self.is_dead() {
@@ -519,6 +547,12 @@ impl Surface {
         if !out.is_empty() {
             self.io.write(&out);
         }
+        // tmux control-mode lifecycle (ADR 006 slice 5c). Feed the drained
+        // notifications to this surface's live `TmuxSession` — created on the
+        // `Enter` the DCS `1000p` seam emits — write its outgoing command bytes
+        // back to this same pty (control mode is in-band), and surface its
+        // reconcile plan / exit for the native tab layer.
+        let (tmux_plan, tmux_exit) = self.pump_tmux(tmux_notifications);
         // Pair OSC 133 `C` (output start) with the following `D` (command end)
         // to time each command for `notify-on-command-finish`. Multiple
         // commands finishing in one ~16ms tick is vanishingly rare; keep the
@@ -558,7 +592,59 @@ impl Surface {
             notification,
             command_finished,
             progress_report,
+            tmux_plan,
+            tmux_exit,
         }
+    }
+
+    /// Drive the tmux control-mode lifecycle for this surface from the drained
+    /// notification batch (ADR 006 slice 5c). Constructs the [`TmuxSession`] on
+    /// the first `Enter`, feeds the batch, writes the session's outgoing
+    /// command bytes back to this surface's own pty (control mode is in-band on
+    /// the same pty), tears the session down on `Exit`, and returns the native
+    /// reconcile plan + exit flag for the controller to apply after the
+    /// per-surface borrow drops. Returns `(None, false)` for an ordinary
+    /// (non-tmux) pane, which drains an empty notification vec.
+    fn pump_tmux(
+        &mut self,
+        notifications: Vec<qwertty_term_vt::tmux::Notification>,
+    ) -> (Option<crate::tmux_reconcile::ReconcilePlan>, bool) {
+        use qwertty_term_vt::tmux::Notification;
+
+        if notifications.is_empty() {
+            return (None, false);
+        }
+        // Lazily start a session on the first `Enter` (the only notification
+        // emitted before a session exists). A stray notification with no session
+        // and no `Enter` is ignored — nothing to drive.
+        if self.tmux.is_none()
+            && notifications
+                .iter()
+                .any(|n| matches!(n, Notification::Enter))
+        {
+            self.tmux = Some(crate::tmux_session::TmuxSession::new());
+        }
+        let Some(update) = self.tmux.as_mut().map(|s| s.ingest(notifications)) else {
+            return (None, false);
+        };
+        // Write each command block back to the control pty (already newline-
+        // terminated). This is the in-band request half of control mode.
+        for command in &update.commands {
+            self.io.write(command);
+        }
+        // On exit (or a defunct session) drop it so a later re-entry starts
+        // fresh; the controller tears the native tabs down from `tmux_exit`.
+        if update.exit || self.tmux.as_ref().is_some_and(|s| s.is_defunct()) {
+            self.tmux = None;
+        }
+        (update.plan, update.exit)
+    }
+
+    /// Read access to this surface's live tmux control-mode session, if it is
+    /// running `tmux -CC`. The native tab layer reads pane terminals out of it
+    /// for rendering (ADR 006 slice 5b-native).
+    fn tmux_session(&self) -> Option<&crate::tmux_session::TmuxSession> {
+        self.tmux.as_ref()
     }
 
     /// Bring a poison-dead surface to rest exactly once: shut its io down (the
@@ -1999,6 +2085,65 @@ impl Controller {
     /// The active tab, if any.
     pub fn active_tab(&self) -> Option<TabId> {
         self.0.borrow().registry.active()
+    }
+
+    // -- tmux control mode ------------------------------------------------
+
+    /// Apply the tmux control-mode reconcile events collected during a tick's
+    /// per-surface pump (ADR 006 slice 5c). Called with **no** controller borrow
+    /// held, so it is free to create/remove native tabs.
+    ///
+    /// ## Status: lifecycle live; native tab creation is the 5b-native hook
+    ///
+    /// The *lifecycle* is fully wired: a pane running `tmux -CC` decodes the
+    /// control-mode stream into notifications, drives its
+    /// [`TmuxSession`](crate::tmux_session::TmuxSession), writes the session's
+    /// commands back to its own pty, and produces the [`ReconcilePlan`] and
+    /// exit events handled here. What remains (deferred, ADR 006 "5c
+    /// surface-binding") is turning each plan into real [`NSWindow`] tabs whose
+    /// panes are **display-only surfaces** rendering the Viewer's per-pane
+    /// `Terminal`s (a new, non-pty `Surface` construction mode not yet present
+    /// in [`build_surface`](Self::build_surface)). Until that lands, this
+    /// records the reconciliation so a live `tmux -CC` session is observable
+    /// and the seam is explicit; the pane terminals are already populated by
+    /// `%output` and reachable via
+    /// [`TmuxSession::pane_terminal`](crate::tmux_session::TmuxSession::pane_terminal).
+    fn apply_tmux_reconciles(&self, events: Vec<TmuxReconcileEvent>) {
+        for event in events {
+            if event.exit {
+                eprintln!(
+                    "qwertty-term[tmux]: control mode ended on tab {:?} surface {:?} \
+                     (native tabs torn down; 5b-native)",
+                    event.tab.0, event.surface.0
+                );
+                continue;
+            }
+            let Some(plan) = event.plan else {
+                continue;
+            };
+            let (mut creates, mut removes, mut sets) = (0usize, 0usize, 0usize);
+            for op in &plan.ops {
+                match op {
+                    crate::tmux_reconcile::ReconcileOp::CreateTab { .. } => creates += 1,
+                    crate::tmux_reconcile::ReconcileOp::RemoveTab { .. } => removes += 1,
+                    crate::tmux_reconcile::ReconcileOp::SetSplitTree { .. } => sets += 1,
+                }
+            }
+            // TODO(ADR 006 slice 5b-native): apply `plan.ops` to the native tab
+            // registry — CreateTab → spawn a display-only tab, RemoveTab → close
+            // it, SetSplitTree → set the tab's `SplitTree` and bind each leaf's
+            // surface to `TmuxSession::pane_terminal`. `plan.dropped_surfaces`
+            // frees the renderer surfaces of closed panes.
+            eprintln!(
+                "qwertty-term[tmux]: reconcile on tab {:?} surface {:?} — \
+                 +{creates} tab(s), -{removes} tab(s), {sets} split-tree(s), \
+                 {} pane(s), {} dropped surface(s) (native apply: 5b-native)",
+                event.tab.0,
+                event.surface.0,
+                event.pane_count,
+                plan.dropped_surfaces.len()
+            );
+        }
     }
 
     // -- quick terminal ---------------------------------------------------
@@ -4431,7 +4576,7 @@ impl Controller {
             let mtm = self.0.borrow().mtm;
             NSApplication::sharedApplication(mtm).isActive()
         };
-        let (exited, bell_rang, notifications, command_finishes) = {
+        let (exited, bell_rang, notifications, command_finishes, tmux_events) = {
             let mut state = self.0.borrow_mut();
             let mut dead: Vec<(TabId, SurfaceId)> = Vec::new();
             // Whether any pane rang this tick — drives the once-per-tick
@@ -4445,6 +4590,12 @@ impl Controller {
             // exit_code, elapsed, focused)`.
             let mut command_finishes: Vec<(TabId, Option<i32>, std::time::Duration, bool)> =
                 Vec::new();
+            // tmux control-mode reconcile events observed this tick (ADR 006
+            // slice 5c): `(tab, control-surface, plan, pane_count, exit)`.
+            // Collected here and applied to native tabs after the per-surface
+            // borrow drops (creating/removing tabs needs `&mut state.tabs`,
+            // which is borrowed by this loop).
+            let mut tmux_events: Vec<TmuxReconcileEvent> = Vec::new();
             // The forced-title override (config `title`); cloned out before the
             // per-tab loop so it doesn't alias the `state.tabs` mutable borrow.
             let forced_title = state.forced_title.clone();
@@ -4460,6 +4611,21 @@ impl Controller {
                 let mut password_focused = false;
                 for (sid, surface) in tab.surfaces.iter_mut() {
                     let result = surface.pump();
+                    // tmux control-mode: a tree change (plan) or an exit is
+                    // recorded for post-borrow application to native tabs.
+                    if result.tmux_plan.is_some() || result.tmux_exit {
+                        let pane_count = surface
+                            .tmux_session()
+                            .map(|s| s.viewer().pane_count())
+                            .unwrap_or(0);
+                        tmux_events.push(TmuxReconcileEvent {
+                            tab: *tid,
+                            surface: *sid,
+                            plan: result.tmux_plan,
+                            pane_count,
+                            exit: result.tmux_exit,
+                        });
+                    }
                     if result.exited {
                         dead.push((*tid, *sid));
                     } else {
@@ -4524,8 +4690,13 @@ impl Controller {
                 // Expire the resize overlay once its lifetime elapses.
                 tab.tick_resize_overlay(now_tick);
             }
-            (dead, any_bell, notifications, command_finishes)
+            (dead, any_bell, notifications, command_finishes, tmux_events)
         };
+        // Apply tmux control-mode reconcile events with the per-surface borrow
+        // released (creating/removing native tabs needs `&mut state.tabs`).
+        if !tmux_events.is_empty() {
+            self.apply_tmux_reconciles(tmux_events);
+        }
         // Fire the once-per-tick audible/attention bell effects with no
         // controller borrow held (these are AppKit calls). The per-tab title
         // indicator was already set inside the borrow above.
@@ -4744,6 +4915,7 @@ impl Controller {
             progress: None,
             progress_deadline: None,
             progress_layer: None,
+            tmux: None,
         })
     }
 
