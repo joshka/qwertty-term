@@ -38,17 +38,15 @@
 //!   (d) sprites (a box-drawing glyph and '❯' when resolvable) share the same
 //!       visual baseline as text — no font/sprite vertical mismatch.
 //!
-//! Skips gracefully (`SKIP:`) when no Metal device is present, matching the
-//! R1-R4 GPU-test convention.
+//! Runs over the platform-free [`Software`] backend (ADR 003), so it **never
+//! skips** and is **not OS-gated** — baseline placement is a face-metrics + CPU
+//! compositor property, so this gives real Linux baseline pixel coverage (#42).
 
-#![cfg(target_os = "macos")]
-
-use qwertty_term_font::coretext::Face;
 use qwertty_term_font::grid::Grid;
-use qwertty_term_font::{CodepointResolver, Collection, Metrics};
+use qwertty_term_font::{CodepointResolver, Collection, Face, Metrics};
 use qwertty_term_renderer::engine::{Engine, FrameOptions};
-use qwertty_term_renderer::metal::Metal;
 use qwertty_term_renderer::snapshot::FullSnapshot;
+use qwertty_term_renderer::software::Software;
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
 use qwertty_term_vt::terminal::{Options, Terminal};
 
@@ -132,13 +130,7 @@ fn make_grid(face: Face) -> Grid {
 
 /// Render `text` starting at (col 0, row 1) and read back the frame + metrics.
 fn render_line(size_px: f64, text: &str) -> Option<(Frame, Metrics)> {
-    let backend = match Metal::new() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("SKIP: no Metal device ({e}); skipping text-baseline test");
-            return None;
-        }
-    };
+    let backend = Software::new();
 
     let face = Face::load_embedded(size_px).expect("embedded JetBrains Mono");
     let metrics = Metrics::calc(face.face_metrics());

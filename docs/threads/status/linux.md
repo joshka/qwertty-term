@@ -1,14 +1,32 @@
 # linux status (Linux port — ADR 003, P2/P3 continuation of T7)
 
-- **Current item:** mission #1 (fontconfig discovery) **DONE + merged** (S1 #245, S2 #248).
-  Next unblocked: **`force-autohint`/`freetype-load-flags`** (FreeType-side plumbing; config-key
-  parsing is T3's — coordinate) then **#42** (un-gate pixel tests on Linux CI).
-- **Last merged:** #248 (S2 — fontconfig wiring into collection/resolver) → `000477ff` on main.
-- **Blockers:** none. (Session note: 1Password SSH-signing locked mid-session once, blocking
-  pushes; recovered/retried. If pushes fail with `op-ssh-sign: failed to fill whole buffer`,
-  the agent needs an interactive unlock.)
-- **Claims:** none held (S1+S2 merged).
+- **Current item:** **#42** (un-gate pixel tests onto Software/Linux) — slice 1 gate-green,
+  shipping. Next: `force-autohint`/`freetype-load-flags` (FreeType plumbing; config parsing T3);
+  then the deferred #42 tests (emoji/kitty/cursor/ligature — need Software color/image or
+  `load_by_name`).
+- **Last merged:** #254 (status closeout) → `2eb51eec`. (Code: S1 #245, S2 #248.)
+- **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if pushes fail
+  with `op-ssh-sign: failed to fill whole buffer`, retry; it recovered last time.)
+- **Claims:** `crates/qwertty-term-renderer/tests/{bold_italic_pixels,sprite_specimen,
+  text_baseline,default_fg_ink}.rs` for the #42 slice-1 PR.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
+
+## Log (recent)
+
+- 2026-07-14: **#42 slice 1 — un-gated 4 renderer pixel tests onto `Software`/Linux.**
+  `bold_italic_pixels`, `sprite_specimen`, `text_baseline`, and the embedded case of
+  `default_fg_ink` now build `Engine<Software>` (dropped `#![cfg(target_os="macos")]`, swapped
+  `metal::Metal`→`software::Software` + `coretext::Face`→the `Face` alias), mirroring
+  `software_headless.rs` — so they run on macOS (CoreText) and Linux CI (FreeType) alike, giving
+  real Linux glyph/sprite/baseline pixel coverage. `named_family_default_fg_inks_on_theme` stays
+  `#[cfg(target_os="macos")]` (needs CoreText `load_by_name`). Note: in the *renderer* crate,
+  CoreText⟺`target_os="macos"` (it enables the font FreeType backend only off-macOS) — do NOT
+  use `feature="freetype"` in renderer cfgs (unknown-cfg warning → `-D warnings`). Deferred:
+  `emoji_pixels`/`kitty_image_pixels` (Software color/image are deferred features),
+  `ligature_pixels` (needs `load_by_name`), cursor tests; `first_pixels` kept as the Metal
+  IOSurface-readback proof. **Gate:** fmt ✓; workspace clippy+test ✓ (2496); vt release ✓ (1570)
+  and paranoid ✓ (1545); offscreen-smoke ✓; the 4 tests pass on macOS-Software locally (the
+  Linux FreeType path is validated by CI, same mechanism as `software_headless`).
 
 ## Next-item pointers (respawn crib)
 
