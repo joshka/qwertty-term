@@ -239,6 +239,30 @@ impl SplitTree {
         }
     }
 
+    /// Build a tree from a pre-assembled [`Node`] tree and a focused leaf, with
+    /// no zoom. Additive constructor for callers that build the node tree
+    /// externally rather than via [`split`](Self::split) — notably the tmux
+    /// control-mode Viewer's layout-tree → `SplitTree` converter (ADR 006
+    /// slice 5b), which translates a tmux `Layout` into a right-leaning binary
+    /// split chain and needs to hand the finished tree straight in. `Node`,
+    /// `Split`, and `Axis` are already public, but the tree's fields are
+    /// private, so this is the one seam that lets an external node tree become a
+    /// `SplitTree`. If `focused` is not a leaf of `root`, the tree's leftmost
+    /// leaf is used instead so the invariant "focused is always a live leaf"
+    /// holds.
+    pub fn from_node(root: Node, focused: SurfaceId) -> Self {
+        let focused = if subtree_contains(&root, focused) {
+            focused
+        } else {
+            leftmost_leaf(&root)
+        };
+        SplitTree {
+            root,
+            focused,
+            zoomed: None,
+        }
+    }
+
     /// The currently focused surface.
     pub fn focused(&self) -> SurfaceId {
         self.focused
@@ -1300,6 +1324,52 @@ mod tests {
         tree.resize_dir(Direction::Right, 1000.0, container, 0.0);
         let layout = tree.layout(container, 0.0);
         assert!((layout.panes[&s(0)].w - 90.0).abs() < 1e-6); // clamped to 0.9
+    }
+
+    // ---- from_node -------------------------------------------------------
+
+    #[test]
+    fn from_node_wraps_a_prebuilt_tree() {
+        // A | (B / C): a horizontal root whose second child is a vertical split.
+        let root = Node::Split(Box::new(Split {
+            axis: Axis::Horizontal,
+            ratio: 0.5,
+            first: Node::Leaf(s(0)),
+            second: Node::Split(Box::new(Split {
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                first: Node::Leaf(s(1)),
+                second: Node::Leaf(s(2)),
+            })),
+        }));
+        let tree = SplitTree::from_node(root, s(1));
+        assert_eq!(tree.focused(), s(1));
+        assert_eq!(tree.surfaces(), vec![s(0), s(1), s(2)]);
+        assert!(!tree.is_zoomed());
+        // The structure lays out like an equivalent split-built tree.
+        let layout = tree.layout(Rect::new(0.0, 0.0, 200.0, 200.0), 0.0);
+        assert_eq!(layout.panes[&s(0)].w, 100.0);
+        assert_eq!(layout.panes[&s(1)].h, 100.0);
+    }
+
+    #[test]
+    fn from_node_single_leaf() {
+        let tree = SplitTree::from_node(Node::Leaf(s(7)), s(7));
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.focused(), s(7));
+    }
+
+    #[test]
+    fn from_node_falls_back_to_leftmost_when_focus_absent() {
+        let root = Node::Split(Box::new(Split {
+            axis: Axis::Horizontal,
+            ratio: 0.5,
+            first: Node::Leaf(s(3)),
+            second: Node::Leaf(s(4)),
+        }));
+        // s(99) is not in the tree → falls back to the leftmost leaf s(3).
+        let tree = SplitTree::from_node(root, s(99));
+        assert_eq!(tree.focused(), s(3));
     }
 
     #[test]

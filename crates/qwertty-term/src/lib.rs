@@ -41,6 +41,11 @@ pub mod theme;
 // AppKit-free — consumes the engine's tmux notification stream. Platform-agnostic.
 pub mod tmux_viewer;
 
+// tmux Viewer layout → SplitTree converter + window → tab reconciler (ADR 006
+// slice 5b — pure logic). Maps the Viewer's window/pane model onto native
+// tab/split intent (Option (a)); creates no native surfaces. Platform-agnostic.
+pub mod tmux_reconcile;
+
 // The real terminal IO stack binding (M2 chunk E). `qwertty-term-termio` is POSIX
 // (rustix/libc fork+pty), so gate on unix; the app itself is macOS-only.
 #[cfg(unix)]
