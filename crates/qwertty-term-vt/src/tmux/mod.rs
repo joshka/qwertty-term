@@ -3,11 +3,19 @@
 //!
 //! This crate owns the *pure* protocol parsers; the native viewer that maps
 //! notifications to surfaces lives in the app/termio layer. Slices so far:
-//! `control` (notification parser), `layout` (window-layout parser); `output`
-//! follows (ADR 004 slice 3).
+//! `control` (notification parser), `layout` (window-layout parser), `output`
+//! (format-variable parse/encode). The DCS `TmuxRaw` seam wiring is ADR 004
+//! slice 4; the native Viewer is slice 5 (app-tails).
 
 pub mod control;
 pub mod layout;
+pub mod output;
 
 pub use control::{BufferOverflow, ControlParser, Notification};
-pub use layout::{Checksum, Content, Layout, ParseError};
+pub use layout::{Checksum, Content, Layout};
+pub use output::{Value, ValueKind, Variable};
+
+// NOTE: both `layout` and `output` define a `ParseError`; neither is re-exported
+// here to avoid a name collision — use `layout::ParseError` / `output::ParseError`.
+// (`layout::ParseError` was exported as `tmux::ParseError` in slice 2; that alias
+// is intentionally dropped now that a second `ParseError` exists.)
