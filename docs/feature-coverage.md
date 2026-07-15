@@ -68,7 +68,9 @@ items are `[ ]` wholesale unless noted.
       `discover_family_style`, `FcDeferredFace`, now consumed by `collection` (styled-family
       members) and `resolver` (codepoint fallback, presentation-aware) — so installed system
       fonts resolve on Linux, not just the embedded + synthetic chain. Verified end-to-end against
-      real system fonts. `force-autohint`/`freetype-load-flags` + real wght-variation bold deferred
+      real system fonts. FreeType `Face::load_by_name` (named-family lookup) added via
+      `fontconfig::discover_family` with the CoreText family-match + embedded-fallback semantics.
+      `force-autohint`/`freetype-load-flags` + real wght-variation bold deferred
 
 ## Rendering (`src/renderer`, ~60%)
 
