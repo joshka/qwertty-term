@@ -68,13 +68,22 @@ pub struct SessionUpdate {
     /// tmux closed control mode, or the Viewer became defunct. The caller tears
     /// down every native tab bound to this session and drops the `TmuxSession`.
     pub exit: bool,
+    /// The native surface the app should move keyboard focus to, present iff
+    /// tmux's **active pane** changed this batch to a pane bound to a surface
+    /// (ADR 006 slice 5e — tmux→app focus sync). Set e.g. when a fresh
+    /// `split-window` makes its new pane active. `None` leaves focus untouched.
+    /// A change the app *itself* initiated via `select_pane` does not surface
+    /// here (the Viewer sets its active pane optimistically, so the echo is a
+    /// no-op).
+    pub focus: Option<SurfaceId>,
 }
 
 impl SessionUpdate {
     /// Whether this update carries nothing to act on (no commands, no plan, no
-    /// exit) — the common steady-state case for a plain `%output` batch.
+    /// exit, no focus) — the common steady-state case for a plain `%output`
+    /// batch.
     pub fn is_empty(&self) -> bool {
-        self.commands.is_empty() && self.plan.is_none() && !self.exit
+        self.commands.is_empty() && self.plan.is_none() && !self.exit && self.focus.is_none()
     }
 }
 
@@ -115,6 +124,11 @@ impl TmuxSession {
     ) -> SessionUpdate {
         let mut update = SessionUpdate::default();
         let mut windows_changed = false;
+        // tmux's active pane before this batch: used to detect a tmux-initiated
+        // active-pane change (focus sync). A change the app initiated via
+        // `select_pane` set the active pane optimistically already, so it won't
+        // register as a change here — only genuine tmux-side moves do.
+        let active_before = self.viewer.active_pane();
 
         for n in notifications {
             for action in self.viewer.next(n) {
@@ -131,6 +145,19 @@ impl TmuxSession {
         // the native tabs are torn down wholesale, so no plan is needed.
         if windows_changed && !update.exit {
             update.plan = Some(self.reconciler.reconcile(self.viewer.windows()));
+        }
+
+        // Surface a tmux-initiated active-pane change as a focus target, resolved
+        // through the (now up-to-date) reconciler map so a pane created by this
+        // same batch (e.g. a `split-window`'s new active pane) resolves. Skipped
+        // on exit (everything tears down).
+        if !update.exit {
+            let active_after = self.viewer.active_pane();
+            if active_after != active_before
+                && let Some(pane_id) = active_after
+            {
+                update.focus = self.reconciler.surface_of(pane_id);
+            }
         }
 
         update
@@ -174,13 +201,71 @@ impl TmuxSession {
         let Some(pane_id) = self.reconciler.pane_of_surface(surface) else {
             return Vec::new();
         };
-        self.viewer
-            .send_keys(pane_id, bytes)
-            .into_iter()
-            .filter_map(|a| match a {
-                Action::Command(b) => Some(b),
-                _ => None,
-            })
-            .collect()
+        commands_of(self.viewer.send_keys(pane_id, bytes))
     }
+
+    /// Redirect a native split action targeting a tmux pane surface into a tmux
+    /// `split-window` control command (ADR 006 slice 5e). `horizontal` picks a
+    /// left/right (`-h`) vs top/bottom (`-v`) split; `before` (`-b`) places the
+    /// new pane before (left/above) the target. Returns the control-pty bytes to
+    /// write (empty for an unbound surface or before steady state). The new pane
+    /// is created+rendered by the resulting `%layout-change` reconcile — the
+    /// caller must NOT mutate the native `SplitTree` for a tmux-managed tab.
+    pub fn split_pane(
+        &mut self,
+        surface: SurfaceId,
+        horizontal: bool,
+        before: bool,
+    ) -> Vec<Vec<u8>> {
+        let Some(pane_id) = self.reconciler.pane_of_surface(surface) else {
+            return Vec::new();
+        };
+        commands_of(self.viewer.split_window(pane_id, horizontal, before))
+    }
+
+    /// Redirect a native new-tab action (Cmd-T) while focus is in a tmux window
+    /// into a tmux `new-window` control command (ADR 006 slice 5e — Josh's
+    /// iTerm2-style choice). Returns the control-pty bytes to write (empty
+    /// before steady state). The new window appears as a fresh native tab via
+    /// the `%window-add` reconcile — the caller must NOT create a normal tab.
+    pub fn new_window(&mut self) -> Vec<Vec<u8>> {
+        commands_of(self.viewer.new_window())
+    }
+
+    /// Redirect a native close-surface action (Cmd-W) on a tmux pane into a tmux
+    /// `kill-pane` control command (ADR 006 slice 5e). Returns the control-pty
+    /// bytes to write (empty for an unbound surface or before steady state). The
+    /// native surface/tab is removed by the resulting `%layout-change` /
+    /// `%window-close` reconcile — the caller must NOT mutate the native tree.
+    pub fn kill_pane(&mut self, surface: SurfaceId) -> Vec<Vec<u8>> {
+        let Some(pane_id) = self.reconciler.pane_of_surface(surface) else {
+            return Vec::new();
+        };
+        commands_of(self.viewer.kill_pane(pane_id))
+    }
+
+    /// Make the tmux pane a native surface renders the active pane (ADR 006
+    /// slice 5e — app→tmux focus sync). Called when the app's keyboard focus
+    /// moves to a tmux pane so bare `split-window` and the active-pane indicator
+    /// operate on the pane the user is in. Returns the control-pty bytes to write
+    /// (empty for an unbound surface, before steady state, or when that pane is
+    /// already active).
+    pub fn select_pane(&mut self, surface: SurfaceId) -> Vec<Vec<u8>> {
+        let Some(pane_id) = self.reconciler.pane_of_surface(surface) else {
+            return Vec::new();
+        };
+        commands_of(self.viewer.select_pane(pane_id))
+    }
+}
+
+/// Keep only the `Command` bytes from a Viewer action list (the write helpers
+/// only ever emit `Action::Command`, but this filters defensively).
+fn commands_of(actions: Vec<Action>) -> Vec<Vec<u8>> {
+    actions
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Command(b) => Some(b),
+            _ => None,
+        })
+        .collect()
 }

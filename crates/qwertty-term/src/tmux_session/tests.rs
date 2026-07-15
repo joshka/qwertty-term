@@ -249,3 +249,108 @@ fn send_keys_maps_surface_to_pane_and_emits_send_keys() {
         "input for an unbound surface should yield no command"
     );
 }
+
+#[test]
+fn split_pane_maps_surface_to_pane_and_emits_split_window() {
+    // A 1x2 split so pane 1 has a real surface to target.
+    let (mut s, _u) = session_with_window("027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1]");
+    // Drain the capture queue for both new panes so the queue is idle.
+    for _ in 0..20 {
+        if s.ingest([block_end("")]).commands.is_empty() {
+            break;
+        }
+    }
+
+    let s1 = s.surface_of(1).expect("pane 1 has a surface");
+    // Horizontal, after: `-h`.
+    let blob = s.split_pane(s1, true, false).concat();
+    assert!(
+        bytes_contains(&blob, b"split-window -t %1 -h\n"),
+        "unexpected split bytes: {:?}",
+        String::from_utf8_lossy(&blob)
+    );
+
+    // An unbound surface id resolves to no pane, so no command is produced.
+    assert!(
+        s.split_pane(crate::splits::SurfaceId(4242), true, false)
+            .is_empty(),
+        "split for an unbound surface should yield no command"
+    );
+}
+
+#[test]
+fn kill_pane_maps_surface_to_pane() {
+    let (mut s, _u) = session_with_window("b7dd,83x44,0,0,0");
+    for _ in 0..5 {
+        s.ingest([block_end("")]);
+    }
+    let s0 = s.surface_of(0).expect("pane 0 has a surface");
+
+    let blob = s.kill_pane(s0).concat();
+    assert!(
+        bytes_contains(&blob, b"kill-pane -t %0\n"),
+        "unexpected kill bytes: {:?}",
+        String::from_utf8_lossy(&blob)
+    );
+    assert!(
+        s.kill_pane(crate::splits::SurfaceId(4242)).is_empty(),
+        "kill for an unbound surface should yield no command"
+    );
+}
+
+#[test]
+fn select_pane_maps_surface_and_ingest_surfaces_tmux_focus() {
+    // A 1x2 split so panes 0 and 1 both have surfaces.
+    let (mut s, _u) = session_with_window("027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1]");
+    for _ in 0..20 {
+        if s.ingest([block_end("")]).commands.is_empty() {
+            break;
+        }
+    }
+    let s0 = s.surface_of(0).expect("pane 0 surface");
+    let s1 = s.surface_of(1).expect("pane 1 surface");
+
+    // App→tmux: focusing pane 1 emits `select-pane -t %1`.
+    let blob = s.select_pane(s1).concat();
+    assert!(
+        bytes_contains(&blob, b"select-pane -t %1\n"),
+        "unexpected select bytes: {:?}",
+        String::from_utf8_lossy(&blob)
+    );
+    // That set the active pane optimistically, so tmux's echo is a no-op (no
+    // focus surfaced back to the app).
+    let u = s.ingest([Notification::WindowPaneChanged {
+        window_id: 0,
+        pane_id: 1,
+    }]);
+    assert_eq!(u.focus, None, "app-initiated select must not bounce focus");
+
+    // tmux→app: tmux moves the active pane to 0 on its own → focus surfaces s0.
+    let u = s.ingest([Notification::WindowPaneChanged {
+        window_id: 0,
+        pane_id: 0,
+    }]);
+    assert_eq!(
+        u.focus,
+        Some(s0),
+        "a tmux-initiated active-pane change surfaces the app focus target"
+    );
+
+    // Unbound surface → no select command.
+    assert!(s.select_pane(crate::splits::SurfaceId(4242)).is_empty());
+}
+
+#[test]
+fn new_window_is_bare_and_session_scoped() {
+    // Fresh idle session so new-window emits immediately (no pane target).
+    let (mut s, _u) = session_with_window("b7dd,83x44,0,0,0");
+    for _ in 0..5 {
+        s.ingest([block_end("")]);
+    }
+    let blob = s.new_window().concat();
+    assert!(
+        bytes_contains(&blob, b"new-window\n"),
+        "unexpected new-window bytes: {:?}",
+        String::from_utf8_lossy(&blob)
+    );
+}

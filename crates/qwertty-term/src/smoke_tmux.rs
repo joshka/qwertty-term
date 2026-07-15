@@ -139,6 +139,17 @@ impl FakeServer {
             if !text.is_empty() {
                 self.send_line(engine, &format!("%output %{pane_id} {text}"));
             }
+        } else if contains(command, b"split-window")
+            || contains(command, b"new-window")
+            || contains(command, b"kill-pane")
+            || contains(command, b"select-pane")
+        {
+            // Structural writes (ADR 006 slice 5e): tmux acks the command with an
+            // empty block (advancing the command queue), then emits the layout
+            // effect (%layout-change / %window-add / %window-close)
+            // asynchronously. The smoke drives that effect explicitly in `run`,
+            // mirroring the real server, so here we only ack.
+            self.send_block(engine, "");
         } else if contains(command, b"capture-pane") || contains(command, b"list-panes") {
             // Content-capture / pane-state: an empty block is a valid response
             // and keeps the command queue advancing (the live path we assert is
@@ -198,6 +209,13 @@ fn drive(
         }
         if update.exit {
             exited = true;
+            // Control mode ended: the native layer tears down every tmux-window
+            // tab wholesale (no plan on exit) and restores the hidden control
+            // surface. The mock has no control surface, but it must drop the
+            // tmux-window tabs — mirroring `Controller::apply_tmux_reconciles`'s
+            // exit branch (ADR 006 slice 5e teardown).
+            native.order.clear();
+            native.trees.clear();
         }
         for command in &update.commands {
             server.respond(engine, command);
@@ -408,7 +426,222 @@ pub fn run() -> Result<(), String> {
         return Err("window 1 tree changed when window 2 was added".to_string());
     }
 
-    // --- Exit control mode tears the session down --------------------------
+    // --- Focus sync: app→tmux select-pane + tmux→app active-pane (slice 5e) -
+    // App→tmux: moving the app's keyboard focus to pane 3 emits
+    // `select-pane -t %3`, so a subsequent bare `split-window` targets pane 3.
+    let sel_cmds = session.select_pane(s3);
+    let sel_blob: Vec<u8> = sel_cmds.concat();
+    if !contains(&sel_blob, b"select-pane -t %3\n") {
+        return Err(format!(
+            "focus sync produced the wrong select-pane command: {:?}",
+            String::from_utf8_lossy(&sel_blob)
+        ));
+    }
+    for cmd in &sel_cmds {
+        server.respond(&mut engine, cmd);
+    }
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    // tmux→app: tmux moves the active pane back to %1 on its own (e.g. another
+    // client, or a fresh split). The decoded `%window-pane-changed` surfaces
+    // pane 1's surface as the focus target the app must adopt. Ingest directly
+    // so the `focus` field can be inspected (the same decode path `drive` uses).
+    server.send_line(&mut engine, "%window-pane-changed @1 %1");
+    let focus = session.ingest(engine.take_tmux_notifications()).focus;
+    if focus != Some(s1) {
+        return Err(format!(
+            "a tmux active-pane change should surface pane 1's surface, got {focus:?}"
+        ));
+    }
+
+    // --- Native split redirect (Cmd-D on a tmux pane, slice 5e) ------------
+    // A native split targeting a tmux pane must NOT spawn a rogue native pty
+    // pane; it is redirected to a tmux `split-window`, and the resulting
+    // `%layout-change` reconcile creates+renders the new pane. Drive that end to
+    // end for pane 1 of window 1 (currently holding panes 1|3).
+    let split_cmds = session.split_pane(s1, true, false);
+    let split_blob: Vec<u8> = split_cmds.concat();
+    if !contains(&split_blob, b"split-window -t %1 -h\n") {
+        return Err(format!(
+            "split redirect produced the wrong command: {:?}",
+            String::from_utf8_lossy(&split_blob)
+        ));
+    }
+    // The client must not have mutated the native tree itself — the split only
+    // materialises via the reconcile below. Window 1 is still exactly 1|3.
+    let tree1 = native
+        .trees
+        .get(&1)
+        .ok_or("window 1 tree missing pre-split")?;
+    if tree1.surfaces() != vec![s1, s3] {
+        return Err(format!(
+            "split_pane must NOT add a rogue native surface; tree = {:?}",
+            tree1.surfaces()
+        ));
+    }
+    for cmd in &split_cmds {
+        server.respond(&mut engine, cmd);
+    }
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    // tmux now emits the layout change that adds pane %4 (as split-window does).
+    let after_split = "83x44,0,0[83x14,0,0,1,83x14,0,15,3,83x13,0,30,4]";
+    server.windows[0].1 = after_split.to_string();
+    server.send_line(
+        &mut engine,
+        &format!(
+            "%layout-change @1 {} {} *",
+            FakeServer::layout(after_split),
+            FakeServer::layout(after_split)
+        ),
+    );
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    let s4 = session
+        .surface_of(4)
+        .ok_or("split redirect: new pane 4 was not created by the reconcile")?;
+    let tree1 = native
+        .trees
+        .get(&1)
+        .ok_or("window 1 tree missing post-split")?;
+    if tree1.surfaces() != vec![s1, s3, s4] {
+        return Err(format!(
+            "split redirect: window 1 should now be panes 1|3|4, got {:?}",
+            tree1.surfaces()
+        ));
+    }
+    if native.order != [1, 2] {
+        return Err(format!(
+            "a pane split must not add a tab, tabs = {:?}",
+            native.order
+        ));
+    }
+
+    // --- Native close redirect (Cmd-W on a tmux pane, slice 5e) ------------
+    // Closing a tmux pane is redirected to `kill-pane`; the native surface is
+    // removed by the resulting `%layout-change` reconcile, not by the client.
+    let kill_cmds = session.kill_pane(s4);
+    let kill_blob: Vec<u8> = kill_cmds.concat();
+    if !contains(&kill_blob, b"kill-pane -t %4\n") {
+        return Err(format!(
+            "close redirect produced the wrong command: {:?}",
+            String::from_utf8_lossy(&kill_blob)
+        ));
+    }
+    // The client did not drop the surface itself — still 1|3|4 until reconcile.
+    let tree1 = native
+        .trees
+        .get(&1)
+        .ok_or("window 1 tree missing pre-kill")?;
+    if tree1.surfaces() != vec![s1, s3, s4] {
+        return Err("kill_pane must not mutate the native tree directly".to_string());
+    }
+    for cmd in &kill_cmds {
+        server.respond(&mut engine, cmd);
+    }
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    let after_kill = "83x44,0,0[83x22,0,0,1,83x21,0,23,3]";
+    server.windows[0].1 = after_kill.to_string();
+    server.send_line(
+        &mut engine,
+        &format!(
+            "%layout-change @1 {} {} *",
+            FakeServer::layout(after_kill),
+            FakeServer::layout(after_kill)
+        ),
+    );
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    let tree1 = native
+        .trees
+        .get(&1)
+        .ok_or("window 1 tree missing post-kill")?;
+    if tree1.surfaces() != vec![s1, s3] {
+        return Err(format!(
+            "close redirect: window 1 should be back to panes 1|3, got {:?}",
+            tree1.surfaces()
+        ));
+    }
+
+    // --- Native new-tab redirect (Cmd-T in a tmux window, slice 5e) --------
+    // A new tab while focus is in a tmux window is redirected to `new-window`
+    // (iTerm2-style); it appears as a fresh native tab via the `%window-add`
+    // reconcile, in the same session, not as a rogue normal tab.
+    let win_cmds = session.new_window();
+    let win_blob: Vec<u8> = win_cmds.concat();
+    if !contains(&win_blob, b"new-window\n") {
+        return Err(format!(
+            "new-tab redirect produced the wrong command: {:?}",
+            String::from_utf8_lossy(&win_blob)
+        ));
+    }
+    // No native tab yet — it arrives via the %window-add reconcile below.
+    if native.order != [1, 2] {
+        return Err("new_window must not create a native tab directly".to_string());
+    }
+    for cmd in &win_cmds {
+        server.respond(&mut engine, cmd);
+    }
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    server.windows.push((3, "83x44,0,0,5".to_string()));
+    server.send_line(&mut engine, "%window-add @3");
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    if native.order != [1, 2, 3] {
+        return Err(format!(
+            "new-tab redirect: window-add @3 should create a 3rd native tab, tabs = {:?}",
+            native.order
+        ));
+    }
+    let s5 = session
+        .surface_of(5)
+        .ok_or("new-tab redirect: window 3's pane was not assigned a surface")?;
+    let tree3 = native.trees.get(&3).ok_or("window 3 has no split tree")?;
+    if tree3.surfaces() != vec![s5] {
+        return Err(format!(
+            "new-tab redirect: window 3 tree should be a single leaf, got {:?}",
+            tree3.surfaces()
+        ));
+    }
+
+    // --- Close ONE pane of the 2-pane window @1 (teardown, slice 5e) -------
+    // Ctrl-D (shell EOF) or `kill-pane` on one pane of a 2-pane tmux window
+    // must remove ONLY that pane: tmux emits a `%layout-change` leaving a
+    // single pane, and the reconcile drops that one surface while the tab and
+    // the surviving pane remain. (The window/tab must NOT close.)
+    let single_pane = "83x44,0,0,1";
+    server.windows[0].1 = single_pane.to_string();
+    server.send_line(
+        &mut engine,
+        &format!(
+            "%layout-change @1 {} {} *",
+            FakeServer::layout(single_pane),
+            FakeServer::layout(single_pane)
+        ),
+    );
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    let tree1 = native
+        .trees
+        .get(&1)
+        .ok_or("window 1 tab closed on a pane close")?;
+    if tree1.surfaces() != vec![s1] {
+        return Err(format!(
+            "closing one pane should leave window 1 with just pane 1, got {:?}",
+            tree1.surfaces()
+        ));
+    }
+    // The tab set is unchanged (windows 1, 2, 3 all still present).
+    if native.order != [1, 2, 3] {
+        return Err(format!(
+            "closing one pane must not remove a tab, tabs = {:?}",
+            native.order
+        ));
+    }
+    // The surviving pane still resolves to its terminal (keyboard/render target).
+    if session.pane_terminal(s1).is_none() {
+        return Err("surviving pane 1 lost its terminal after the pane close".to_string());
+    }
+
+    // --- Exit control mode tears the tmux tabs down (window survives) ------
+    // `%exit` + ST end control mode. The session goes defunct and every
+    // tmux-window tab is torn down; the real app restores the hidden control
+    // surface so its *window* is NOT closed (asserted live, not in this mock,
+    // which models only the tmux-window tabs).
     engine.write(b"\x1b\\");
     let exited = drive(&mut engine, &mut session, &mut native, &mut server);
     if !exited {
@@ -416,6 +649,13 @@ pub fn run() -> Result<(), String> {
     }
     if !session.is_defunct() {
         return Err("session should be defunct after exit".to_string());
+    }
+    // Every tmux-window tab was torn down on exit.
+    if !native.order.is_empty() {
+        return Err(format!(
+            "exit should tear down all tmux-window tabs, tabs = {:?}",
+            native.order
+        ));
     }
 
     Ok(())

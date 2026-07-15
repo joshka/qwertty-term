@@ -160,6 +160,34 @@ enum Command {
     /// is a *write*: its `%begin`/`%end` response carries no data we consume, it
     /// only advances the command queue.
     SendKeys { pane_id: usize, keys: Vec<u32> },
+    /// `split-window`: split a tmux pane (ADR 006 slice 5e — tmux-aware native
+    /// actions). A native Cmd-D / split keybind targeting a tmux-managed tab is
+    /// redirected here instead of mutating the native `SplitTree`; the resulting
+    /// `%layout-change` reconcile creates+renders the new pane. `horizontal`
+    /// selects a left/right split (`-h`) vs a top/bottom split (`-v`); `before`
+    /// (`-b`) places the new pane before (left/above) the target. A *write*
+    /// command: its `%begin`/`%end` reply carries nothing, it only advances the
+    /// queue.
+    SplitWindow {
+        pane_id: usize,
+        horizontal: bool,
+        before: bool,
+    },
+    /// `new-window`: create a new tmux window (ADR 006 slice 5e). A native
+    /// Cmd-T / new-tab while focus is in a tmux window is redirected here
+    /// (Josh's iTerm2-style choice): tmux emits `%window-add`, the reconcile
+    /// spawns a fresh native tab in the same session. A *write* command.
+    NewWindow,
+    /// `kill-pane`: close a tmux pane (ADR 006 slice 5e). A native Cmd-W /
+    /// close-surface on a tmux pane is redirected here instead of mutating the
+    /// native tree; tmux's `%layout-change` (or `%window-close` for the last
+    /// pane) reconcile removes the native surface/tab. A *write* command.
+    KillPane { pane_id: usize },
+    /// `select-pane`: make a tmux pane the window's active pane (ADR 006 slice
+    /// 5e — focus sync). Sent when the app's keyboard focus moves to a tmux pane
+    /// so bare `split-window`, the active-pane indicator, and any no-`-t` command
+    /// operate on the pane the user is actually in. A *write* command.
+    SelectPane { pane_id: usize },
 }
 
 impl Command {
@@ -207,6 +235,26 @@ impl Command {
                 cmd.push('\n');
                 cmd.into_bytes()
             }
+            // `split-window -t %<id> -h|-v [-b]`: split the target pane. `-h` is
+            // a left/right split, `-v` a top/bottom one; `-b` puts the new pane
+            // before (left/above) the target.
+            Command::SplitWindow {
+                pane_id,
+                horizontal,
+                before,
+            } => {
+                let orient = if *horizontal { "-h" } else { "-v" };
+                let b = if *before { " -b" } else { "" };
+                format!("split-window -t %{pane_id} {orient}{b}\n").into_bytes()
+            }
+            // `new-window`: create a new window in the attached session (the one
+            // control mode is attached to). tmux picks the target session, so no
+            // `-t` is needed.
+            Command::NewWindow => b"new-window\n".to_vec(),
+            // `kill-pane -t %<id>`: close the target pane.
+            Command::KillPane { pane_id } => format!("kill-pane -t %{pane_id}\n").into_bytes(),
+            // `select-pane -t %<id>`: make the target pane the active pane.
+            Command::SelectPane { pane_id } => format!("select-pane -t %{pane_id}\n").into_bytes(),
         }
     }
 }
@@ -322,6 +370,12 @@ pub struct Viewer {
     /// creation so tmux panes honour the user's colors (ADR 006 theme fix).
     /// Retained across a `%session-changed` reset.
     colors: Colors,
+    /// The tmux pane id tmux currently considers **active** (ADR 006 slice 5e —
+    /// focus sync). Updated from `%window-pane-changed` (and set optimistically
+    /// when the app sends a `select-pane`). Upstream ignores this and drives its
+    /// own focus (`viewer.zig:508-510`, TODO `viewer.zig:23`); we track it so the
+    /// app's keyboard focus and tmux's active pane stay in sync both ways.
+    active_pane: Option<usize>,
 }
 
 impl Default for Viewer {
@@ -343,7 +397,16 @@ impl Viewer {
             windows: Vec::new(),
             panes: Vec::new(),
             colors,
+            active_pane: None,
         }
+    }
+
+    /// The tmux pane id tmux currently considers active, if known (ADR 006 slice
+    /// 5e). The native layer resolves this to a `SurfaceId` to sync keyboard
+    /// focus after a tmux-initiated active-pane change (e.g. a fresh split makes
+    /// its new pane active).
+    pub fn active_pane(&self) -> Option<usize> {
+        self.active_pane
     }
 
     // ---- query API (the native layer / slice 5b reads through these) -------
@@ -475,8 +538,14 @@ impl Viewer {
                 self.command_queue.push_back(Command::ListWindows);
             }
 
-            // The active pane changed: we drive our own focus, so ignore.
-            Notification::WindowPaneChanged { .. } => {}
+            // The active pane changed (ADR 006 slice 5e — focus sync). Unlike
+            // upstream (which ignores this and drives its own focus,
+            // `viewer.zig:508-510`), we record tmux's active pane so the native
+            // layer can move the app's keyboard focus to match — e.g. a fresh
+            // `split-window` makes its new pane active and tmux reports it here.
+            Notification::WindowPaneChanged { pane_id, .. } => {
+                self.active_pane = Some(pane_id);
+            }
             // A session was created/destroyed elsewhere: we'll get exit or
             // session_changed for our own; ignore otherwise.
             Notification::SessionsChanged => {}
@@ -525,9 +594,77 @@ impl Viewer {
         if keys.is_empty() {
             return Vec::new();
         }
+        self.enqueue_write(Command::SendKeys { pane_id, keys })
+    }
+
+    /// Split the tmux pane a native surface renders, in the given orientation
+    /// (ADR 006 slice 5e). `horizontal` picks a left/right (`-h`) vs top/bottom
+    /// (`-v`) split; `before` (`-b`) places the new pane before the target.
+    /// Returns the control command(s) to send now (empty when not in steady
+    /// state or the pane is unknown). The new pane materialises via the
+    /// subsequent `%layout-change` reconcile, not by mutating any native tree.
+    pub fn split_window(&mut self, pane_id: usize, horizontal: bool, before: bool) -> Vec<Action> {
+        if self.state != State::CommandQueue || !self.panes.iter().any(|p| p.id == pane_id) {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::SplitWindow {
+            pane_id,
+            horizontal,
+            before,
+        })
+    }
+
+    /// Create a new tmux window in the attached session (ADR 006 slice 5e — the
+    /// Cmd-T redirect). Returns the control command to send now (empty when not
+    /// in steady state). The new window materialises via the `%window-add`
+    /// reconcile as a fresh native tab.
+    pub fn new_window(&mut self) -> Vec<Action> {
+        if self.state != State::CommandQueue {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::NewWindow)
+    }
+
+    /// Kill the tmux pane a native surface renders (ADR 006 slice 5e — the
+    /// Cmd-W redirect). Returns the control command to send now (empty when not
+    /// in steady state or the pane is unknown). The native surface/tab is torn
+    /// down by the subsequent `%layout-change` / `%window-close` reconcile.
+    pub fn kill_pane(&mut self, pane_id: usize) -> Vec<Action> {
+        if self.state != State::CommandQueue || !self.panes.iter().any(|p| p.id == pane_id) {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::KillPane { pane_id })
+    }
+
+    /// Make a tmux pane the active pane (ADR 006 slice 5e — app→tmux focus sync).
+    /// Called when the app's keyboard focus moves to a tmux pane so bare
+    /// `split-window` and the active-pane indicator operate on the pane the user
+    /// is in. Sets [`active_pane`](Self::active_pane) optimistically so tmux's
+    /// echoing `%window-pane-changed` is a no-op (no focus bounce), and returns
+    /// the control command to send now (empty when not in steady state, the pane
+    /// is unknown, or it is already active — nothing to do).
+    pub fn select_pane(&mut self, pane_id: usize) -> Vec<Action> {
+        if self.state != State::CommandQueue
+            || self.active_pane == Some(pane_id)
+            || !self.panes.iter().any(|p| p.id == pane_id)
+        {
+            return Vec::new();
+        }
+        self.active_pane = Some(pane_id);
+        self.enqueue_write(Command::SelectPane { pane_id })
+    }
+
+    /// Queue a *write* control command (send-keys / split-window / new-window /
+    /// kill-pane) onto the in-flight command queue and return the action to send
+    /// it now, if the queue was idle. Threading writes through the same queue as
+    /// reads keeps each `%begin`/`%end` reply correlated with the command that
+    /// triggered it (a stray reply would otherwise be mis-attributed). When a
+    /// command is already in flight the write is emitted by `next_command` once
+    /// that completes. Precondition: caller has verified `State::CommandQueue`.
+    fn enqueue_write(&mut self, cmd: Command) -> Vec<Action> {
+        debug_assert_eq!(self.state, State::CommandQueue);
         let was_idle = self.command_queue.is_empty();
-        self.command_queue
-            .push_back(Command::SendKeys { pane_id, keys });
+        self.command_queue.push_back(cmd);
         if was_idle {
             // Nothing in flight: emit now; its %begin/%end will pop it.
             vec![Action::Command(
@@ -561,6 +698,14 @@ impl Viewer {
             // pop above already advanced the queue. The pane's echo (if any)
             // arrives separately as `%output`.
             Command::SendKeys { .. } => {}
+            // Structural writes (split/new-window/kill): the reply carries
+            // nothing to apply either. The pop advanced the queue; the layout
+            // effect arrives later as a `%layout-change` / `%window-add` /
+            // `%window-close` that drives the reconcile (ADR 006 slice 5e).
+            Command::SplitWindow { .. }
+            | Command::NewWindow
+            | Command::KillPane { .. }
+            | Command::SelectPane { .. } => {}
         }
     }
 

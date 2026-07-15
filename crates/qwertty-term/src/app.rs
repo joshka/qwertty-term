@@ -449,6 +449,9 @@ struct PumpResult {
     /// tmux left control mode this tick (`Exit`): the controller tears down the
     /// native tabs bound to this surface's session.
     tmux_exit: bool,
+    /// A tmux-initiated active-pane change this tick: the surface the app should
+    /// move keyboard focus to (ADR 006 slice 5e — tmux→app focus sync).
+    tmux_focus: Option<SurfaceId>,
 }
 
 /// One tmux control-mode reconcile event, collected during the per-surface
@@ -460,6 +463,27 @@ struct TmuxReconcileEvent {
     surface: SurfaceId,
     plan: Option<crate::tmux_reconcile::ReconcilePlan>,
     exit: bool,
+    /// A tmux-initiated active-pane change: the surface to move keyboard focus to
+    /// after the plan is applied (ADR 006 slice 5e — tmux→app focus sync).
+    focus: Option<SurfaceId>,
+}
+
+/// A native window action on a tmux-managed tab, redirected to its tmux
+/// control-command equivalent (ADR 006 slice 5e). The Viewer owns the tab's
+/// layout, so the native handler enqueues one of these through the control
+/// session instead of mutating the native `SplitTree`; the effect returns as a
+/// `%layout-change` / `%window-*` reconcile.
+enum TmuxNativeAction {
+    /// A split (`split-window`): `horizontal` picks a left/right (`-h`) vs
+    /// top/bottom (`-v`) split, `before` (`-b`) places the new pane first.
+    Split { horizontal: bool, before: bool },
+    /// A new tab while focus is in a tmux window → `new-window` (iTerm2-style).
+    NewWindow,
+    /// A pane close (`kill-pane`).
+    KillPane,
+    /// A focus change onto a tmux pane → `select-pane` (make it tmux-active so
+    /// bare `split-window` / the active-pane indicator target it).
+    SelectPane,
 }
 
 impl Surface {
@@ -622,7 +646,7 @@ impl Surface {
         // `Enter` the DCS `1000p` seam emits — write its outgoing command bytes
         // back to this same pty (control mode is in-band), and surface its
         // reconcile plan / exit for the native tab layer.
-        let (tmux_plan, tmux_exit) = self.pump_tmux(tmux_notifications);
+        let (tmux_plan, tmux_exit, tmux_focus) = self.pump_tmux(tmux_notifications);
         // Pair OSC 133 `C` (output start) with the following `D` (command end)
         // to time each command for `notify-on-command-finish`. Multiple
         // commands finishing in one ~16ms tick is vanishingly rare; keep the
@@ -669,6 +693,7 @@ impl Surface {
             progress_report,
             tmux_plan,
             tmux_exit,
+            tmux_focus,
         }
     }
 
@@ -683,11 +708,15 @@ impl Surface {
     fn pump_tmux(
         &mut self,
         notifications: Vec<qwertty_term_vt::tmux::Notification>,
-    ) -> (Option<crate::tmux_reconcile::ReconcilePlan>, bool) {
+    ) -> (
+        Option<crate::tmux_reconcile::ReconcilePlan>,
+        bool,
+        Option<SurfaceId>,
+    ) {
         use qwertty_term_vt::tmux::Notification;
 
         if notifications.is_empty() {
-            return (None, false);
+            return (None, false, None);
         }
         // Lazily start a session on the first `Enter` (the only notification
         // emitted before a session exists). A stray notification with no session
@@ -702,19 +731,20 @@ impl Surface {
             ));
         }
         let Some(update) = self.tmux.as_mut().map(|s| s.ingest(notifications)) else {
-            return (None, false);
+            return (None, false, None);
         };
         // Write each command block back to the control pty (already newline-
         // terminated). This is the in-band request half of control mode.
         for command in &update.commands {
             self.send_pty(command);
         }
+        let focus = update.focus;
         // On exit (or a defunct session) drop it so a later re-entry starts
         // fresh; the controller tears the native tabs down from `tmux_exit`.
         if update.exit || self.tmux.as_ref().is_some_and(|s| s.is_defunct()) {
             self.tmux = None;
         }
-        (update.plan, update.exit)
+        (update.plan, update.exit, focus)
     }
 
     /// Read access to this surface's live tmux control-mode session, if it is
@@ -2197,6 +2227,19 @@ impl Controller {
     /// Open a new tab in `parent`'s window group, inheriting the *focused*
     /// surface's pwd.
     pub fn new_tab_in(&self, parent: TabId) -> Option<TabId> {
+        // tmux-managed tab: focus is in a tmux window, so redirect Cmd-T to a
+        // tmux `new-window` (Josh's iTerm2-style choice) — it appears as another
+        // native tab in the same session via the `%window-add` reconcile.
+        // Creating a normal native tab instead would sit outside the session and
+        // leave a rogue tab (ADR 006 slice 5e). The new tab arrives async, so
+        // there is no id to return synchronously.
+        let focused = self.0.borrow().tabs.get(&parent).map(|t| t.tree.focused());
+        if let Some(focused) = focused
+            && let Some(src) = self.tmux_pane_of(parent, focused)
+        {
+            self.redirect_tmux_action(src, focused, TmuxNativeAction::NewWindow);
+            return None;
+        }
         let pwd = {
             let state = self.0.borrow();
             state
@@ -2273,64 +2316,127 @@ impl Controller {
                 self.restore_control_tab(event.tab);
                 continue;
             }
-            let Some(plan) = event.plan else {
-                continue;
-            };
             let control = DisplaySource {
                 control_tab: event.tab,
                 control_surface: event.surface,
             };
-            // 1. Remove native tabs for windows that disappeared.
-            for op in &plan.ops {
-                if let crate::tmux_reconcile::ReconcileOp::RemoveTab { window_id } = op {
-                    let native = self
-                        .0
-                        .borrow_mut()
-                        .tmux_tabs
-                        .get_mut(&key)
-                        .and_then(|m| m.remove(window_id));
-                    if let Some(tab) = native {
-                        self.close_tab(tab);
-                    }
+            if let Some(plan) = event.plan {
+                self.apply_tmux_plan(key, control, &plan);
+            }
+            // tmux moved its active pane (e.g. a fresh split makes its new pane
+            // active): mirror that into the app's keyboard focus, after any plan
+            // above has created the pane's surface. This is the tmux→app half of
+            // focus sync; it does NOT send `select-pane` back (no echo loop).
+            if let Some(surface) = event.focus {
+                self.apply_tmux_focus(surface);
+            }
+        }
+    }
+
+    /// Apply one tmux reconcile plan's tab create/remove/set-tree ops to the
+    /// native tabs for control session `key` (ADR 006 slice 5b-native), then hide
+    /// the raw control tab once at least one tmux-window tab exists. Split out of
+    /// [`apply_tmux_reconciles`](Self::apply_tmux_reconciles) so a focus-only
+    /// event (no plan) still reaches the focus-application step.
+    fn apply_tmux_plan(
+        &self,
+        key: (TabId, SurfaceId),
+        control: DisplaySource,
+        plan: &crate::tmux_reconcile::ReconcilePlan,
+    ) {
+        // 1. Remove native tabs for windows that disappeared.
+        for op in &plan.ops {
+            if let crate::tmux_reconcile::ReconcileOp::RemoveTab { window_id } = op {
+                let native = self
+                    .0
+                    .borrow_mut()
+                    .tmux_tabs
+                    .get_mut(&key)
+                    .and_then(|m| m.remove(window_id));
+                if let Some(tab) = native {
+                    self.close_tab(tab);
                 }
             }
-            // 2. Create-or-update a native tab for every present window.
-            for op in &plan.ops {
-                if let crate::tmux_reconcile::ReconcileOp::SetSplitTree { window_id, tree } = op {
-                    let existing = self
-                        .0
-                        .borrow()
-                        .tmux_tabs
-                        .get(&key)
-                        .and_then(|m| m.get(window_id))
-                        .copied();
-                    match existing {
-                        Some(tab) => self.update_tmux_tab(tab, control, tree),
-                        None => {
-                            if let Some(tab) = self.spawn_tmux_tab(control, tree) {
-                                self.0
-                                    .borrow_mut()
-                                    .tmux_tabs
-                                    .entry(key)
-                                    .or_default()
-                                    .insert(*window_id, tab);
-                            }
+        }
+        // 2. Create-or-update a native tab for every present window.
+        for op in &plan.ops {
+            if let crate::tmux_reconcile::ReconcileOp::SetSplitTree { window_id, tree } = op {
+                let existing = self
+                    .0
+                    .borrow()
+                    .tmux_tabs
+                    .get(&key)
+                    .and_then(|m| m.get(window_id))
+                    .copied();
+                match existing {
+                    Some(tab) => self.update_tmux_tab(tab, control, tree),
+                    None => {
+                        if let Some(tab) = self.spawn_tmux_tab(control, tree) {
+                            self.0
+                                .borrow_mut()
+                                .tmux_tabs
+                                .entry(key)
+                                .or_default()
+                                .insert(*window_id, tab);
                         }
                     }
                 }
             }
-            // Now that at least one tmux window tab exists, hide the raw
-            // `tmux -CC` control tab so the user sees only the tmux windows
-            // (upstream behaviour). No-op once already hidden.
-            let has_native_tab = self
-                .0
-                .borrow()
-                .tmux_tabs
-                .get(&key)
-                .is_some_and(|m| !m.is_empty());
-            if has_native_tab {
-                self.hide_control_tab(event.tab);
+        }
+        // Now that at least one tmux window tab exists, hide the raw
+        // `tmux -CC` control tab so the user sees only the tmux windows
+        // (upstream behaviour). No-op once already hidden.
+        let has_native_tab = self
+            .0
+            .borrow()
+            .tmux_tabs
+            .get(&key)
+            .is_some_and(|m| !m.is_empty());
+        if has_native_tab {
+            self.hide_control_tab(control.control_tab);
+        }
+    }
+
+    /// Move the app's keyboard focus to the tmux pane `surface` (ADR 006 slice
+    /// 5e — the tmux→app half of focus sync). Finds the native tmux-window tab
+    /// holding that display-only surface, focuses it in the tree, sends per-pane
+    /// focus reporting, and makes its view the window's first responder — WITHOUT
+    /// sending a `select-pane` back to tmux (this focus *originated* from tmux,
+    /// so echoing it would be redundant control traffic). No-op if the surface is
+    /// not a live display pane.
+    fn apply_tmux_focus(&self, surface: SurfaceId) {
+        let view = {
+            let mut state = self.0.borrow_mut();
+            // Find the tab whose surface map holds this (unique) display surface.
+            let Some((&tab_id, _)) = state
+                .tabs
+                .iter()
+                .find(|(_, t)| t.surfaces.contains_key(&surface))
+            else {
+                return;
+            };
+            let Some(t) = state.tabs.get_mut(&tab_id) else {
+                return;
+            };
+            let previous = t.tree.focused();
+            if previous == surface {
+                return; // already focused; nothing to do.
             }
+            if !t.tree.focus(surface) {
+                return;
+            }
+            if let Some(prev) = t.surfaces.get_mut(&previous) {
+                prev.set_focus(false);
+            }
+            if let Some(next) = t.surfaces.get_mut(&surface) {
+                next.set_focus(true);
+            }
+            t.surfaces.get(&surface).map(|s| s.view.clone())
+        };
+        if let Some(view) = view
+            && let Some(window) = view.window()
+        {
+            window.makeFirstResponder(Some(&view));
         }
     }
 
@@ -2496,7 +2602,7 @@ impl Controller {
 
         // Diff the leaf set against the tab's current surfaces under a scoped
         // borrow: collect the pane ids to add and the surfaces to drop.
-        let (to_add, scale): (Vec<SurfaceId>, f64) = {
+        let (to_add, scale, focus_removed): (Vec<SurfaceId>, f64, bool) = {
             let mut state = self.0.borrow_mut();
             let Some(t) = state.tabs.get_mut(&tab_id) else {
                 return;
@@ -2505,6 +2611,12 @@ impl Controller {
             let present: std::collections::HashSet<SurfaceId> =
                 t.surfaces.keys().copied().collect();
             let wanted: std::collections::HashSet<SurfaceId> = leaves.iter().copied().collect();
+            // Whether the pane that currently holds focus (and thus, for a fronted
+            // tmux tab, the window's first responder) is being removed. If so we
+            // must hand focus to a survivor below, or the window is left with a
+            // dangling first responder and *no pane accepts keyboard* after a pane
+            // close (ADR 006 slice 5e teardown fix).
+            let focus_removed = !wanted.contains(&t.tree.focused());
             // Remove panes no longer in the layout.
             for gone in present.difference(&wanted) {
                 if let Some(dead) = t.surfaces.remove(gone) {
@@ -2512,7 +2624,7 @@ impl Controller {
                 }
             }
             let to_add: Vec<SurfaceId> = wanted.difference(&present).copied().collect();
-            (to_add, scale)
+            (to_add, scale, focus_removed)
         };
 
         // Build new display surfaces outside the borrow (config reads borrow).
@@ -2524,16 +2636,42 @@ impl Controller {
         }
 
         // Insert the new surfaces, set the tree, and re-lay-out under a borrow.
-        let mut state = self.0.borrow_mut();
-        let Some(t) = state.tabs.get_mut(&tab_id) else {
-            return;
+        // If the focused pane was removed, hand focus to the new tree's focused
+        // survivor (the reconciler's leftmost leaf) and capture its view so it can
+        // be made first responder once the borrow drops.
+        let refocus_view: Option<Retained<TerminalView>> = {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab_id) else {
+                return;
+            };
+            for (leaf, surface) in built {
+                t.container.addSubview(&surface.view);
+                t.surfaces.insert(leaf, surface);
+            }
+            t.tree = tree.clone();
+            t.relayout(controller_ptr, tab_id, mtm);
+            if focus_removed {
+                let survivor = t.tree.focused();
+                if let Some(next) = t.surfaces.get_mut(&survivor) {
+                    // Focus-IN reporting (mode-1004 + password poll) for the pane
+                    // that inherits focus, mirroring the split/close paths.
+                    next.set_focus(true);
+                    Some(next.view.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
-        for (leaf, surface) in built {
-            t.container.addSubview(&surface.view);
-            t.surfaces.insert(leaf, surface);
+
+        // Make the survivor the window's first responder with no borrow held, so
+        // keyboard input routes to a live tmux pane after a pane close.
+        if let Some(view) = refocus_view
+            && let Some(window) = view.window()
+        {
+            window.makeFirstResponder(Some(&view));
         }
-        t.tree = tree.clone();
-        t.relayout(controller_ptr, tab_id, mtm);
     }
 
     /// Draw every display-only tmux pane surface from the pane `Terminal` its
@@ -4370,6 +4508,60 @@ impl Controller {
         }
     }
 
+    /// The display source of `surface` in `tab`, if it is a display-only tmux
+    /// pane surface — i.e. `tab` is a **tmux-managed tab** whose split layout the
+    /// control session's Viewer owns and reconciles (ADR 006 slice 5e). `Some`
+    /// means every native mutation of this tab's tree (split / close / new-tab)
+    /// must be redirected to a tmux control command instead, or it fights the
+    /// next `%layout-change` reconcile. `None` is an ordinary pane — unchanged.
+    fn tmux_pane_of(&self, tab: TabId, surface: SurfaceId) -> Option<DisplaySource> {
+        self.0
+            .borrow()
+            .tabs
+            .get(&tab)?
+            .surfaces
+            .get(&surface)?
+            .display_source()
+    }
+
+    /// Redirect a native window action on a tmux pane surface to its tmux
+    /// control-command equivalent (ADR 006 slice 5e). `src` locates the control
+    /// surface running `tmux -CC`; `pane_surface` is the tmux pane surface's own
+    /// id (the Reconciler's stable `pane_id → SurfaceId` key). The command is
+    /// written to the control pty (control mode is in-band); the resulting
+    /// `%layout-change` / `%window-add` / `%window-close` reconcile applies the
+    /// native effect (create/remove the split or tab). No-op if the control
+    /// surface/session is gone.
+    fn redirect_tmux_action(
+        &self,
+        src: DisplaySource,
+        pane_surface: SurfaceId,
+        action: TmuxNativeAction,
+    ) {
+        let mut state = self.0.borrow_mut();
+        if let Some(cs) = state
+            .tabs
+            .get_mut(&src.control_tab)
+            .and_then(|t| t.surfaces.get_mut(&src.control_surface))
+        {
+            let commands = cs
+                .tmux
+                .as_mut()
+                .map(|sess| match action {
+                    TmuxNativeAction::Split { horizontal, before } => {
+                        sess.split_pane(pane_surface, horizontal, before)
+                    }
+                    TmuxNativeAction::NewWindow => sess.new_window(),
+                    TmuxNativeAction::KillPane => sess.kill_pane(pane_surface),
+                    TmuxNativeAction::SelectPane => sess.select_pane(pane_surface),
+                })
+                .unwrap_or_default();
+            for cmd in &commands {
+                cs.send_pty(cmd);
+            }
+        }
+    }
+
     /// Send already-composed text (IME commit) to `surface`'s pty. Committed
     /// text is user input, so it snaps this pane's viewport to the bottom.
     pub fn send_text_to_surface(&self, tab: TabId, surface: SurfaceId, text: &str) {
@@ -4565,7 +4757,7 @@ impl Controller {
     /// keystrokes/IME route there), and marks the tab active. A no-op if the
     /// surface isn't in the tab.
     pub fn focus_surface_in_tab(&self, tab: TabId, surface: SurfaceId) {
-        let view = {
+        let (view, transitioned) = {
             let mut state = self.0.borrow_mut();
             let Some(t) = state.tabs.get_mut(&tab) else {
                 return;
@@ -4576,11 +4768,12 @@ impl Controller {
             if !t.tree.focus(surface) {
                 return;
             }
+            let transitioned = previous != surface;
             // A real transition (different pane) drives the per-surface focus
             // change: the newly-focused pane gets `focus(true)` (mode-1004 CSI I
             // + password poll on), the previous one `focus(false)` (CSI O +
             // poll off). Same-pane re-focus is a no-op for reporting.
-            if previous != surface {
+            if transitioned {
                 if let Some(prev) = t.surfaces.get_mut(&previous) {
                     prev.set_focus(false);
                 }
@@ -4588,7 +4781,7 @@ impl Controller {
                     next.set_focus(true);
                 }
             }
-            t.focused_surface().map(|s| s.view.clone())
+            (t.focused_surface().map(|s| s.view.clone()), transitioned)
         };
         // Make the newly-focused pane the first responder outside the borrow
         // (AppKit may re-enter). Its window is already key (we don't change
@@ -4599,6 +4792,12 @@ impl Controller {
             window.makeFirstResponder(Some(&view));
         }
         self.0.borrow_mut().registry.activate(tab);
+        // app→tmux focus sync (ADR 006 slice 5e): a real focus transition onto a
+        // tmux pane makes it tmux's active pane, so bare `split-window` and the
+        // active-pane indicator operate on the pane the user is actually in.
+        if transitioned && let Some(src) = self.tmux_pane_of(tab, surface) {
+            self.redirect_tmux_action(src, surface, TmuxNativeAction::SelectPane);
+        }
     }
 
     /// Dispatch a resolved [`MenuAction`] against the active tab / app.
@@ -5258,12 +5457,14 @@ impl Controller {
                     let result = surface.pump();
                     // tmux control-mode: a tree change (plan) or an exit is
                     // recorded for post-borrow application to native tabs.
-                    if result.tmux_plan.is_some() || result.tmux_exit {
+                    if result.tmux_plan.is_some() || result.tmux_exit || result.tmux_focus.is_some()
+                    {
                         tmux_events.push(TmuxReconcileEvent {
                             tab: *tid,
                             surface: *sid,
                             plan: result.tmux_plan,
                             exit: result.tmux_exit,
+                            focus: result.tmux_focus,
                         });
                     }
                     if result.exited {
@@ -5831,6 +6032,21 @@ impl Controller {
                 .and_then(|p| tabs::inherit_pwd(Some(&p)));
             (anchor, cwd)
         };
+        // tmux-managed tab: the Viewer owns this tab's layout. Redirect the
+        // split to a tmux `split-window` (the resulting `%layout-change`
+        // reconcile creates+renders the new pane) instead of spawning a rogue
+        // native pty pane that would fight the reconcile (ADR 006 slice 5e).
+        if let Some(src) = self.tmux_pane_of(tab, anchor) {
+            self.redirect_tmux_action(
+                src,
+                anchor,
+                TmuxNativeAction::Split {
+                    horizontal: direction.axis() == crate::splits::Axis::Horizontal,
+                    before: direction.new_is_first(),
+                },
+            );
+            return;
+        }
         self.spawn_split(tab, anchor, direction, cwd);
     }
 
@@ -6207,6 +6423,15 @@ impl Controller {
     /// (today's behaviour). Called on `cmd+w` (focused pane) and on a pane's
     /// shell exit.
     pub fn close_surface(&self, tab: TabId, surface: SurfaceId) {
+        // tmux-managed tab: redirect the pane close to a tmux `kill-pane`. tmux's
+        // `%layout-change` (or `%window-close` for the last pane) reconcile then
+        // removes the native surface/tab — closing it natively here would fight
+        // that reconcile (ADR 006 slice 5e).
+        if let Some(src) = self.tmux_pane_of(tab, surface) {
+            self.redirect_tmux_action(src, surface, TmuxNativeAction::KillPane);
+            return;
+        }
+
         let mtm = self.0.borrow().mtm;
         let controller_ptr: *const Controller = self;
 

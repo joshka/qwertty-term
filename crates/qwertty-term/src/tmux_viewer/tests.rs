@@ -35,6 +35,10 @@ fn layout_change(window_id: usize, layout: &str) -> Notification {
     }
 }
 
+fn window_pane_changed(window_id: usize, pane_id: usize) -> Notification {
+    Notification::WindowPaneChanged { window_id, pane_id }
+}
+
 // ---- action assertions -----------------------------------------------------
 
 fn command_bytes(actions: &[Action]) -> Option<Vec<u8>> {
@@ -428,4 +432,140 @@ fn send_keys_ignores_unknown_pane_pre_steady_and_empty_input() {
     drain_to_idle(&mut v);
     assert!(v.send_keys(999, b"x").is_empty());
     assert!(v.send_keys(0, b"").is_empty());
+}
+
+// ---- structural writes: split-window / new-window / kill-pane (slice 5e) ---
+
+#[test]
+fn split_window_emits_orientation_and_before_flags() {
+    // Horizontal (left/right, `-h`), new pane after (no `-b`).
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.split_window(0, true, false)).expect("split command");
+    assert!(
+        bytes_contains(&cmd, b"split-window -t %0 -h\n"),
+        "unexpected split bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+
+    // Vertical (top/bottom, `-v`), new pane before (`-b`).
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.split_window(0, false, true)).expect("split command");
+    assert!(
+        bytes_contains(&cmd, b"split-window -t %0 -v -b\n"),
+        "unexpected split bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+}
+
+#[test]
+fn kill_pane_emits_targeted_kill() {
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.kill_pane(0)).expect("kill command");
+    assert!(
+        bytes_contains(&cmd, b"kill-pane -t %0\n"),
+        "unexpected kill bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+}
+
+#[test]
+fn new_window_emits_bare_new_window() {
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.new_window()).expect("new-window command");
+    assert!(
+        bytes_contains(&cmd, b"new-window\n"),
+        "unexpected new-window bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+}
+
+#[test]
+fn structural_writes_thread_through_the_command_queue() {
+    // A capture command is in flight straight after startup (queue non-empty),
+    // so a split enqueues behind it and emits nothing right now — proving the
+    // write correlates through the same in-flight queue as reads.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    assert!(!has_command(&v.split_window(0, true, false)));
+    // Draining the capture queue eventually emits the deferred split.
+    let mut saw = false;
+    for _ in 0..100 {
+        let a = v.next(block_end(""));
+        match command_bytes(&a) {
+            Some(cmd) if bytes_contains(&cmd, b"split-window -t %0 -h\n") => {
+                saw = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(saw, "deferred split-window was never emitted");
+}
+
+#[test]
+fn structural_writes_guard_pre_steady_and_unknown_pane() {
+    // Not yet in steady state: no command from any structural write.
+    let mut fresh = Viewer::new(Colors::default());
+    assert!(fresh.split_window(0, true, false).is_empty());
+    assert!(fresh.kill_pane(0).is_empty());
+    assert!(fresh.new_window().is_empty());
+    // Steady state, but an unknown pane id yields no split/kill command.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    assert!(v.split_window(999, true, false).is_empty());
+    assert!(v.kill_pane(999).is_empty());
+}
+
+// ---- focus sync: select-pane + active-pane tracking (slice 5e) -------------
+
+#[test]
+fn window_pane_changed_updates_active_pane() {
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    assert_eq!(
+        v.active_pane(),
+        None,
+        "no active pane until tmux reports one"
+    );
+    v.next(window_pane_changed(0, 0));
+    assert_eq!(v.active_pane(), Some(0), "tmux's active pane is tracked");
+}
+
+#[test]
+fn select_pane_emits_targeted_select_and_sets_active_optimistically() {
+    // A 1x2 split so panes 0 and 1 both exist.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0[83x20,0,0,0,83x23,0,21,1]"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.select_pane(1)).expect("select command");
+    assert!(
+        bytes_contains(&cmd, b"select-pane -t %1\n"),
+        "unexpected select bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+    // Active pane set optimistically so tmux's echoing %window-pane-changed is a
+    // no-op (no focus bounce).
+    assert_eq!(v.active_pane(), Some(1));
+}
+
+#[test]
+fn select_pane_is_idempotent_and_guarded() {
+    // Not in steady state: nothing.
+    let mut fresh = Viewer::new(Colors::default());
+    assert!(fresh.select_pane(0).is_empty());
+
+    let mut v = viewer_with_window(&checksummed("83x44,0,0[83x20,0,0,0,83x23,0,21,1]"));
+    drain_to_idle(&mut v);
+    // Unknown pane → no command.
+    assert!(v.select_pane(999).is_empty());
+    // Selecting an already-active pane is a no-op (avoids redundant traffic).
+    v.next(window_pane_changed(0, 1));
+    assert_eq!(v.active_pane(), Some(1));
+    assert!(
+        v.select_pane(1).is_empty(),
+        "selecting the already-active pane must emit nothing"
+    );
 }
