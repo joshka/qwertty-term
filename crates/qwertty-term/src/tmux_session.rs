@@ -244,6 +244,19 @@ impl TmuxSession {
         commands_of(self.viewer.kill_pane(pane_id))
     }
 
+    /// Redirect a native tab-close action on a tmux-managed tab into a tmux
+    /// `kill-window` control command (ADR 006 slice 5e — gap 1). Unlike the
+    /// pane/surface-keyed helpers this takes the tmux **window id** directly:
+    /// the caller (the window-close delegate) already knows which tmux window a
+    /// native tab mirrors (its key in `tmux_tabs`), and a tab close targets the
+    /// whole window, not one pane. Returns the control-pty bytes to write (empty
+    /// for an unknown window or before steady state). The native tab is removed
+    /// by the follow-up `list-windows` reconcile — the caller must NOT close the
+    /// native tab directly (I3).
+    pub fn kill_window(&mut self, window_id: usize) -> Vec<Vec<u8>> {
+        commands_of(self.viewer.kill_window(window_id))
+    }
+
     /// Make the tmux pane a native surface renders the active pane (ADR 006
     /// slice 5e — app→tmux focus sync). Called when the app's keyboard focus
     /// moves to a tmux pane so bare `split-window` and the active-pane indicator

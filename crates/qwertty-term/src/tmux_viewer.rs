@@ -183,6 +183,13 @@ enum Command {
     /// native tree; tmux's `%layout-change` (or `%window-close` for the last
     /// pane) reconcile removes the native surface/tab. A *write* command.
     KillPane { pane_id: usize },
+    /// `kill-window`: close a whole tmux window (ADR 006 slice 5e — the
+    /// close-tab redirect). A native tab close (the tab's red button / close
+    /// button) on a tmux-managed tab is redirected here instead of closing the
+    /// native tab directly (I3); tmux removes the window and the native tab is
+    /// dropped by the follow-up `list-windows` refresh (see
+    /// [`Viewer::received_command_output`]). A *write* command.
+    KillWindow { window_id: usize },
     /// `select-pane`: make a tmux pane the window's active pane (ADR 006 slice
     /// 5e — focus sync). Sent when the app's keyboard focus moves to a tmux pane
     /// so bare `split-window`, the active-pane indicator, and any no-`-t` command
@@ -253,6 +260,10 @@ impl Command {
             Command::NewWindow => b"new-window\n".to_vec(),
             // `kill-pane -t %<id>`: close the target pane.
             Command::KillPane { pane_id } => format!("kill-pane -t %{pane_id}\n").into_bytes(),
+            // `kill-window -t @<id>`: close the target window (and all its panes).
+            Command::KillWindow { window_id } => {
+                format!("kill-window -t @{window_id}\n").into_bytes()
+            }
             // `select-pane -t %<id>`: make the target pane the active pane.
             Command::SelectPane { pane_id } => format!("select-pane -t %{pane_id}\n").into_bytes(),
         }
@@ -636,6 +647,20 @@ impl Viewer {
         self.enqueue_write(Command::KillPane { pane_id })
     }
 
+    /// Kill the tmux window a native tab mirrors (ADR 006 slice 5e — the
+    /// close-tab redirect / gap 1). Returns the control command(s) to send now
+    /// (empty when not in steady state or the window is unknown). The window
+    /// (and all its panes) is removed by tmux; the native tab is torn down by
+    /// the follow-up `list-windows` refresh queued in
+    /// [`received_command_output`](Self::received_command_output) — the caller
+    /// must NOT close the native tab directly (I3).
+    pub fn kill_window(&mut self, window_id: usize) -> Vec<Action> {
+        if self.state != State::CommandQueue || !self.windows.iter().any(|w| w.id == window_id) {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::KillWindow { window_id })
+    }
+
     /// Make a tmux pane the active pane (ADR 006 slice 5e — app→tmux focus sync).
     /// Called when the app's keyboard focus moves to a tmux pane so bare
     /// `split-window` and the active-pane indicator operate on the pane the user
@@ -698,14 +723,25 @@ impl Viewer {
             // pop above already advanced the queue. The pane's echo (if any)
             // arrives separately as `%output`.
             Command::SendKeys { .. } => {}
-            // Structural writes (split/new-window/kill): the reply carries
+            // Structural writes (split/new-window/select): the reply carries
             // nothing to apply either. The pop advanced the queue; the layout
-            // effect arrives later as a `%layout-change` / `%window-add` /
-            // `%window-close` that drives the reconcile (ADR 006 slice 5e).
-            Command::SplitWindow { .. }
-            | Command::NewWindow
-            | Command::KillPane { .. }
-            | Command::SelectPane { .. } => {}
+            // effect arrives later as a `%layout-change` / `%window-add` that
+            // drives the reconcile (ADR 006 slice 5e).
+            Command::SplitWindow { .. } | Command::NewWindow | Command::SelectPane { .. } => {}
+            // Window-removing writes (kill-pane / kill-window): tmux signals the
+            // removal of the *last* pane of a window (or a whole window) with
+            // `%window-close` / `%unlinked-window-close`, which the control-mode
+            // decoder does NOT surface as a notification (verified against tmux
+            // 3.7b: a non-last window close emits only `%unlinked-window-close`
+            // + `%session-window-changed`, both undecoded). So a native tab would
+            // linger after its tmux window is gone. Because *we* initiated this
+            // write, we can close the loop app-side: queue a `list-windows`
+            // refresh so the reconcile drops the now-missing window's tab (I1/I3).
+            // A kill-pane that only removed a non-last pane already got a
+            // `%layout-change`; the extra refresh is an idempotent no-op there.
+            Command::KillPane { .. } | Command::KillWindow { .. } => {
+                self.command_queue.push_back(Command::ListWindows);
+            }
         }
     }
 

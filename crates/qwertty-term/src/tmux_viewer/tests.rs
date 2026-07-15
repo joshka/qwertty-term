@@ -472,6 +472,55 @@ fn kill_pane_emits_targeted_kill() {
 }
 
 #[test]
+fn kill_window_emits_targeted_kill_and_queues_a_list_windows_refresh() {
+    // A tab close on a tmux-managed tab (gap 1) → `kill-window -t @<w>`.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.kill_window(0)).expect("kill-window command");
+    assert!(
+        bytes_contains(&cmd, b"kill-window -t @0\n"),
+        "unexpected kill-window bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+    // tmux signals the window's removal with an undecoded
+    // `%window-close`/`%unlinked-window-close`, so the write's %begin/%end reply
+    // must queue a `list-windows` refresh to reconcile the tab away (I3).
+    let refresh = command_bytes(&v.next(block_end(""))).expect("follow-up refresh");
+    assert!(
+        bytes_contains(&refresh, b"list-windows"),
+        "kill-window must queue a list-windows refresh, got: {:?}",
+        String::from_utf8_lossy(&refresh)
+    );
+}
+
+#[test]
+fn kill_pane_queues_a_list_windows_refresh_for_the_last_pane_collapse() {
+    // kill-pane of a window's *last* pane closes the window (undecoded
+    // `%window-close`), so kill-pane also queues a list-windows refresh so the
+    // collapse-to-tab-close reconciles (gap 1 "collapse-to-tab-close").
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    command_bytes(&v.kill_pane(0)).expect("kill-pane command");
+    let refresh = command_bytes(&v.next(block_end(""))).expect("follow-up refresh");
+    assert!(
+        bytes_contains(&refresh, b"list-windows"),
+        "kill-pane must queue a list-windows refresh, got: {:?}",
+        String::from_utf8_lossy(&refresh)
+    );
+}
+
+#[test]
+fn kill_window_guards_pre_steady_and_unknown_window() {
+    // Not yet in steady state: no command.
+    let mut fresh = Viewer::new(Colors::default());
+    assert!(fresh.kill_window(0).is_empty());
+    // Steady state, but an unknown window id yields no command.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    assert!(v.kill_window(999).is_empty());
+}
+
+#[test]
 fn new_window_emits_bare_new_window() {
     let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
     drain_to_idle(&mut v);

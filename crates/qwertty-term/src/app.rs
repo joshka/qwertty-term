@@ -2299,7 +2299,13 @@ impl Controller {
         for event in events {
             let key = (event.tab, event.surface);
             if event.exit {
-                // Tear down every native tab mirroring this control session.
+                // Control mode ended. I1 (never-empty window): restore the
+                // hidden `tmux -CC` control tab **before** tearing down the
+                // tmux-window tabs, so the window group never passes through a
+                // zero-visible-surface state (a zero-surface window self-closes,
+                // which is the "close last pane closed the window" bug). Only
+                // then close every native tab mirroring this control session.
+                self.restore_control_tab(event.tab);
                 let tabs: Vec<TabId> = self
                     .0
                     .borrow_mut()
@@ -2310,10 +2316,6 @@ impl Controller {
                 for tab in tabs {
                     self.close_tab(tab);
                 }
-                // Control mode ended: bring the original `tmux -CC` control tab
-                // back into view (it was hidden while the session owned the
-                // screen).
-                self.restore_control_tab(event.tab);
                 continue;
             }
             let control = DisplaySource {
@@ -2383,9 +2385,14 @@ impl Controller {
                 }
             }
         }
-        // Now that at least one tmux window tab exists, hide the raw
-        // `tmux -CC` control tab so the user sees only the tmux windows
-        // (upstream behaviour). No-op once already hidden.
+        // Control-surface visibility follows I1 + I4: while ≥1 tmux-window tab
+        // exists, hide the raw `tmux -CC` control tab so the user sees only the
+        // tmux windows (I4, upstream behaviour). But the moment a reconcile
+        // removes the *last* tmux-window tab (e.g. the last window was killed),
+        // restore the control tab so the window group never sits at zero visible
+        // surfaces (I1 — never-empty window). `restore_control_tab` is a no-op if
+        // the control tab was never hidden (the pre-first-window case), and
+        // `hide_control_tab` is a no-op once already hidden.
         let has_native_tab = self
             .0
             .borrow()
@@ -2394,6 +2401,8 @@ impl Controller {
             .is_some_and(|m| !m.is_empty());
         if has_native_tab {
             self.hide_control_tab(control.control_tab);
+        } else {
+            self.restore_control_tab(control.control_tab);
         }
     }
 
@@ -3266,6 +3275,27 @@ impl Controller {
         }
     }
 
+    /// Close a whole *tab* (the Close-Tab menu item / `close_tab` keybind), as
+    /// distinct from closing one pane (`close_surface`). For a **tmux-managed
+    /// tab** this is redirected to a tmux `kill-window` (ADR 006 slice 5e — gap
+    /// 1): tmux owns the layout, so the native tab is removed by the resulting
+    /// reconcile, never closed directly (I3). For an ordinary tab it falls back
+    /// to closing the focused pane (whose last-pane collapse closes the tab —
+    /// today's single-pane-tab model).
+    fn close_tab_confirmed(&self, tab: TabId) {
+        if let Some((ctrl_tab, ctrl_surface, window_id)) = self.tmux_window_tab(tab) {
+            self.redirect_tmux_kill_window(
+                DisplaySource {
+                    control_tab: ctrl_tab,
+                    control_surface: ctrl_surface,
+                },
+                window_id,
+            );
+            return;
+        }
+        self.close_focused_confirmed(tab);
+    }
+
     /// Toggle native macOS full-screen for `tab`'s window (the `toggle_fullscreen`
     /// keybind / View menu "Enter Full Screen", NSWindow's own animation).
     fn toggle_fullscreen(&self, tab: TabId) {
@@ -4055,10 +4085,12 @@ impl Controller {
                 true
             }
 
-            // Window / tab lifecycle. Route to the same handlers the menu items
-            // use. `CloseSurface` and `CloseTab(this)` both close the focused
-            // pane (the last pane's collapse closes the tab — today's model);
-            // `CloseTab(other/right)` isn't supported yet and falls through.
+            // Window / tab lifecycle. `CloseSurface` closes the focused pane
+            // (a tmux pane → `kill-pane`); `CloseTab(this)` closes the whole tab
+            // (a tmux tab → `kill-window`, gap 1). For an ordinary tab both
+            // collapse to closing the focused pane (the last pane's collapse
+            // closes the tab — today's model). `CloseTab(other/right)` isn't
+            // supported yet and falls through.
             A::NewWindow => {
                 self.new_window();
                 true
@@ -4067,8 +4099,12 @@ impl Controller {
                 self.new_tab_in(tab);
                 true
             }
-            A::CloseSurface | A::CloseTab(CloseTabMode::This) => {
+            A::CloseSurface => {
                 self.close_focused_confirmed(tab);
+                true
+            }
+            A::CloseTab(CloseTabMode::This) => {
+                self.close_tab_confirmed(tab);
                 true
             }
             A::ToggleQuickTerminal => {
@@ -4562,6 +4598,84 @@ impl Controller {
         }
     }
 
+    /// Redirect a native **tab** close on a tmux-managed tab to a tmux
+    /// `kill-window` control command (ADR 006 slice 5e — gap 1). `control`
+    /// locates the `tmux -CC` control surface; `window_id` is the tmux window
+    /// the native tab mirrors (its key in [`ControllerState::tmux_tabs`]). The
+    /// command is written to the control pty; the native tab is removed by the
+    /// follow-up `list-windows` reconcile (I3) — the caller must NOT close the
+    /// native tab directly. No-op if the control surface/session is gone.
+    fn redirect_tmux_kill_window(&self, control: DisplaySource, window_id: usize) {
+        let mut state = self.0.borrow_mut();
+        if let Some(cs) = state
+            .tabs
+            .get_mut(&control.control_tab)
+            .and_then(|t| t.surfaces.get_mut(&control.control_surface))
+        {
+            let commands = cs
+                .tmux
+                .as_mut()
+                .map(|sess| sess.kill_window(window_id))
+                .unwrap_or_default();
+            for cmd in &commands {
+                cs.send_pty(cmd);
+            }
+        }
+    }
+
+    /// If `tab` is a **tmux-window tab** (it mirrors a tmux window under some
+    /// live control session), return `(control_tab, control_surface,
+    /// window_id)` — everything the window-close delegate needs to redirect a
+    /// tab close to `kill-window` (gap 1). `None` for an ordinary tab or the
+    /// control tab itself.
+    fn tmux_window_tab(&self, tab: TabId) -> Option<(TabId, SurfaceId, usize)> {
+        let state = self.0.borrow();
+        for (&(ctrl_tab, ctrl_surface), map) in state.tmux_tabs.iter() {
+            for (&window_id, &native) in map.iter() {
+                if native == tab {
+                    return Some((ctrl_tab, ctrl_surface, window_id));
+                }
+            }
+        }
+        None
+    }
+
+    /// If `tab` hosts a live `tmux -CC` **control surface**, return that
+    /// surface's id (gap 4 — window-close teardown). `None` if no surface in the
+    /// tab is running control mode.
+    fn tmux_control_surface_of(&self, tab: TabId) -> Option<SurfaceId> {
+        let state = self.0.borrow();
+        let t = state.tabs.get(&tab)?;
+        t.surfaces
+            .iter()
+            .find_map(|(sid, s)| s.tmux_session().is_some().then_some(*sid))
+    }
+
+    /// Tear down the tmux session hosted by control surface `(control_tab,
+    /// control_surface)` (ADR 006 slice 5e — gap 4). Closes every native
+    /// tmux-window tab mirroring the session so none are orphaned when the
+    /// control window closes, and clears the hidden-control bookkeeping. The
+    /// control surface's own pty close detaches the `tmux -CC` client (tmux
+    /// keeps the detached session on its server — a clean detach, not an
+    /// orphaned server or a zombie). Idempotent.
+    fn teardown_tmux_control(&self, control_tab: TabId, control_surface: SurfaceId) {
+        let key = (control_tab, control_surface);
+        let tabs: Vec<TabId> = self
+            .0
+            .borrow_mut()
+            .tmux_tabs
+            .remove(&key)
+            .map(|m| m.into_values().collect())
+            .unwrap_or_default();
+        for tab in tabs {
+            self.close_tab(tab);
+        }
+        self.0
+            .borrow_mut()
+            .tmux_hidden_controls
+            .remove(&control_tab);
+    }
+
     /// Send already-composed text (IME commit) to `surface`'s pty. Committed
     /// text is user input, so it snaps this pane's viewport to the bottom.
     pub fn send_text_to_surface(&self, tab: TabId, surface: SurfaceId, text: &str) {
@@ -4815,7 +4929,7 @@ impl Controller {
             }
             MenuAction::CloseTab => {
                 if let Some(active) = self.active_tab() {
-                    self.close_focused_confirmed(active);
+                    self.close_tab_confirmed(active);
                 }
             }
             MenuAction::Copy => self.copy_selection_from_active(),
@@ -6846,13 +6960,43 @@ define_class!(
     unsafe impl NSObjectProtocol for WindowDelegate {}
 
     unsafe impl NSWindowDelegate for WindowDelegate {
-        /// The window's close button (or Cmd-W routed to the window) was hit:
-        /// gate on `confirm-close-surface`. Returning `false` vetoes the close
-        /// (the user cancelled the confirmation); `true` lets it proceed.
+        /// The window's close button (or Cmd-W routed to the window) was hit.
+        ///
+        /// Three cases (ADR 006 tmux lifecycle):
+        /// - **tmux-window tab** (gap 1): redirect the close to a tmux
+        ///   `kill-window` and **veto** the native close (`false`) — tmux owns
+        ///   the layout, so the native tab is removed by the resulting
+        ///   `%window-close` / `list-windows` reconcile, not here (I3).
+        /// - **tmux control tab** (gap 4): closing the `tmux -CC` host window
+        ///   ends the session; tear down its mirrored tmux tabs (so none are
+        ///   orphaned), then proceed with the close (the pty close detaches the
+        ///   client cleanly).
+        /// - **ordinary tab**: gate on `confirm-close-surface`. Returning
+        ///   `false` vetoes the close (the user cancelled); `true` proceeds.
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSObject) -> bool {
             let ivars = self.ivars();
-            ivars.controller.confirm_close_window(ivars.tab)
+            let controller = &ivars.controller;
+            let tab = ivars.tab;
+            // Gap 1: a tmux-window tab close becomes `kill-window`; veto the
+            // native close so the reconcile removes the tab.
+            if let Some((ctrl_tab, ctrl_surface, window_id)) = controller.tmux_window_tab(tab) {
+                controller.redirect_tmux_kill_window(
+                    DisplaySource {
+                        control_tab: ctrl_tab,
+                        control_surface: ctrl_surface,
+                    },
+                    window_id,
+                );
+                false
+            } else {
+                // Gap 4: closing the control window ends the session — tear the
+                // mirrored tmux tabs down before the window goes.
+                if let Some(ctrl_surface) = controller.tmux_control_surface_of(tab) {
+                    controller.teardown_tmux_control(tab, ctrl_surface);
+                }
+                controller.confirm_close_window(tab)
+            }
         }
 
         /// The window (tab) became key: mark its tab active in the controller and

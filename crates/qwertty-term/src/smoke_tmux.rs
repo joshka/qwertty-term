@@ -44,17 +44,50 @@ use crate::tmux_session::TmuxSession;
 
 /// The mock native-tab set the reconcile plan is applied to — the headless
 /// analog of the AppKit tab registry + per-tab `SplitTree`s (slice 5b-native).
-#[derive(Default)]
+///
+/// Beyond the tmux-window tabs, it models the two lifecycle-invariant pieces the
+/// real [`Controller`](crate::app) tracks but AppKit hides from a headless test
+/// (ADR 006 tmux lifecycle gaps 2 & 4):
+///
+/// - `control_visible` mirrors `Controller::{hide,restore}_control_tab`: the
+///   `tmux -CC` control surface `S_c` is hidden (ordered out) while ≥1
+///   tmux-window tab exists (I4), and restored the moment the last one is
+///   removed (I1 — never-empty window). Asserting it here proves the reconcile
+///   plans drive the control surface to the right visibility; the actual
+///   `orderOut` / `makeKeyAndOrderFront` still needs a human click-test.
+/// - `focused` mirrors the app's keyboard-focus target, driven by the
+///   tmux→app focus-sync signal (`SessionUpdate::focus`).
 struct NativeTabs {
     /// Native tab window ids in creation order (each tmux window → one tab).
     order: Vec<usize>,
     /// Each present window's split tree (pane → split).
     trees: HashMap<usize, SplitTree>,
+    /// Whether the control surface `S_c` is currently visible (I1/I4). Starts
+    /// visible (a plain shell) and is hidden once the first tmux tab appears.
+    control_visible: bool,
+    /// The surface the app would move keyboard focus to (tmux→app focus sync).
+    focused: Option<crate::splits::SurfaceId>,
+}
+
+impl Default for NativeTabs {
+    fn default() -> NativeTabs {
+        NativeTabs {
+            order: Vec::new(),
+            trees: HashMap::new(),
+            // S_c is visible before any tmux window exists (it is the raw shell
+            // the user typed `tmux -CC` into).
+            control_visible: true,
+            focused: None,
+        }
+    }
 }
 
 impl NativeTabs {
     /// Apply one reconcile plan, exactly as the native layer would: removals,
-    /// then creations, then set each present window's split tree.
+    /// then creations, then set each present window's split tree — and finally
+    /// reconcile the control surface's visibility per I1/I4 (hidden while any
+    /// tmux tab exists, restored when none remain), mirroring the tail of
+    /// `Controller::apply_tmux_plan`.
     fn apply(&mut self, plan: &ReconcilePlan) {
         for op in &plan.ops {
             match op {
@@ -68,10 +101,16 @@ impl NativeTabs {
                     }
                 }
                 ReconcileOp::SetSplitTree { window_id, tree } => {
+                    if !self.order.contains(window_id) {
+                        self.order.push(*window_id);
+                    }
                     self.trees.insert(*window_id, tree.clone());
                 }
             }
         }
+        // I1 + I4: hide S_c while ≥1 tmux-window tab exists; restore it the
+        // moment the last is removed so the window group is never left empty.
+        self.control_visible = self.order.is_empty();
     }
 }
 
@@ -142,13 +181,18 @@ impl FakeServer {
         } else if contains(command, b"split-window")
             || contains(command, b"new-window")
             || contains(command, b"kill-pane")
+            || contains(command, b"kill-window")
             || contains(command, b"select-pane")
         {
             // Structural writes (ADR 006 slice 5e): tmux acks the command with an
             // empty block (advancing the command queue), then emits the layout
             // effect (%layout-change / %window-add / %window-close)
             // asynchronously. The smoke drives that effect explicitly in `run`,
-            // mirroring the real server, so here we only ack.
+            // mirroring the real server, so here we only ack. For a window-
+            // removing write (kill-pane of a last pane / kill-window), tmux emits
+            // an undecoded `%window-close` / `%unlinked-window-close`, so the
+            // session instead queues a follow-up `list-windows` — answered from
+            // `self.windows`, which `run` updates before driving.
             self.send_block(engine, "");
         } else if contains(command, b"capture-pane") || contains(command, b"list-panes") {
             // Content-capture / pane-state: an empty block is a valid response
@@ -207,15 +251,21 @@ fn drive(
         if let Some(plan) = &update.plan {
             native.apply(plan);
         }
+        // tmux→app focus sync: adopt the surface tmux made active this batch.
+        if let Some(focus) = update.focus {
+            native.focused = Some(focus);
+        }
         if update.exit {
             exited = true;
-            // Control mode ended: the native layer tears down every tmux-window
-            // tab wholesale (no plan on exit) and restores the hidden control
-            // surface. The mock has no control surface, but it must drop the
-            // tmux-window tabs — mirroring `Controller::apply_tmux_reconciles`'s
-            // exit branch (ADR 006 slice 5e teardown).
+            // Control mode ended (ADR 006 slice 5e teardown): mirror
+            // `Controller::apply_tmux_reconciles`'s exit branch — restore the
+            // hidden control surface **before** dropping the tmux-window tabs
+            // (I1 — the window group never passes through zero visible
+            // surfaces), then tear the tmux-window tabs down wholesale.
+            native.control_visible = true;
             native.order.clear();
             native.trees.clear();
+            native.focused = None;
         }
         for command in &update.commands {
             server.respond(engine, command);
@@ -261,6 +311,11 @@ pub fn run() -> Result<(), String> {
             "window 1 tree should be a single leaf for pane 1's surface, got {:?}",
             tree1.surfaces()
         ));
+    }
+    // I4: with a tmux-window tab now present, the raw control surface S_c is
+    // hidden (the user sees the tmux window, not the `tmux -CC` shell).
+    if native.control_visible {
+        return Err("control surface should be hidden once a tmux-window tab exists".to_string());
     }
 
     // --- Live %output routes to the right pane terminal --------------------
@@ -637,15 +692,94 @@ pub fn run() -> Result<(), String> {
         return Err("surviving pane 1 lost its terminal after the pane close".to_string());
     }
 
-    // --- Exit control mode tears the tmux tabs down (window survives) ------
-    // `%exit` + ST end control mode. The session goes defunct and every
-    // tmux-window tab is torn down; the real app restores the hidden control
-    // surface so its *window* is NOT closed (asserted live, not in this mock,
-    // which models only the tmux-window tabs).
+    // --- Close a TAB (gap 1): tmux-managed tab close -> kill-window --------
+    // Closing a native tmux-window *tab* (its red button / close control) is
+    // redirected to `kill-window -t @<w>` — NOT applied to the native tree (I3).
+    // The tab is removed only by the follow-up `list-windows` reconcile. Close
+    // window @2 (a 1-pane tab in the current [1, 2, 3] set).
+    let kw_cmds = session.kill_window(2);
+    let kw_blob: Vec<u8> = kw_cmds.concat();
+    if !contains(&kw_blob, b"kill-window -t @2\n") {
+        return Err(format!(
+            "tab close redirect produced the wrong command: {:?}",
+            String::from_utf8_lossy(&kw_blob)
+        ));
+    }
+    // The client must NOT have removed the native tab itself — still [1, 2, 3]
+    // until tmux confirms via the reconcile.
+    if native.order != [1, 2, 3] {
+        return Err(format!(
+            "kill-window must not remove the native tab directly, tabs = {:?}",
+            native.order
+        ));
+    }
+    // Play tmux: window @2 is gone from the server model. Ack the write (which
+    // makes the session queue the `list-windows` refresh that closes the loop —
+    // tmux's real `%window-close`/`%unlinked-window-close` is not decoded).
+    server.windows.retain(|(id, _)| *id != 2);
+    for cmd in &kw_cmds {
+        server.respond(&mut engine, cmd);
+    }
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    // Now the tab is gone; window @1 and @3 (and their panes) remain.
+    if native.order != [1, 3] {
+        return Err(format!(
+            "after kill-window @2 the reconcile should leave tabs [1, 3], got {:?}",
+            native.order
+        ));
+    }
+    // The killed window's pane surface is dropped; survivors keep their
+    // terminals (still valid keyboard/render targets — a focus survivor exists).
+    if session.surface_of(2).is_some() {
+        return Err("killed window @2's pane surface should be dropped".to_string());
+    }
+    if session.pane_terminal(s1).is_none() || session.pane_terminal(s5).is_none() {
+        return Err("a surviving tmux pane lost its terminal after kill-window".to_string());
+    }
+    // Two tabs still present → S_c stays hidden (I4).
+    if native.control_visible {
+        return Err("control surface must stay hidden while tmux tabs remain".to_string());
+    }
+
+    // --- Close a non-last tmux tab (gap 2 setup): stays hidden ------------
+    // Removing a non-last tmux-window tab keeps S_c hidden (a tmux window still
+    // owns the group, I4). Kill @3, leaving only @1 — the last window, whose
+    // close the real tmux server signals with `%exit` (tested next).
+    let kw3 = session.kill_window(3);
+    server.windows.retain(|(id, _)| *id != 3);
+    for cmd in &kw3 {
+        server.respond(&mut engine, cmd);
+    }
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    if native.order != [1] {
+        return Err(format!(
+            "after kill-window @3 the reconcile should leave tab [1], got {:?}",
+            native.order
+        ));
+    }
+    if native.control_visible {
+        return Err("control surface must stay hidden while window @1 remains".to_string());
+    }
+    if session.surface_of(5).is_some() {
+        return Err("killed window @3's pane surface should be dropped".to_string());
+    }
+
+    // --- Exit control mode: last window closed -> restore S_c (gap 2, I1) --
+    // Killing the last tmux window ends the session: the real tmux server sends
+    // `%exit` (verified against tmux 3.7b). `%exit` + ST drive the session
+    // defunct; the teardown restores the hidden control surface S_c **before**
+    // the window group would be left empty (I1 — never a zero-surface,
+    // self-closing window) and tears down the single remaining tmux-window tab.
     engine.write(b"\x1b\\");
     let exited = drive(&mut engine, &mut session, &mut native, &mut server);
     if !exited {
         return Err("ST (exit control mode) did not signal session teardown".to_string());
+    }
+    // I1: S_c is restored (visible) so the window survives the last tab's close.
+    if !native.control_visible {
+        return Err(
+            "I1 violated: control surface must be restored on control-mode exit".to_string(),
+        );
     }
     if !session.is_defunct() {
         return Err("session should be defunct after exit".to_string());
