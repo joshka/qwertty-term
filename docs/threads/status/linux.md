@@ -1,11 +1,11 @@
 # linux status (Linux port — ADR 003, P2/P3 continuation of T7)
 
-- **Current item:** FreeType `load_by_name` via fontconfig — gate-green, shipping. Next:
-  #42 slice 2 (un-gate `ligature_pixels` + `named_family_default_fg` now that `load_by_name`
-  exists on FreeType), then `force-autohint`/`freetype-load-flags` (FreeType plumbing; config
-  parsing T3).
-- **Last merged:** #258 (#42 slice 1 — 4 pixel tests on Software/Linux) → `23c09cbd`.
-  (Code: S1 #245, S2 #248.)
+- **Current item:** #42 slice 2 (un-gate `ligature_pixels` + `named_family_default_fg`) —
+  gate-green, shipping. Next: `force-autohint`/`freetype-load-flags` (FreeType plumbing; config
+  parsing T3); then real wght-variation bold; then deferred pixel tests (emoji/kitty/cursor —
+  need Software color/image compositing).
+- **Last merged:** #260 (FreeType `load_by_name` via fontconfig) → `882acd8a`.
+  (Also merged this session: S1 #245, S2 #248, #254 status, #258 #42-slice1.)
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
@@ -41,6 +41,14 @@
   `--features freetype` + `--features fontconfig` clippy ✓; freetype/fontconfig tests ✓ (bogus
   fallback verified with real libfontconfig); workspace test ✓ (2521); vt release ✓ (1595) +
   paranoid ✓ (1570); offscreen-smoke ✓.
+
+- 2026-07-14: **#42 slice 2 — un-gated `ligature_pixels` + `named_family_default_fg_inks_on_theme`.**
+  Both need `Face::load_by_name` (now on FreeType via #260). `ligature_pixels`: dropped the OS
+  gate, swapped `coretext::{Face,PixelFormat,Bitmap}` → the crate-root aliases. `default_fg_ink`:
+  removed the `#[cfg(target_os="macos")]` on the named-family test. Both skip-if-not-installed on
+  Linux (FiraCode/named family usually absent on CI → `load_by_name` embedded-fallback → family
+  check misses → SKIP). **Gate:** fmt ✓; renderer clippy all-targets ✓; workspace test ✓ (2521);
+  vt release ✓ (1595) + paranoid ✓ (1570); offscreen-smoke ✓; both pass on macOS locally.
 
 ## Next-item pointers (respawn crib)
 
