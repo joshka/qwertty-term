@@ -65,6 +65,23 @@ impl Engine {
         }
     }
 
+    /// Create a new engine with the given grid size, startup colors, and
+    /// scrollback byte limit. Used by the app to thread the `scrollback-limit`
+    /// config value (bytes of history per surface) into
+    /// [`Options::max_scrollback`] at construction — a reload only affects new
+    /// surfaces, matching upstream (`Config.zig:1387`).
+    pub fn with_options(cols: usize, rows: usize, colors: Colors, max_scrollback: usize) -> Self {
+        let terminal = Terminal::new(Options {
+            cols: clamp_dim(cols),
+            rows: clamp_dim(rows),
+            colors,
+            max_scrollback,
+        });
+        Self {
+            stream: Stream::new(TerminalHandler::new(terminal)),
+        }
+    }
+
     fn terminal(&self) -> &Terminal {
         &self.stream.handler.terminal
     }
@@ -144,6 +161,44 @@ impl Engine {
         let terminal = self.terminal_mut();
         terminal.colors = colors;
         terminal.screen_mut().pages.mark_all_dirty();
+    }
+
+    /// Enable or disable answering the window-title report query (`CSI 21 t`),
+    /// per the `title-report` config (upstream `Surface.zig:983`). The engine
+    /// defaults this on for libghostty-vt parity, so the app sets it to the
+    /// config value on startup and on reload.
+    pub fn set_title_reporting(&mut self, enabled: bool) {
+        self.stream.handler.set_title_reporting(enabled);
+    }
+
+    /// Set the ENQ (`0x05`) answerback string (`enquiry-response` config).
+    /// Empty (the default) makes ENQ produce no reply. Applied on startup and
+    /// on reload.
+    pub fn set_enquiry_response(&mut self, response: &[u8]) {
+        self.stream.handler.set_enquiry_response(response);
+    }
+
+    /// Set the OSC 4/10/11 color-query reply format (`osc-color-report-format`
+    /// config). Applied on startup and on reload.
+    pub fn set_osc_color_report_format(
+        &mut self,
+        format: qwertty_term_vt::stream::OscColorReportFormat,
+    ) {
+        self.stream.handler.set_osc_color_report_format(format);
+    }
+
+    /// Set the per-screen image-storage byte limit (`image-storage-limit`
+    /// config; `0` disables image protocols). Applied on startup and on reload.
+    pub fn set_kitty_graphics_size_limit(&mut self, limit: usize) {
+        self.terminal_mut().set_kitty_graphics_size_limit(limit);
+    }
+
+    /// Whether the running program has enabled KAM (ANSI mode 2,
+    /// `disable_keyboard`). Combined with the `vt-kam-allowed` config, the app
+    /// suppresses keyboard input to the pty while both hold (upstream
+    /// `Surface.zig:2699`).
+    pub fn keyboard_disabled(&self) -> bool {
+        self.mode(Mode::DisableKeyboard)
     }
 
     /// Whether synchronized output (mode 2026) is currently active. When set,
@@ -1037,5 +1092,153 @@ mod tests {
         // bottom-right.
         assert_eq!(range.top_left, (0, 0));
         assert_eq!(range.bottom_right, (4, 0));
+    }
+
+    #[test]
+    fn set_title_reporting_gates_csi_21t() {
+        // Engine default is on (lib parity): CSI 21 t replies `ESC ] l … ST`.
+        let mut engine = Engine::new(80, 24);
+        engine.write(b"\x1b]2;hi\x07"); // set a window title
+        let _ = engine.take_output();
+        engine.write(b"\x1b[21t");
+        assert_eq!(engine.take_output(), b"\x1b]lhi\x1b\\");
+        // Disabling it (the `title-report=false` app default) suppresses the reply.
+        engine.set_title_reporting(false);
+        engine.write(b"\x1b[21t");
+        assert!(engine.take_output().is_empty());
+    }
+
+    #[test]
+    fn set_enquiry_response_answers_enq() {
+        let mut engine = Engine::new(80, 24);
+        // Default empty → ENQ (0x05) produces no reply.
+        engine.write(b"\x05");
+        assert!(engine.take_output().is_empty());
+        engine.set_enquiry_response(b"PONG");
+        engine.write(b"\x05");
+        assert_eq!(engine.take_output(), b"PONG");
+    }
+
+    #[test]
+    fn set_osc_color_report_format_controls_reply() {
+        use qwertty_term_vt::stream::OscColorReportFormat;
+        // Query palette index 1 (always resolvable). `none` suppresses the reply.
+        let mut engine = Engine::new(80, 24);
+        engine.set_osc_color_report_format(OscColorReportFormat::None);
+        engine.write(b"\x1b]4;1;?\x07");
+        assert!(engine.take_output().is_empty());
+        // 8-bit replies with unscaled `rgb:rr/gg/bb` (two hex digits per channel).
+        engine.set_osc_color_report_format(OscColorReportFormat::Bit8);
+        engine.write(b"\x1b]4;1;?\x07");
+        let reply8 = engine.take_output();
+        let text8 = String::from_utf8_lossy(&reply8);
+        assert!(
+            text8.contains("rgb:"),
+            "expected an rgb: reply, got {text8:?}"
+        );
+        let first8 = text8
+            .split("rgb:")
+            .nth(1)
+            .unwrap_or("")
+            .split('/')
+            .next()
+            .unwrap_or("");
+        assert_eq!(
+            first8.len(),
+            2,
+            "8-bit channel should be 2 hex digits: {text8:?}"
+        );
+        // 16-bit replies with scaled channels (four hex digits per channel).
+        engine.set_osc_color_report_format(OscColorReportFormat::Bit16);
+        engine.write(b"\x1b]4;1;?\x07");
+        let reply16 = engine.take_output();
+        let text16 = String::from_utf8_lossy(&reply16);
+        let first16 = text16
+            .split("rgb:")
+            .nth(1)
+            .unwrap_or("")
+            .split('/')
+            .next()
+            .unwrap_or("");
+        assert_eq!(
+            first16.len(),
+            4,
+            "16-bit channel should be 4 hex digits: {text16:?}"
+        );
+    }
+
+    #[test]
+    fn set_kitty_graphics_size_limit_zero_disables_images() {
+        // A zero storage limit disables the image protocol (upstream
+        // `image-storage-limit = 0`): the storage reports `enabled() == false`
+        // and a transmit stores nothing.
+        let mut engine = Engine::new(80, 24);
+        engine.set_kitty_graphics_size_limit(0);
+        assert!(
+            !engine
+                .stream
+                .handler
+                .terminal
+                .screen()
+                .kitty_images
+                .enabled()
+        );
+        // Minimal RGB 1x1 transmit-and-display (a=T), base64 of 3 bytes.
+        engine.write(b"\x1b_Ga=T,f=24,s=1,v=1;AAAA\x1b\\");
+        assert!(
+            engine
+                .stream
+                .handler
+                .terminal
+                .screen()
+                .kitty_images
+                .images
+                .is_empty(),
+            "a zero storage limit should reject the transmit"
+        );
+        // A generous limit re-enables the protocol.
+        engine.set_kitty_graphics_size_limit(320 * 1000 * 1000);
+        assert!(
+            engine
+                .stream
+                .handler
+                .terminal
+                .screen()
+                .kitty_images
+                .enabled()
+        );
+    }
+
+    #[test]
+    fn with_options_sets_scrollback_limit() {
+        // `max_scrollback` is a byte budget; a tiny limit prunes history fast,
+        // an ample one retains it. Push 50 rows over a 3-row grid.
+        let write_rows = |engine: &mut Engine| {
+            for i in 0..50 {
+                engine.write(format!("line{i}\r\n").as_bytes());
+            }
+        };
+        let mut small = Engine::with_options(20, 3, Colors::default(), 0);
+        write_rows(&mut small);
+        let mut ample = Engine::with_options(20, 3, Colors::default(), 10_000_000);
+        write_rows(&mut ample);
+        assert!(
+            ample.scrollback_len() > small.scrollback_len(),
+            "ample scrollback ({}) should retain more history than none ({})",
+            ample.scrollback_len(),
+            small.scrollback_len()
+        );
+        assert_eq!(small.scrollback_len(), 0, "zero limit keeps no scrollback");
+    }
+
+    #[test]
+    fn keyboard_disabled_tracks_kam_mode() {
+        // ANSI mode 2 (KAM) → `disable_keyboard`. `CSI 2 h` sets, `CSI 2 l` clears.
+        let mut engine = Engine::new(80, 24);
+        assert!(!engine.keyboard_disabled());
+        engine.write(b"\x1b[2h");
+        assert!(engine.keyboard_disabled());
+        engine.write(b"\x1b[2l");
+        assert!(!engine.keyboard_disabled());
     }
 }
