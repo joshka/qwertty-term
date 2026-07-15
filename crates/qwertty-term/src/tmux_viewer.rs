@@ -549,6 +549,13 @@ impl Viewer {
                 self.command_queue.push_back(Command::ListWindows);
             }
 
+            Notification::WindowClose { .. } => {
+                // A window closed (incl. a non-active window's last pane being
+                // Ctrl-D'd → `%unlinked-window-close`). Refresh the window list
+                // so the reconcile drops the vanished window's tab (I3 / gap 3).
+                self.command_queue.push_back(Command::ListWindows);
+            }
+
             // The active pane changed (ADR 006 slice 5e — focus sync). Unlike
             // upstream (which ignores this and drives its own focus,
             // `viewer.zig:508-510`), we record tmux's active pane so the native

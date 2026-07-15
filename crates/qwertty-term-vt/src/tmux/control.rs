@@ -319,6 +319,22 @@ fn parse_line(line: &[u8]) -> Option<Notification> {
         return Some(Notification::WindowAdd { id });
     }
 
+    // %window-close @<id> / %unlinked-window-close @<id>: a window closed. tmux
+    // emits `%window-close` for a window linked to the current session and
+    // `%unlinked-window-close` for one that isn't (e.g. the only pane of a
+    // non-active window gets Ctrl-D'd); both mean the native tab for that window
+    // should be dropped. Upstream `control.zig` does not decode these — see
+    // `docs/analysis/tmux-control-mode-states.md` gap 3.
+    if let Some(rest) = strip_prefix(line, b"%window-close @")
+        .or_else(|| strip_prefix(line, b"%unlinked-window-close @"))
+    {
+        let (id, rest) = parse_usize_prefix(rest)?;
+        if !rest.is_empty() {
+            return None;
+        }
+        return Some(Notification::WindowClose { id });
+    }
+
     // %window-renamed @<id> <name>   (name non-empty)
     if let Some(rest) = strip_prefix(line, b"%window-renamed @") {
         let (id, rest) = parse_usize_prefix(rest)?;
@@ -497,6 +513,10 @@ pub enum Notification {
 
     /// Window `id` was linked to the current session (`%window-add @<id>`).
     WindowAdd { id: usize },
+
+    /// Window `id` closed (`%window-close @<id>` or `%unlinked-window-close
+    /// @<id>`) — its native tab should be dropped.
+    WindowClose { id: usize },
 
     /// Window `id` was renamed to `name` (`%window-renamed @<id> <name>`).
     WindowRenamed { id: usize, name: Vec<u8> },

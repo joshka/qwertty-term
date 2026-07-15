@@ -177,6 +177,23 @@ fn window_add() {
 }
 
 #[test]
+fn window_close_and_unlinked_window_close_decoded() {
+    // Both forms tmux emits for a closed window map to WindowClose (gap 3).
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%window-close @7");
+    assert_eq!(put_newline(&mut c), Notification::WindowClose { id: 7 });
+
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%unlinked-window-close @3");
+    assert_eq!(put_newline(&mut c), Notification::WindowClose { id: 3 });
+
+    // Trailing garbage after the id is not a match.
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%window-close @7 extra");
+    assert_eq!(c.put(b'\n'), Ok(None));
+}
+
+#[test]
 fn window_renamed() {
     let mut c = ControlParser::new();
     put_all_none(&mut c, "%window-renamed @42 bar");
