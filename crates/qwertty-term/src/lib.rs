@@ -36,6 +36,11 @@ pub mod splitkeys;
 pub mod splits;
 pub mod tabkeys;
 pub mod tabs;
+// `theme` is consumed only by the macOS `app` module (`#[cfg(macos)]`), so it is
+// dead code when this crate is compiled for a non-macOS target (e.g. as a
+// platform-free-logic dependency of `qwertty-term-gtk` on Linux). Keep it
+// compiled everywhere (doc-links stay intact) but allow the dead code off-macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub mod theme;
 // Headless tmux control-mode Viewer model (ADR 006 / ADR 004 slice 5a). Pure,
 // AppKit-free — consumes the engine's tmux notification stream. Platform-agnostic.
