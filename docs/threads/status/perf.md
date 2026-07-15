@@ -7,8 +7,8 @@
 > **#283** (wide-cell pair-write, cjk +4%). The `perf` jj workspace was forgotten + deleted and
 > this session archived. **To resume perf work, spawn a fresh thread** off this file — the two
 > remaining items are (1) the whole-app vtebench **scoreboard refresh** (the mission's final
-> "Done" deliverable, BLOCKED only on a quiet machine — run `scripts/bench-vtebench.sh` across qt
-> + ghostty-main + ghostty-1.3.1 when loadavg < ~3 and WindowServer is idle, then refresh
+> "Done" deliverable, BLOCKED only on a quiet machine — run `scripts/bench-vtebench.sh` across
+> all three terminals when loadavg is below ~3 and WindowServer is idle, then refresh
 > `docs/benchmarks/vtebench-baseline.md`) and (2) an optional **SIMD NEON decode** lever (no
 > longer the cjk-full bottleneck post-#277 — a decode-heavy-embedded nicety for its own focused
 > session). Oracle infra to keep: the installed `77190bd02` lib at `~/local/ghostty/zig-out/lib`
