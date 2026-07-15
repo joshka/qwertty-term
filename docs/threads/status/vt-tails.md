@@ -1,12 +1,12 @@
 # vt-tails status
 
-- **Current item:** **tmux control mode — slices 1–3 MERGED (all three pure parsers on main).
-  Next: slice 4 — wire the DCS `TmuxRaw` seam → `Notification` stream (the LAST vt-tails
-  slice; slice 5 Viewer is app-tails). Recycling here — a fresh session executes slice 4 from
-  the detailed design below + ADR 004.**
-- **Last merged:** #261 (slice 3 `output`). #259 (slice 2 `layout`), #257 (slice 1 `control`),
-  #255 (ADR 004) all on main. VT-completeness tail (#241/#244/#249/#250) on main.
-- **Blockers:** none (slices 1–4 are vt-tails; slice 5 Viewer is app-tails, routed at slice 4).
+- **Current item:** **tmux control mode — Josh committed to FULL tmux (slices 4+5).** Slices
+  1–3 MERGED (pure parsers on main). Next (fresh vt-tails session): **slice 4** — wire the DCS
+  `1000p` seam → `Notification` stream (LAST vt-tails slice; detailed design below + ADR 004).
+  **Slice 5 (native Viewer, ~2,283 LoC) routed to app-tails** (Inbox note left in `app-tails.md`).
+- **Last merged:** #263 (slice-4 handoff doc). #261/#259/#257 (slices 3/2/1), #255 (ADR 004),
+  VT-completeness tail (#241/#244/#249/#250) — all on main.
+- **Blockers:** none (slice 4 is vt-tails; slice 5 Viewer is app-tails, Inbox-routed).
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
@@ -113,3 +113,9 @@ After slice 4: vt-tails' tmux work is COMPLETE; only slice 5 (app-tails Viewer) 
   the detailed slice-4 (DCS-seam) design above — context is long and slice 4 is integration
   work (dcs.rs state machine) that deserves a fresh session. **Respawn to continue:** read
   `docs/adr/004-tmux-control-mode.md` + this status file and execute slice 4.
+- 2026-07-14: Josh committed to **full tmux (slices 4+5)** + asked to recycle into a fresh
+  session. Recorded the decision in ADR 004; routed **slice 5 (native Viewer, ~2,283 LoC)** to
+  app-tails' Inbox with the engine API surface. Cleaned the vt-tails workspace (forgot all
+  merged `vt-tails/*` bookmarks → dangling pre-merge commits auto-abandoned; working copy reset
+  to empty-on-main). Workspace KEPT (purpose: slice 4). **Fresh session:** `cd work/vt-tails &&
+  claude` → read ADR 004 + this file → do slice 4.

@@ -101,6 +101,17 @@ vt-tails owns everything above the dashed line; app-tails/termio owns the Viewer
    parsers land. No headless reference consumer is carried in vt-tails; the parsers are proven
    by unit tests.
 
+## Scope decision (Josh 2026-07-14)
+
+**Committed to full tmux control mode (slices 4 + 5).** With slices 1–3 (the three pure
+parsers) merged, Josh greenlit finishing the feature end-to-end: slice 4 (vt-tails — the DCS
+`1000p` seam → `Notification` stream) and **slice 5 — the native Viewer (app-tails,
+~2,283 LoC)** that maps notifications to native tabs/splits so `tmux -CC` renders natively.
+Slice 5 is handed to app-tails via their Inbox with the engine API surface (`tmux::{ControlParser,
+layout::Layout, output::{Variable, parse_format, format}}` + slice 4's `take_tmux_notifications`
+drain). Until slice 5 lands, tmux control mode is not app-observable — the parsers are library
+code proven by unit tests.
+
 ## Consequences
 
 - Closes the last VT-engine feature-coverage item once slices 1–4 land; slice 5 is app-side.
