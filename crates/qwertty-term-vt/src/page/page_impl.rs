@@ -671,15 +671,17 @@ impl Layout {
         let hyperlink_set_start = align_forward(string_alloc_end, HyperlinkSet::base_align());
         let hyperlink_set_end = hyperlink_set_start + hyperlink_set_layout.total_size;
 
+        // Request the raw entry count; the map layout adds the load-factor
+        // headroom and rounds the raw slot count to a power of two (avoiding a
+        // redundant pre-rounding — upstream `7e14347c1`).
         let hyperlink_map_count: u32 = if hyperlink_count == 0 {
             0
         } else {
-            match (hyperlink_count * HYPERLINK_CELL_MULTIPLIER).try_into() {
-                Ok(m) => u32::next_power_of_two(m),
-                Err(_) => u32::MAX,
-            }
+            (hyperlink_count * HYPERLINK_CELL_MULTIPLIER)
+                .try_into()
+                .unwrap_or(u32::MAX)
         };
-        let hyperlink_map_layout = hyperlink::Map::layout(hyperlink_map_count);
+        let hyperlink_map_layout = hyperlink::Map::layout_for_size(hyperlink_map_count);
         let hyperlink_map_start = align_forward(hyperlink_set_end, hyperlink::Map::base_align());
         let hyperlink_map_end = hyperlink_map_start + hyperlink_map_layout.total_size;
 
@@ -1669,10 +1671,12 @@ impl Page {
         unsafe { self.hyperlink_map.map(self.mem).count() as usize }
     }
 
-    /// Hyperlink map capacity. Port of `hyperlinkCapacity`.
+    /// Hyperlink map capacity — the number of unique cells that can hold
+    /// hyperlink data. This is the load-factor-bounded `max_load`, not the raw
+    /// slot count. Port of `hyperlinkCapacity`.
     pub fn hyperlink_capacity(&self) -> usize {
         // SAFETY: map region valid.
-        unsafe { self.hyperlink_map.map(self.mem).capacity() as usize }
+        unsafe { self.hyperlink_map.map(self.mem).max_load() as usize }
     }
 
     /// Insert a hyperlink (URI + optional explicit id) into the page, returning
