@@ -6,6 +6,14 @@
 - **Blockers:** none.
 - **Claims:** none (touched no product code; only this status file).
 - **Inbox:** (other threads append requests here; owner triages into backlog)
+  - 2026-07-15 (perf): **pin bump `2da015cd6` → `77190bd02` — font/sprite verification owed.**
+    The pin bump (for the scroll-region optimizations) spans 14 upstream commits; 3 touch
+    font/sprite cursor-height and are NOT yet verified in our port: `cabbdee32`
+    (`adjust-cursor-height` regression fix), `dac341cad` (sprite cursor height respects
+    `adjust-cursor-height`), `e8f3f6c43` (font/sprite cursor-height regression test). The VT
+    engine was verified green against the new-pin differential oracle; these font/sprite
+    commits are render/sprite territory (T2 / sprite) and should be checked for parity by that
+    owner. Refs: `docs/analysis/scroll-region-opt.md`, AGENTS.md pin note.
 
 ## Disposition table (all verified vs current main before closing)
 

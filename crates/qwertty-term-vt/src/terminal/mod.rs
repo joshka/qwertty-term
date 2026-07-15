@@ -788,18 +788,20 @@ impl Terminal {
         let x = self.screen().cursor.x;
         // Inside the region and on the bottom-most line: scroll up.
         if y == bottom && x >= self.scrolling_region.left && x <= self.scrolling_region.right {
-            // Full-screen (top-anchored, no margins) scrollback path. NOTE:
-            // upstream 77190bd02 additionally skips scrollback creation here on
-            // no-scrollback screens (routing top-anchored regions to the
-            // in-place scroll). That is a *semantic* change relative to our
-            // frozen pin (2da015cd6): the reference oracle still pushes the
-            // scrolled-out rows into (transient) scrollback, so adopting it
-            // diverges. We keep the pin's behavior and only take the pure-perf
-            // in-place path for top!=0 regions below. See
-            // docs/analysis/scroll-region-opt.md.
+            // If the scrolling region is at the top, we create scrollback — but
+            // only if the screen retains scrollback. If it doesn't (the alt
+            // screen, or any no-scrollback screen), creating scrollback is pure
+            // overhead: those rows are never visible and are pruned later (each
+            // scroll paying PageList.grow() + amortized page pruning, incl. a
+            // 512 KB memset per recycled page). In that case use the in-place
+            // region scroll below, unless the region is a single row
+            // (bottom == 0), which cursor_scroll_region_up can't handle
+            // (cursor_scroll_above special-cases it). Port of upstream
+            // index()'s no_scrollback gate (77190bd02, change 1).
             if self.scrolling_region.top == 0
                 && self.scrolling_region.left == 0
                 && self.scrolling_region.right == self.cols - 1
+                && (!self.screen().no_scrollback || self.scrolling_region.bottom == 0)
             {
                 // Port of the scrollback-creating scroll.
                 self.screen_mut().cursor_scroll_above();
@@ -807,29 +809,21 @@ impl Terminal {
                 return;
             }
 
-            // Slow path for left/right scrolling region margins OR when we have
-            // an SGR bg to preserve in the erased rows: scroll_up fills the
-            // blank (and matches the reference oracle's wide-spacer-head
-            // handling, which the fast in-place rotate does not for a non-zero
-            // blank). The fast path below is restricted to a zero blank — the
-            // exact domain the previous erase_row_bounded routing covered.
-            if self.scrolling_region.left != 0
-                || self.scrolling_region.right != self.cols - 1
-                || !self.screen().blank_cell().is_zero()
-            {
+            // Slow path for left/right scrolling region margins.
+            if self.scrolling_region.left != 0 || self.scrolling_region.right != self.cols - 1 {
                 self.scroll_up(1);
                 apply_semantic(self);
                 return;
             }
 
-            // Otherwise (a top-anchored=false, full-width region with a zero
-            // blank) use the fast in-place region scroll, which discards the
-            // region's top row (no scrollback — top != 0) and shifts the rest
-            // up, leaving a blank cursor row. Pure-perf port of upstream's
-            // cursorScrollRegionUp (77190bd02): the result is identical to the
-            // previous erase_row_bounded path (verified against the reference
-            // oracle) but without the per-scroll Point->Pin resolution, cursor
-            // re-resolution, and manual_style_update the old path paid.
+            // Otherwise (a full-width region that is either top != 0 or on a
+            // no-scrollback screen) use the fast in-place region scroll. It
+            // discards the region's top row (no scrollback), shifts the rest up,
+            // and fills the cursor row with the blank — handling both a zero
+            // blank and an SGR-bg blank. Port of upstream's cursorScrollRegionUp
+            // routing (77190bd02), which replaced the erase_row_bounded +
+            // Point->Pin resolution + cursor re-resolution + manual_style_update
+            // the old path paid.
             let limit = (bottom - self.scrolling_region.top) as usize;
             self.screen_mut().cursor_scroll_region_up(limit);
             apply_semantic(self);
@@ -967,10 +961,17 @@ impl Terminal {
         let old_wrap = self.screen().cursor.pending_wrap;
 
         // If the region is at the top with no l/r margins, move scrolled-out
-        // text into scrollback via cursor_scroll_above.
+        // text into scrollback via cursor_scroll_above — but only if the screen
+        // retains scrollback. On a no-scrollback screen creating scrollback is
+        // pure overhead, so fall through to the in-place delete_lines path,
+        // unless the region is the full screen (bottom == rows - 1), where
+        // cursor_scroll_above's cursor_down_scroll fast path already scrolls
+        // without creating scrollback. Port of upstream scrollUp's no_scrollback
+        // gate (77190bd02, change 1).
         if self.scrolling_region.top == 0
             && self.scrolling_region.left == 0
             && self.scrolling_region.right == self.cols - 1
+            && (!self.screen().no_scrollback || self.scrolling_region.bottom == self.rows - 1)
         {
             let region_height = self.scrolling_region.bottom + 1;
             let adjusted_count = count.min(region_height as usize);

@@ -2,8 +2,9 @@
 //! used by the differential harness.
 //!
 //! Source of truth: `include/ghostty/vt/{terminal,formatter,types}.h` in the
-//! ghostty checkout (commit 2da015cd6). Struct layouts below must match the
-//! C definitions exactly; all enums are C `int` on the Zig side.
+//! ghostty checkout (commit 77190bd02; the C API layouts are unchanged from the
+//! prior `2da015cd6` pin — verified by the differential harness). Struct layouts
+//! below must match the C definitions exactly; all enums are C `int` on the Zig side.
 //!
 //! See `docs/analysis/libghostty-vt-c-api.md` for API semantics, ownership
 //! rules, and gotchas.
