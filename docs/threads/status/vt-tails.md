@@ -1,9 +1,11 @@
 # vt-tails status
 
-- **Current item:** **tmux control mode — slice 3 (`tmux::output`) shipping.** ADR 004
-  ACCEPTED. Next: slice 4 (wire the DCS `TmuxRaw` seam → `Notification` stream) — the last
-  vt-tails slice. Slice 5 (Viewer) is app-tails.
-- **Last merged:** #259 (slice 2 `layout`). #257 (slice 1), #255 (ADR), VT tail on main.
+- **Current item:** **tmux control mode — slices 1–3 MERGED (all three pure parsers on main).
+  Next: slice 4 — wire the DCS `TmuxRaw` seam → `Notification` stream (the LAST vt-tails
+  slice; slice 5 Viewer is app-tails). Recycling here — a fresh session executes slice 4 from
+  the detailed design below + ADR 004.**
+- **Last merged:** #261 (slice 3 `output`). #259 (slice 2 `layout`), #257 (slice 1 `control`),
+  #255 (ADR 004) all on main. VT-completeness tail (#241/#244/#249/#250) on main.
 - **Blockers:** none (slices 1–4 are vt-tails; slice 5 Viewer is app-tails, routed at slice 4).
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
@@ -17,20 +19,62 @@ surface → **unit tests are the referee** (like XTGETTCAP/DECRQSS). Zig-port ha
 
 ### tmux backlog (ADR 004 slices — vt-tails owns 1–4; app-tails owns 5)
 
-1. **`tmux::ControlParser`** — `control.zig` (839 LoC): idle/notification/block state machine,
-   `%begin…%end` blocks, `max_bytes` broken-state guard, `Notification` enum. Uses `oniguruma`
-   regex upstream → port matchers to our regex stack or hand-rolled scanners. Port inline tests.
-   **← START HERE.**
-2. **`tmux::layout::Layout`** — `layout.zig` (638 LoC): layout-string parser + tree. Pure.
-3. **`tmux::output`** — `output.zig` (590 LoC): `%output` parse + command encode. Pure.
-4. **Wire the `TmuxRaw` DCS seam** (`dcs.rs` already parses `\ePtmux;…`, currently dropped) →
-   feed control bytes to `ControlParser`, expose the `Notification` stream on the engine's
-   event surface (additive, like clipboard/notification seams). DCS entry tests + fuzz tokens.
+1. ✅ **`tmux::ControlParser`** (`control.rs`) — MERGED #257. 26 tests.
+2. ✅ **`tmux::layout::Layout`** (`layout.rs`) — MERGED #259. 24 tests.
+3. ✅ **`tmux::output`** (`output.rs`) — MERGED #261. 23 tests.
+4. **Wire the DCS `1000p` seam → `Notification` stream** — LAST vt-tails slice. Detailed
+   design below. DCS entry tests + fuzz-dictionary tokens (`\eP1000p`, `%output`, `%begin`).
 5. **Viewer + termio wiring** (`viewer.zig`, 2,283 LoC) — **app-tails/termio, NOT vt-tails.**
-   Route via app-tails Inbox once 1–4 land.
+   Route via app-tails Inbox once slice 4 lands.
 
-Open questions (ADR 004, need Josh/app-tails; do NOT block 1–3): build-gate default
-(recommend: always-compiled, runtime-inert); Viewer ownership split.
+Open questions — RESOLVED (Josh confirmed 2026-07-14): always-compiled/runtime-inert;
+Viewer = app-tails. See ADR 004 "Resolution".
+
+### Slice 4 design (for the fresh session — verify vs `~/local/ghostty` `2da015cd6`)
+
+The `ControlParser`/`layout`/`output` modules exist in `crates/qwertty-term-vt/src/tmux/`.
+Slice 4 connects the DCS state machine to `ControlParser` and surfaces its notifications.
+
+**Upstream flow** (`src/terminal/dcs.zig`): the `ControlParser` lives *inside* the DCS
+`State.tmux` payload. `hook` on `ESC P 1000 p` (`dcs.zig:53-73`) → `Command.tmux = .enter`.
+Each subsequent body byte: `put` feeds `tmux.put(byte)`; a produced notification →
+`Command.tmux = notification` (`dcs.zig:130-132`). `unhook` (ST) → `Command.tmux = .exit`
+(`dcs.zig:168-170`). `stream_handler.zig:393` dispatches: `.enter` makes the Viewer, `.exit`
+frees it, else feeds the Viewer.
+
+**Our current seam** (`crates/qwertty-term-vt/src/dcs.rs`): `Handler::hook` already returns
+`Command::TmuxRaw(TmuxEvent::Enter)` on `[1000]p` (dcs.rs ~194-202); `put`'s `State::Tmux`
+arm drops bytes (TODO ~99-101); `unhook` returns `TmuxRaw(TmuxEvent::Exit)` (~139-141).
+`enum Command` has `TmuxRaw(TmuxEvent)` (~265); `enum TmuxEvent { Enter, Exit }` (~273).
+
+**Do:**
+
+1. Replace `Command::TmuxRaw(TmuxEvent)` with `Command::Tmux(crate::tmux::Notification)`
+   (my `Notification` already has `Enter`/`Exit` variants for exactly this). Delete `TmuxEvent`.
+2. Add a `tmux_parser: Option<ControlParser>` field to `dcs::Handler` (our `State` is a unit
+   enum, so the parser lives on the Handler — the Rust analog of upstream's `State.tmux`
+   payload). `hook` `[1000]p`: `self.tmux_parser = Some(ControlParser::new())`, return
+   `Command::Tmux(Notification::Enter)`. `put`/`State::Tmux`: `match self.tmux_parser.as_mut()?
+   .put(byte) { Ok(Some(n)) => Some(Command::Tmux(n)), Ok(None) => None, Err(BufferOverflow)
+   => None }` (broken parser then drops; document the divergence from upstream's error
+   propagation — we don't want a panic path). `unhook`/`State::Tmux`: `self.tmux_parser =
+   None`, return `Command::Tmux(Notification::Exit)`.
+3. `stream.rs` dcs dispatch (~1056): add `dcs::Command::Tmux(n) => self.handler.tmux(n)`. Add a
+   `pending_tmux: Vec<Notification>` field to `TerminalHandler` + a `fn tmux(&mut self, n)` that
+   pushes, and a `pub fn take_tmux_notifications(&mut self) -> Vec<Notification>` drain accessor
+   (additive event seam, mirroring `pending_clipboard`/`take_clipboard`). The app-tails Viewer
+   drains it. Enter/Exit flow through too so the consumer can create/tear-down.
+4. Tests: a stream/dcs test feeding `\eP1000p` then `%output %1 hi\n` … then ST, asserting the
+   drained notifications are `[Enter, Output{1,"hi"}, Exit]`. Port `dcs.zig`'s
+   "tmux enter and implicit exit" test. Add fuzz-dict tokens. NOT a differential-oracle surface
+   (lib-vt tmux is build-gated off in our reference) → unit tests are the referee.
+5. Update `feature-coverage.md` line "tmux control mode" from `[ ]` → `[~]` (engine parsers +
+   DCS wiring done; native Viewer = app-tails slice 5) OR `[x]` with a note that the Viewer is
+   app-tails — pick per how you read the checkbox; leave an Inbox note in `app-tails.md` handing
+   off slice 5 (Viewer) with the `take_tmux_notifications` seam + the `tmux::{ControlParser,
+   Layout, Variable, ...}` API.
+
+After slice 4: vt-tails' tmux work is COMPLETE; only slice 5 (app-tails Viewer) remains.
 
 ## Completed (VT-completeness tail — CLOSED before the tmux reopen)
 
@@ -64,4 +108,8 @@ Open questions (ADR 004, need Josh/app-tails; do NOT block 1–3): build-gate de
   the vars. Zig's per-variable InvalidCharacter/Overflow collapse to one parse-failure
   (parseFormatStruct did the same); MissingEntry/ExtraEntry/FormatError preserved. 23 tests.
   (`tmux::ParseError` re-export dropped — `layout` and `output` both define one; use the
-  module-qualified names.) Next: slice 4 — DCS `TmuxRaw` seam wiring.
+  module-qualified names.) #261 merged.
+- 2026-07-14: slices 1–3 all merged (the three pure tmux parsers on main). **Recycling** with
+  the detailed slice-4 (DCS-seam) design above — context is long and slice 4 is integration
+  work (dcs.rs state machine) that deserves a fresh session. **Respawn to continue:** read
+  `docs/adr/004-tmux-control-mode.md` + this status file and execute slice 4.
