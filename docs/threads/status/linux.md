@@ -1,15 +1,19 @@
 # linux status (Linux port — ADR 003 Wave-1 done; P4 windowed app GREENLIT)
 
-- **Current item:** **P4 — the GTK4 window RENDERS REAL TERMINAL TEXT on Linux (milestone hit).**
-  Shipped: slice 1 OpenGL backend (#279), GTK plan (#280), coordination (#281), GTK scaffold
-  (#284), **present seam** (#290 — `GpuBackend::present`, merged into T2 core per Josh's call, T2
-  notified post-hoc), **terminal render wiring** (#291 — pty→vt→`Engine<OpenGL>`→GLArea; Docker+
-  Xvfb-verified: 1480 glyph pixels via `glReadPixels`). **NEXT = keyboard input → typeable window
-  (the milestone worth Josh's eyes).** Then: per-surface resize (re-grid + `TIOCSWINSZ`),
-  dirty-tracked redraw (drop the 60Hz tick), DPI/font-config; later winproto/tabs/splits/IME.
-- **Keyboard chunk (next, additive to the gtk crate — my territory, no T2 core):** `EventController
-  Key` → GDK keyval → `qwertty_term_input::KeyEvent` → `key_encode::encode` → pty write
-  (`termio::Subprocess` write side). Seam: `qwertty-term-gtk/src/{app,surface}.rs`. Validate
+- **Current item:** **P4 — the GTK4 Linux terminal is TYPEABLE (milestone hit).** `cargo run -p
+  qwertty-term-gtk` opens a GTK4 window running a real shell: FreeType glyphs via `Engine<OpenGL>`
+  → GtkGLArea, keystrokes → pty → echo. Shipped: OpenGL backend (#279), GTK plan (#280),
+  coordination (#281), scaffold (#284), **present seam** (#290, into T2 core per Josh's call, T2
+  post-hoc note), **terminal render** (#291), **keyboard input** (#294 — GDK keys→pty, echo
+  round-trip proven). All Docker+Xvfb-verified.
+- **NEXT (toward daily-usable; all additive to the gtk crate = my territory):** per-surface
+  **resize** (`TODO(resize)` in `app.rs::connect_resize` — re-grid `Terminal` + `Subprocess::resize`
+  TIOCSWINSZ + engine target); **IME/compose** (`GtkIMMulticontext`, `surface.zig:1246-1334`);
+  **live encode modes** (thread DECCKM/kitty flags into `EncodeOptions`); **mouse/selection**;
+  **dirty-tracked redraw** (drop the 60Hz tick); **DPI/font-config**; later winproto/tabs/splits.
+  Also outstanding: T8 CI (headless-GL + `--features fontconfig` + GTK-dev-libs steps — filed);
+  T2 post-hoc review of the present seam (#290, T2 thread currently closed).
+- **The keyboard chunk (DONE #294):** `EventControllerKey` → GDK keyval →
   headless: a scripted keypress reaches the pty (strongest as a `TabIo::write`→snapshot-echo test).
 - **Last merged:** #284 (GTK scaffold). All P4 PRs merged: #270, #279, #280, #281, #284. Wave-1
   (#245/#248/#254/#258/#260/#262/#264/#265) done. Everything Docker-validated on arm64 Linux.
