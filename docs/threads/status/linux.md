@@ -1,16 +1,36 @@
-# linux status (Linux port — ADR 003, P2/P3 continuation of T7)
+# linux status (Linux port — ADR 003 Wave-1 done; P4 windowed app GREENLIT)
 
-- **Current item:** **PAUSED for recycle — mission #1 (fontconfig discovery) + #42 (Linux pixel
-  coverage) COMPLETE, all merged.** Next backlog item = real wght-variation bold (needs unsafe
-  `freetype-sys` FFI — see crib); respawn to continue.
-- **Last merged:** #264 (FreeType `LoadFlags`) → `39ef05fe`. Session PRs (all merged): #245, #248,
-  #254, #258, #260, #262, #264.
+- **Current item:** **P4 GREENLIT (Josh 2026-07-15).** Wrote ADR 005 (PROPOSED) slicing the
+  windowed Linux app; shipping it. **Next: P4 slice 1 = OpenGL `GpuBackend`** (toolkit-
+  independent; headless-GL testable in Docker). **Toolkit (GTK4-rs vs winit+GL) is Josh's call**
+  — flagged in ADR 005, gates slice 2+ only.
+- **Last merged (Wave 1):** #264 (FreeType `LoadFlags`) → `39ef05fe`. Wave-1 PRs (all merged):
+  #245, #248, #254, #258, #260, #262, #264, #265. **Mission #1 (fontconfig) + #42 (Linux pixel
+  coverage) COMPLETE + validated on native arm64 Linux via Docker (incl. visual PNGs).**
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
   `jj-push-signing-workaround` memory.)
-- **Claims:** `crates/qwertty-term-font/src/freetype.rs` (`load_by_name`) for the current PR.
+- **Claims:** `docs/adr/005-*` for the ADR PR.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
+
+## Local Linux validation harness (proven this session)
+
+Run the full Linux path in Docker, no CI/VM/human needed (arm64 = valid; code is arch-neutral):
+
+```sh
+REPO=~/local/ghostty-rs; DST=/tmp/lx && rm -rf $DST && mkdir -p $DST
+git -C $REPO archive origin/main | tar -x -C $DST
+docker run --rm -v $DST:/src -w /src -e CARGO_TARGET_DIR=/cache -v /tmp/lxcache:/cache \
+  rust:1-bookworm bash -c 'apt-get update -q && apt-get install -y -q libfontconfig1 fonts-dejavu-core &&
+    cargo test -p qwertty-term-renderer --test software_headless &&
+    cargo test -p qwertty-term-renderer --test bold_italic_pixels --test sprite_specimen --test text_baseline &&
+    cargo test -p qwertty-term-font --features fontconfig'
+# pixel-test PNGs land in $DST/target/*.png (mkdir $DST/target first if you want them)
+```
+
+For P4 slice-1's headless GL readback: add Mesa (`apt install -y libgl1-mesa-dri libegl1`) and
+run with `LIBGL_ALWAYS_SOFTWARE=1` / EGL surfaceless — llvmpipe software GL, no display server.
 
 ## Log (recent)
 
@@ -61,7 +81,34 @@
   freetype (67) + fontconfig (73, real libfontconfig) suites ✓; `load_flags_default_and_mapping`
   test ✓.
 
+- 2026-07-15: **Wave-1 validated on native arm64 Linux via Docker** (rust:1-bookworm = rustc
+  1.97.0). Exported `origin/main`, ran headless render + all un-gated pixel tests + fontconfig
+  suite over real FreeType/fontconfig — **all pass**; FiraCode-dependent tests skip-as-designed;
+  bold/italic/sprite/baseline PNGs visually confirmed. Harness recorded above (repeatable, no
+  human needed). Then **Josh greenlit P4**; wrote ADR 005 (PROPOSED) — OpenGL-first slicing +
+  the GTK4-vs-winit toolkit Open Question. Shipping ADR; slice 1 (OpenGL backend) is next.
+
 ## Next-item pointers (respawn crib)
+
+**P4 slice 1 — OpenGL `GpuBackend` (the greenlit next chunk; spec = ADR 005):**
+
+- Port upstream `renderer/OpenGL.zig` (461) + `renderer/opengl/*` + the GLSL shaders
+  (`shaders/glsl/*`, kept **verbatim**) as a new `OpenGL` backend impl of `renderer/src/gpu.rs`'s
+  `GpuBackend`, alongside `Metal`/`Software`. Feed the **frozen wire structs** (T2 invariant) —
+  GL just interprets the same uniforms/vertices Metal does.
+- GL 4.3 core; loader via the `glow` crate (safe-ish GL) — mirrors upstream's GLAD/min-4.3
+  (`OpenGL.zig:36-38,134,141-149`). Swap-chain = 1, always-sync.
+- **Toolkit-independent** — needed by any on-screen path (GTK GLArea or winit), so it proceeds
+  before the toolkit decision. It's the one diff-provable P4 piece.
+- **Evidence (headless, no display/GPU):** an offscreen GL readback test (EGL surfaceless /
+  pbuffer under Mesa `llvmpipe`, `LIBGL_ALWAYS_SOFTWARE=1`) that reproduces the same cell grid
+  the Software/Metal backends produce for a known input — the ADR-003 differential parity. Runs
+  in the Docker harness above. Renderer core (`gpu.rs`/`engine.rs`/`present.rs`) is **T2**'s —
+  the `OpenGL` backend module is additive, but file-claim/coordinate any `engine.rs` touch.
+- **BLOCKED-on-Josh for slice 2+ only:** the windowing toolkit — GTK4-rs (recommended, parity)
+  vs winit+GL (lean standalone). ADR 005 Open Question. Do NOT start slice 2 until confirmed.
+
+**Wave-1 follow-ups (lower priority than P4 now):**
 
 **DONE this session (all merged):** mission #1 = fontconfig discovery (#245 module, #248 wiring),
 FreeType `load_by_name` (#260), FreeType `LoadFlags` (#264); #42 Linux pixel coverage (#258
