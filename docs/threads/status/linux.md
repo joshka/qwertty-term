@@ -1,12 +1,13 @@
 # linux status (Linux port — ADR 003 Wave-1 done; P4 windowed app GREENLIT)
 
-- **Current item:** **P4 GREENLIT (Josh 2026-07-15).** Wrote ADR 005 (PROPOSED) slicing the
-  windowed Linux app; shipping it. **Next: P4 slice 1 = OpenGL `GpuBackend`** (toolkit-
-  independent; headless-GL testable in Docker). **Toolkit (GTK4-rs vs winit+GL) is Josh's call**
-  — flagged in ADR 005, gates slice 2+ only.
-- **Last merged (Wave 1):** #264 (FreeType `LoadFlags`) → `39ef05fe`. Wave-1 PRs (all merged):
-  #245, #248, #254, #258, #260, #262, #264, #265. **Mission #1 (fontconfig) + #42 (Linux pixel
-  coverage) COMPLETE + validated on native arm64 Linux via Docker (incl. visual PNGs).**
+- **Current item:** **P4 in progress (GTK4 chosen, ADR 005 merged #270).** Slice 1 = **OpenGL
+  `GpuBackend`** shipped (#279, headless-GL validated in Docker) + GTK app plan (#280). **Next:
+  slice 2 present-seam** (`GpuBackend::present`, T2 core → heads-up filed to T2, author w/ their
+  review) → GTK crate scaffold + window → keyboard = **user-testable milestone**. Executing via
+  subagents (one file-mutating at a time — concurrent same-workspace edits diverge, see log).
+- **Last merged (Wave 1):** #264 → `39ef05fe`; #245/#248/#254/#258/#260/#262/#264/#265 all merged.
+  Mission #1 (fontconfig) + #42 (pixel coverage) COMPLETE + Docker-validated on arm64 Linux.
+  **P4:** ADR 005 (#270) merged. In flight: #279 (OpenGL backend), #280 (GTK plan).
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
@@ -87,6 +88,20 @@ run with `LIBGL_ALWAYS_SOFTWARE=1` / EGL surfaceless — llvmpipe software GL, n
   bold/italic/sprite/baseline PNGs visually confirmed. Harness recorded above (repeatable, no
   human needed). Then **Josh greenlit P4**; wrote ADR 005 (PROPOSED) — OpenGL-first slicing +
   the GTK4-vs-winit toolkit Open Question. Shipping ADR; slice 1 (OpenGL backend) is next.
+- 2026-07-15: **Josh accepted ADR 005; toolkit = GTK4** (winit rejected — known problems). ADR
+  merged #270. Kicked off execution with **subagents in parallel**: (a) OpenGL `GpuBackend`
+  slice 1 — shipped #279; (b) GTK app plan — shipped #280 (`docs/plans/linux-gtk-app.md`).
+  **#279:** ports upstream OpenGL.zig + opengl/* + 8 GLSL (verbatim) as a headless GL 4.3
+  backend over surfaceless EGL (`glow`+`khronos-egl`); additive (no T2 core); I re-validated it
+  myself in Docker (arm64 Mesa llvmpipe, surfaceless): opengl_headless (2, incl. differential
+  parity vs Software) + 12 module tests pass; macOS gate green (2580). **LESSON: running two
+  file-mutating subagents concurrently in the SAME jj workspace diverged the working copy**
+  (both snapshots landed as divergent `vmxrkots/0` non-empty vs `/2` empty; `update-stale`
+  reverted the tree). Recovered via the op log: `jj log -r 'files(<path>)'` found the non-empty
+  commit, `jj rebase -r <it> -d main@origin`, `jj edit`, `jj split` (non-interactive:
+  `JJ_EDITOR=true jj split <path>`). **RULE: only ONE file-mutating subagent per workspace at a
+  time; parallel subagents must be read-only, or use `isolation:"worktree"`.** Filed T8 (headless-
+  GL CI step) + T2 (present-seam heads-up) inbox notes.
 
 ## Next-item pointers (respawn crib)
 
