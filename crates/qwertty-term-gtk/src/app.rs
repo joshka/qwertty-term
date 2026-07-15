@@ -90,6 +90,11 @@ enum Mode {
     /// read the presented framebuffer back and measure glyph ink (the
     /// terminal-renders-text proof). One frame, then quit.
     TextSmoke,
+    /// Build the surface at the GLArea's size, render one frame, then
+    /// [`SurfaceState::resize`] to a different pixel size and render again —
+    /// proving the terminal re-grids and the render target re-sizes with no GL
+    /// error at the new size (the resize proof). One resize, then quit.
+    ResizeSmoke,
 }
 
 /// Outcome of the clear-only smoke: what realize/render observed for a single
@@ -202,6 +207,65 @@ impl std::fmt::Display for TextSmokeOutcome {
     }
 }
 
+/// Outcome of the resize smoke: proof that a GLArea resize re-grids the
+/// terminal and re-sizes the render target, still rendering cleanly at the new
+/// grid. The surface is built at one size, rendered, resized to a different
+/// pixel size, then rendered again.
+#[derive(Debug, Clone, Default)]
+pub struct ResizeSmokeOutcome {
+    /// The GLArea realized a GL context without error.
+    pub realized: bool,
+    /// A context error seen in `realize`, if any.
+    pub realize_error: Option<String>,
+    /// The per-surface core was built.
+    pub surface_init: bool,
+    /// Grid `(cols, rows)` at the initial size.
+    pub initial_grid: (usize, usize),
+    /// Grid `(cols, rows)` after the resize.
+    pub resized_grid: (usize, usize),
+    /// The frame at the new size rendered + presented without a Rust-side error.
+    pub rendered: bool,
+    /// A render/present error at the new size, if any.
+    pub render_error: Option<String>,
+    /// `glGetError()` after the post-resize present (0 == `GL_NO_ERROR`).
+    pub gl_error: u32,
+    /// The pty's `(cols, rows)` per `TIOCGWINSZ` after the resize, if a pty was
+    /// spawned (proves the `TIOCSWINSZ` propagated). `None` if no pty spawned.
+    pub pty_grid: Option<(u16, u16)>,
+}
+
+impl ResizeSmokeOutcome {
+    /// True iff the surface initialized, the resize produced a *different* grid,
+    /// and a frame rendered+presented at the new size with no GL error.
+    pub fn regridded(&self) -> bool {
+        self.surface_init
+            && self.rendered
+            && self.render_error.is_none()
+            && self.gl_error == 0
+            && self.resized_grid != self.initial_grid
+            && self.resized_grid.0 >= 1
+            && self.resized_grid.1 >= 1
+    }
+}
+
+impl std::fmt::Display for ResizeSmokeOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "realized={} surface_init={} initial_grid={:?} resized_grid={:?} rendered={} \
+             render_error={:?} gl_error=0x{:04x} pty_grid={:?}",
+            self.realized,
+            self.surface_init,
+            self.initial_grid,
+            self.resized_grid,
+            self.rendered,
+            self.render_error,
+            self.gl_error,
+            self.pty_grid,
+        )
+    }
+}
+
 /// Compare an 8-bit RGBA readback against a float clear color (RGB only, with a
 /// small tolerance for the float→8-bit round-trip). Alpha is ignored because
 /// the GLArea framebuffer's alpha semantics vary by backend.
@@ -270,6 +334,8 @@ struct Shared {
     smoke: RefCell<SmokeOutcome>,
     /// Text-smoke result.
     text: RefCell<TextSmokeOutcome>,
+    /// Resize-smoke result.
+    resize: RefCell<ResizeSmokeOutcome>,
 }
 
 /// Render the clear-only smoke frame: clear to [`CLEAR_COLOR`], read the center
@@ -413,6 +479,67 @@ fn render_text_smoke(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
     t.bright_pixels = bright_count(&buf);
     t.bottom_band_bright = band(0, bottom);
     t.top_band_bright = band(sh.saturating_sub(top), sh);
+}
+
+/// Render the resize-smoke frames: build the surface, feed [`SMOKE_TEXT`],
+/// render once at the GLArea size, then [`SurfaceState::resize`] to half the
+/// pixel size and render again — recording the before/after grid and the GL
+/// error at the new size. Spawns a pty so the `TIOCSWINSZ` propagation can be
+/// checked too. Records into `shared.resize`.
+fn render_resize_smoke(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
+    // Capture the GLArea's framebuffer before `ensure_surface` (engine/FBO
+    // creation on the first frame rebinds the draw framebuffer).
+    let dst = current_draw_fbo(gl);
+
+    // Spawn a pty so the resize can exercise `Pty::resize` (TIOCSWINSZ).
+    if !ensure_surface(area, shared, true) {
+        return;
+    }
+    shared.resize.borrow_mut().surface_init = true;
+
+    let (init_w, init_h) = (area.width().max(1), area.height().max(1));
+
+    let mut sref = shared.surface.borrow_mut();
+    let surface = sref.as_mut().expect("surface present");
+    surface.feed(SMOKE_TEXT);
+    shared.resize.borrow_mut().initial_grid = surface.grid_size();
+    // First frame at the initial size (also sizes the render target).
+    let _ = surface.render(dst);
+
+    // Resize to half the pixel size — a guaranteed-different, smaller grid
+    // (the 800×600 default window halves to 400×300, well clear of 1×1).
+    let (new_w, new_h) = (init_w / 2, init_h / 2);
+    let regridded = surface.resize(new_w, new_h);
+    if let Some((cols, rows)) = regridded {
+        let (cw, ch) = surface.cell_size();
+        if let Some(pty) = shared.pty.borrow_mut().as_mut() {
+            pty.resize(
+                cols as u16,
+                rows as u16,
+                (cols * cw) as u32,
+                (rows * ch) as u32,
+            );
+            shared.resize.borrow_mut().pty_grid = pty.winsize();
+        }
+    }
+    let resized_grid = surface.grid_size();
+
+    // Render again at the new size; the engine's `update_frame` resizes its
+    // contents + target FBO to the smaller grid.
+    let render_error = surface.render(dst).err();
+    drop(sref);
+
+    // SAFETY: current context; a plain error query after the present.
+    let gl_error = unsafe {
+        gl.flush();
+        gl.get_error()
+    };
+
+    let mut o = shared.resize.borrow_mut();
+    o.resized_grid = resized_grid;
+    o.rendered = render_error.is_none();
+    o.render_error = render_error;
+    o.gl_error = gl_error;
 }
 
 /// Render the live terminal (interactive): drain any pty output into the
@@ -830,13 +957,15 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
             if let Some(err) = gtk::prelude::GLAreaExt::error(area) {
                 let msg = err.to_string();
                 shared.smoke.borrow_mut().realize_error = Some(msg.clone());
-                shared.text.borrow_mut().realize_error = Some(msg);
+                shared.text.borrow_mut().realize_error = Some(msg.clone());
+                shared.resize.borrow_mut().realize_error = Some(msg);
                 return;
             }
             ensure_gl_loader();
             *shared.gl.borrow_mut() = Some(make_glow());
             shared.smoke.borrow_mut().realized = true;
             shared.text.borrow_mut().realized = true;
+            shared.resize.borrow_mut().realized = true;
 
             // === SURFACE INIT SEAM ===
             // The per-surface core (TabIo/pty + vt `Terminal` + `Engine<OpenGL>`)
@@ -866,10 +995,11 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
             match mode {
                 Mode::ClearSmoke => render_clear(area, gl, &shared),
                 Mode::TextSmoke => render_text_smoke(area, gl, &shared),
+                Mode::ResizeSmoke => render_resize_smoke(area, gl, &shared),
                 Mode::Interactive => render_interactive(area, gl, &shared),
             }
 
-            if matches!(mode, Mode::ClearSmoke | Mode::TextSmoke) {
+            if matches!(mode, Mode::ClearSmoke | Mode::TextSmoke | Mode::ResizeSmoke) {
                 // One frame is all a headless smoke needs; tear down cleanly.
                 app.quit();
             }
@@ -877,13 +1007,40 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
         });
     }
 
-    // resize: cache the new size. Mirrors glareaResize (surface.zig:3365-3423).
-    // TODO(resize): per-surface resize (re-grid the `Terminal`, `TIOCSWINSZ` on
-    // the pty via `Subprocess::resize`, resize the `Engine<OpenGL>` target) is
-    // still deferred — the surface is sized once at first init. Wiring it needs
-    // a re-grid path on `SurfaceState`; kept out of the keyboard chunk to stay
-    // small. See upstream `glareaResize` (surface.zig:3365).
-    gl_area.connect_resize(|_area, _width, _height| {});
+    // resize: re-grid the surface to the new GLArea pixel size. Mirrors
+    // glareaResize → Surface.resize (surface.zig:3365-3423): recompute the grid,
+    // re-grid the terminal + render target, and `TIOCSWINSZ` the pty so the
+    // shell gets a SIGWINCH. The GLArea `resize` signal delivers the framebuffer
+    // size in pixels; no HiDPI backing scale is wired in this host (scale 1), so
+    // widget px == device px — HiDPI is deferred (see the module TODO(scale)).
+    {
+        let shared = shared.clone();
+        gl_area.connect_resize(move |area, width, height| {
+            // Nothing to re-grid until the surface has been lazily built on the
+            // first render (the initial `resize` fires before that).
+            let mut sref = shared.surface.borrow_mut();
+            let Some(surface) = sref.as_mut() else {
+                return;
+            };
+            let Some((cols, rows)) = surface.resize(width, height) else {
+                return; // same grid — no re-grid, no pty churn
+            };
+            let (cw, ch) = surface.cell_size();
+            drop(sref);
+            // Keep the pty in sync so the child shell re-reads the new size.
+            if let Some(pty) = shared.pty.borrow_mut().as_mut() {
+                pty.resize(
+                    cols as u16,
+                    rows as u16,
+                    (cols * cw) as u32,
+                    (rows * ch) as u32,
+                );
+            }
+            // Repaint at the new grid; the renderer resizes its target FBO on the
+            // next frame (Engine::update_frame's size-change path).
+            area.queue_render();
+        });
+    }
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -908,7 +1065,7 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
                 glib::ControlFlow::Continue
             });
         }
-        Mode::ClearSmoke | Mode::TextSmoke => {
+        Mode::ClearSmoke | Mode::TextSmoke | Mode::ResizeSmoke => {
             // Force a first frame and guarantee termination even if `render`
             // never fires (e.g. the GLArea never maps), so a headless run can't
             // hang.
@@ -969,4 +1126,21 @@ pub fn run_text_smoke() -> TextSmokeOutcome {
     }
     let _ = app.run_with_args::<&str>(&[]);
     shared.text.borrow().clone()
+}
+
+/// Run the resize smoke headlessly: build the surface, render a frame, resize
+/// the surface to a different pixel size, and render again — proving the
+/// terminal re-grids and the render target re-sizes with no GL error. Intended
+/// for the headless GTK resize test.
+pub fn run_resize_smoke() -> ResizeSmokeOutcome {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    let shared = Rc::new(Shared::default());
+    {
+        let shared = shared.clone();
+        app.connect_activate(move |app| {
+            build_window(app, shared.clone(), Mode::ResizeSmoke);
+        });
+    }
+    let _ = app.run_with_args::<&str>(&[]);
+    shared.resize.borrow().clone()
 }
