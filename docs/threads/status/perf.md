@@ -1,38 +1,37 @@
-# perf status — ACTIVE (respawned 2026-07-15)
+# perf status — 🗄️ RECYCLED 2026-07-15 (APC lever shipped)
 
-> **Thread active again.** New perf session (Opus) respawned off the archived handoff below.
-> The competitive-perf mission stays complete (all four vtebench region-scroll suites closed +
-> wide/CJK optimized: #266/#269/#277/#283, all merged, pin at `77190bd02`). This session's job
-> is the remaining backlog. **State on respawn (2026-07-15):** machine CONTENDED (loadavg 8.75
-> rising on 12 cores, WindowServer 47%, mediaanalysisd 69%, Josh active on Firefox) → the
-> scoreboard refresh is blocked AND clean perf before/after numbers can't be taken. Oracle infra
-> intact: `77190bd02` lib at `~/local/ghostty/zig-out/lib` + `~/local/ghostty-pin77190` worktree.
+> **Session recycled after shipping + merging the APC lever.** The competitive-perf mission stays
+> complete (region-scroll #266/#269/#277/#283 + wide/CJK, pin `77190bd02`). This session took
+> Josh's "start APC SIMD vectorize" pick and shipped it as two MERGED PRs:
+> **#287** `8fa6772a` (bulk `apc_put_slice` dispatch, port of upstream `f6f79acce`) — kitty
+> **~42→~294 MiB/s (~7×)**; and **#289** `50e9814f` (NEON SIMD payload prescan, port of
+> `8c523ed03`) — **~294→~338–347 MiB/s (~+15%)**. Both full-rigor (equivalence + differential vs
+> the `77190bd02` oracle + 730k/384k-run fuzz + Miri) and now on origin/main. Analysis:
+> `docs/analysis/apc-bulk-dispatch.md`. Josh granted self-merge + pin-bump authority; I merged
+> both, verified they're ancestors of origin/main, and cleaned up (workspace forgotten + deleted).
 >
-> **Upstream perf scan (bootstrap item 3, done this session):** fetched `~/local/ghostty`
-> origin/main; 81 commits touch `src/simd`/`src/terminal` since the pin. Only three are perf
-> levers (rest are search/generation-marker correctness): **(a) `8c523ed03` vectorize APC
-> payload scanning** — +42% on a 64 MiB kitty-graphics corpus; self-contained (43 lines in
-> `stream.zig`, scalar tail + full fallback). Our APC path is per-byte (`ApcPut(u8)` through the
-> state machine one byte at a time) → same structural bottleneck upstream fixed; **strongest
-> net-new lever**, serves the embeddability/betamax goal. **(b/c) `fedd42e8d`+`7e14347c1`+
-> `65f953e8e` page-map `hash_map.zig` backward-shift deletion** — bounds probe lengths, ~5.5% on
-> a cell-move bench, net −136 lines; large interdependent rewrite of the hyperlink/grapheme map,
-> differential-critical, coupled to a further pin-bump decision (Josh's call). Both need full
-> rigor + a quiet machine for clean numbers.
+> **To resume perf work, spawn a fresh thread off this file.** Remaining backlog below. Oracle
+> infra intact: `77190bd02` lib at `~/local/ghostty/zig-out/lib` + `~/local/ghostty-pin77190`.
+>
+> **NEXT LEVER (unblocked — Josh granted pin-bump auth): hash_map backward-shift deletion.** Port
+> upstream `fedd42e8d` (+ its cluster `7e14347c1`/`65f953e8e`) — replaces tombstone deletion with
+> backward-shift (Knuth 6.4-R) in the page hyperlink/grapheme maps, bounding probe lengths (~5.5%
+> on a cell-move bench, net −136 lines). Large, differential-CRITICAL (hyperlink/grapheme
+> correctness), and coupled to a further pin bump (`77190bd02` → ≥ the cluster). Its OWN focused
+> session: profile-first (add a hyperlink/grapheme-move bench to `profile_streams`); differential,
+> generative sweep, Miri (unsafe hash probing), fuzz, before/after numbers (CPU microbench —
+> measurable under moderate load, unlike the scoreboard). The APC lever this session is the
+> template. **Scoreboard is a SEPARATE item — still machine-blocked** (below).
+>
+> **Upstream perf scan (this session, still current):** 81 commits touch `src/simd`/`src/terminal`
+> since the pin; only the hash_map cluster (above) + the now-shipped APC pair were perf levers —
+> the rest are search/generation-marker correctness.
 
-- **Current item:** APC lever SHIPPED as two stacked PRs (Josh chose "start APC SIMD vectorize";
-  the profile-first scan revealed the bulk-dispatch was the real ~7× win and SIMD a ~+15% cherry).
-  Both green + open for Josh (no self-merge authority). Next: monitor #287/#289 to merge; then the
-  scoreboard is still the only remaining "Done" deliverable, still machine-blocked.
-  - **✅ #287 `perf/apc-bulk-dispatch`** (port of upstream `f6f79acce`) — bulk `apc_put_slice`
-    dispatch: `Stream::consume_apc_string` scans an apc_put run and hands it to the handler in
-    one call; `apc::Handler::feed_slice` bulk-appends. **kitty ~42 → ~294 MiB/s (~7×)**. Full
-    gate + differential + Miri-N/A (no unsafe) + 730k-run fuzz. CI GREEN. Scalar-only.
-  - **✅ #289 `perf/apc-simd-scan`** (port of upstream `8c523ed03`, **stacked on #287**) — NEON
-    16-byte prescan of the payload boundary + scalar fallback, `cfg(target_arch=aarch64)`,
-    `cfg(not(miri))`. **~294 → ~338–347 MiB/s (~+15%)**. Boundary test + 384k-run fuzz (NEON
-    active) + Miri (scalar path) + differential. markdownlint GREEN, rest running.
-  - Analysis: `docs/analysis/apc-bulk-dispatch.md`.
+- **Current item:** 🗄️ **RECYCLED** — APC lever DONE + MERGED (#287 `8fa6772a`, #289 `50e9814f`,
+  both verified on origin/main). Backlog for a fresh thread:
+  - **(0, NEXT) hash_map backward-shift lever** (`fedd42e8d` cluster) — see banner. Unblocked
+    (pin-bump auth granted); big + differential-critical → own focused session. Highest-value
+    remaining code lever.
   - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15: WindowServer 47%, loadavg 8.75 rising,
     mediaanalysisd 69%, Josh active on Firefox → the render-heavy region suites are contended and
@@ -51,13 +50,13 @@
     run_len) is correctness-load-bearing / already-minimal → diminishing returns, higher risk.
     Only pursue with fresh line-level profiling showing a concrete hot spot.
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
-- **Last merged:** **#283** (wide pair-write, `9e51aad3`); **#277** (unchecked interior UTF-8
-  decode, `2708b267`); **#269** (change 1 + pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
-- **Blockers:** the **scoreboard refresh** remains machine-blocked (loadavg ~7–8, WindowServer
-  busy while Josh works) — contended numbers would be 3–4× inflated on all builds; not published.
-  APC lever DONE (#287/#289 open for Josh). The other net-new lever (hash_map backward-shift
-  `fedd42e8d`) is big + pin-bump-coupled → a Josh decision. **Workspace:** `work/perf`.
-- **Waiting on Josh:** merge #287 then #289 (stacked; perf thread has no self-merge authority).
+- **Last merged:** **#289** (APC SIMD scan, `50e9814f`); **#287** (APC bulk dispatch, `8fa6772a`);
+  **#283** (wide pair-write, `9e51aad3`); **#277** (`2708b267`); **#269** (`36256c78`); **#266**.
+- **Blockers:** the **scoreboard refresh** remains machine-blocked (WindowServer ~47% + a sibling
+  running `qwertty-term`; render-heavy suites would read 3–4× inflated on all builds) — needs a
+  genuinely quiet box (WindowServer idle, no sibling GUI app). The hash_map lever is NOT so
+  blocked (CPU microbench, measurable under moderate load). **Workspace:** forgotten + deleted
+  (recycled).
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
@@ -218,3 +217,13 @@ New tests: `hand_scroll_region_fast_path` (vt-diff, wide+deep), `index_region_sc
 - Both open for Josh (no self-merge authority); monitoring CI. Analysis:
   `docs/analysis/apc-bulk-dispatch.md`. Scoreboard still the only remaining "Done" item, still
   machine-blocked.
+
+## Session — respawn 2026-07-15 part 3 (Opus) — APC merged, thread recycled
+
+After shipping #287/#289, Josh granted self-merge + pin-bump authority + cleanup latitude.
+
+- Merged both (rebase): #287 `8fa6772a`; retargeted + rebased #289 onto new main, merged `50e9814f`.
+- Re-verified the rebased #289 combo (check/apc-tests/differential green) before merge.
+- Confirmed both are ancestors of origin/main (merge-race check); remote branches auto-deleted.
+- Scoreboard re-checked: loadavg eased to ~3.7 but WindowServer ~47% + a sibling ran the app; NOT run.
+- Recycled: closeout above; workspace forgotten + deleted. Next: hash_map backward-shift lever.
