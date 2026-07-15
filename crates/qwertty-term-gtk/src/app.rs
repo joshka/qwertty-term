@@ -19,26 +19,66 @@
 //!   (`must_draw_from_app_thread`, `class/App.zig:20`).
 //! - GLArea `resize` → cache size; lazily init the surface on first resize —
 //!   upstream `class/surface.zig:3365` (`glareaResize`, lazy init at `:3419`).
+//!
+//! ## What this renders
+//!
+//! The `render` callback draws the **real terminal**: it captures the live vt
+//! screen, rebuilds the frame through the font grid + `Engine<OpenGL>`, and
+//! **presents** it into the GLArea's framebuffer via the on-screen present seam
+//! ([`Engine::draw_and_present`] → `OpenGL::present`, a `glBlitFramebuffer` of
+//! the engine target onto the GLArea FBO). The per-surface core lives in
+//! [`crate::surface`]; it is fed either by a pty running the user's shell (the
+//! interactive [`run`] path) or directly by known bytes (the headless
+//! [`run_text_smoke`] proof). Keyboard input is the next chunk.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Once;
 use std::time::Duration;
 
 use adw::prelude::*;
+use glow::HasContext;
 use gtk::glib;
+
+use crate::surface::{Pty, SurfaceState};
 
 /// Application id for the GTK/DBus registration.
 const APP_ID: &str = "com.qwertty.TerminalGtk";
 
+/// Embedded font size (px) for the surface's grid (reduced cut: no DPI scaling
+/// or config yet).
+const FONT_SIZE: f64 = 16.0;
+
 /// The framebuffer clear color (linear RGBA, alpha opaque) — a distinctive
-/// slate blue. Deliberately non-black so a headless `glReadPixels` readback can
-/// tell "we actually cleared" from an untouched (zero) framebuffer.
+/// slate blue. Used by the clear-only smoke path and as the pre-terminal
+/// fallback fill. Deliberately non-black so a headless `glReadPixels` readback
+/// can tell "we actually cleared" from an untouched (zero) framebuffer.
 pub const CLEAR_COLOR: [f32; 4] = [0.12, 0.16, 0.36, 1.0];
 
-/// Outcome of a headless smoke run: what the realize/render callbacks observed
-/// while driving the GTK main loop for a single frame.
+/// The bytes the headless text smoke feeds the terminal — a line of known
+/// glyphs on row 0, the rest of the screen left blank (so exactly one cell-row
+/// band carries ink and the opposite band is background).
+const SMOKE_TEXT: &[u8] = b"QWERTTY TERM :: hello world 0123456789";
+
+/// What [`build_window`]'s render callback does with the GLArea.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Render the live terminal, fed by a pty running the user's shell. Repaints
+    /// continuously (a glib tick); runs until the window closes.
+    Interactive,
+    /// Clear the framebuffer to [`CLEAR_COLOR`] and read the center pixel back
+    /// (the GL-plumbing regression smoke). One frame, then quit.
+    ClearSmoke,
+    /// Feed [`SMOKE_TEXT`] into the terminal, render + present one frame, then
+    /// read the presented framebuffer back and measure glyph ink (the
+    /// terminal-renders-text proof). One frame, then quit.
+    TextSmoke,
+}
+
+/// Outcome of the clear-only smoke: what realize/render observed for a single
+/// cleared frame.
 #[derive(Debug, Clone, Default)]
 pub struct SmokeOutcome {
     /// The GLArea `realize` handler ran and `gl_area.error()` was `None`.
@@ -76,6 +116,77 @@ impl std::fmt::Display for SmokeOutcome {
     }
 }
 
+/// Outcome of the text smoke: proof that the GLArea presented **real terminal
+/// glyphs** (not just a clear color), measured by reading the presented
+/// framebuffer back and counting glyph-bright pixels.
+#[derive(Debug, Clone, Default)]
+pub struct TextSmokeOutcome {
+    /// The GLArea realized a GL context without error.
+    pub realized: bool,
+    /// A context error seen in `realize`, if any.
+    pub realize_error: Option<String>,
+    /// The per-surface core (engine + grid + terminal) was built.
+    pub surface_init: bool,
+    /// The terminal render + present ran.
+    pub rendered: bool,
+    /// A render/present error, if any.
+    pub render_error: Option<String>,
+    /// `glGetError()` after present (0 == `GL_NO_ERROR`).
+    pub gl_error: u32,
+    /// Grid `(cols, rows)`.
+    pub grid: (usize, usize),
+    /// The presented region sampled `(width, height)` px (= grid × cell).
+    pub sample: (usize, usize),
+    /// Count of glyph-bright pixels across the whole presented region (ink).
+    pub bright_pixels: usize,
+    /// Bright pixels in the top cell-row band of the readback (GL bottom-up
+    /// coords) and the bottom band — one carries the text line, the other is
+    /// blank background (which is which depends on the compositor's flip).
+    pub top_band_bright: usize,
+    pub bottom_band_bright: usize,
+}
+
+impl TextSmokeOutcome {
+    /// True iff the surface initialized, a frame rendered+presented without GL
+    /// error, and the presented framebuffer carries glyph ink.
+    pub fn glyphs_rendered(&self) -> bool {
+        self.surface_init
+            && self.rendered
+            && self.render_error.is_none()
+            && self.gl_error == 0
+            && self.bright_pixels > 0
+    }
+
+    /// True iff exactly one cell-row band carries the text and the opposite band
+    /// is (near) blank — a real single-line render, orientation-agnostic.
+    pub fn one_band_is_text(&self) -> bool {
+        const BAND_FLOOR: usize = 20;
+        const BLANK_CEIL: usize = 4;
+        (self.top_band_bright > BAND_FLOOR && self.bottom_band_bright <= BLANK_CEIL)
+            || (self.bottom_band_bright > BAND_FLOOR && self.top_band_bright <= BLANK_CEIL)
+    }
+}
+
+impl std::fmt::Display for TextSmokeOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "realized={} surface_init={} rendered={} render_error={:?} gl_error=0x{:04x} \
+             grid={:?} sample={:?} bright_pixels={} top_band={} bottom_band={}",
+            self.realized,
+            self.surface_init,
+            self.rendered,
+            self.render_error,
+            self.gl_error,
+            self.grid,
+            self.sample,
+            self.bright_pixels,
+            self.top_band_bright,
+            self.bottom_band_bright,
+        )
+    }
+}
+
 /// Compare an 8-bit RGBA readback against a float clear color (RGB only, with a
 /// small tolerance for the float→8-bit round-trip). Alpha is ignored because
 /// the GLArea framebuffer's alpha semantics vary by backend.
@@ -107,15 +218,222 @@ fn ensure_gl_loader() {
     });
 }
 
+/// Build a fresh `glow::Context` over GTK's current GL context (via `epoxy`).
+/// Cheap (a dispatch table); `ensure_gl_loader` must already have run.
+fn make_glow() -> glow::Context {
+    // SAFETY: the GLArea's context is current; `epoxy::get_proc_addr` returns
+    // valid entry points (or null, which glow treats as unsupported).
+    unsafe { glow::Context::from_loader_function(epoxy::get_proc_addr) }
+}
+
+/// The framebuffer GTK has bound for drawing (`GL_DRAW_FRAMEBUFFER_BINDING`) —
+/// the target the present blit must write into. `None` = FBO 0.
+fn current_draw_fbo(gl: &glow::Context) -> Option<glow::NativeFramebuffer> {
+    // SAFETY: plain integer query on the current context.
+    let id = unsafe { gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING) };
+    NonZeroU32::new(id as u32).map(glow::NativeFramebuffer)
+}
+
+/// Shared per-window state threaded through the GLArea callbacks.
+#[derive(Default)]
+struct Shared {
+    /// App-side `glow` handle for direct GL (fbo query, smoke readback). Built
+    /// in `realize`. Distinct from the engine's own context handle.
+    gl: RefCell<Option<glow::Context>>,
+    /// The per-surface renderer core, initialized lazily on first render.
+    surface: RefCell<Option<SurfaceState>>,
+    /// The pty feeding the terminal (interactive mode); `None` until spawned or
+    /// if the spawn failed (then a static banner is fed once).
+    pty: RefCell<Option<Pty>>,
+    /// Whether the fallback banner was already fed (interactive, no pty).
+    banner_fed: RefCell<bool>,
+    /// Clear-smoke result.
+    smoke: RefCell<SmokeOutcome>,
+    /// Text-smoke result.
+    text: RefCell<TextSmokeOutcome>,
+}
+
+/// Render the clear-only smoke frame: clear to [`CLEAR_COLOR`], read the center
+/// pixel back. Records into `shared.smoke`.
+fn render_clear(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
+    let w = area.width().max(1);
+    let h = area.height().max(1);
+    // SAFETY: GTK's context is current and its framebuffer bound (render cb).
+    unsafe {
+        gl.viewport(0, 0, w, h);
+        gl.clear_color(
+            CLEAR_COLOR[0],
+            CLEAR_COLOR[1],
+            CLEAR_COLOR[2],
+            CLEAR_COLOR[3],
+        );
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        gl.flush();
+        let gl_error = gl.get_error();
+        let (cx, cy) = (w / 2, h / 2);
+        let mut px = [0u8; 4];
+        gl.read_pixels(
+            cx,
+            cy,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut px)),
+        );
+        let mut o = shared.smoke.borrow_mut();
+        o.rendered = true;
+        o.gl_error = gl_error;
+        o.center_pixel = px;
+    }
+}
+
+/// Ensure the per-surface core exists (lazy init on first render, once the
+/// GLArea has a real size). `feed_shell` spawns a pty; otherwise the caller
+/// feeds bytes directly. Returns whether a surface is now present.
+fn ensure_surface(area: &gtk::GLArea, shared: &Shared, feed_shell: bool) -> bool {
+    if shared.surface.borrow().is_some() {
+        return true;
+    }
+    let (w, h) = (area.width().max(1), area.height().max(1));
+    let surface = SurfaceState::new(make_glow(), w, h, FONT_SIZE);
+    let Some(surface) = surface else {
+        return false;
+    };
+    if feed_shell {
+        let (cols, rows) = surface.grid_size();
+        let pty = Pty::spawn(cols as u16, rows as u16, w as u32, h as u32);
+        *shared.pty.borrow_mut() = pty;
+    }
+    *shared.surface.borrow_mut() = Some(surface);
+    true
+}
+
+/// Count glyph-bright pixels in an RGBA readback: pixels whose channel sum
+/// exceeds `BRIGHT` (dark terminal bg ≈ 0x18·3 = 72 is well below; light glyph
+/// text ≈ 0xd8·3 = 648 is above). Background-agnostic ink measure.
+fn bright_count(px: &[u8]) -> usize {
+    const BRIGHT: u32 = 300;
+    px.chunks_exact(4)
+        .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > BRIGHT)
+        .count()
+}
+
+/// Render the text-smoke frame: feed [`SMOKE_TEXT`] once, present the terminal,
+/// then read the presented region back and measure glyph ink. Records into
+/// `shared.text`.
+fn render_text_smoke(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
+    // Capture the GLArea's framebuffer FIRST — before `ensure_surface` builds
+    // the engine, whose FBO/target creation rebinds the draw framebuffer away
+    // from GTK's. The present blit must target the framebuffer GTK had bound on
+    // entry, not whatever a resource-creation call left bound.
+    let dst = current_draw_fbo(gl);
+
+    if !ensure_surface(area, shared, false) {
+        return;
+    }
+    shared.text.borrow_mut().surface_init = true;
+
+    let (sw, sh, top, bottom);
+    {
+        let mut sref = shared.surface.borrow_mut();
+        let surface = sref.as_mut().expect("surface present");
+        // Feed the known text exactly once (idempotent: only on the first frame,
+        // which is all the smoke renders).
+        surface.feed(SMOKE_TEXT);
+        let (cols, rows) = surface.grid_size();
+        let (cw, ch) = surface.cell_size();
+        sw = cols * cw;
+        sh = rows * ch;
+        top = ch; // one cell-row band
+        bottom = ch;
+
+        let mut t = shared.text.borrow_mut();
+        t.grid = (cols, rows);
+        t.sample = (sw, sh);
+        if let Err(e) = surface.render(dst) {
+            t.render_error = Some(e);
+        } else {
+            t.rendered = true;
+        }
+    }
+
+    // Read the presented region back from the (now-bound) host framebuffer and
+    // measure ink. `present` restored `dst` as the bound framebuffer, so this
+    // reads exactly what we blitted.
+    if sw == 0 || sh == 0 {
+        return;
+    }
+    let mut buf = vec![0u8; sw * sh * 4];
+    // SAFETY: current context; buffer is exactly sw*sh*4 bytes for the region.
+    let gl_error = unsafe {
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+        gl.read_pixels(
+            0,
+            0,
+            sw as i32,
+            sh as i32,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut buf)),
+        );
+        gl.get_error()
+    };
+
+    // Row stride for band sampling (readback is bottom-up: row 0 = bottom).
+    let stride = sw * 4;
+    let band = |y0: usize, y1: usize| -> usize {
+        let y1 = y1.min(sh);
+        (y0..y1)
+            .map(|y| bright_count(&buf[y * stride..(y + 1) * stride]))
+            .sum()
+    };
+
+    let mut t = shared.text.borrow_mut();
+    t.gl_error = gl_error;
+    t.bright_pixels = bright_count(&buf);
+    t.bottom_band_bright = band(0, bottom);
+    t.top_band_bright = band(sh.saturating_sub(top), sh);
+}
+
+/// Render the live terminal (interactive): drain any pty output into the
+/// terminal, then present a frame. Falls back to a static banner if no pty.
+fn render_interactive(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
+    // Capture the GLArea's framebuffer before `ensure_surface` (engine/FBO
+    // creation on the first frame rebinds the draw framebuffer); the present
+    // blit must target the framebuffer GTK bound on entry.
+    let dst = current_draw_fbo(gl);
+
+    if !ensure_surface(area, shared, true) {
+        // Surface not buildable yet — clear so the window isn't garbage.
+        render_clear(area, gl, shared);
+        return;
+    }
+
+    // Drain the pty (if any) and feed the terminal. With no pty, feed a one-shot
+    // banner so the window still shows real glyphs.
+    let pty_bytes = shared.pty.borrow().as_ref().map(|p| p.drain());
+    let feed_banner = pty_bytes.is_none() && !*shared.banner_fed.borrow();
+    {
+        let mut sref = shared.surface.borrow_mut();
+        let surface = sref.as_mut().expect("surface present");
+        if let Some(bytes) = pty_bytes {
+            surface.feed(&bytes);
+        } else if feed_banner {
+            surface.feed(
+                b"qwertty-term (gtk) \xe2\x80\x94 no shell; keyboard input is the next chunk.\r\n",
+            );
+        }
+        let _ = surface.render(dst);
+    }
+    if feed_banner {
+        *shared.banner_fed.borrow_mut() = true;
+    }
+}
+
 /// Build the GLArea and its parent window, wiring the realize/render/resize
-/// signals. `smoke` = true tears the app down after the first rendered frame so
-/// a headless run terminates deterministically.
-fn build_window(
-    app: &adw::Application,
-    gl_state: Rc<RefCell<Option<glow::Context>>>,
-    outcome: Rc<RefCell<SmokeOutcome>>,
-    smoke: bool,
-) {
+/// signals for `mode`.
+fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
     let gl_area = gtk::GLArea::new();
     gl_area.set_hexpand(true);
     gl_area.set_vexpand(true);
@@ -126,112 +444,60 @@ fn build_window(
     gl_area.set_has_stencil_buffer(false);
     // GL 4.3 core (upstream renderer/OpenGL.zig). Requiring 4.3 already forces a
     // *desktop* GL context (GLES has no 4.3), which is what upstream's
-    // `allowed-apis: gl` (surface.blp:36) achieves — so we don't set the
-    // `allowed-apis` property separately (its `set_allowed_apis` binding isn't on
-    // `GLAreaExt` in gtk4-rs 0.9). PR-C can pin it via the property if needed.
+    // `allowed-apis: gl` (surface.blp:36) achieves.
     gl_area.set_required_version(4, 3);
 
     // realize: make current, check for a context error, load `glow`.
     // Mirrors glareaRealize (surface.zig:3247-3282).
     {
-        let gl_state = gl_state.clone();
-        let outcome = outcome.clone();
+        let shared = shared.clone();
         gl_area.connect_realize(move |area| {
             area.make_current();
-            // Fully-qualified: `error()` also exists on `GLContextExt`, which is
-            // in scope via the preludes, so plain `area.error()` is ambiguous.
+            // Fully-qualified: `error()` also exists on `GLContextExt`.
             if let Some(err) = gtk::prelude::GLAreaExt::error(area) {
-                // A context error here is almost always a driver/library issue
-                // rather than our code (upstream logs the same guidance).
-                outcome.borrow_mut().realize_error = Some(err.to_string());
+                let msg = err.to_string();
+                shared.smoke.borrow_mut().realize_error = Some(msg.clone());
+                shared.text.borrow_mut().realize_error = Some(msg);
                 return;
             }
             ensure_gl_loader();
-            let gl = unsafe { glow::Context::from_loader_function(epoxy::get_proc_addr) };
-            *gl_state.borrow_mut() = Some(gl);
-            outcome.borrow_mut().realized = true;
+            *shared.gl.borrow_mut() = Some(make_glow());
+            shared.smoke.borrow_mut().realized = true;
+            shared.text.borrow_mut().realized = true;
 
-            // === SURFACE INIT SEAM (PR-C) ===
-            // Upstream initializes the core surface/renderer here when one
-            // already exists, else lazily on first resize (surface.zig:3268,
-            // 3419). Slice PR-C spawns TabIo (termio) + the vt `Terminal` +
-            // `Engine<OpenGL>` at that lazy point so the terminal gets correct
-            // initial dimensions.
+            // === SURFACE INIT SEAM ===
+            // The per-surface core (TabIo/pty + vt `Terminal` + `Engine<OpenGL>`)
+            // is created lazily on the first `render` (below), once the GLArea
+            // has a real size — matching upstream's lazy init on first resize
+            // (surface.zig:3419) so the terminal gets correct dimensions.
         });
     }
 
-    // render: clear the bound default framebuffer on the GTK main thread.
-    // Mirrors glareaRender (surface.zig:3347-3363).
+    // render: draw one frame on the GTK main thread (the only place GL may
+    // draw/present — `must_draw_from_app_thread`, App.zig:20). Mirrors
+    // glareaRender (surface.zig:3347-3363).
     {
-        let gl_state = gl_state.clone();
-        let outcome = outcome.clone();
+        let shared = shared.clone();
         let app = app.clone();
         gl_area.connect_render(move |area, _ctx| {
-            use glow::HasContext;
-            let guard = gl_state.borrow();
+            let guard = shared.gl.borrow();
             let Some(gl) = guard.as_ref() else {
-                // Not yet realized; nothing to draw.
-                return glib::Propagation::Stop;
+                return glib::Propagation::Stop; // not realized yet
             };
 
-            let w = area.width().max(1);
-            let h = area.height().max(1);
-            unsafe {
-                gl.viewport(0, 0, w, h);
-                gl.clear_color(
-                    CLEAR_COLOR[0],
-                    CLEAR_COLOR[1],
-                    CLEAR_COLOR[2],
-                    CLEAR_COLOR[3],
-                );
-                gl.clear(glow::COLOR_BUFFER_BIT);
-
-                // ===================== TERMINAL RENDER SEAM =====================
-                // (ADR 005 PR-C, gated on the present seam PR-A — plan §2.)
-                //
-                // The GLArea's default framebuffer (FBO 0) is bound and current
-                // *right here*, on the GTK main thread — the only place GL may
-                // draw/present (`must_draw_from_app_thread`, App.zig:20-23). Once
-                // `GpuBackend::present` + `Engine::<OpenGL>::draw_and_present`
-                // land, replace the clear above with the terminal frame:
-                //
-                //     let snap = FullSnapshot::capture_tracking(&mut terminal);
-                //     engine.update_frame(&snap, &mut grid, opts);
-                //     engine.sync_atlas(&grid);
-                //     engine.draw_and_present(); // blits engine FBO -> FBO 0,
-                //                                // GL_FRAMEBUFFER_SRGB disabled
-                //                                // during the blit (OpenGL.zig:302).
-                //
-                // `engine`/`terminal`/`grid` would be owned by the per-surface
-                // state created at the SURFACE INIT SEAM above.
-                // ================================================================
-
-                gl.flush();
-                let gl_error = gl.get_error();
-
-                // Read the center pixel back to prove the clear reached the
-                // framebuffer (the headless analog of the offscreen readback
-                // that slice 1 uses to prove pixel-correctness).
-                let (cx, cy) = (w / 2, h / 2);
-                let mut px = [0u8; 4];
-                gl.read_pixels(
-                    cx,
-                    cy,
-                    1,
-                    1,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelPackData::Slice(Some(&mut px)),
-                );
-
-                let mut o = outcome.borrow_mut();
-                o.rendered = true;
-                o.gl_error = gl_error;
-                o.center_pixel = px;
+            // ===================== TERMINAL RENDER SEAM =====================
+            // The GLArea's default framebuffer is bound + current right here.
+            // `SurfaceState::render` captures the vt screen, rebuilds the frame
+            // through the font grid + `Engine<OpenGL>`, and blits it onto this
+            // framebuffer (`draw_and_present` → `OpenGL::present`).
+            match mode {
+                Mode::ClearSmoke => render_clear(area, gl, &shared),
+                Mode::TextSmoke => render_text_smoke(area, gl, &shared),
+                Mode::Interactive => render_interactive(area, gl, &shared),
             }
 
-            if smoke {
-                // One frame is all the headless smoke needs; tear down cleanly.
+            if matches!(mode, Mode::ClearSmoke | Mode::TextSmoke) {
+                // One frame is all a headless smoke needs; tear down cleanly.
                 app.quit();
             }
             glib::Propagation::Stop
@@ -239,11 +505,10 @@ fn build_window(
     }
 
     // resize: cache the new size. Mirrors glareaResize (surface.zig:3365-3423).
-    // The scaffold has no per-surface state to resize yet; PR-C hooks the lazy
-    // surface init (first resize) + engine-target/pty-winsize resize here.
-    gl_area.connect_resize(|_area, _width, _height| {
-        // no-op for the scaffold.
-    });
+    // Per-surface resize (re-grid the terminal + pty winsize + engine target) is
+    // deferred to the keyboard/interaction chunk; the surface is sized once at
+    // first init.
+    gl_area.connect_resize(|_area, _width, _height| {});
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -254,28 +519,39 @@ fn build_window(
         .build();
     window.present();
 
-    if smoke {
-        // Force a first frame and guarantee termination even if `render` never
-        // fires (e.g. the GLArea never maps), so a headless run cannot hang.
-        gl_area.queue_render();
-        let app = app.clone();
-        glib::timeout_add_local_once(Duration::from_secs(5), move || {
-            app.quit();
-        });
+    match mode {
+        Mode::Interactive => {
+            // Repaint at ~60fps so pty output shows promptly (no dirty-tracking
+            // wakeup yet). Cheap: a full redraw of a small grid.
+            let area = gl_area.clone();
+            glib::timeout_add_local(Duration::from_millis(16), move || {
+                area.queue_render();
+                glib::ControlFlow::Continue
+            });
+        }
+        Mode::ClearSmoke | Mode::TextSmoke => {
+            // Force a first frame and guarantee termination even if `render`
+            // never fires (e.g. the GLArea never maps), so a headless run can't
+            // hang.
+            gl_area.queue_render();
+            let app = app.clone();
+            glib::timeout_add_local_once(Duration::from_secs(5), move || {
+                app.quit();
+            });
+        }
     }
 }
 
-/// Run the GTK application interactively (opens a window that GL-clears to
-/// [`CLEAR_COLOR`]). Returns the process exit code.
+/// Run the GTK application interactively — opens a window that renders the live
+/// terminal (a pty running the user's shell). Returns the process exit code.
 pub fn run() -> std::process::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    let gl_state: Rc<RefCell<Option<glow::Context>>> = Rc::new(RefCell::new(None));
-    let outcome = Rc::new(RefCell::new(SmokeOutcome::default()));
+    let shared = Rc::new(Shared::default());
     app.connect_activate(move |app| {
-        build_window(app, gl_state.clone(), outcome.clone(), false);
+        build_window(app, shared.clone(), Mode::Interactive);
     });
-    // Empty arg list: our own flags (e.g. `--smoke`) are handled before this
-    // and must not be parsed by GTK.
+    // Empty arg list: our own flags (e.g. `--smoke`) are handled before this and
+    // must not be parsed by GTK.
     let code = app.run_with_args::<&str>(&[]);
     if code.value() == 0 {
         std::process::ExitCode::SUCCESS
@@ -284,20 +560,34 @@ pub fn run() -> std::process::ExitCode {
     }
 }
 
-/// Run the app headlessly for a single frame and report what the realize/render
-/// callbacks observed. Intended for the `--smoke` bin flag and the headless
-/// integration test under Xvfb + Mesa llvmpipe.
+/// Run the clear-only smoke headlessly for a single frame (GL-plumbing
+/// regression). Intended for the `--smoke` bin flag and the headless GTK test.
 pub fn run_smoke() -> SmokeOutcome {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    let gl_state: Rc<RefCell<Option<glow::Context>>> = Rc::new(RefCell::new(None));
-    let outcome = Rc::new(RefCell::new(SmokeOutcome::default()));
+    let shared = Rc::new(Shared::default());
     {
-        let gl_state = gl_state.clone();
-        let outcome = outcome.clone();
+        let shared = shared.clone();
         app.connect_activate(move |app| {
-            build_window(app, gl_state.clone(), outcome.clone(), true);
+            build_window(app, shared.clone(), Mode::ClearSmoke);
         });
     }
     let _ = app.run_with_args::<&str>(&[]);
-    outcome.borrow().clone()
+    shared.smoke.borrow().clone()
+}
+
+/// Run the text smoke headlessly for a single frame: feed known text into the
+/// terminal, render + present it into the GLArea, and read the presented pixels
+/// back to prove **real glyph ink** reached the framebuffer. Intended for the
+/// `--text-smoke` bin flag and the headless GTK text-render test.
+pub fn run_text_smoke() -> TextSmokeOutcome {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    let shared = Rc::new(Shared::default());
+    {
+        let shared = shared.clone();
+        app.connect_activate(move |app| {
+            build_window(app, shared.clone(), Mode::TextSmoke);
+        });
+    }
+    let _ = app.run_with_args::<&str>(&[]);
+    shared.text.borrow().clone()
 }

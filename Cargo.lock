@@ -3376,6 +3376,10 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "libloading",
+ "qwertty-term-font",
+ "qwertty-term-renderer",
+ "qwertty-term-termio",
+ "qwertty-term-vt",
 ]
 
 [[package]]

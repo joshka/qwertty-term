@@ -38,3 +38,14 @@ adw = { package = "libadwaita", version = "0.7" }
 glow = "0.17"
 epoxy = "0.1"
 libloading = "0.8"
+# The platform-free core: the vt terminal, the font grid, and the renderer
+# engine + its Linux OpenGL backend. `cargo check -p qwertty-term` is clean on
+# Linux, so these modules reuse cleanly here. Path+version so this crate stays
+# in lockstep with the workspace release (release-plz bumps all three together).
+qwertty-term-vt = { version = "0.4.0", path = "../qwertty-term-vt" }
+qwertty-term-font = { version = "0.4.0", path = "../qwertty-term-font" }
+qwertty-term-renderer = { version = "0.4.0", path = "../qwertty-term-renderer" }
+# The POSIX pty/subprocess for the interactive shell (SURFACE INIT). The
+# headless text smoke drives the vt Terminal directly, so this is only exercised
+# by an interactive launch (`run`), not by validation.
+qwertty-term-termio = { version = "0.4.0", path = "../qwertty-term-termio" }
