@@ -38,6 +38,14 @@ adw = { package = "libadwaita", version = "0.7" }
 glow = "0.17"
 epoxy = "0.1"
 libloading = "0.8"
+# The platform-free half of the macOS app: the terminal `Engine` wrapper (vt
+# `Terminal` + selection API), the selection-gesture state machine, the CPU-side
+# selection tint (`selection::tint_selection`), the paste-safety classifier, and
+# the context-menu model. All of these modules are un-gated (not `cfg(macos)`)
+# and depend only on the vt/input crates, so they compile + run on Linux; the
+# GTK host wires GTK events to this shared logic rather than reinventing it.
+# `[target.linux]` keeps macOS builds from pulling it (they use it directly).
+qwertty-term = { version = "0.4.0", path = "../qwertty-term" }
 # The platform-free core: the vt terminal, the font grid, and the renderer
 # engine + its Linux OpenGL backend. `cargo check -p qwertty-term` is clean on
 # Linux, so these modules reuse cleanly here. Path+version so this crate stays

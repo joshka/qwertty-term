@@ -30,6 +30,8 @@ mod app;
 #[cfg(target_os = "linux")]
 mod input;
 #[cfg(target_os = "linux")]
+mod mouse;
+#[cfg(target_os = "linux")]
 mod surface;
 
 #[cfg(target_os = "linux")]
