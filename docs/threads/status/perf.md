@@ -1,11 +1,16 @@
-# perf status — ACTIVE 2026-07-15 (hash_map backward-shift lever)
+# perf status — 🗄️ RECYCLED 2026-07-15 (hash_map lever complete + oracle fixed)
 
-> **Active: hash_map backward-shift lever.** Succeeds the recycled APC session (#287 `8fa6772a`
-> bulk apc dispatch, #289 `50e9814f` NEON scan — both merged). Now porting the page hash-map
-> deletion cluster (`fedd42e8d` core + deferred `7e14347c1`/`65f953e8e`). Analysis:
-> `docs/analysis/hash-map-backward-shift.md`.
+> **Session recycled after completing the hash_map backward-shift lever + fixing a fleet-wide
+> stale-oracle bug.** Both PRs MERGED to origin/main (verified ancestors): **#297** `0babde7a`
+> (backward-shift deletion) and **#303** `d0a62c8c` (80% hyperlink load factor) — the full faithful
+> port of the upstream hash_map cluster (`fedd42e8d` + `7e14347c1`; `65f953e8e` already present).
+> Both oracle-neutral (**no pin bump** — proven, not assumed). Analysis:
+> `docs/analysis/hash-map-backward-shift.md`. **To resume perf work, spawn a fresh thread off this
+> file.** Oracle infra now CORRECT: `77190bd02` lib installed at `~/local/ghostty/zig-out/lib`
+> (stale Jul-7 lib backed up to `lib-backup-stale-jul7-2da015cd6/`); `~/local/ghostty-pin77190`
+> worktree intact. Backlog for the next thread is below.
 >
-> **PR-1 (backward-shift deletion) — GATE-GREEN, shipping.** Replaces tombstone deletion with
+> **PR-1 (backward-shift deletion) — MERGED `0babde7a` (#297).** Replaced tombstone deletion with
 > backward-shift (Knuth §6.4-R) in `page::offset_map`. **Profile-first correction:** the first
 > churn bench misled (same-key churn is cheap on raw tombstones → backward-shift looked slower);
 > the *representative* workload is **sliding-window churn** (cells at *different* offsets), where
@@ -17,7 +22,7 @@
 > release lane 1631, corpus/afl/hand/formatter differential green, Miri 15/15, resize fuzz 85 257
 > runs clean, fmt/clippy/check clean.
 >
-> **PR-2 (80% hyperlink load factor, `7e14347c1`) — GATE-GREEN, ORACLE-NEUTRAL, shipping.**
+> **PR-2 (80% hyperlink load factor, `7e14347c1`) — MERGED `d0a62c8c` (#303), ORACLE-NEUTRAL.**
 > Defaulted const generic `OffsetHashMap<K, V, const MAX_LOAD: u8 = 100>` (hyperlink map = 80,
 > grapheme stays 100), `layout_for_size` scaling + `max_load()` ceiling, `hyperlink_capacity()` →
 > `max_load()`. **Evaluated the pin-bump question empirically: NO pin bump.** The full `vt-diff
@@ -41,9 +46,11 @@
 > region-scroll suites down ~1.5–1.7 ms (18→16.4) consistent with the shipped region-scroll
 > levers. A real 3-round median refresh still wants a quiet box.
 
-- **Current item:** PR-1 backward-shift — gate-green, pushing PR. Then PR-2 (load factor)
-  empirical divergence check. Backlog:
-  - **(0, ACTIVE) hash_map backward-shift** — PR-1 shipping; PR-2 (load factor) next.
+- **Current item:** 🗄️ **RECYCLED** — hash_map lever DONE + MERGED (#297 `0babde7a`, #303
+  `d0a62c8c`, both verified on origin/main) + stale oracle fixed (fleet-wide). Backlog for a fresh
+  thread:
+  - **(DONE) hash_map backward-shift + load factor** — both PRs merged; full faithful port complete,
+    oracle-neutral. Analysis `docs/analysis/hash-map-backward-shift.md`.
   - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15: WindowServer 47%, loadavg 8.75 rising,
     mediaanalysisd 69%, Josh active on Firefox → the render-heavy region suites are contended and
@@ -62,13 +69,13 @@
     run_len) is correctness-load-bearing / already-minimal → diminishing returns, higher risk.
     Only pursue with fresh line-level profiling showing a concrete hot spot.
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
-- **Last merged:** **#289** (APC SIMD scan, `50e9814f`); **#287** (APC bulk dispatch, `8fa6772a`);
-  **#283** (wide pair-write, `9e51aad3`); **#277** (`2708b267`); **#269** (`36256c78`); **#266**.
-- **Blockers:** the **scoreboard refresh** remains machine-blocked (WindowServer ~47% + a sibling
-  running `qwertty-term`; render-heavy suites would read 3–4× inflated on all builds) — needs a
-  genuinely quiet box (WindowServer idle, no sibling GUI app). The hash_map lever is NOT so
-  blocked (CPU microbench, measurable under moderate load). **Workspace:** forgotten + deleted
-  (recycled).
+- **Last merged:** **#303** (80% hyperlink load factor, `d0a62c8c`); **#297** (backward-shift
+  deletion, `0babde7a`); **#289** (APC SIMD scan, `50e9814f`); **#287** (APC bulk dispatch,
+  `8fa6772a`); **#283** (`9e51aad3`); **#277** (`2708b267`); **#269** (`36256c78`); **#266**.
+- **Blockers:** the **scoreboard refresh** remains machine-blocked — needs a genuinely quiet box
+  (WindowServer idle, no sibling GUI app). A directional vibes run this session (loadavg ~7) showed
+  no regression vs the 2026-07-13 baseline. **Workspace:** `work/perf` still live at recycle — a
+  fresh thread can reuse it or re-create; both PRs merged so nothing uncommitted of value remains.
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
