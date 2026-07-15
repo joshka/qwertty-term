@@ -19,6 +19,21 @@ fn main() -> std::process::ExitCode {
             eprintln!("text-smoke: FAILED");
             std::process::ExitCode::FAILURE
         }
+    } else if args.iter().any(|a| a == "--resize-smoke") {
+        // Prove a GLArea resize re-grids the terminal and re-sizes the render
+        // target (render at one size → resize → render again, no GL error).
+        let outcome = qwertty_term_gtk::run_resize_smoke();
+        println!("resize-smoke: {outcome}");
+        if outcome.regridded() {
+            println!(
+                "resize-smoke: OK ({:?} -> {:?})",
+                outcome.initial_grid, outcome.resized_grid
+            );
+            std::process::ExitCode::SUCCESS
+        } else {
+            eprintln!("resize-smoke: FAILED");
+            std::process::ExitCode::FAILURE
+        }
     } else if args.iter().any(|a| a == "--smoke") {
         let outcome = qwertty_term_gtk::run_smoke();
         println!("smoke: {outcome}");

@@ -22,6 +22,17 @@ use qwertty_term_renderer::engine::{Engine, FrameOptions};
 use qwertty_term_renderer::opengl::OpenGL;
 use qwertty_term_renderer::snapshot::FullSnapshot;
 
+/// The `(cols, rows)` grid that fits a `width_px × height_px` GLArea with
+/// `cell_w × cell_h` cells (reduced cut: no window padding). Always at least
+/// 1×1 so a zero-size GLArea still yields a valid grid. Shared by
+/// [`SurfaceState::new`] and [`SurfaceState::resize`] so init and re-grid can
+/// never drift apart.
+fn grid_dims(width_px: i32, height_px: i32, cell_w: usize, cell_h: usize) -> (usize, usize) {
+    let cols = (width_px.max(1) as usize / cell_w.max(1)).max(1);
+    let rows = (height_px.max(1) as usize / cell_h.max(1)).max(1);
+    (cols, rows)
+}
+
 /// The per-surface renderer core: GPU engine + font grid + the terminal
 /// [`TermEngine`], sized to the GLArea.
 ///
@@ -67,8 +78,7 @@ impl SurfaceState {
         };
         // Grid dims from the GLArea size and cell metrics (reduced cut: no
         // window padding). At least 1×1 so a zero-size GLArea still builds.
-        let cols = (width_px.max(1) as usize / cell_w.max(1)).max(1);
-        let rows = (height_px.max(1) as usize / cell_h.max(1)).max(1);
+        let (cols, rows) = grid_dims(width_px, height_px, cell_w, cell_h);
 
         let backend = OpenGL::from_glow(gl);
         let renderer = Engine::with_backend_for_grid(backend, &grid).ok()?;
@@ -94,6 +104,33 @@ impl SurfaceState {
     /// Cell width/height in pixels.
     pub fn cell_size(&self) -> (usize, usize) {
         (self.cell_w, self.cell_h)
+    }
+
+    /// Re-grid this surface for a new GLArea pixel size. Recomputes cols/rows
+    /// from the cached cell metrics; when they change it re-grids the terminal
+    /// [`TermEngine`] (which reflows the screen) and updates the stored dims,
+    /// returning the new `(cols, rows)` so the caller can `TIOCSWINSZ` the pty.
+    /// Returns `None` (no work) when the size maps to the same grid.
+    ///
+    /// The render engine is *not* touched here: its next
+    /// [`render`](Self::render) rebuilds from a snapshot at the new dims, and
+    /// [`Engine::update_frame`] detects the grid-size change and resizes both
+    /// its CPU contents and the on-screen target FBO
+    /// (`qwertty-term-renderer/src/engine.rs:436` + `:1489`) — so a plain
+    /// re-grid + repaint is all the host must do.
+    ///
+    /// Mirrors upstream `glareaResize` → `Surface.resize` (re-grid + pty resize,
+    /// `class/surface.zig:3419`) and the macOS host's reflow
+    /// (`qwertty-term/src/app.rs:472`).
+    pub fn resize(&mut self, width_px: i32, height_px: i32) -> Option<(usize, usize)> {
+        let (cols, rows) = grid_dims(width_px, height_px, self.cell_w, self.cell_h);
+        if cols == self.cols && rows == self.rows {
+            return None;
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.engine.resize(cols, rows);
+        Some((cols, rows))
     }
 
     /// The terminal engine (selection queries, `bracketed_paste`, …).
@@ -182,8 +219,10 @@ pub struct Pty {
     /// The pty master, for writing keystrokes to the child. A clone of the fd
     /// the reader thread reads from (the master is bidirectional).
     writer: std::fs::File,
-    /// Kept alive so the child isn't dropped/reaped while the window lives.
-    _subprocess: qwertty_term_termio::Subprocess,
+    /// The pty child. Kept alive so it isn't dropped/reaped while the window
+    /// lives, and re-invoked by [`Pty::resize`] to `TIOCSWINSZ` on window
+    /// resize.
+    subprocess: qwertty_term_termio::Subprocess,
 }
 
 impl Pty {
@@ -246,8 +285,34 @@ impl Pty {
         Some(Self {
             buf,
             writer,
-            _subprocess: subprocess,
+            subprocess,
         })
+    }
+
+    /// Resize the pty to `cols`×`rows` (`w`×`h` px) via `TIOCSWINSZ`, so the
+    /// child shell and its foreground program get a `SIGWINCH` and re-read the
+    /// new window size. Re-invokes [`Subprocess::resize`](qwertty_term_termio::Subprocess::resize)
+    /// — the same call [`Pty::spawn`] makes once at spawn. Best-effort: a resize
+    /// error (e.g. the child already exited) is ignored. Mirrors the pty half of
+    /// upstream's resize (`class/surface.zig:3419` → `io.resize`).
+    pub fn resize(&mut self, cols: u16, rows: u16, w: u32, h: u32) {
+        use qwertty_term_termio::size::{GridSize, ScreenSize};
+        let _ = self.subprocess.resize(
+            GridSize {
+                columns: cols,
+                rows,
+            },
+            ScreenSize {
+                width: w,
+                height: h,
+            },
+        );
+    }
+
+    /// The pty's current `(cols, rows)` per `TIOCGWINSZ`. Used by the resize
+    /// smoke to prove a [`resize`](Self::resize) actually reached the kernel pty.
+    pub fn winsize(&self) -> Option<(u16, u16)> {
+        self.subprocess.size().map(|ws| (ws.cols, ws.rows))
     }
 
     /// Take everything read from the pty since the last drain (empties the

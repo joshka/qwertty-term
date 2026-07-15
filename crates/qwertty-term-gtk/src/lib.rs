@@ -35,4 +35,7 @@ mod mouse;
 mod surface;
 
 #[cfg(target_os = "linux")]
-pub use app::{CLEAR_COLOR, SmokeOutcome, TextSmokeOutcome, run, run_smoke, run_text_smoke};
+pub use app::{
+    CLEAR_COLOR, ResizeSmokeOutcome, SmokeOutcome, TextSmokeOutcome, run, run_resize_smoke,
+    run_smoke, run_text_smoke,
+};
