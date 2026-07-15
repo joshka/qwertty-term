@@ -13,8 +13,19 @@
 //! base (`hash_map.zig:139-169, 296-308`).
 //!
 //! Capacity is always a power of two; `slot = hash & (cap - 1)`; each metadata
-//! byte is a 7-bit fingerprint (top hash bits) plus a used bit. Tombstones
-//! (`fingerprint = 1, used = 0`) mark deletions and are recycled on insert.
+//! byte is a 7-bit fingerprint (top hash bits) plus a used bit. Removal uses
+//! backward-shift deletion (Knuth vol. 3, section 6.4, algorithm R): rather
+//! than leaving a tombstone, it restores the table to the state it would be in
+//! had the removed key never been inserted, so probe chains stay canonical at
+//! all times and a free slot is only ever the all-zero byte. A fixed-capacity
+//! map cannot outgrow tombstone buildup the way an allocating map does, so
+//! tombstones would require either unbounded probe lengths or periodic in-place
+//! rebuilds; backward-shift avoids both by construction.
+//!
+//! Pointer stability: insertion never moves existing entries, but removal may
+//! move *other* entries within a probe cluster. Any key or value pointer
+//! previously returned by the map must be considered invalidated by any
+//! removal (no caller holds an entry pointer across a removal).
 //!
 //! The hash comes from the [`MapKey`] trait (a stable SplitMix64 mix, standing
 //! in for Zig's `autoHash`/Wyhash — see `hash.rs`). Exact hash values are
@@ -41,8 +52,7 @@ impl Metadata {
     const FP_MASK: u8 = 0b0111_1111;
     const USED_BIT: u8 = 0b1000_0000;
 
-    const FREE: u8 = 0; // fingerprint 0, used 0
-    const TOMBSTONE: u8 = 1; // fingerprint 1, used 0
+    const FREE: u8 = 0; // fingerprint 0, used 0 — the all-zero byte
 
     #[inline]
     fn is_used(self) -> bool {
@@ -50,13 +60,13 @@ impl Metadata {
     }
 
     #[inline]
-    fn is_tombstone(self) -> bool {
-        self.0 == Self::TOMBSTONE
-    }
-
-    #[inline]
     fn is_free(self) -> bool {
-        self.0 == Self::FREE
+        // A free slot is always the all-zero byte: `fill` sets the used bit and
+        // backward-shift removal zeroes the whole byte. Comparing the full byte
+        // (rather than testing just the used bit) lets the optimizer fuse this
+        // with the fingerprint comparison in probe loops into single-byte
+        // compares. Port of `Metadata.isFree`.
+        self.0 == 0
     }
 
     #[inline]
@@ -73,11 +83,6 @@ impl Metadata {
     #[inline]
     fn fill(&mut self, fp: u8) {
         self.0 = Self::USED_BIT | (fp & Self::FP_MASK);
-    }
-
-    #[inline]
-    fn remove(&mut self) {
-        self.0 = Self::TOMBSTONE;
     }
 }
 
@@ -370,6 +375,11 @@ impl<K: MapKey, V: Copy> Map<K, V> {
     pub unsafe fn put_assume_capacity_no_clobber(&mut self, key: K, value: V) {
         // SAFETY: per caller contract.
         unsafe {
+            // A free slot must exist for the probe below to terminate; with
+            // backward-shift deletion (no tombstones) that holds iff the map
+            // is not completely full. (Side-effect-free — release-lane safe.)
+            debug_assert!((*self.header()).size < self.capacity());
+
             let cap = self.capacity() as usize;
             let mask = (cap - 1) as u64;
             let hash = key.hash64();
@@ -422,7 +432,6 @@ impl<K: MapKey, V: Copy> Map<K, V> {
             let fp = Metadata::take_fingerprint(hash);
             let mut limit = cap;
             let mut idx = (hash & mask) as usize;
-            let mut first_tombstone: usize = cap; // invalid index sentinel
 
             loop {
                 let m = *self.meta_at(idx);
@@ -437,17 +446,16 @@ impl<K: MapKey, V: Copy> Map<K, V> {
                             found_existing: true,
                         });
                     }
-                } else if first_tombstone == cap && m.is_tombstone() {
-                    first_tombstone = idx;
                 }
                 limit -= 1;
                 idx = ((idx as u64 + 1) & mask) as usize;
             }
 
-            if first_tombstone < cap {
-                // Recycle a tombstone to lower probe lengths.
-                idx = first_tombstone;
-            }
+            // The available check above guaranteed room for one new entry, and
+            // backward-shift deletion leaves no tombstones, so the probe must
+            // have ended at a free slot. Anything else would silently overwrite
+            // a live entry. (No side effects in the assert — release-lane safe.)
+            debug_assert!((*self.meta_at(idx)).is_free());
 
             (*self.meta_at(idx)).fill(fp);
             self.keys().add(idx).write(key);
@@ -494,10 +502,52 @@ impl<K: MapKey, V: Copy> Map<K, V> {
         }
     }
 
+    /// Remove the entry at `idx` using backward-shift deletion (Knuth vol. 3,
+    /// section 6.4, algorithm R): rather than marking the slot with a
+    /// tombstone, restore the table to the state it would be in had the removed
+    /// key never been inserted. Any entry whose probe sequence passes over the
+    /// hole is moved into it, which moves the hole further along the cluster,
+    /// until the cluster ends at a free slot. Port of `removeByIndexContext`.
+    ///
+    /// # Safety
+    ///
+    /// `idx` must address a currently-used slot and the map must have exclusive
+    /// access. Moves other entries — invalidates any outstanding key/value ptr.
     unsafe fn remove_by_index(&mut self, idx: usize) {
         // SAFETY: idx valid per caller.
         unsafe {
-            (*self.meta_at(idx)).remove();
+            let cap = self.capacity() as usize;
+            let mask = cap - 1;
+
+            // A completely full table has no free slot to terminate the scan,
+            // so bound it to one full cycle. That is sufficient: the hole only
+            // ever moves forward to slots the scan has already visited, so each
+            // entry is considered exactly once.
+            let mut hole = idx;
+            let mut j = idx;
+            let mut limit = cap - 1;
+            while limit != 0 {
+                j = (j + 1) & mask;
+                if (*self.meta_at(j)).is_free() {
+                    break;
+                }
+
+                // The entry at `j` may move into the hole only if the hole lies
+                // on its probe path, i.e. cyclically within [home, j).
+                // Otherwise the move would place it before its home slot and
+                // lookups could no longer find it.
+                let home = (self.keys().add(j).read().hash64() as usize) & mask;
+                if (hole.wrapping_sub(home) & mask) < (j.wrapping_sub(home) & mask) {
+                    *self.meta_at(hole) = *self.meta_at(j);
+                    self.keys().add(hole).write(self.keys().add(j).read());
+                    self.values().add(hole).write(self.values().add(j).read());
+                    hole = j;
+                }
+
+                limit -= 1;
+            }
+
+            (*self.meta_at(hole)).0 = Metadata::FREE;
             (*self.header()).size -= 1;
         }
     }
@@ -851,10 +901,10 @@ mod tests {
         }
     }
 
-    // Port of "HashMap ensureUnusedCapacity with tombstones" (repeat put/remove
-    // must not exhaust the map).
+    // Port of "HashMap ensureUnusedCapacity with removals" (repeat put/remove
+    // must not exhaust the map; backward-shift frees the slot each time).
     #[test]
-    fn tombstone_recycling() {
+    fn removal_recycling() {
         let tm = TestMap::<i32, i32>::new(32);
         let mut map = tm.map();
         // SAFETY: exclusive access.
@@ -865,6 +915,168 @@ mod tests {
                 map.remove(&i);
             }
             assert_eq!(map.count(), 0);
+        }
+    }
+
+    /// Verify the canonical placement invariant that backward-shift deletion
+    /// maintains: every used entry is reachable from its home slot without
+    /// crossing a free slot. This is exactly the property lookups depend on.
+    /// Port of the Zig test helper `expectCanonical`.
+    ///
+    /// # Safety
+    ///
+    /// The map's regions must be valid for reads.
+    unsafe fn assert_canonical<K: MapKey, V: Copy>(map: &Map<K, V>) {
+        // SAFETY: per caller contract; in-module access to the private view.
+        unsafe {
+            let cap = map.capacity() as usize;
+            let mask = cap - 1;
+            let mut used = 0usize;
+            for idx in 0..cap {
+                if !(*map.meta_at(idx)).is_used() {
+                    continue;
+                }
+                used += 1;
+                let home = (map.keys().add(idx).read().hash64() as usize) & mask;
+                let mut probe = home;
+                while probe != idx {
+                    assert!(
+                        (*map.meta_at(probe)).is_used(),
+                        "free slot in probe chain of idx {idx} (home {home})"
+                    );
+                    probe = (probe + 1) & mask;
+                }
+            }
+            assert_eq!(map.count() as usize, used);
+        }
+    }
+
+    /// A key type whose hash forces every value to the same home slot, so
+    /// clusters wrap around the index mask. Exercises the cyclic arithmetic in
+    /// backward-shift deletion. Port of the "colliding clusters" Zig context.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct Collide(u32);
+    impl MapKey for Collide {
+        // Home slot `14 & mask`; fingerprint `14 >> 57 == 0` — all identical,
+        // forcing full key comparisons along the probe chain.
+        fn hash64(&self) -> u64 {
+            14
+        }
+    }
+
+    // Port of "HashMap removal keeps colliding clusters findable".
+    #[test]
+    fn removal_colliding_clusters_findable() {
+        let tm = TestMap::<Collide, u32>::new(16);
+        let mut map = tm.map();
+        // SAFETY: exclusive access.
+        unsafe {
+            // Fill half the table: the cluster spans the wraparound point.
+            for i in 0..8u32 {
+                map.put_assume_capacity_no_clobber(Collide(i), i);
+            }
+            let mut removed = 0u32;
+            for key in [3u32, 0, 7, 4, 1, 6, 2, 5] {
+                assert!(map.remove(&Collide(key)));
+                removed += 1;
+                for i in 0..8u32 {
+                    if map.contains(&Collide(i)) {
+                        assert_eq!(map.get(&Collide(i)), Some(i));
+                    }
+                }
+                assert_eq!(map.count(), 8 - removed);
+                assert_canonical(&map);
+            }
+        }
+    }
+
+    // Port of "HashMap removal from a completely full table": a 100% load
+    // factor allows filling every raw slot, so removal cannot rely on a free
+    // slot to terminate its cluster scan.
+    #[test]
+    fn removal_from_full_table() {
+        let cap = 64u32;
+        let tm = TestMap::<u32, u32>::new(cap);
+        let mut map = tm.map();
+        // SAFETY: exclusive access.
+        unsafe {
+            for i in 0..cap {
+                map.put_assume_capacity_no_clobber(i, i);
+            }
+            assert_eq!(map.count(), cap);
+
+            let mut expected = cap;
+            for i in 0..cap {
+                if i % 2 != 0 {
+                    continue;
+                }
+                assert!(map.remove(&i));
+                expected -= 1;
+                assert_eq!(map.count(), expected);
+            }
+            for i in 0..cap {
+                if i % 2 == 0 {
+                    assert_eq!(map.get(&i), None);
+                } else {
+                    assert_eq!(map.get(&i), Some(i));
+                }
+            }
+            assert_canonical(&map);
+        }
+    }
+
+    // Port of "HashMap random operations against an oracle": random hits,
+    // misses and re-insertions at every load factor from empty to full,
+    // compared against a std HashMap oracle plus the canonical invariant.
+    #[test]
+    fn random_operations_against_oracle() {
+        use std::collections::HashMap;
+        let cap = 64u32;
+        let tm = TestMap::<u32, u32>::new(cap);
+        let mut map = tm.map();
+        let mut oracle: HashMap<u32, u32> = HashMap::new();
+
+        // Deterministic splitmix64 stream (no Math.random).
+        let mut state = 0xdead_beefu64;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            crate::page::hash::splitmix64(state)
+        };
+        // A small key space forces frequent hits, misses and re-insertions.
+        let key_space = cap + cap / 2;
+
+        // SAFETY: exclusive access.
+        unsafe {
+            for _ in 0..20_000 {
+                let key = (next() as u32) % key_space;
+                match next() % 4 {
+                    0 | 1 => {
+                        let value = next() as u32;
+                        match map.put(key, value) {
+                            Ok(()) => {
+                                oracle.insert(key, value);
+                            }
+                            Err(OutOfMemory) => {
+                                // Map full: put only fails on an absent key.
+                                assert!(!oracle.contains_key(&key));
+                                assert_eq!(map.count(), map.capacity());
+                            }
+                        }
+                    }
+                    2 => {
+                        assert_eq!(oracle.remove(&key).is_some(), map.remove(&key));
+                    }
+                    _ => {
+                        assert_eq!(oracle.get(&key).copied(), map.get(&key));
+                    }
+                }
+                assert_eq!(oracle.len() as u32, map.count());
+            }
+
+            for (&k, &v) in &oracle {
+                assert_eq!(map.get(&k), Some(v));
+            }
+            assert_canonical(&map);
         }
     }
 

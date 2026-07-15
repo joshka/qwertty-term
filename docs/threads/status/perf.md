@@ -1,37 +1,45 @@
-# perf status — 🗄️ RECYCLED 2026-07-15 (APC lever shipped)
+# perf status — ACTIVE 2026-07-15 (hash_map backward-shift lever)
 
-> **Session recycled after shipping + merging the APC lever.** The competitive-perf mission stays
-> complete (region-scroll #266/#269/#277/#283 + wide/CJK, pin `77190bd02`). This session took
-> Josh's "start APC SIMD vectorize" pick and shipped it as two MERGED PRs:
-> **#287** `8fa6772a` (bulk `apc_put_slice` dispatch, port of upstream `f6f79acce`) — kitty
-> **~42→~294 MiB/s (~7×)**; and **#289** `50e9814f` (NEON SIMD payload prescan, port of
-> `8c523ed03`) — **~294→~338–347 MiB/s (~+15%)**. Both full-rigor (equivalence + differential vs
-> the `77190bd02` oracle + 730k/384k-run fuzz + Miri) and now on origin/main. Analysis:
-> `docs/analysis/apc-bulk-dispatch.md`. Josh granted self-merge + pin-bump authority; I merged
-> both, verified they're ancestors of origin/main, and cleaned up (workspace forgotten + deleted).
+> **Active: hash_map backward-shift lever.** Succeeds the recycled APC session (#287 `8fa6772a`
+> bulk apc dispatch, #289 `50e9814f` NEON scan — both merged). Now porting the page hash-map
+> deletion cluster (`fedd42e8d` core + deferred `7e14347c1`/`65f953e8e`). Analysis:
+> `docs/analysis/hash-map-backward-shift.md`.
 >
-> **To resume perf work, spawn a fresh thread off this file.** Remaining backlog below. Oracle
-> infra intact: `77190bd02` lib at `~/local/ghostty/zig-out/lib` + `~/local/ghostty-pin77190`.
+> **PR-1 (backward-shift deletion) — GATE-GREEN, shipping.** Replaces tombstone deletion with
+> backward-shift (Knuth §6.4-R) in `page::offset_map`. **Profile-first correction:** the first
+> churn bench misled (same-key churn is cheap on raw tombstones → backward-shift looked slower);
+> the *representative* workload is **sliding-window churn** (cells at *different* offsets), where
+> tombstones accumulate — there backward-shift is **9.3× faster @50%, 18× @90%** (criterion
+> `benches/hash_map.rs`), plus canonical lookups, at the cost of a narrow same-key-churn
+> regression at high load (matches upstream's tradeoff). **Oracle-neutral** (internal algorithm
+> swap): proved divergence-neutral (generative sweep 259 identical seeds w/ & w/o the change,
+> **zero** hyperlink/grapheme) → **no pin bump**. Gates: unit 15/15 (+ oracle differential),
+> release lane 1631, corpus/afl/hand/formatter differential green, Miri 15/15, resize fuzz 85 257
+> runs clean, fmt/clippy/check clean.
 >
-> **NEXT LEVER (unblocked — Josh granted pin-bump auth): hash_map backward-shift deletion.** Port
-> upstream `fedd42e8d` (+ its cluster `7e14347c1`/`65f953e8e`) — replaces tombstone deletion with
-> backward-shift (Knuth 6.4-R) in the page hyperlink/grapheme maps, bounding probe lengths (~5.5%
-> on a cell-move bench, net −136 lines). Large, differential-CRITICAL (hyperlink/grapheme
-> correctness), and coupled to a further pin bump (`77190bd02` → ≥ the cluster). Its OWN focused
-> session: profile-first (add a hyperlink/grapheme-move bench to `profile_streams`); differential,
-> generative sweep, Miri (unsafe hash probing), fuzz, before/after numbers (CPU microbench —
-> measurable under moderate load, unlike the scoreboard). The APC lever this session is the
-> template. **Scoreboard is a SEPARATE item — still machine-blocked** (below).
+> **PR-2 (80% hyperlink load factor, `7e14347c1`) — DEFERRED, next.** Strict superset of PR-1;
+> the *only* added risk is a layout change that MAY need a pin bump. To be evaluated empirically
+> (implement → run differential; pin-bump only if it actually diverges). Bounds full-map probes +
+> dodges the same-key regression for the hyperlink map. `65f953e8e` (no-clobber moves) already
+> present in our port.
 >
-> **Upstream perf scan (this session, still current):** 81 commits touch `src/simd`/`src/terminal`
-> since the pin; only the hash_map cluster (above) + the now-shipped APC pair were perf levers —
-> the rest are search/generation-marker correctness.
+> **✅ Fixed a stale-oracle repo issue (fleet-wide).** The installed reference lib
+> `~/local/ghostty/zig-out/lib/libghostty-vt.a` was the old Jul-7 `2da015cd6`-era artifact
+> (the prior pin-bump install updated only symlinks/xcframework, not the `.a`/`.dylib`), leaving
+> main's generative sweep red at **259 scrollback-class divergences** — orthogonal to hash_map.
+> Installed the correct `77190bd02` build (already present un-installed in `~/local/ghostty-
+> pin77190/zig-out/lib`) into the oracle path; **default `vt-diff --features reference` now passes
+> at 0 divergences** — zero-divergence invariant restored for every thread. PR-1 re-verified 0
+> against the correct oracle. issues.md item marked resolved.
+>
+> **Vibes scoreboard (Josh-requested, our numbers vs 2026-07-13 baseline):** 1-round, loadavg ~7,
+> mean-not-median → DIRECTIONAL ONLY, not written to the baseline doc. No regression anywhere;
+> region-scroll suites down ~1.5–1.7 ms (18→16.4) consistent with the shipped region-scroll
+> levers. A real 3-round median refresh still wants a quiet box.
 
-- **Current item:** 🗄️ **RECYCLED** — APC lever DONE + MERGED (#287 `8fa6772a`, #289 `50e9814f`,
-  both verified on origin/main). Backlog for a fresh thread:
-  - **(0, NEXT) hash_map backward-shift lever** (`fedd42e8d` cluster) — see banner. Unblocked
-    (pin-bump auth granted); big + differential-critical → own focused session. Highest-value
-    remaining code lever.
+- **Current item:** PR-1 backward-shift — gate-green, pushing PR. Then PR-2 (load factor)
+  empirical divergence check. Backlog:
+  - **(0, ACTIVE) hash_map backward-shift** — PR-1 shipping; PR-2 (load factor) next.
   - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15: WindowServer 47%, loadavg 8.75 rising,
     mediaanalysisd 69%, Josh active on Firefox → the render-heavy region suites are contended and
