@@ -76,17 +76,48 @@ command on each `apc_end`), versus upstream's ~25× on an isolated APC-parser
 bench that skips image decode/storage; the whole-path number is the honest one
 for our stack.
 
+## The SIMD scan (PR-2, `8c523ed03` port)
+
+After PR-1, `consume_apc_string`'s payload-boundary scan is a per-byte match
+loop. PR-2 prescans it a vector at a time (`apc_scan_prefix` / `_neon`): on
+`aarch64`, 16 bytes per `vld1q_u8`, testing each lane for CAN/SUB/ESC or
+`>= 0x80` (`vceqq_u8` × 3 `| vcgeq_u8`), horizontal-OR via `vmaxvq_u8`; the
+scalar loop then pinpoints the exact boundary in the first vector that contains
+a non-apc_put byte. NEON is mandatory in the ARMv8-A baseline, so there is no
+runtime feature detection — a `cfg(target_arch = "aarch64")` gate with a scalar
+fallback (return 0) on every other target. The block is `cfg(not(miri))` so Miri
+exercises the scalar path; its correctness on hardware is proved by
+`apc_vector_boundaries_match_scalar` (control byte before/on/after every 16-byte
+edge) plus the feed-vs-next fuzz differential.
+
+Additional gain, same generator + machine, back-to-back at matched load:
+
+| build            | kitty MiB/s | vs PR-1 |
+| ---------------- | ----------- | ------- |
+| PR-1 (scalar)    | ~294        | —       |
+| PR-1 + SIMD scan | ~338–347    | ~+15%   |
+
+Distributions are tight and non-overlapping, so the ~15% is real (not noise),
+though the absolute figures still want a quiet box.
+
 ## Verification
 
 - **Direct equivalence** (the primary guarantee for this change):
   `apc::feed_slice_matches_feed` + `_at_max_bytes` (bulk vs per-byte `feed`
-  across every slice split, incl. the `max_bytes` cap boundary) and
+  across every slice split, incl. the `max_bytes` cap boundary),
   `stream::apc_bulk_slice_matches_scalar` (bulk `feed` vs per-byte `next`,
-  incl. 7-byte chunking and CAN/SUB/ESC terminators).
+  incl. 7-byte chunking and CAN/SUB/ESC terminators), and
+  `stream::apc_vector_boundaries_match_scalar` (SIMD boundary vs scalar with a
+  control byte before/on/after every 16-byte vector edge — PR-2).
 - **Differential** vs the `77190bd02` reference oracle
   (`vt-diff --features reference`): corpus + afl + generative sweep + hand
   differential all green, zero divergences.
 - **Fuzz**: `parser` target section 3 (`Stream::feed` fast path vs byte-at-a-
-  time `Stream::next`, screen-state differential) — 3 min, no divergence/crash.
+  time `Stream::next`, screen-state differential), seeded with an APC corpus
+  file — ~730k runs / 3 min each PR, no divergence/crash. This is the on-
+  hardware check of the active NEON path (PR-2).
+- **Miri** (`cargo +nightly miri test -p qwertty-term-vt --lib apc`): clean; the
+  NEON block is `cfg(not(miri))` so Miri validates `feed_slice`'s slicing and the
+  scalar boundary scan.
 - Full gate: check (0 warnings), workspace tests, release + paranoid lanes,
   fmt, clippy.

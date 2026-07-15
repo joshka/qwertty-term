@@ -396,6 +396,70 @@ pub enum CommandBoundary {
     End { exit_code: Option<i32> },
 }
 
+/// SIMD prescan for [`Stream::consume_apc_string`]: advance over apc_put bytes a
+/// whole vector at a time, stopping at the first vector that contains a
+/// non-apc_put byte — CAN (`0x18`), SUB (`0x1A`), ESC (`0x1B`), or `>= 0x80`.
+/// Returns the number of leading bytes proven to be apc_put (a multiple of the
+/// vector width); the caller's scalar loop resumes there and finds the exact
+/// boundary. Returns 0 on targets without a vector implementation, leaving the
+/// scalar loop to do all the work. Port of upstream `8c523ed03`.
+#[inline]
+fn apc_scan_prefix(input: &[u8]) -> usize {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    {
+        // SAFETY: Advanced SIMD (NEON) is mandatory in the ARMv8-A baseline, so
+        // the intrinsics are always available on aarch64 — no runtime feature
+        // detection needed. All loads are bounded by the `end + 16 <= len`
+        // guard inside the function. Excluded under Miri, which does not model
+        // these intrinsics; the scalar loop covers the same bytes there.
+        unsafe { apc_scan_prefix_neon(input) }
+    }
+    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+    {
+        let _ = input;
+        0
+    }
+}
+
+/// NEON implementation of [`apc_scan_prefix`]. Processes 16 bytes per iteration.
+///
+/// # Safety
+///
+/// Requires the `neon` target feature, which is guaranteed on all `aarch64`
+/// targets (mandatory in ARMv8-A). Reads only within `input` (each load is
+/// guarded by `end + 16 <= input.len()`).
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[target_feature(enable = "neon")]
+unsafe fn apc_scan_prefix_neon(input: &[u8]) -> usize {
+    use std::arch::aarch64::*;
+
+    let mut end = 0;
+    let len = input.len();
+    // Splatted comparands: the three abort/exit control bytes and the C1 floor.
+    let can = vdupq_n_u8(0x18);
+    let sub = vdupq_n_u8(0x1A);
+    let esc = vdupq_n_u8(0x1B);
+    let c1 = vdupq_n_u8(0x80);
+
+    while end + 16 <= len {
+        // SAFETY: `end + 16 <= len` guarantees 16 readable bytes at `end`.
+        let bytes = unsafe { vld1q_u8(input.as_ptr().add(end)) };
+        // A lane is "invalid" (not an apc_put byte) if it equals CAN/SUB/ESC or
+        // is >= 0x80. Each comparison yields 0xFF for matching lanes, 0x00 else.
+        let invalid = vorrq_u8(
+            vorrq_u8(vceqq_u8(bytes, can), vceqq_u8(bytes, sub)),
+            vorrq_u8(vceqq_u8(bytes, esc), vcgeq_u8(bytes, c1)),
+        );
+        // Horizontal max: non-zero iff any lane was invalid. Stop the prescan on
+        // that vector and let the scalar loop pinpoint the boundary within it.
+        if vmaxvq_u8(invalid) != 0 {
+            break;
+        }
+        end += 16;
+    }
+    end
+}
+
 /// The handler interface the [`Stream`] dispatches parser actions onto.
 ///
 /// This is the Rust analogue of ghostty's `comptime Handler` with its
@@ -927,7 +991,11 @@ impl<H: Handler> Stream<H> {
     fn consume_apc_string(&mut self, input: &[u8]) -> usize {
         debug_assert_eq!(self.parser.state(), State::SosPmApcString);
 
-        let mut end = 0;
+        // SIMD prescan advances over whole vectors of apc_put bytes; the scalar
+        // loop then finds the exact boundary in the (partial) vector where a
+        // non-apc_put byte first appears. On targets without a vector path the
+        // prescan returns 0 and the scalar loop does all the work.
+        let mut end = apc_scan_prefix(input);
         while end < input.len() {
             match input[end] {
                 // Not apc_put bytes: CAN/SUB/ESC and most C1 exit or abort the
