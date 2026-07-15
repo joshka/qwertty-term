@@ -587,6 +587,42 @@ fn osc9_and_osc777_latch_a_drainable_notification() {
     assert!(s.handler.take_notification().is_none());
 }
 
+// tmux control mode: the DCS `\eP1000p` seam feeds the control-mode parser and
+// surfaces an ordered `Notification` queue for the app-tails Viewer to drain
+// (ADR 004 slice 4). Mirrors `dcs.zig`'s "tmux enter and implicit exit" test,
+// extended with a `%output` line through the real body path.
+#[test]
+fn tmux_dcs_seam_surfaces_notification_stream() {
+    use crate::tmux::Notification;
+
+    let mut s = term(10, 10);
+    assert!(
+        s.handler.take_tmux_notifications().is_empty(),
+        "no tmux notifications before entering control mode"
+    );
+
+    // `ESC P 1000 p` enters control mode; then a `%output %1 hi` line; then ST
+    // (`ESC \`) exits. Note: the DCS body bytes are the literal control-mode
+    // stream, so the trailing `\n` completes the `%output` line before ST.
+    s.feed(b"\x1bP1000p%output %1 hi\n\x1b\\");
+
+    let notifications = s.handler.take_tmux_notifications();
+    assert_eq!(
+        notifications,
+        vec![
+            Notification::Enter,
+            Notification::Output {
+                pane_id: 1,
+                data: b"hi".to_vec(),
+            },
+            Notification::Exit,
+        ]
+    );
+
+    // Drained: empty until the next control-mode session.
+    assert!(s.handler.take_tmux_notifications().is_empty());
+}
+
 // OSC 133 C/D marks are surfaced as an ordered command-boundary queue for
 // `notify-on-command-finish` (in addition to the row-tagging semantic prompt).
 #[test]

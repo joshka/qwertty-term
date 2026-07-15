@@ -33,7 +33,8 @@ items are `[ ]` wholesale unless noted.
 - [x] XTWINOPS size/title reports (14/16/18/21 t, extra-param-guarded); title stack
       push/pop (22/23 t) validated as upstream's apprt-level no-op seam
 - [x] XTGETTCAP full terminfo capability set (268 caps + TN/Co/RGB) / DECRQSS at parity
-- [ ] tmux control mode (`4.3k` Zig, deferred)
+- [~] tmux control mode — engine parsers + DCS wiring done (slices 1–4); native Viewer =
+      app-tails slice 5
 - [x] OSC 21 kitty color protocol (set/reset/query, 8-bit `rgb:` replies) — the query
       side is our forward-port of upstream `14c829883` (postdates the pin)
 - [x] VT config toggles — engine seams landed (app wires the config keys): `title-report`

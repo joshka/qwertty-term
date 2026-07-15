@@ -18,14 +18,20 @@
 //! | `+` | `q` | XTGETTCAP |
 //! | `$` | `q` | DECRQSS |
 //!
-//! Tmux control mode is seamed (`TODO(chunk:tmux-control-mode)`, see the module docs
-//! below on [`Command::TmuxRaw`]) rather than ported: the real thing is a ~4.35k-line
-//! tmux *client* (`src/terminal/tmux/{control,viewer,output,layout}.zig`) unrelated to
-//! DCS byte-parsing itself, and not owned by any concurrently-running chunk.
+//! Tmux control mode is now wired (ADR 004 slice 4): the DCS `1000p` seam owns a
+//! [`ControlParser`] (`crate::tmux`) that decodes control-mode lines into
+//! [`crate::tmux::Notification`]s. `hook` emits [`Notification::Enter`], each body byte
+//! is fed to the parser (surfacing an owned notification when a line completes), and
+//! `unhook` emits [`Notification::Exit`]. This mirrors upstream's `State.tmux` payload
+//! (`dcs.zig`), except that upstream keeps the parser inside the `State` union; our
+//! `State` is a unit enum, so the parser lives on the [`Handler`]. The native Viewer
+//! that maps notifications to surfaces is ADR 004 slice 5 (app-tails), not here.
 
 /// A hooked DCS command (mirrors ghostty's `DCS` struct, `Parser.zig:124-136`, exposed
 /// here as [`crate::parser::Dcs`]).
 pub use crate::parser::Dcs;
+
+use crate::tmux::{BufferOverflow, ControlParser, Notification};
 
 /// DCS command handler. This should be hooked into a terminal stream handler; the
 /// hook/put/unhook methods are meant to be called from the DCS parser events
@@ -37,8 +43,14 @@ pub struct Handler {
     /// Maximum bytes any DCS command can take, to prevent malicious input from
     /// allocating unbounded memory. Arbitrarily 1 MiB, matching ghostty
     /// (`dcs.zig:16-19`). Applies to XTGETTCAP; DECRQSS has its own fixed 2-byte cap
-    /// and tmux control mode manages its own buffering (out of scope here).
+    /// and tmux control mode manages its own buffering (in `tmux_parser`).
     max_bytes: usize,
+
+    /// The tmux control-mode parser, present only while in [`State::Tmux`] (set on
+    /// `hook` of `ESC P 1000 p`, cleared on `unhook`). The Rust analog of upstream's
+    /// `State.tmux` payload (`dcs.zig`): our `State` is a unit enum, so the parser
+    /// sits on the [`Handler`] instead of inside the state variant.
+    tmux_parser: Option<ControlParser>,
 }
 
 impl Default for Handler {
@@ -54,6 +66,7 @@ impl Handler {
         Self {
             state: State::Inactive,
             max_bytes: 1024 * 1024,
+            tmux_parser: None,
         }
     }
 
@@ -68,6 +81,12 @@ impl Handler {
         match try_hook(dcs) {
             Some(hook) => {
                 self.state = hook.state;
+                // Entering tmux control mode: spin up the control-mode parser. The
+                // Rust analog of upstream initializing the `State.tmux` payload's
+                // buffer (`dcs.zig`), kept on the Handler since our `State` is unit.
+                if matches!(self.state, State::Tmux) {
+                    self.tmux_parser = Some(ControlParser::new());
+                }
                 hook.command
             }
             None => {
@@ -97,17 +116,25 @@ impl Handler {
             State::Inactive | State::Ignore => Ok(None),
 
             State::Tmux => {
-                // TODO(chunk:tmux-control-mode): forward each byte to the real tmux
-                // control-mode parser (`terminal.tmux.ControlParser.put`,
-                // dcs.zig:130-134) and yield a decoded `ControlNotification` per
-                // complete line. The real client is a ~4.35k-line subsystem
-                // (src/terminal/tmux/{control,viewer,output,layout}.zig) unrelated
-                // to DCS byte-parsing itself and not owned by any concurrently
-                // running chunk (see docs/analysis/dcs-apc.md, "Seam design").
-                // Until that lands, tmux control-mode lines are silently dropped
-                // (no buffering, no notification) -- only the enter/exit lifecycle
-                // (see `try_hook` and `unhook`) is observable.
-                Ok(None)
+                // Forward each body byte to the control-mode parser (upstream
+                // `tmux.put(byte)`, `dcs.zig:130-134`), surfacing an owned
+                // notification when a line completes.
+                //
+                // Divergence: upstream propagates the parser's error out of `tryPut`,
+                // which `put` catches and turns into a state discard. Our
+                // `ControlParser` breaks itself internally on overflow (and returns
+                // `Ok(None)` thereafter), so `Err(BufferOverflow)` here just maps to
+                // `None` — the parser is already broken and drops the rest. This
+                // deliberately avoids a panic/error path for a malicious byte flood
+                // while keeping the observable behaviour (silent drop) identical.
+                let Some(parser) = self.tmux_parser.as_mut() else {
+                    return Ok(None);
+                };
+                match parser.put(byte) {
+                    Ok(Some(n)) => Ok(Some(Command::Tmux(n))),
+                    Ok(None) => Ok(None),
+                    Err(BufferOverflow) => Ok(None),
+                }
             }
 
             State::XtGetTcap(buf) => {
@@ -137,8 +164,10 @@ impl Handler {
             State::Inactive | State::Ignore => None,
 
             State::Tmux => {
-                // TODO(chunk:tmux-control-mode): real exit notification.
-                Some(Command::TmuxRaw(TmuxEvent::Exit))
+                // Tear down the control-mode parser and emit the exit lifecycle
+                // event (upstream `dcs.zig:168-170`, `.tmux = .exit`).
+                self.tmux_parser = None;
+                Some(Command::Tmux(Notification::Exit))
             }
 
             State::XtGetTcap(mut data) => {
@@ -175,6 +204,9 @@ impl Handler {
     /// Ghostty's `deinit` calls this; in Rust the buffers drop themselves, so this is
     /// just a state reset, kept for API parity and explicit call sites.
     pub fn discard(&mut self) {
+        // Free any tmux parser too (upstream `discard` calls `state.deinit()`,
+        // which releases the `State.tmux` buffer).
+        self.tmux_parser = None;
         self.state = State::Inactive;
     }
 }
@@ -199,7 +231,7 @@ fn try_hook(dcs: Dcs<'_>) -> Option<Hook> {
                 }
                 Some(Hook {
                     state: State::Tmux,
-                    command: Some(Command::TmuxRaw(TmuxEvent::Enter)),
+                    command: Some(Command::Tmux(Notification::Enter)),
                 })
             }
             _ => None,
@@ -246,7 +278,8 @@ enum State {
     /// DECRQSS: fixed 2-byte buffer.
     Decrqss { data: [u8; 2], len: u8 },
 
-    /// Tmux control mode. Seamed: see module docs and [`Command::TmuxRaw`].
+    /// Tmux control mode. The control-mode parser lives in the Handler's
+    /// `tmux_parser` field (our `State` is a unit enum); see module docs.
     Tmux,
 }
 
@@ -259,20 +292,11 @@ pub enum Command {
     /// DECRQSS
     Decrqss(Decrqss),
 
-    /// Tmux control mode. `TODO(chunk:tmux-control-mode)`: replace with a decoded
-    /// `ControlNotification`-equivalent; today this carries only the coarse
-    /// enter/exit lifecycle with no line parsing.
-    TmuxRaw(TmuxEvent),
-}
-
-/// Seam placeholder for tmux control-mode lifecycle events. `TODO(chunk:tmux-control-
-/// mode)`: ghostty's `terminal.tmux.ControlNotification` is a full decoded event type
-/// backed by `src/terminal/tmux/control.zig` (839 lines) et al.; this variant only
-/// tracks session enter/exit until that subsystem is ported.
-#[derive(Debug, PartialEq, Eq)]
-pub enum TmuxEvent {
-    Enter,
-    Exit,
+    /// Tmux control mode. Carries a decoded [`crate::tmux::Notification`]: the
+    /// enter/exit lifecycle plus every control-mode line (`%output`, `%begin`/`%end`
+    /// blocks, `%window-add`, `%layout-change`, …) parsed by the [`ControlParser`].
+    /// Mirrors upstream's `Command.tmux` (`dcs.zig`).
+    Tmux(Notification),
 }
 
 /// XTGETTCAP command payload (mirrors `Command.XTGETTCAP`, `dcs.zig:228-248`).
@@ -432,17 +456,67 @@ mod tests {
         assert!(h.unhook().is_none());
     }
 
-    /// Port of `dcs.zig:408-430`, "tmux enter and implicit exit". Ported against the
-    /// seamed `TmuxRaw` lifecycle events (see module docs); real tmux control-mode
-    /// parsing is `TODO(chunk:tmux-control-mode)`.
+    /// Port of `dcs.zig:408-430`, "tmux enter and implicit exit". Now backed by the
+    /// real control-mode parser (ADR 004 slice 4): `hook` emits `Notification::Enter`,
+    /// `unhook` emits `Notification::Exit`.
     #[test]
     fn tmux_enter_and_implicit_exit() {
         let mut h = Handler::new();
 
         let cmd = h.hook(dcs(&[], &[1000], b'p')).unwrap();
-        assert_eq!(cmd, Command::TmuxRaw(TmuxEvent::Enter));
+        assert_eq!(cmd, Command::Tmux(Notification::Enter));
+        assert!(h.tmux_parser.is_some());
 
         let cmd = h.unhook().unwrap();
-        assert_eq!(cmd, Command::TmuxRaw(TmuxEvent::Exit));
+        assert_eq!(cmd, Command::Tmux(Notification::Exit));
+        assert!(h.tmux_parser.is_none());
+    }
+
+    /// A tmux `%output` control line fed through the DCS body surfaces a decoded
+    /// [`Notification::Output`]. Confirms the `1000p` seam actually drives the
+    /// control-mode parser (ADR 004 slice 4).
+    #[test]
+    fn tmux_output_line_decoded() {
+        let mut h = Handler::new();
+
+        assert_eq!(
+            h.hook(dcs(&[], &[1000], b'p')),
+            Some(Command::Tmux(Notification::Enter))
+        );
+
+        // Feed `%output %1 hi\n`; only the terminating newline completes the line.
+        let mut got = None;
+        for &byte in b"%output %1 hi\n" {
+            if let Some(cmd) = h.put(byte) {
+                assert!(got.is_none(), "expected exactly one notification");
+                got = Some(cmd);
+            }
+        }
+        assert_eq!(
+            got,
+            Some(Command::Tmux(Notification::Output {
+                pane_id: 1,
+                data: b"hi".to_vec(),
+            }))
+        );
+
+        assert_eq!(h.unhook(), Some(Command::Tmux(Notification::Exit)));
+    }
+
+    /// A non-`%` first byte breaks the control-mode parser, which reports an early
+    /// exit; the parser then drops the rest until `unhook`.
+    #[test]
+    fn tmux_broken_line_reports_exit() {
+        let mut h = Handler::new();
+        h.hook(dcs(&[], &[1000], b'p'));
+
+        // First body byte is not `%` → parser breaks and returns an Exit.
+        assert_eq!(h.put(b'x'), Some(Command::Tmux(Notification::Exit)));
+        // Broken parser drops subsequent bytes.
+        assert_eq!(h.put(b'y'), None);
+        assert_eq!(h.put(b'\n'), None);
+
+        // The DCS unhook still emits its own lifecycle Exit.
+        assert_eq!(h.unhook(), Some(Command::Tmux(Notification::Exit)));
     }
 }

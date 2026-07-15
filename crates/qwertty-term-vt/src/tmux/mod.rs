@@ -4,8 +4,11 @@
 //! This crate owns the *pure* protocol parsers; the native viewer that maps
 //! notifications to surfaces lives in the app/termio layer. Slices so far:
 //! `control` (notification parser), `layout` (window-layout parser), `output`
-//! (format-variable parse/encode). The DCS `TmuxRaw` seam wiring is ADR 004
-//! slice 4; the native Viewer is slice 5 (app-tails).
+//! (format-variable parse/encode). The DCS `1000p` seam wiring — feeding
+//! control-mode bytes into [`ControlParser`] and surfacing [`Notification`]s on
+//! the engine's event queue (`stream::TerminalHandler::take_tmux_notifications`)
+//! — landed as ADR 004 slice 4 (`crate::dcs`). The native Viewer is slice 5
+//! (app-tails).
 
 pub mod control;
 pub mod layout;

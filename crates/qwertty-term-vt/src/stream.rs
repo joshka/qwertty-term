@@ -46,6 +46,7 @@ use crate::osc;
 use crate::parser::{Action, MAX_INTERMEDIATE, MAX_PARAMS, Parser, State};
 use crate::sgr;
 use crate::terminal::{SwitchScreenMode, Terminal};
+use crate::tmux::Notification;
 use crate::utf8_decoder::Utf8Decoder;
 
 /// A device-status-report / device-attributes / DECRQSS reply, collected in
@@ -495,6 +496,14 @@ pub trait Handler {
     /// Upstream surfaces this to the apprt, which renders an in-surface progress
     /// bar (gated by `progress-style`); this trait method is the same seam.
     fn progress_report(&mut self, report: osc::ProgressReport) {}
+
+    /// A tmux control-mode notification arrived on the DCS `1000p` seam
+    /// (ADR 004 slice 4): the enter/exit lifecycle or a decoded control-mode line
+    /// (`%output`, `%begin`/`%end` blocks, `%window-add`, …). Upstream feeds these
+    /// straight into the `?*Viewer` (`stream_handler.zig:393`); the Viewer is
+    /// app-side (slice 5), so the default is a no-op and `TerminalHandler` queues
+    /// them for [`TerminalHandler::take_tmux_notifications`].
+    fn tmux(&mut self, notification: Notification) {}
 
     // ---- reports (queue-emitting) --------------------------------------
     fn device_attributes(&mut self, req: DeviceAttributesReq) {}
@@ -1055,7 +1064,11 @@ impl<H: Handler> Stream<H> {
         match cmd {
             dcs::Command::Decrqss(setting) => self.handler.decrqss(setting),
             dcs::Command::XtGetTcap(mut cmd) => self.handler.xtgettcap(&mut cmd),
-            _ => {}
+            // tmux control-mode notifications are queued for the app-tails Viewer
+            // (ADR 004 slice 5) to drain via `take_tmux_notifications`. Upstream
+            // dispatches these to the `?*Viewer` in `stream_handler.zig:393`; the
+            // Viewer is app-side, so the engine just surfaces the stream.
+            dcs::Command::Tmux(n) => self.handler.tmux(n),
         }
     }
 
@@ -1849,6 +1862,16 @@ pub struct TerminalHandler {
     /// it), so the app reads only the final state per frame. `None` until one
     /// arrives. The [`TerminalHandler::progress_report`] handler was a no-op.
     pending_progress: Option<osc::ProgressReport>,
+    /// tmux control-mode notifications observed since the last
+    /// [`TerminalHandler::take_tmux_notifications`] drain, in order. Populated by
+    /// the DCS `1000p` seam (ADR 004 slice 4) via [`TerminalHandler::tmux`]: the
+    /// enter/exit lifecycle plus every decoded control-mode line. Unlike the
+    /// latched bell/notification, this is an ordered queue — the app-tails Viewer
+    /// (slice 5) replays them to create/tear-down surfaces, so a burst must not
+    /// coalesce. Usually empty (an empty `Vec` doesn't allocate). Until the Viewer
+    /// lands, tmux control mode is not app-observable; the parsers are proven by
+    /// unit tests.
+    pending_tmux: Vec<Notification>,
     /// The APC sub-protocol handler (kitty graphics / glyph). Port of
     /// `stream_terminal.Handler.apc_handler`. The stream's `apc_start`/
     /// `apc_put`/`apc_end` events drive it; on `end` a completed
@@ -1947,6 +1970,7 @@ impl TerminalHandler {
             pending_notification: None,
             pending_command_boundaries: Vec::new(),
             pending_progress: None,
+            pending_tmux: Vec::new(),
             apc_handler: apc::Handler::new(),
             color_scheme: None,
             cell_size: None,
@@ -2029,6 +2053,14 @@ impl TerminalHandler {
     /// [`TerminalHandler::pending_notification`].
     pub fn take_notification(&mut self) -> Option<(String, String)> {
         self.pending_notification.take()
+    }
+
+    /// Take (and clear) the tmux control-mode notifications observed since the last
+    /// drain, in order (enter/exit lifecycle + decoded control-mode lines). The
+    /// app-tails Viewer polls this to create/update/tear-down native surfaces. See
+    /// [`TerminalHandler::pending_tmux`].
+    pub fn take_tmux_notifications(&mut self) -> Vec<Notification> {
+        std::mem::take(&mut self.pending_tmux)
     }
 
     /// Take (and clear) the OSC 133 command boundaries observed since the last
@@ -2700,6 +2732,13 @@ impl Handler for TerminalHandler {
         let mut s = String::new();
         report.encode(&mut s);
         self.write_pty(s.as_bytes());
+    }
+    fn tmux(&mut self, notification: Notification) {
+        // Queue the control-mode notification for the app-tails Viewer (ADR 004
+        // slice 5) to drain via `take_tmux_notifications`. Additive event seam
+        // mirroring the pending clipboard/notification queues; upstream feeds
+        // these straight into the `?*Viewer` (`stream_handler.zig:393`).
+        self.pending_tmux.push(notification);
     }
     fn decrqss(&mut self, setting: dcs::Decrqss) {
         // Build the `\eP{valid}$r{body}\e\\` reply. Port of the DECRQSS handler
