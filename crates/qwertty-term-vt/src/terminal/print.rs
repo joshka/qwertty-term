@@ -243,10 +243,26 @@ impl Terminal {
         // fresh single-codepoint cell, so the grapheme-break check is exact.
         let run_len: usize = {
             let mut r = cps.len();
-            for idx in 1..cps.len() {
+            let mut idx = 1;
+            while idx < cps.len() {
+                // Vector-skip the leading run of always-narrow Latin-1 printables
+                // [0x10, 0xFF] (never cluster): these would each hit the
+                // `continue` just below, so a prescan advances over them a whole
+                // vector at a time and the scalar checks resume at the boundary
+                // codepoint (handling the wider / grapheme cases exactly). This
+                // is a read-only prefix scan; a wrong length is caught by the
+                // differential oracle (wrong cells filled). Narrow class only —
+                // a Latin-1 codepoint can never be width 2.
+                if !WIDE {
+                    idx += latin1_narrow_prefix(&cps[idx..]);
+                    if idx >= cps.len() {
+                        break;
+                    }
+                }
                 let cp = cps[idx];
                 // [0x10, 0xFF] is always narrow (width 1) and never clusters.
                 if !WIDE && (0x10..=0xFF).contains(&cp) {
+                    idx += 1;
                     continue;
                 }
                 if cp > 0xFF
@@ -255,10 +271,12 @@ impl Terminal {
                     && crate::unicode::codepoint_width(cp) == expected_width
                 {
                     if !grapheme_cluster {
+                        idx += 1;
                         continue;
                     }
                     let mut state = BreakState::Default;
                     if grapheme_break(cps[idx - 1], cp, &mut state) {
+                        idx += 1;
                         continue;
                     }
                 }
@@ -975,5 +993,129 @@ impl Terminal {
             }
         }
         self.screen().assert_integrity();
+    }
+}
+
+/// Vector prescan for the narrow [`Terminal::print_slice_fill`] `run_len` loop:
+/// advance over codepoints in `[0x10, 0xFF]` (the always-narrow, never-clustering
+/// Latin-1 printable range) a whole vector at a time, stopping at the first
+/// vector that contains a codepoint outside that range. Returns the number of
+/// leading in-range codepoints proven so far (a multiple of the vector width on
+/// NEON); the caller's scalar loop resumes there to pinpoint the exact boundary
+/// and handle the wider / grapheme cases. Returns 0 on targets without a vector
+/// implementation, leaving the scalar loop to do all the work. Same shape as the
+/// stream layer's `apc_scan_prefix` (8c523ed03).
+#[inline]
+fn latin1_narrow_prefix(cps: &[u32]) -> usize {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    {
+        // SAFETY: Advanced SIMD (NEON) is mandatory in the ARMv8-A baseline, so
+        // the intrinsics are always available on aarch64 — no runtime feature
+        // detection needed. All loads are bounded by the `end + 4 <= len` guard
+        // inside the function. Excluded under Miri, which does not model these
+        // intrinsics; the scalar loop covers the same codepoints there.
+        unsafe { latin1_narrow_prefix_neon(cps) }
+    }
+    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+    {
+        let _ = cps;
+        0
+    }
+}
+
+/// NEON implementation of [`latin1_narrow_prefix`]. Processes 4 codepoints
+/// (`u32` lanes) per iteration.
+///
+/// # Safety
+///
+/// Requires the `neon` target feature, which is guaranteed on all `aarch64`
+/// targets (mandatory in ARMv8-A). Reads only within `cps` (each load is guarded
+/// by `end + 4 <= cps.len()`).
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[target_feature(enable = "neon")]
+unsafe fn latin1_narrow_prefix_neon(cps: &[u32]) -> usize {
+    use std::arch::aarch64::*;
+
+    let mut end = 0;
+    let len = cps.len();
+    // Inclusive range bounds [0x10, 0xFF], splatted across the four lanes.
+    let lo = vdupq_n_u32(0x10);
+    let hi = vdupq_n_u32(0xFF);
+
+    while end + 4 <= len {
+        // SAFETY: `end + 4 <= len` guarantees 4 readable codepoints at `end`.
+        let v = unsafe { vld1q_u32(cps.as_ptr().add(end)) };
+        // A lane is in range iff `cp >= 0x10 && cp <= 0xFF`. Each compare yields
+        // all-ones for matching lanes, zero otherwise; AND them per lane.
+        let in_range = vandq_u32(vcgeq_u32(v, lo), vcleq_u32(v, hi));
+        // Horizontal min: zero iff any lane was out of range. Stop the prescan on
+        // that vector and let the scalar loop pinpoint the boundary within it.
+        if vminvq_u32(in_range) == 0 {
+            break;
+        }
+        end += 4;
+    }
+    end
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::latin1_narrow_prefix;
+
+    /// Scalar reference: the exact count of leading codepoints in [0x10, 0xFF].
+    fn ref_prefix(cps: &[u32]) -> usize {
+        cps.iter()
+            .take_while(|&&c| (0x10..=0xFF).contains(&c))
+            .count()
+    }
+
+    /// The prescan must never report a prefix longer than the true Latin-1 run,
+    /// and every codepoint it reports must actually be in `[0x10, 0xFF]` — an
+    /// out-of-range codepoint placed just before, on, and after each 4-lane
+    /// (`u32`) vector edge is where a SIMD prescan could miscount. The caller's
+    /// scalar loop then finds the exact boundary, so an undercount (e.g. the
+    /// scalar-fallback 0) is still correct. Same shape as the stream layer's
+    /// `apc_vector_boundaries_match_scalar` (8c523ed03).
+    #[test]
+    fn latin1_prefix_never_overcounts_at_vector_boundaries() {
+        let out_of_range = [0x00u32, 0x0F, 0x100, 0x1F600, 0x4E16, 0x7F_FFFF];
+        for position in 0..=20usize {
+            for oor in out_of_range {
+                let mut cps: Vec<u32> = std::iter::repeat_n(b'a' as u32, 24).collect();
+                cps[position] = oor;
+                let got = latin1_narrow_prefix(&cps);
+                let want = ref_prefix(&cps);
+                assert!(
+                    got <= want,
+                    "over-counted at position {position}, oor {oor:#x}: {got} > true {want}"
+                );
+                assert!(
+                    cps[..got].iter().all(|&c| (0x10..=0xFF).contains(&c)),
+                    "reported non-Latin-1 at position {position}, oor {oor:#x}: got {got}"
+                );
+            }
+        }
+    }
+
+    /// Short inputs (below the vector width) and a leading out-of-range
+    /// codepoint must not panic and must report 0-or-in-range.
+    #[test]
+    fn latin1_prefix_short_and_leading_oor() {
+        for n in 0..4usize {
+            let s: Vec<u32> = std::iter::repeat_n(0x62u32, n).collect();
+            assert!(latin1_narrow_prefix(&s) <= n);
+        }
+        assert_eq!(latin1_narrow_prefix(&[0x100, 0x41, 0x42]), 0);
+        assert_eq!(latin1_narrow_prefix(&[]), 0);
+    }
+
+    /// On the primary target the vector fast path must actually engage — an
+    /// all-in-range slice a whole number of vectors long is skipped entirely
+    /// (otherwise the "optimization" would silently no-op).
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    #[test]
+    fn latin1_prefix_fast_path_engages_on_aarch64() {
+        let all: Vec<u32> = std::iter::repeat_n(0x41u32, 16).collect();
+        assert_eq!(latin1_narrow_prefix(&all), 16);
     }
 }

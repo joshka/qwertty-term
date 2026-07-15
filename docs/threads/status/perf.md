@@ -68,14 +68,20 @@
 > region-scroll suites down ~1.5–1.7 ms (18→16.4) consistent with the shipped region-scroll
 > levers. A real 3-round median refresh still wants a quiet box.
 
-- **Current item:** **PR-1 run_len narrow prescan** (print-scan lever, `print.rs:246`). Profiling
-  done (`docs/analysis/print-slice-scan.md`); next = representative criterion bench → NEON impl →
-  full gate → ship. Reprioritized backlog:
+- **Current item:** **PR-2 simple-cell scan** next. **PR-1 run_len narrow prescan SHIPPED** (this
+  PR): `latin1_narrow_prefix` NEON find-first over the Latin-1 `[0x10,0xFF]` prefix + scalar
+  fallback, `cfg(not(miri))`. **Full-pipeline win on real vtebench payloads: light_cells +7.6–8.0%,
+  medium_cells +5.3–6.3%, dense_cells +5.2%** (ascii +11–12%, redraw +9.8% synthetic; A/B best-of-5,
+  order-verified). Gate all green: differential 0-divergence vs `77190bd02` oracle (corpus+afl+
+  generative+hand+formatter), workspace tests, release lane, paranoid lane (1634), boundary tests +
+  `print_slice_differential_fuzz`, parser fuzz 1.04M runs no crash, Miri clean (scalar path),
+  fmt/clippy/check. Reprioritized backlog:
   - **(DONE) hash_map backward-shift + load factor** — both PRs merged; full faithful port complete,
     oracle-neutral. Analysis `docs/analysis/hash-map-backward-shift.md`.
-  - **(NEW, top) print-scan NEON lever** — `print_slice_fill` read-only find-first scans, the real
-    full-pipeline bottleneck (~20–27% on real light/medium_cells). PR-1 run_len (u32, 4-lane, safe);
-    PR-2 simple-cell (u64, 2-lane, Miri). Analysis `docs/analysis/print-slice-scan.md`.
+  - **(top, in progress) print-scan NEON lever** — `print_slice_fill` read-only find-first scans, the
+    real full-pipeline bottleneck (~20–27% on real light/medium_cells). **PR-1 run_len (u32, 4-lane,
+    safe) SHIPPED**; PR-2 simple-cell (u64, 2-lane, needs Miri on the pointer walk) next. Analysis
+    `docs/analysis/print-slice-scan.md`.
   - **(RETIRED) SIMD NEON UTF-8 decode** — profile shows decode is not the bottleneck (print is);
     would only lift a NOOP ceiling nothing hits, at max differential risk. Evidence in the analysis
     doc. Superseded by the print-scan lever.
@@ -117,7 +123,14 @@
   find-first scans** in `print_slice_fill::<narrow>` (run_len `print.rs:246` u32; simple-cell
   `print.rs:372` u64) — representative (hot on the real scoreboard payloads), long runs
   (median ~28–31 → NEON-favorable), low-risk (APC-scan precedent). Wrote
-  `docs/analysis/print-slice-scan.md`. Next: PR-1 run_len prescan (bench → NEON → gate → ship).
+  `docs/analysis/print-slice-scan.md`. Landed the analysis + pivot as **#304** (`6f8735ef`, doc-only,
+  self-merged gate-green).
+- **Shipped PR-1** (run_len narrow prescan, `latin1_narrow_prefix`). A/B best-of-5: real payloads
+  light_cells +7.6–8.0%, medium_cells +5.3–6.3%, dense_cells +5.2% (ascii/redraw +10–12% synthetic).
+  Full gate green (differential 0-divergence, release+paranoid lanes, parser fuzz 1.04M, Miri scalar,
+  boundary tests). Note: hit the divergent-change hazard (#304 merged carrying change-id `sntkpyso`;
+  local twin held the code) — recovered by restoring from the explicit commit_id + abandoning the
+  twin. Next: PR-2 simple-cell scan.
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
