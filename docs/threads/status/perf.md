@@ -20,16 +20,19 @@
 > differential-critical, coupled to a further pin-bump decision (Josh's call). Both need full
 > rigor + a quiet machine for clean numbers.
 
-- **Current item:** machine-blocked on the scoreboard; assessing net-new levers. Awaiting Josh
-  steer on whether to invest a focused session in the **APC SIMD vectorize** (recommended
-  net-new lever) vs. hold for the scoreboard. Backlog (all gated / big-effort / need quiet box):
-  - **(0, NEW) APC SIMD vectorize** (port of upstream `8c523ed03`) — +42% kitty-graphics APC
-    parsing upstream; our path is per-byte. Strongest net-new lever, embeddability-relevant.
-    `std::arch::aarch64` NEON (stable) or `core::arch` per-target width + scalar tail/fallback;
-    gate `cfg(target_arch)`. Differential-CRITICAL (parser boundary) → full rigor: differential,
-    generative sweep, Miri on the unsafe, 3-min parser fuzz, and clean before/after (add an
-    `apc`/kitty stream to `profile_streams` first — profile FIRST). Needs a quiet machine for
-    numbers. Awaiting Josh go/hold.
+- **Current item:** APC lever SHIPPED as two stacked PRs (Josh chose "start APC SIMD vectorize";
+  the profile-first scan revealed the bulk-dispatch was the real ~7× win and SIMD a ~+15% cherry).
+  Both green + open for Josh (no self-merge authority). Next: monitor #287/#289 to merge; then the
+  scoreboard is still the only remaining "Done" deliverable, still machine-blocked.
+  - **✅ #287 `perf/apc-bulk-dispatch`** (port of upstream `f6f79acce`) — bulk `apc_put_slice`
+    dispatch: `Stream::consume_apc_string` scans an apc_put run and hands it to the handler in
+    one call; `apc::Handler::feed_slice` bulk-appends. **kitty ~42 → ~294 MiB/s (~7×)**. Full
+    gate + differential + Miri-N/A (no unsafe) + 730k-run fuzz. CI GREEN. Scalar-only.
+  - **✅ #289 `perf/apc-simd-scan`** (port of upstream `8c523ed03`, **stacked on #287**) — NEON
+    16-byte prescan of the payload boundary + scalar fallback, `cfg(target_arch=aarch64)`,
+    `cfg(not(miri))`. **~294 → ~338–347 MiB/s (~+15%)**. Boundary test + 384k-run fuzz (NEON
+    active) + Miri (scalar path) + differential. markdownlint GREEN, rest running.
+  - Analysis: `docs/analysis/apc-bulk-dispatch.md`.
   - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15: WindowServer 47%, loadavg 8.75 rising,
     mediaanalysisd 69%, Josh active on Firefox → the render-heavy region suites are contended and
@@ -50,10 +53,11 @@
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
 - **Last merged:** **#283** (wide pair-write, `9e51aad3`); **#277** (unchecked interior UTF-8
   decode, `2708b267`); **#269** (change 1 + pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
-- **Blockers:** machine contention (loadavg 8.75, WindowServer 47%) blocks the scoreboard AND
-  clean perf before/after numbers; the box is unlikely to quiet while Josh works. Net-new levers
-  (APC vectorize / hash_map backward-shift) await a Josh go/hold. **Workspace:** `work/perf`
-  (recreated this session).
+- **Blockers:** the **scoreboard refresh** remains machine-blocked (loadavg ~7–8, WindowServer
+  busy while Josh works) — contended numbers would be 3–4× inflated on all builds; not published.
+  APC lever DONE (#287/#289 open for Josh). The other net-new lever (hash_map backward-shift
+  `fedd42e8d`) is big + pin-bump-coupled → a Josh decision. **Workspace:** `work/perf`.
+- **Waiting on Josh:** merge #287 then #289 (stacked; perf thread has no self-merge authority).
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
@@ -196,3 +200,21 @@ New tests: `hand_scroll_region_fast_path` (vt-diff, wide+deep), `index_region_sc
   move, big + pin-bump-coupled). Rest are search/generation-marker correctness, not perf.
 - Un-archived this file; recorded findings; presented Josh the go/hold decision on the APC
   vectorize vs. hold-for-scoreboard. Awaiting steer.
+
+## Session — respawn 2026-07-15 cont. (Opus) — APC lever shipped
+
+- Josh chose "start APC SIMD vectorize". Profile-first (`profile_streams kitty`, new APC/kitty
+  stream generator) showed the path was parser-APC-bound (~42 MiB/s, per-byte `ApcPut(u8)`).
+- Upstream scan found the real lever is **two** post-pin commits: `f6f79acce` (bulk-slice
+  dispatch, ~25× upstream) then `8c523ed03` (SIMD on top, ~1.69×). Shipped both, split one per
+  PR with before/after numbers per the perf-thread method.
+- **#287** (bulk dispatch): kitty ~42 → ~294 MiB/s (~7× whole-path). Scalar; no unsafe.
+  New `Handler::apc_put_slice` trait method (default loops `apc_put`), `Stream::consume_apc_string`,
+  `apc::Handler::feed_slice`. Equivalence tests (bulk vs per-byte, every slice split + max_bytes),
+  differential green, 730k-run fuzz. CI GREEN.
+- **#289** (SIMD, stacked): ~294 → ~338–347 MiB/s (~+15%). `apc_scan_prefix_neon` (aarch64,
+  `cfg(not(miri))`) + scalar fallback. Boundary test (control byte at every 16-byte edge), 384k-run
+  fuzz with NEON active, Miri clean (scalar path), differential green.
+- Both open for Josh (no self-merge authority); monitoring CI. Analysis:
+  `docs/analysis/apc-bulk-dispatch.md`. Scoreboard still the only remaining "Done" item, still
+  machine-blocked.
