@@ -1,14 +1,16 @@
 # linux status (Linux port — ADR 003 Wave-1 done; P4 windowed app GREENLIT)
 
-- **Current item:** **P4 — the GTK4 Linux terminal is TYPEABLE (milestone hit).** `cargo run -p
-  qwertty-term-gtk` opens a GTK4 window running a real shell: FreeType glyphs via `Engine<OpenGL>`
-  → GtkGLArea, keystrokes → pty → echo. Shipped: OpenGL backend (#279), GTK plan (#280),
-  coordination (#281), scaffold (#284), **present seam** (#290, into T2 core per Josh's call, T2
-  post-hoc note), **terminal render** (#291), **keyboard input** (#294 — GDK keys→pty, echo
-  round-trip proven). All Docker+Xvfb-verified.
-- **NEXT (toward daily-usable; all additive to the gtk crate = my territory):** per-surface
-  **resize** (`TODO(resize)` in `app.rs::connect_resize` — re-grid `Terminal` + `Subprocess::resize`
-  TIOCSWINSZ + engine target); **IME/compose** (`GtkIMMulticontext`, `surface.zig:1246-1334`);
+- **Current item:** **P4 — GTK4 Linux terminal is TYPEABLE + has copy/paste.** `cargo run -p
+  qwertty-term-gtk` = a GTK4 window running a real shell (FreeType via `Engine<OpenGL>`, keyboard,
+  shell env), now with **mouse selection (drag/word/line), clipboard copy/paste (CLIPBOARD +
+  PRIMARY, bracketed), right-click Copy/Paste menu** (#299). Shipped: #279 backend, #284 scaffold,
+  #290 present seam, #291 render, #294 keyboard, #296 shell-env, #299 selection/clipboard (+ #298
+  app-crate theme dead_code fix — reuse of `qwertty-term` platform-free logic). All Docker/Xvfb-
+  verified. Screenshot: `~/Downloads/qwertty-term-linux.png`.
+- **NEXT — feature buildout via sequential subagents (one writer/workspace), highest-value first:**
+  **resize** (IN PROGRESS — `TODO(resize)` in `app.rs::connect_resize`: re-grid `Terminal` +
+  `Subprocess::resize` TIOCSWINSZ + engine target); then **headerbar+menu → tabs → splits →
+  IME/compose** (`GtkIMMulticontext`, `surface.zig:1246-1334`);
   **live encode modes** (thread DECCKM/kitty flags into `EncodeOptions`); **mouse/selection**;
   **dirty-tracked redraw** (drop the 60Hz tick); **DPI/font-config**; later winproto/tabs/splits.
   Also outstanding: T8 CI (headless-GL + `--features fontconfig` + GTK-dev-libs steps — filed);
