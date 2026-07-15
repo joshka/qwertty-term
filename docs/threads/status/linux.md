@@ -1,13 +1,19 @@
 # linux status (Linux port — ADR 003 Wave-1 done; P4 windowed app GREENLIT)
 
-- **Current item:** **P4 in progress (GTK4 chosen, ADR 005 merged #270).** Slice 1 = **OpenGL
-  `GpuBackend`** shipped (#279, headless-GL validated in Docker) + GTK app plan (#280). **Next:
-  slice 2 present-seam** (`GpuBackend::present`, T2 core → heads-up filed to T2, author w/ their
-  review) → GTK crate scaffold + window → keyboard = **user-testable milestone**. Executing via
-  subagents (one file-mutating at a time — concurrent same-workspace edits diverge, see log).
-- **Last merged (Wave 1):** #264 → `39ef05fe`; #245/#248/#254/#258/#260/#262/#264/#265 all merged.
-  Mission #1 (fontconfig) + #42 (pixel coverage) COMPLETE + Docker-validated on arm64 Linux.
-  **P4:** ADR 005 (#270) merged. In flight: #279 (OpenGL backend), #280 (GTK plan).
+- **Current item:** **P4 in progress (GTK4, ADR 005 #270).** Shipped: slice 1 **OpenGL
+  `GpuBackend`** (#279) + GTK plan (#280) + coordination (#281) + slice-2 **GTK crate scaffold**
+  (#284 — `crates/qwertty-term-gtk`: adw window + GtkGLArea that realizes a GL 4.3 context and
+  renders a clear frame, Docker+Xvfb-validated). **CRITICAL PATH now: the on-screen present seam**
+  (`GpuBackend::present`, **T2 core → BLOCKED on T2's reply** to the heads-up in their Inbox;
+  don't author until T2 agrees the design or hands it over) → then wire the terminal render into
+  the GTK GLArea (two seams marked in `qwertty-term-gtk/src/app.rs`) → keyboard = **user-testable
+  window milestone**. `qwertty-term` confirmed clean on Linux (reuse its platform-free modules).
+- **Recycle recommended:** the `work/linux` jj workspace hit a **spurious cross-workspace conflict**
+  (an unrelated thread's `perf.md` materialized as a conflict in the local jj view; origin/main is
+  clean — git-verified). #284 was shipped via a git worktree to bypass it. A fresh workspace
+  (bootstrap below) starts clean; tear down the old `work/linux`.
+- **Last merged:** #284 (GTK scaffold). All P4 PRs merged: #270, #279, #280, #281, #284. Wave-1
+  (#245/#248/#254/#258/#260/#262/#264/#265) done. Everything Docker-validated on arm64 Linux.
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
@@ -34,6 +40,18 @@ For P4 slice-1's headless GL readback: add Mesa (`apt install -y libgl1-mesa-dri
 run with `LIBGL_ALWAYS_SOFTWARE=1` / EGL surfaceless — llvmpipe software GL, no display server.
 
 ## Log (recent)
+
+- 2026-07-15: **P4 slice 2 PR-B — GTK crate scaffold shipped (#284).** Subagent (single writer)
+  created `crates/qwertty-term-gtk` (Linux-gated): `adw::Application`→`ApplicationWindow`→
+  `GtkGLArea`, realize/render/resize mirroring `apprt/gtk/class/surface.zig` (3247/3347/3365).
+  I re-validated in Docker (GTK 4.8.3, Mesa llvmpipe, Xvfb): `--smoke` → realized+rendered,
+  `gl_error=0`, center pixel == clear color (`glReadPixels`); smoke test passes; macOS builds the
+  crate empty (cfg-gated). `cargo check -p qwertty-term` clean on Linux (no objc2 leak). Two
+  render-wiring seams marked in `src/app.rs`. **Workspace hazard:** the earlier concurrent-subagent
+  divergence left the local jj view with a spurious `perf.md` conflict (unrelated thread; origin/
+  main git-clean); shipped #284 via a `git worktree` off origin/main. **Recycle: tear down
+  `work/linux`, re-bootstrap fresh.** Next critical-path item = the **present seam** (T2 core,
+  awaiting T2's Inbox reply — do not author until agreed).
 
 - 2026-07-14: **#42 slice 1 — un-gated 4 renderer pixel tests onto `Software`/Linux.**
   `bold_italic_pixels`, `sprite_specimen`, `text_baseline`, and the embedded case of
