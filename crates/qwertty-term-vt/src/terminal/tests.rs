@@ -3622,6 +3622,35 @@ fn scroll_up_with_max_scrollback_zero_and_top_margin() {
     assert_eq!(t.plain_string(), "AAAAA\nCCCCC\nDDDDD");
 }
 
+// Drives `index()` (LF) into the in-place region-scroll fast path
+// (`cursor_scroll_region_up`): a top != 0, full-width, zero-blank region with
+// the cursor on the region bottom. Guards the new unsafe rotate/clear/pin-shift
+// (also the target for the Miri run on the touched module).
+#[test]
+fn index_region_scroll_fast_path() {
+    let mut t = term(5, 5);
+    // Fill rows 0..4 with A..E.
+    for line in [b"AAAAA", b"BBBBB", b"CCCCC", b"DDDDD", b"EEEEE"] {
+        t.print_string(std::str::from_utf8(line).unwrap());
+        t.carriage_return();
+        if line != b"EEEEE" {
+            t.linefeed();
+        }
+    }
+    // Region rows 2..5 (1-indexed), i.e. top index 1 (top != 0), full width.
+    t.set_top_and_bottom_margin(2, 5);
+    // Cursor to the region's bottom row (row 5, 1-indexed).
+    t.set_cursor_pos(5, 1);
+    // LF at the region bottom scrolls the region in place: top region row (B)
+    // is discarded, C/D/E shift up, the bottom row is blanked. Row 0 (A) is
+    // outside the region and untouched.
+    t.linefeed();
+    assert_eq!(t.plain_string(), "AAAAA\nCCCCC\nDDDDD\nEEEEE");
+    // A second scroll shifts again.
+    t.linefeed();
+    assert_eq!(t.plain_string(), "AAAAA\nDDDDD\nEEEEE");
+}
+
 // Zig: "Terminal: scrollUp with max_scrollback zero and left/right margin" —
 // uses the deleteLines path.
 #[test]

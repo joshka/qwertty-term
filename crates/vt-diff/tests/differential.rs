@@ -71,6 +71,38 @@ fn hand_scroll_region() {
 }
 
 #[test]
+fn hand_scroll_region_fast_path() {
+    // Exercises the in-place region-scroll fast path (cursor_scroll_region_up):
+    // a top != 0, full-width, zero-blank region scrolled many times. Wide (CJK)
+    // chars are included because a wide-spacer-head at the region boundary was
+    // the exact class that diverged while porting upstream's cursorScrollRegionUp
+    // (77190bd02) — the fast path is deliberately restricted to a zero blank so
+    // its clear+rotate is bit-identical to the erase_row_bounded path.
+    assert_agree(
+        "scroll_region_fast_ascii",
+        10,
+        5,
+        b"\x1B[2;4rtop\x1B[2;1HA\r\nB\r\nC\r\nD\r\nE\r\nF\r\nG",
+    );
+    // Wide chars filling to the last column (forces spacer heads) then scroll.
+    assert_agree(
+        "scroll_region_fast_wide",
+        5,
+        4,
+        "\x1B[2;4r\u{4E16}\u{4E16}\u{4E16}\r\n\u{4E16}\u{4E16}\u{4E16}\r\n\u{4E16}\u{4E16}\u{4E16}"
+            .as_bytes(),
+    );
+    // Deep region so the region spans a page boundary (slow path) on a small
+    // grid with a lot of scrolling.
+    assert_agree(
+        "scroll_region_fast_deep",
+        8,
+        6,
+        b"\x1B[1;6r\x1B[6;1H0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9",
+    );
+}
+
+#[test]
 fn hand_alt_screen() {
     assert_agree(
         "alt_screen",
