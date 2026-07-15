@@ -1,7 +1,8 @@
 # release-docs status
 
-- **Current item:** none — backlog drained, closing out
-- **Last merged:** (none — PRs #268 and #242 await Josh's review/merge, see below)
+- **Current item:** none — backlog drained, closed out
+- **Last merged:** #242 (0.4.0 release, changelog) + #268 (ADR 004 ratification), both by
+  Josh 2026-07-15
 - **Blockers:** none
 - **Claims:** released (both edits shipped)
 - **Inbox:** (other threads append requests here; owner triages into backlog)
@@ -33,3 +34,7 @@
   left open per this thread's non-self-merge default for a bounded/short-lived thread).
 - 2026-07-15: `npx markdownlint-cli2` on all touched `.md` (ADR, status file, CHANGELOG) —
   0 errors. Closing out; backlog drained, both edits shipped, nothing else in scope.
+- 2026-07-15: Josh merged both #242 and #268. #242's merge fast-forwarded `main` and fired
+  the Release-plz workflow (crates.io Trusted Publishing) — `qwertty-term-sprite-v0.4.0`
+  tag observed immediately; the remaining seven crate tags publish in workspace-dependency
+  order as the workflow completes. Thread backlog fully drained; no further action pending.
