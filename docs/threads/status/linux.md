@@ -1,11 +1,10 @@
 # linux status (Linux port — ADR 003, P2/P3 continuation of T7)
 
-- **Current item:** #42 slice 2 (un-gate `ligature_pixels` + `named_family_default_fg`) —
-  gate-green, shipping. Next: `force-autohint`/`freetype-load-flags` (FreeType plumbing; config
-  parsing T3); then real wght-variation bold; then deferred pixel tests (emoji/kitty/cursor —
-  need Software color/image compositing).
-- **Last merged:** #260 (FreeType `load_by_name` via fontconfig) → `882acd8a`.
-  (Also merged this session: S1 #245, S2 #248, #254 status, #258 #42-slice1.)
+- **Current item:** FreeType `LoadFlags` (`freetype-load-flags`/`force-autohint`) plumbing —
+  gate-green, shipping. Next: real wght-variation bold; then deferred pixel tests
+  (emoji/kitty/cursor — need Software color/image compositing).
+- **Last merged:** #262 (#42 slice 2 — ligature + named-family pixel tests on Linux) → `030d2dcc`.
+  (Also this session: S1 #245, S2 #248, #254 status, #258 #42-slice1, #260 load_by_name.)
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
@@ -49,6 +48,18 @@
   Linux (FiraCode/named family usually absent on CI → `load_by_name` embedded-fallback → family
   check misses → SKIP). **Gate:** fmt ✓; renderer clippy all-targets ✓; workspace test ✓ (2521);
   vt release ✓ (1595) + paranoid ✓ (1570); offscreen-smoke ✓; both pass on macOS locally.
+
+- 2026-07-14: **FreeType `LoadFlags` plumbing** (`src/freetype.rs`) — the face now carries a
+  `LoadFlags { hinting, force_autohint, autohint }` (Default = upstream: hinting+autohint on,
+  force-autohint off) and builds the FT load bitset via `glyph_load_flags(constrained)` mirroring
+  upstream `glyphLoadFlags` (constrained forces hinting off). `with_load_flags` builder +
+  `load_flags()` getter; `try_clone` preserves them. Behavior-preserving by default (the old
+  `LoadFlag::DEFAULT` ≈ the default set). `monochrome` deferred (grayscale-only; needs mono-bitmap
+  path). **No consumer yet** (macOS CoreText ignores it; Linux apprt is P4) — filed a heads-up to
+  **T3's Inbox** so the `freetype-load-flags`/`force-autohint` config keys have a landing spot.
+  **Gate:** fmt ✓; macOS default + `--features freetype` + `--features fontconfig` clippy ✓; full
+  freetype (67) + fontconfig (73, real libfontconfig) suites ✓; `load_flags_default_and_mapping`
+  test ✓.
 
 ## Next-item pointers (respawn crib)
 
