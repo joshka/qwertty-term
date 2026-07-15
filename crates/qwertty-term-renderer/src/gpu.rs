@@ -120,6 +120,28 @@ pub trait GpuBackend: Sized {
         desc: &crate::shaders::PipelineDescription,
         source: ShaderSource<'_>,
     ) -> Result<Self::Pipeline, Self::Error>;
+
+    /// Present an already-drawn `target` to this backend's on-screen surface.
+    ///
+    /// Port of upstream `generic.zig`'s `api.present(target)` — the on-screen
+    /// half of the draw loop that the offscreen/readback path skips. Called by
+    /// [`Engine::draw_and_present`](crate::engine::Engine) after a frame has
+    /// been drawn into `target` and completed, with the host's default
+    /// framebuffer bound and current (for OpenGL under GTK: the `GtkGLArea`'s
+    /// FBO on its render thread).
+    ///
+    /// Default: **no-op**. The headless [`Software`](crate::software::Software)
+    /// backend has nothing to present to, and the Metal backend presents by
+    /// assigning the drawn `IOSurface` to a `CALayer` — which needs the
+    /// external layer handle, so it keeps its dedicated
+    /// `Engine<Metal>::draw_and_present(layer)` in
+    /// [`crate::present`](crate::present) and leaves this a no-op. Only the
+    /// `OpenGL` backend overrides it, blitting the target FBO onto the bound
+    /// default framebuffer (`OpenGL.zig:299-333`).
+    fn present(&self, target: &Self::Target) -> Result<(), Self::Error> {
+        let _ = target;
+        Ok(())
+    }
 }
 
 /// One in-flight frame (upstream `metal/Frame.zig`): opens render passes and

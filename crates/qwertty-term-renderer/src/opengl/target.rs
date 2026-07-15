@@ -83,6 +83,55 @@ impl Target {
     pub(super) fn framebuffer(&self) -> glow::Framebuffer {
         self.framebuffer
     }
+
+    /// Present this target by blitting its FBO onto `dst` (the host's default
+    /// framebuffer; `None` = FBO 0). Port of `OpenGL.present`
+    /// (`OpenGL.zig:299-333`).
+    ///
+    /// Blits color 1:1 (same size, `GL_NEAREST`) from this target as the READ
+    /// framebuffer to `dst` as the DRAW framebuffer. `GL_FRAMEBUFFER_SRGB` is
+    /// disabled across the blit — the target's texels are already sRGB even
+    /// though a linear-blending target carries a linear *internal* format, so
+    /// letting the copy linearize them would double-convert (upstream's exact
+    /// reasoning, `OpenGL.zig:301-305`).
+    ///
+    /// Unlike upstream — whose render pass unbinds to FBO 0, making 0 the
+    /// implicit default — our [`RenderPass`](super::render_pass::RenderPass)
+    /// leaves *this* target bound as the draw framebuffer, and the host default
+    /// under GTK is the `GtkGLArea`'s FBO, not 0. So we bind `dst` explicitly
+    /// for drawing rather than relying on the current binding, then restore
+    /// `dst` as the bound framebuffer (read+draw) so a caller that reads the
+    /// presented pixels back (the windowed smoke) sees the host framebuffer,
+    /// matching the state GTK had bound on entry.
+    pub(super) fn blit_to(&self, gl: &glow::Context, dst: Option<glow::Framebuffer>) {
+        let (w, h) = (self.width as i32, self.height as i32);
+        // SAFETY: plain GL state changes + a same-size color blit on the current
+        // context; both framebuffers are complete (this target checked at
+        // creation; `dst` is the host's live default framebuffer or FBO 0).
+        unsafe {
+            gl.disable(glow::FRAMEBUFFER_SRGB);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.framebuffer));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, dst);
+            // src rect (0,0)-(w,h) → dst rect (0,0)-(w,h): 1:1, no flip (upstream).
+            gl.blit_framebuffer(
+                0,
+                0,
+                w,
+                h,
+                0,
+                0,
+                w,
+                h,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            // Restore the host default framebuffer as the bound FBO (read+draw),
+            // the state GTK had on render entry, so a post-present readback of
+            // the presented pixels reads the host framebuffer.
+            gl.bind_framebuffer(glow::FRAMEBUFFER, dst);
+            gl.enable(glow::FRAMEBUFFER_SRGB);
+        }
+    }
 }
 
 impl GpuTarget for Target {

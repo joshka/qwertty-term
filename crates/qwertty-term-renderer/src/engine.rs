@@ -1390,16 +1390,53 @@ impl<B: GpuBackend> Engine<B> {
         Ok(())
     }
     /// Draw the current [`Contents`] into a fresh frame against the swap chain
-    /// and present (readback-ready). Port of `drawFrame`'s cell-drawing
-    /// structure (bg_color → cell_bg → cell_text → image), sync mode.
+    /// and read the pixels back. Port of `drawFrame`'s cell-drawing structure
+    /// (bg_color → cell_bg → cell_text → image), sync mode.
     ///
     /// Returns the drawn slot's readback pixels (BGRA, row-padding stripped) so
-    /// the caller (offscreen tests / a future window host reading the surface)
-    /// can inspect them. In sync mode this is coherent after
-    /// `waitUntilCompleted`.
+    /// the caller (offscreen tests / a window host reading the surface) can
+    /// inspect them. In sync mode this is coherent after `waitUntilCompleted`.
     pub fn draw_frame(&mut self) -> Result<Vec<u8>, B::Error> {
+        Ok(self
+            .draw_into_slot(|_backend, target| Ok(target.read_pixels()))?
+            .unwrap_or_default())
+    }
+
+    /// Draw one frame into the swap-chain target and **present it on screen**
+    /// via the backend's [`GpuBackend::present`] — the generic analog of
+    /// upstream `generic.zig`'s draw-then-`api.present(target)`.
+    ///
+    /// Identical GPU work to [`draw_frame`](Self::draw_frame), except that
+    /// instead of reading the target's pixels back it hands the drawn target to
+    /// the backend to present: OpenGL blits it onto the host's bound default
+    /// framebuffer (the `GtkGLArea`'s FBO, current on the GTK render thread);
+    /// Software no-ops. The Metal on-screen path is the dedicated
+    /// `draw_and_present(layer)` in [`crate::present`] (IOSurface/CALayer), so
+    /// this generic method is compiled off macOS to avoid the name clash and is
+    /// never needed there.
+    ///
+    /// Must be called with the host's default framebuffer bound and current.
+    /// Returns `false` (nothing presented) when the target has zero area — no
+    /// `update_frame` has sized it yet — mirroring `draw_frame`'s early-out.
+    #[cfg(not(target_os = "macos"))]
+    pub fn draw_and_present(&mut self) -> Result<bool, B::Error> {
+        Ok(self
+            .draw_into_slot(|backend, target| backend.present(target))?
+            .is_some())
+    }
+
+    /// Shared body of the draw paths: rebuild the GPU buffers for this frame,
+    /// encode the cell passes into a fresh frame against the swap chain, and
+    /// complete it (sync). Then, while the drawn slot target is still live,
+    /// invoke `after(backend, target)` — the readback ([`draw_frame`]) or the
+    /// on-screen present ([`draw_and_present`]). Returns `Ok(None)` when the
+    /// target has zero area (no frame drawn); otherwise `Ok(Some(after(..)))`.
+    fn draw_into_slot<R>(
+        &mut self,
+        after: impl FnOnce(&B, &B::Target) -> Result<R, B::Error>,
+    ) -> Result<Option<R>, B::Error> {
         if self.screen_width == 0 || self.screen_height == 0 {
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         // Upload kitty image textures + sync placement instance buffers before
@@ -1546,9 +1583,11 @@ impl<B: GpuBackend> Engine<B> {
         }
         frame.complete(true);
 
-        let pixels = slot.target.read_pixels();
+        // While the drawn slot target is still live, hand it to the caller for
+        // readback (`draw_frame`) or on-screen present (`draw_and_present`).
+        let out = after(backend, &slot.target)?;
         guard.release();
-        Ok(pixels)
+        Ok(Some(out))
     }
 
     /// Upload the grayscale **and** color atlases into the *next* slot's

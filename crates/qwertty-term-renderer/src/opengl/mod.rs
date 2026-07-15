@@ -100,12 +100,11 @@ impl fmt::Display for GlError {
 
 impl std::error::Error for GlError {}
 
-/// The shared GL context: the `glow` wrapper plus the EGL handles that keep it
-/// current and alive. Held behind an [`Rc`] by the backend and every resource,
-/// so GL objects can be freed on `Drop` while the context is still valid.
-pub struct GlState {
-    /// The `glow` GL function table.
-    gl: glow::Context,
+/// The EGL context this backend *owns* (created by [`OpenGL::new`] for the
+/// headless/offscreen path). Absent when the GL context is owned externally —
+/// e.g. a `GtkGLArea`'s context passed to [`OpenGL::from_glow`] — in which case
+/// the host is responsible for the context's lifetime and current-ness.
+struct OwnedEgl {
     /// The EGL instance (owns the loaded `libEGL`), display, and context. Kept
     /// so the context stays current and is torn down last, after all resources.
     egl: Egl,
@@ -114,6 +113,18 @@ pub struct GlState {
     /// A 1×1 pbuffer surface, only if the driver rejected a truly surfaceless
     /// (`EGL_NO_SURFACE`) `make_current`. `None` on the common surfaceless path.
     surface: Option<egl::Surface>,
+}
+
+/// The shared GL context: the `glow` wrapper plus (for the headless path) the
+/// EGL handles that keep it current and alive. Held behind an [`Rc`] by the
+/// backend and every resource, so GL objects can be freed on `Drop` while the
+/// context is still valid.
+pub struct GlState {
+    /// The `glow` GL function table.
+    gl: glow::Context,
+    /// The owned EGL context, or `None` when the context is externally owned
+    /// (the host — e.g. GTK — created and manages it).
+    egl: Option<OwnedEgl>,
 }
 
 impl GlState {
@@ -125,14 +136,19 @@ impl GlState {
 
 impl Drop for GlState {
     fn drop(&mut self) {
-        // Release the context and tear down EGL. Runs only after every resource
-        // holding an `Rc<GlState>` has dropped, so no GL frees race this.
-        let _ = self.egl.make_current(self.display, None, None, None);
-        if let Some(surface) = self.surface.take() {
-            let _ = self.egl.destroy_surface(self.display, surface);
+        // Tear down EGL only if we own it. Runs after every resource holding an
+        // `Rc<GlState>` has dropped, so no GL frees race this. When the context
+        // is host-owned (`egl == None`) we free nothing here — the host (GTK)
+        // owns the context lifetime.
+        let Some(owned) = self.egl.take() else {
+            return;
+        };
+        let _ = owned.egl.make_current(owned.display, None, None, None);
+        if let Some(surface) = owned.surface {
+            let _ = owned.egl.destroy_surface(owned.display, surface);
         }
-        let _ = self.egl.destroy_context(self.display, self.context);
-        let _ = self.egl.terminate(self.display);
+        let _ = owned.egl.destroy_context(owned.display, owned.context);
+        let _ = owned.egl.terminate(owned.display);
     }
 }
 
@@ -147,6 +163,14 @@ pub struct OpenGL {
     /// (`OpenGL.zig:52`, `initTarget`). Kept for parity with the Metal
     /// backend's `linear_blending`.
     linear_blending: bool,
+    /// The framebuffer [`present`](OpenGL::present) blits the drawn target
+    /// onto — the host's "default framebuffer". `None` = FBO 0 (the offscreen
+    /// path never presents, so it stays `None`). A windowed host that renders
+    /// into its own FBO (a `GtkGLArea` binds one before each `render`) sets the
+    /// current binding here each frame via
+    /// [`set_default_framebuffer`](OpenGL::set_default_framebuffer). Interior
+    /// mutability so it can be updated through the `&B` the engine exposes.
+    default_framebuffer: std::cell::Cell<Option<glow::NativeFramebuffer>>,
 }
 
 impl OpenGL {
@@ -251,13 +275,52 @@ impl OpenGL {
         Ok(Self {
             state: Rc::new(GlState {
                 gl,
-                egl,
-                display,
-                context,
-                surface,
+                egl: Some(OwnedEgl {
+                    egl,
+                    display,
+                    context,
+                    surface,
+                }),
             }),
             linear_blending: false,
+            default_framebuffer: std::cell::Cell::new(None),
         })
+    }
+
+    /// Build the backend over an **externally-owned, already-current** GL
+    /// context — the windowed path. The host (a `GtkGLArea` on its render
+    /// thread) creates the GL 4.3 context, makes it current, and loads the GL
+    /// function pointers; this wraps the resulting [`glow::Context`] without
+    /// creating or owning any EGL state (so `Drop` frees nothing — the host owns
+    /// the context lifetime). The reduced/headless analog is [`OpenGL::new`].
+    ///
+    /// # Preconditions
+    ///
+    /// The caller guarantees `gl` was loaded from a **GL 4.3 core** context that
+    /// is **current on the calling thread**, and stays current for every call
+    /// the engine makes on this backend (upstream's `must_draw_from_app_thread`
+    /// invariant). GTK satisfies this inside `realize`/`render`.
+    pub fn from_glow(gl: glow::Context) -> Self {
+        // Match `new()`'s context setup: enable SRGB-framebuffer support so a
+        // future `linear_blending` target linearizes correctly; `present`
+        // disables it around the blit exactly as upstream does. On our default
+        // non-linear `RGBA8` target this is a no-op.
+        // SAFETY: plain GL enable on the caller's current context.
+        unsafe { gl.enable(glow::FRAMEBUFFER_SRGB) };
+        Self {
+            state: Rc::new(GlState { gl, egl: None }),
+            linear_blending: false,
+            default_framebuffer: std::cell::Cell::new(None),
+        }
+    }
+
+    /// Set the framebuffer [`present`](OpenGL::present) blits onto (the host's
+    /// current "default framebuffer"). A `GtkGLArea` binds a fresh FBO before
+    /// each `render`, so the host queries `GL_DRAW_FRAMEBUFFER_BINDING` at the
+    /// top of its render callback and passes it here before
+    /// [`Engine::draw_and_present`](crate::engine::Engine). `None` = FBO 0.
+    pub fn set_default_framebuffer(&self, fbo: Option<glow::NativeFramebuffer>) {
+        self.default_framebuffer.set(fbo);
     }
 
     /// Clone the shared GL state (for resource constructors).
@@ -281,7 +344,18 @@ impl fmt::Debug for OpenGL {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenGL")
             .field("linear_blending", &self.linear_blending)
-            .field("surfaceless", &self.state.surface.is_none())
+            // Whether this backend owns its EGL context (headless `new`) or
+            // borrows a host-owned one (`from_glow`); and, when owned, whether it
+            // is truly surfaceless (no pbuffer fallback).
+            .field("owns_context", &self.state.egl.is_some())
+            .field(
+                "surfaceless",
+                &self
+                    .state
+                    .egl
+                    .as_ref()
+                    .is_none_or(|owned| owned.surface.is_none()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -368,6 +442,14 @@ impl GpuBackend for OpenGL {
         let set = shaders::shader_set(desc.name)
             .ok_or_else(|| GlError::GlFailed(format!("no GLSL for pipeline `{}`", desc.name)))?;
         Pipeline::new(self.state(), desc, &set)
+    }
+
+    /// Present `target` by blitting its FBO onto the host's default framebuffer
+    /// ([`set_default_framebuffer`](OpenGL::set_default_framebuffer); FBO 0 by
+    /// default). Port of `OpenGL.present` (`OpenGL.zig:299-333`).
+    fn present(&self, target: &Target) -> Result<(), GlError> {
+        target.blit_to(self.state.gl(), self.default_framebuffer.get());
+        Ok(())
     }
 }
 
