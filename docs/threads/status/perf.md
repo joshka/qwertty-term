@@ -1,10 +1,15 @@
 # perf status
 
-- **Current item:** Session 1 **COMPLETE** — both scroll-region PRs merged + frozen pin bumped
-  `2da015cd6`→`77190bd02`. All four vtebench region-scroll suites now addressed at the code
-  level (change 2 = top-region, change 1 = bottom-region). Remaining: a quiet-machine vtebench
-  refresh to publish the scoreboard, + the font/sprite pin-delta verification (tracked in
-  `issues.md`). Next perf lane (unblocked): wide/CJK engine gap (`docs/analysis/perf.md`).
+- **Current item:** Session 1 **COMPLETE — RECYCLING (respawn to continue).** Both scroll-region
+  PRs merged + frozen pin bumped `2da015cd6`→`77190bd02`; all four region-scroll suites addressed
+  at the code level (change 2 = top-region, change 1 = bottom-region). Backlog for a fresh
+  session: **(1)** whole-app vtebench scoreboard refresh — BLOCKED on a quiet machine (checked
+  2026-07-15 09:35: WindowServer 44% CPU, loadavg 6.09 → region suites still contended; re-check
+  and run when quiet, per `docs/analysis/scroll-region-opt.md`). **(2)** wide/CJK engine gap
+  (the real remaining engine deficit, ~2.6× behind upstream engine-only): SIMD UTF-8 decode /
+  tighter wide-print — T1's deferred items in `docs/analysis/perf.md` ("Still deferred after
+  Lever 5"); profile-first via `vt-diff/examples/profile_streams` (cjk/utf8, NOOP=1 attribution).
+  **(3)** font/sprite pin-delta verification (routed to T2/sprite in `issues.md`).
 - **Last merged:** **#269** (change 1 + pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
 - **Blockers:** none.
 
