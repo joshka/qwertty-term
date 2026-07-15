@@ -31,16 +31,15 @@
 //! (underline + text) is asserted too: the cell's ink must exceed a
 //! bare-underline-only baseline.
 //!
-//! Skips gracefully (`SKIP:`) when no Metal device is present.
+//! Runs over the platform-free [`Software`] backend (ADR 003), so the embedded
+//! case is **not OS-gated** and runs on Linux CI too (#42); the named-family
+//! case stays CoreText-gated (needs `Face::load_by_name`).
 
-#![cfg(target_os = "macos")]
-
-use qwertty_term_font::coretext::Face;
 use qwertty_term_font::grid::Grid;
-use qwertty_term_font::{CodepointResolver, Collection, Metrics};
+use qwertty_term_font::{CodepointResolver, Collection, Face, Metrics};
 use qwertty_term_renderer::engine::{Engine, FrameOptions};
-use qwertty_term_renderer::metal::Metal;
 use qwertty_term_renderer::snapshot::FullSnapshot;
+use qwertty_term_renderer::software::Software;
 use qwertty_term_vt::color::Rgb;
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
 use qwertty_term_vt::terminal::{Options, Terminal};
@@ -94,7 +93,7 @@ fn render(face: Face, size_px: f64, line: &str) -> (Vec<u8>, usize, usize, usize
     let term = stream.handler.terminal;
 
     let snapshot = FullSnapshot::capture(&term, 0);
-    let mut engine = Engine::with_backend(Metal::new().unwrap(), cw, ch).expect("engine");
+    let mut engine = Engine::with_backend(Software::new(), cw, ch).expect("engine");
     let opts = FrameOptions {
         cursor_blink_visible: false,
         default_fg: THEME_FG,
@@ -148,20 +147,19 @@ fn assert_default_fg_visible(face: Face, label: &str) {
 
 #[test]
 fn embedded_default_fg_inks_on_theme() {
-    if Metal::new().is_err() {
-        eprintln!("SKIP: no Metal device");
-        return;
-    }
     let face = Face::load_embedded(32.0).expect("embedded JetBrains Mono");
     assert_default_fg_visible(face, "embedded");
 }
 
+// `Face::load_by_name` (system font lookup by family name) exists only on the
+// CoreText face; the FreeType face has no `load_by_name` yet (it would be a
+// fontconfig `discover_family` + load — a follow-up). The renderer uses the
+// CoreText face iff `target_os = "macos"` (it enables the font crate's FreeType
+// backend only off-macOS), so this named-family case is macOS-gated; the
+// embedded case above runs on every backend.
+#[cfg(target_os = "macos")]
 #[test]
 fn named_family_default_fg_inks_on_theme() {
-    if Metal::new().is_err() {
-        eprintln!("SKIP: no Metal device");
-        return;
-    }
     // A name-loaded system family — the path that went dark in the field. Skip
     // (don't fail) when it isn't installed: `load_by_name` falls back to the
     // embedded face on a miss, which would silently retest the embedded path, so

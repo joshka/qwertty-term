@@ -2,7 +2,7 @@
 //!
 //! Drives a real `qwertty_term_vt::Terminal` through a `Stream` with the field
 //! reproduction line `\x1b[1mBOLD\x1b[0m plain \x1b[3mital\x1b[0m`, snapshots
-//! it, builds GPU buffers via the cell engine (which now resolves each cell's
+//! it, builds cell buffers via the cell engine (which resolves each cell's
 //! bold/italic attributes to a styled face in the completed style table and
 //! rasterizes through it), draws an offscreen frame, and reads the pixels back.
 //!
@@ -17,17 +17,19 @@
 //!
 //! Dumps a specimen PNG artifact for human inspection.
 //!
-//! Skips gracefully (prints `SKIP:`) when no Metal device is present, matching
-//! the GPU-test convention.
+//! Runs over the platform-free [`Software`] backend (ADR 003), so — like
+//! `software_headless.rs` — it **never skips** and is **not OS-gated**: it runs
+//! on macOS (over the CoreText face) and on Linux CI (over the FreeType face)
+//! alike (`Face` is the cfg-selected platform alias). The synthetic-bold /
+//! italic facts it asserts are properties of the face rasterizer + CPU
+//! compositor, both backend-agnostic. (#42 — real Linux pixel coverage beyond
+//! the headless smoke test.)
 
-#![cfg(target_os = "macos")]
-
-use qwertty_term_font::coretext::Face;
 use qwertty_term_font::grid::Grid;
-use qwertty_term_font::{CodepointResolver, Collection, Metrics};
+use qwertty_term_font::{CodepointResolver, Collection, Face, Metrics};
 use qwertty_term_renderer::engine::{Engine, FrameOptions};
-use qwertty_term_renderer::metal::Metal;
 use qwertty_term_renderer::snapshot::FullSnapshot;
+use qwertty_term_renderer::software::Software;
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
 use qwertty_term_vt::terminal::{Options, Terminal};
 
@@ -103,8 +105,9 @@ fn make_grid(face: Face, size_px: f64) -> Grid {
     Grid::new(resolver, metrics).expect("grid")
 }
 
-/// Render a plain (no styling) line through a fresh grid and read pixels back.
-fn render_line(backend: Metal, size_px: f64, line: &str) -> (Frame, Px) {
+/// Render a line through a fresh grid over the Software backend and read pixels
+/// back.
+fn render_line(backend: Software, size_px: f64, line: &str) -> (Frame, Px) {
     let face = Face::load_embedded(size_px).expect("embedded JetBrains Mono");
     let metrics = Metrics::calc(face.face_metrics());
     let (cw, ch) = (metrics.cell_width, metrics.cell_height);
@@ -151,12 +154,6 @@ fn render_line(backend: Metal, size_px: f64, line: &str) -> (Frame, Px) {
 fn bold_italic_pixels_offscreen_readback() {
     let size_px = 32.0; // larger cell => more pixels to measure the weight delta
 
-    // Skip gracefully if no Metal device.
-    if Metal::new().is_err() {
-        eprintln!("SKIP: no Metal device; skipping bold/italic-pixels test");
-        return;
-    }
-
     // The field reproduction line: BOLD (SGR 1), then plain, then italic (SGR 3).
     // "plainn" (6 chars) pads so the italic span "ital" lands clear of the bold.
     let styled_line = "\x1b[1mBOLD\x1b[0m plain \x1b[3mital\x1b[0m";
@@ -173,8 +170,8 @@ fn bold_italic_pixels_offscreen_readback() {
     let bold_cols = [0usize, 1, 2, 3];
     let ital_cols = [11usize, 12, 13, 14];
 
-    let (styled, bg) = render_line(Metal::new().unwrap(), size_px, styled_line);
-    let (plain, _) = render_line(Metal::new().unwrap(), size_px, plain_line);
+    let (styled, bg) = render_line(Software::new(), size_px, styled_line);
+    let (plain, _) = render_line(Software::new(), size_px, plain_line);
 
     // === ASSERTION 1: the BOLD span has higher ink coverage than the same
     // letters rendered regular. ===

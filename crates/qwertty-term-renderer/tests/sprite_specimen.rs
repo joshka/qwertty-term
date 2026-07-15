@@ -5,23 +5,21 @@
 //! sheet — rows 0–2: box drawing (light, double, rounded); row 3: block
 //! elements/shades and braille; row 4: powerline separators; row 5: legacy
 //! computing symbols; row 6: diagonals and dashes. It snapshots the terminal,
-//! builds GPU buffers via the cell engine, draws an offscreen frame into an
-//! IOSurface-backed target, and reads the pixels back. The assertion is
-//! deliberately coarse: every specimen row must contain ink (coverage above
+//! builds cell buffers via the cell engine, draws an offscreen frame over the
+//! platform-free [`Software`] backend, and reads the pixels back. The assertion
+//! is deliberately coarse: every specimen row must contain ink (coverage above
 //! background) in at least one cell — visual quality is judged from the PNG
 //! dumped to `target/sprite-specimen.png`. No window is involved.
 //!
-//! Skips gracefully (prints `SKIP:`) when no Metal device is present, matching
-//! the R1/R2/R3 GPU-test convention.
+//! Runs over the Software backend (ADR 003), so it **never skips** and is **not
+//! OS-gated** — sprites are pure Rust (`qwertty-term-sprite`), so this gives real
+//! Linux sprite pixel coverage (#42).
 
-#![cfg(target_os = "macos")]
-
-use qwertty_term_font::coretext::Face;
 use qwertty_term_font::grid::Grid;
-use qwertty_term_font::{CodepointResolver, Collection, Metrics};
+use qwertty_term_font::{CodepointResolver, Collection, Face, Metrics};
 use qwertty_term_renderer::engine::{Engine, FrameOptions};
-use qwertty_term_renderer::metal::Metal;
 use qwertty_term_renderer::snapshot::FullSnapshot;
+use qwertty_term_renderer::software::Software;
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
 use qwertty_term_vt::terminal::{Options, Terminal};
 
@@ -86,14 +84,7 @@ fn make_grid(face: Face) -> Grid {
 
 #[test]
 fn sprite_specimen_offscreen_readback() {
-    // Skip gracefully if no Metal device.
-    let backend = match Metal::new() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("SKIP: no Metal device ({e}); skipping first-pixels test");
-            return;
-        }
-    };
+    let backend = Software::new();
 
     // --- Font substrate: embedded JetBrains Mono supplies the metrics (cell
     //     size); the specimen glyphs themselves are drawn by the procedural
