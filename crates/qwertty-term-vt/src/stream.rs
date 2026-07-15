@@ -248,6 +248,74 @@ fn decode_wellformed_multibyte(input: &[u8]) -> Option<(u32, usize)> {
     }
 }
 
+/// Bounds-check-free variant of [`decode_wellformed_multibyte`] for the hot
+/// interior of a non-ASCII run: identical acceptance logic (Unicode Table 3-7),
+/// but reads `input[i..i+len]` via unchecked indexing. The validation and the
+/// returned `(codepoint, len)` are bit-identical to the checked version, so it
+/// stays a pure, differential-exact fast path.
+///
+/// # Safety
+///
+/// `i + 4 <= input.len()` must hold: a well-formed sequence is at most 4 bytes,
+/// and this reads up to `input[i + 3]` before validating length, so the caller
+/// must guarantee four readable bytes. (Shorter sequences read fewer bytes; the
+/// four-byte margin conservatively covers every branch.)
+#[inline]
+unsafe fn decode_wellformed_multibyte_unchecked(input: &[u8], i: usize) -> Option<(u32, usize)> {
+    debug_assert!(i + 4 <= input.len());
+    // SAFETY: `i + 4 <= input.len()` per the caller contract, so indices
+    // `i..=i+3` are all in bounds.
+    unsafe {
+        let b0 = *input.get_unchecked(i);
+        match b0 {
+            0xC2..=0xDF => {
+                let b1 = *input.get_unchecked(i + 1);
+                if !is_cont(b1) {
+                    return None;
+                }
+                Some((((b0 as u32 & 0x1F) << 6) | (b1 as u32 & 0x3F), 2))
+            }
+            0xE0..=0xEF => {
+                let b1 = *input.get_unchecked(i + 1);
+                let b2 = *input.get_unchecked(i + 2);
+                let b1_ok = match b0 {
+                    0xE0 => (0xA0..=0xBF).contains(&b1),
+                    0xED => (0x80..=0x9F).contains(&b1),
+                    _ => is_cont(b1),
+                };
+                if !b1_ok || !is_cont(b2) {
+                    return None;
+                }
+                Some((
+                    ((b0 as u32 & 0x0F) << 12) | ((b1 as u32 & 0x3F) << 6) | (b2 as u32 & 0x3F),
+                    3,
+                ))
+            }
+            0xF0..=0xF4 => {
+                let b1 = *input.get_unchecked(i + 1);
+                let b2 = *input.get_unchecked(i + 2);
+                let b3 = *input.get_unchecked(i + 3);
+                let b1_ok = match b0 {
+                    0xF0 => (0x90..=0xBF).contains(&b1),
+                    0xF4 => (0x80..=0x8F).contains(&b1),
+                    _ => is_cont(b1),
+                };
+                if !b1_ok || !is_cont(b2) || !is_cont(b3) {
+                    return None;
+                }
+                Some((
+                    ((b0 as u32 & 0x07) << 18)
+                        | ((b1 as u32 & 0x3F) << 12)
+                        | ((b2 as u32 & 0x3F) << 6)
+                        | (b3 as u32 & 0x3F),
+                    4,
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// An owned copy of one [`Action`], detached from the parser borrow.
 enum Emitted {
     Print(char),
@@ -891,6 +959,27 @@ impl<H: Handler> Stream<H> {
                 let mut advanced = false;
                 // `input[i] >= 0x80` holds on entry (we are past the ASCII gate
                 // and not partial); the guard is for subsequent iterations.
+                //
+                // Interior fast region: while at least 4 bytes remain, a
+                // well-formed sequence is fully in bounds, so decode without
+                // per-byte bounds checks. Same acceptance logic as the checked
+                // path, so behavior is identical.
+                while n < cap && i + 4 <= input.len() && input[i] >= 0x80 {
+                    // SAFETY: `i + 4 <= input.len()` guaranteed by the loop
+                    // condition.
+                    match unsafe { decode_wellformed_multibyte_unchecked(input, i) } {
+                        Some((cp, len)) => {
+                            self.cp_buf[n] = cp;
+                            n += 1;
+                            i += len;
+                            advanced = true;
+                        }
+                        None => break,
+                    }
+                }
+                // Tail: fewer than 4 bytes remain (or cap reached). The checked
+                // variant handles the end of the buffer, where a sequence may be
+                // truncated (→ defers to the DFA for cross-chunk partial state).
                 while n < cap && i < input.len() && input[i] >= 0x80 {
                     match decode_wellformed_multibyte(&input[i..]) {
                         Some((cp, len)) => {
