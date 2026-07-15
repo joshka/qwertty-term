@@ -1174,6 +1174,123 @@ impl Screen {
         }
     }
 
+    /// Scroll a full-width scroll region that ends at the cursor row up by one
+    /// row. The cursor must sit on the region's bottom row. `limit` is the
+    /// number of rows in the region above the cursor (region height minus one)
+    /// and must be >= 1.
+    ///
+    /// The top row of the region is discarded (NOT moved into scrollback); all
+    /// other region rows shift up by one and the cursor row becomes a blank row
+    /// filled with the cursor's background color (as other scroll ops do). The
+    /// cursor stays put on the new blank row; content outside the region is
+    /// unmodified.
+    ///
+    /// This is a very hot path (a program on the alt screen using DECSTBM and
+    /// scrolling via LF/IND), optimized for the common case where the whole
+    /// region is within one page. Port of upstream `Screen.cursorScrollRegionUp`
+    /// (77190bd02) — replaces the previous `PageList.eraseRowBounded` + cursor
+    /// re-resolution + `manual_style_update` dance, whose per-scroll bookkeeping
+    /// exceeded the actual row work.
+    pub(crate) fn cursor_scroll_region_up(&mut self, limit: usize) {
+        debug_assert!(limit >= 1);
+        debug_assert!(self.cursor.y as usize >= limit);
+        // Contract: the caller (index()) only routes here for a zero blank; a
+        // non-zero SGR-bg blank still goes through scroll_up(1), whose
+        // wide-spacer-head handling matches the reference oracle (the in-place
+        // rotate does not fill the blank and would diverge). The erased row is
+        // therefore always zero-cleared, exactly like the erase_row_bounded
+        // path this replaces.
+        debug_assert!(self.blank_cell().is_zero());
+
+        // If the region crosses a page boundary, take the slow path. Rare: the
+        // active area must span multiple pages with the split inside the region.
+        // SAFETY: cursor pin live.
+        let pin_y = unsafe { (*self.cursor.page_pin).y as usize };
+        if pin_y < limit {
+            self.cursor_scroll_region_up_slow(limit);
+            self.assert_integrity();
+            return;
+        }
+
+        // Fast path: the whole region is in one page. Clear the top row and
+        // rotate it down to the cursor row.
+        // SAFETY: cursor pin live; the region is within one page (pin_y >=
+        // limit), so `[top_y, pin_y]` are valid rows of that page.
+        unsafe {
+            let node = (*self.cursor.page_pin).node;
+            let page: *mut Page = self.pages.node_page_ptr(node);
+            let top_y = pin_y - limit;
+            let cols = (*page).size.cols as usize;
+            let top_row = (*page).get_row(top_y);
+
+            // Clear the erased (top) row with zero cells (matching the
+            // erase_row_bounded path exactly).
+            if !(*top_row).managed_memory() && !(*top_row).kitty_virtual_placeholder() {
+                // Hot path: no managed memory (styles/graphemes/hyperlinks) and
+                // no kitty placeholder, so a straight zero fill of `cols`
+                // u64-sized cells is bit-identical to clear_cells — the
+                // overwhelmingly common region-scroll case. Mirrors upstream's
+                // `@memset(@as([]u64, ...), 0)`.
+                let base = (*top_row).cells().ptr((*page).mem());
+                std::ptr::write_bytes(base, 0u8, cols);
+            } else {
+                // Generic clear: releases managed memory and recomputes the
+                // grapheme/hyperlink/styled/kitty row flags. Same as the
+                // erase_row_bounded clear.
+                (*page).clear_cells(top_row, 0, cols);
+            }
+
+            // Rotate so the now-blank top row moves to the cursor (bottom) row
+            // and every other region row shifts up by one.
+            (*page).rotate_rows_once_left(top_y, pin_y + 1);
+            (*page).dirty = true;
+
+            // Shift the viewport cache + tracked pins within the region. The
+            // cursor pin is intentionally left where it is (region bottom).
+            self.pages.shift_tracked_pins_region_up(
+                node,
+                top_y as CellCountInt,
+                pin_y as CellCountInt,
+                self.cursor.page_pin,
+            );
+
+            // The cursor pin is unchanged, but the Row at its position now holds
+            // the blank row, so refresh the cached row/cell pointers.
+            self.refresh_cursor_pointers();
+        }
+        self.assert_integrity();
+    }
+
+    /// Slow path for [`Self::cursor_scroll_region_up`]: the region spans
+    /// multiple pages, so fall back to the generic `PageList` erase machinery.
+    /// Port of upstream `Screen.cursorScrollRegionUpSlow`.
+    fn cursor_scroll_region_up_slow(&mut self, limit: usize) {
+        // eraseRowBounded moves our tracked cursor pin up by one (it is inside
+        // the erased region), but we don't want that: the cursor stays put on
+        // the new blank row at the region bottom. Keep the old pin and restore
+        // it after, exactly like cursorDownScroll's no-scrollback case. Beyond
+        // performance this matters for correctness: when the cursor is on the
+        // first row of a page, eraseRowBounded moves the tracked pin to the
+        // previous page, and moving it back via cursor_change_pin would migrate
+        // the cursor style refcount from a page that never held it.
+        // SAFETY: cursor pin live.
+        let old_pin = unsafe { *self.cursor.page_pin };
+        let region_top = self.cursor.y as u32 - limit as u32;
+        self.pages
+            .erase_row_bounded(Point::active(0, region_top), limit);
+
+        // The page never changes, so the cursor's style ref stays valid and no
+        // style accounting is needed; just restore the pin and refresh caches
+        // (the row at the pin now holds the blank row). eraseRowBounded already
+        // cleared the new row with zero cells, which is what we want (the caller
+        // guarantees a zero blank — see cursor_scroll_region_up's contract).
+        // SAFETY: cursor pin live.
+        unsafe {
+            *self.cursor.page_pin = old_pin;
+            self.refresh_cursor_pointers();
+        }
+    }
+
     /// Copy another cursor into this screen. The source cursor may be on any
     /// screen, but its x/y must be within our bounds. Port of `cursorCopy` (the
     /// `hyperlink = false` path used by alt-screen switching).

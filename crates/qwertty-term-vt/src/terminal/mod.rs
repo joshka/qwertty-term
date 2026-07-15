@@ -788,7 +788,15 @@ impl Terminal {
         let x = self.screen().cursor.x;
         // Inside the region and on the bottom-most line: scroll up.
         if y == bottom && x >= self.scrolling_region.left && x <= self.scrolling_region.right {
-            // Full-screen (no margins) scrollback path.
+            // Full-screen (top-anchored, no margins) scrollback path. NOTE:
+            // upstream 77190bd02 additionally skips scrollback creation here on
+            // no-scrollback screens (routing top-anchored regions to the
+            // in-place scroll). That is a *semantic* change relative to our
+            // frozen pin (2da015cd6): the reference oracle still pushes the
+            // scrolled-out rows into (transient) scrollback, so adopting it
+            // diverges. We keep the pin's behavior and only take the pure-perf
+            // in-place path for top!=0 regions below. See
+            // docs/analysis/scroll-region-opt.md.
             if self.scrolling_region.top == 0
                 && self.scrolling_region.left == 0
                 && self.scrolling_region.right == self.cols - 1
@@ -799,9 +807,12 @@ impl Terminal {
                 return;
             }
 
-            // Slow path for left/right margins OR when we have an SGR bg to
-            // preserve in the erased rows (erase_row_bounded doesn't fill bg,
-            // scroll_up does — but scroll_up is much slower).
+            // Slow path for left/right scrolling region margins OR when we have
+            // an SGR bg to preserve in the erased rows: scroll_up fills the
+            // blank (and matches the reference oracle's wide-spacer-head
+            // handling, which the fast in-place rotate does not for a non-zero
+            // blank). The fast path below is restricted to a zero blank — the
+            // exact domain the previous erase_row_bounded routing covered.
             if self.scrolling_region.left != 0
                 || self.scrolling_region.right != self.cols - 1
                 || !self.screen().blank_cell().is_zero()
@@ -811,21 +822,16 @@ impl Terminal {
                 return;
             }
 
-            // Otherwise use the fast PageList scroll of the region contents.
-            let region_top = self.scrolling_region.top;
-            self.screen_mut().pages.erase_row_bounded(
-                crate::point::Point::active(0, region_top as u32),
-                (bottom - region_top) as usize,
-            );
-            // erase_row_bounded moves the cursor pin up by 1; move it back.
-            self.screen_mut().cursor.y -= 1;
-            self.screen_mut().cursor_down(1);
-            if self.screen_mut().manual_style_update().is_err() {
-                self.screen_mut().cursor.style = Style::default();
-                self.screen_mut()
-                    .manual_style_update()
-                    .expect("default-style update cannot fail");
-            }
+            // Otherwise (a top-anchored=false, full-width region with a zero
+            // blank) use the fast in-place region scroll, which discards the
+            // region's top row (no scrollback — top != 0) and shifts the rest
+            // up, leaving a blank cursor row. Pure-perf port of upstream's
+            // cursorScrollRegionUp (77190bd02): the result is identical to the
+            // previous erase_row_bounded path (verified against the reference
+            // oracle) but without the per-scroll Point->Pin resolution, cursor
+            // re-resolution, and manual_style_update the old path paid.
+            let limit = (bottom - self.scrolling_region.top) as usize;
+            self.screen_mut().cursor_scroll_region_up(limit);
             apply_semantic(self);
             return;
         }

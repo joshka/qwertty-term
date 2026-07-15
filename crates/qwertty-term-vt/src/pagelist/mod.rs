@@ -572,6 +572,50 @@ impl PageList {
         self.viewport == Viewport::Active
     }
 
+    /// Shift the viewport cache and tracked pins up by one row after an
+    /// in-page region scroll of rows `[y_top, y_bottom]` on `node`. The cursor
+    /// pin (`cursor_pin`) is deliberately left where it is: the region scroll
+    /// keeps the cursor on the region bottom (the new blank row). Mirrors the
+    /// in-page tracked-pin/viewport logic of `erase_row_bounded` but skips the
+    /// cursor pin, so the caller needn't move it back down. Port of the
+    /// pin-shift block of
+    /// upstream `Screen.cursorScrollRegionUp`.
+    ///
+    /// # Safety
+    ///
+    /// `node` live; `cursor_pin` and all tracked/viewport pins live.
+    pub(crate) unsafe fn shift_tracked_pins_region_up(
+        &mut self,
+        node: *mut Node,
+        y_top: CellCountInt,
+        y_bottom: CellCountInt,
+        cursor_pin: *mut Pin,
+    ) {
+        unsafe {
+            if self.viewport == Viewport::Pin {
+                let p = self.viewport_pin;
+                if (*p).node == node
+                    && (*p).y >= y_top
+                    && (*p).y <= y_bottom
+                    && (*p).y != 0
+                    && let Some(v) = self.viewport_offset_cache().as_mut()
+                {
+                    *v -= 1;
+                }
+            }
+            for &p in &self.tracked_pins {
+                if p == cursor_pin || (*p).node != node || (*p).y < y_top || (*p).y > y_bottom {
+                    continue;
+                }
+                if (*p).y == 0 {
+                    (*p).x = 0;
+                } else {
+                    (*p).y -= 1;
+                }
+            }
+        }
+    }
+
     // ---- test-support accessors (same-crate only) ----
 
     #[cfg(test)]

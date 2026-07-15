@@ -1137,6 +1137,32 @@ impl Page {
         }
     }
 
+    /// Rotate the rows `[y_start, y_end)` left by one: `[0 1 2 3]` becomes
+    /// `[1 2 3 0]`. Port of `fastmem.rotateOnce(Row, rows)`. Rotates the `Row`
+    /// structs (which hold cell/managed-memory offsets), physically leaving cell
+    /// data in place but re-homing it to a different row index — the mirror of
+    /// [`rotate_rows_once_right`](Self::rotate_rows_once_right), used by the
+    /// scroll-up paths. Integrity checks must be paused by the caller if the
+    /// intermediate state would be inspected.
+    ///
+    /// # Safety
+    ///
+    /// `y_start < y_end <= size.rows`.
+    pub(crate) unsafe fn rotate_rows_once_left(&mut self, y_start: usize, y_end: usize) {
+        debug_assert!(y_start < y_end && y_end <= self.size.rows as usize);
+        // SAFETY: range in bounds per caller contract; rows region valid.
+        unsafe {
+            let base = self.rows.ptr(self.mem);
+            let first = std::ptr::read(base.add(y_start));
+            let mut i = y_start;
+            while i < y_end - 1 {
+                std::ptr::write(base.add(i), std::ptr::read(base.add(i + 1)));
+                i += 1;
+            }
+            std::ptr::write(base.add(y_end - 1), first);
+        }
+    }
+
     /// Get the cells slice for a row. Port of `getCells`.
     ///
     /// # Safety
