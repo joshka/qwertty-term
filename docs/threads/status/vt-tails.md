@@ -1,12 +1,13 @@
 # vt-tails status
 
-- **Current item:** **tmux control mode — Josh committed to FULL tmux (slices 4+5).** Slices
-  1–3 MERGED (pure parsers on main). Next (fresh vt-tails session): **slice 4** — wire the DCS
-  `1000p` seam → `Notification` stream (LAST vt-tails slice; detailed design below + ADR 004).
-  **Slice 5 (native Viewer, ~2,283 LoC) routed to app-tails** (Inbox note left in `app-tails.md`).
-- **Last merged:** #263 (slice-4 handoff doc). #261/#259/#257 (slices 3/2/1), #255 (ADR 004),
-  VT-completeness tail (#241/#244/#249/#250) — all on main.
-- **Blockers:** none (slice 4 is vt-tails; slice 5 Viewer is app-tails, Inbox-routed).
+- **Current item:** **tmux control mode — vt-tails engine work COMPLETE (slices 1–4 all
+  merged).** The DCS `1000p` seam feeds the `ControlParser` and surfaces a `Notification`
+  stream via `TerminalHandler::take_tmux_notifications()`. Only **slice 5 (native Viewer,
+  ~2,283 LoC) remains — app-tails territory** (Inbox-routed in `app-tails.md`). Nothing left
+  for vt-tails on tmux unless the Viewer needs an engine accessor (route back via Inbox).
+- **Last merged:** #271 (slice 4 — DCS seam). #261/#259/#257 (slices 3/2/1 parsers), #255
+  (ADR 004), VT-completeness tail (#241/#244/#249/#250) — all on main.
+- **Blockers:** none. vt-tails' tmux backlog is drained; slice 5 is app-tails.
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
@@ -22,8 +23,8 @@ surface → **unit tests are the referee** (like XTGETTCAP/DECRQSS). Zig-port ha
 1. ✅ **`tmux::ControlParser`** (`control.rs`) — MERGED #257. 26 tests.
 2. ✅ **`tmux::layout::Layout`** (`layout.rs`) — MERGED #259. 24 tests.
 3. ✅ **`tmux::output`** (`output.rs`) — MERGED #261. 23 tests.
-4. **Wire the DCS `1000p` seam → `Notification` stream** — LAST vt-tails slice. Detailed
-   design below. DCS entry tests + fuzz-dictionary tokens (`\eP1000p`, `%output`, `%begin`).
+4. ✅ **Wire the DCS `1000p` seam → `Notification` stream** — MERGED #271: `dcs::Command::Tmux`
+   plus `TerminalHandler::{tmux, take_tmux_notifications}`; `feature-coverage` tmux → `[~]`.
 5. **Viewer + termio wiring** (`viewer.zig`, 2,283 LoC) — **app-tails/termio, NOT vt-tails.**
    Route via app-tails Inbox once slice 4 lands.
 
@@ -119,3 +120,10 @@ After slice 4: vt-tails' tmux work is COMPLETE; only slice 5 (app-tails Viewer) 
   merged `vt-tails/*` bookmarks → dangling pre-merge commits auto-abandoned; working copy reset
   to empty-on-main). Workspace KEPT (purpose: slice 4). **Fresh session:** `cd work/vt-tails &&
   claude` → read ADR 004 + this file → do slice 4.
+- 2026-07-14: **slice 4 MERGED (#271)** — done by a parallel background agent in `work/vt-slice4`
+  (spawned alongside an app-tails PR-VT-toggles agent). `dcs::Command::Tmux(Notification)`
+  replaces the old `TmuxRaw`; `hook`/`put`/`unhook` drive an on-Handler `ControlParser`;
+  `stream::TerminalHandler` gains `pending_tmux` + `take_tmux_notifications()`. Documented
+  divergence: `BufferOverflow` in the put arm → `None` (parser self-breaks; no panic path).
+  Gate green + CI (one unrelated termio timing flake re-run green). **vt-tails' entire tmux
+  engine port is COMPLETE (slices 1–4).** Only slice 5 (app-tails Viewer) remains.
