@@ -1,24 +1,38 @@
-# perf status — 🗄️ ARCHIVED 2026-07-15
+# perf status — ACTIVE (respawned 2026-07-15)
 
-> **Thread retired.** The competitive-perf mission is complete: **all four vtebench
-> region-scroll suites closed** (the last DoD gap) and the **wide/CJK engine path optimized end
-> to end**. Shipped + merged: **#266** (region-scroll change 2), **#269** (change 1 + frozen-pin
-> bump `2da015cd6`→`77190bd02`), **#277** (unchecked interior UTF-8 decode, cjk decode +41%),
-> **#283** (wide-cell pair-write, cjk +4%). The `perf` jj workspace was forgotten + deleted and
-> this session archived. **To resume perf work, spawn a fresh thread** off this file — the two
-> remaining items are (1) the whole-app vtebench **scoreboard refresh** (the mission's final
-> "Done" deliverable, BLOCKED only on a quiet machine — run `scripts/bench-vtebench.sh` across
-> all three terminals when loadavg is below ~3 and WindowServer is idle, then refresh
-> `docs/benchmarks/vtebench-baseline.md`) and (2) an optional **SIMD NEON decode** lever (no
-> longer the cjk-full bottleneck post-#277 — a decode-heavy-embedded nicety for its own focused
-> session). Oracle infra to keep: the installed `77190bd02` lib at `~/local/ghostty/zig-out/lib`
-> and the `~/local/ghostty-pin77190` build worktree. Full history + resume detail below.
+> **Thread active again.** New perf session (Opus) respawned off the archived handoff below.
+> The competitive-perf mission stays complete (all four vtebench region-scroll suites closed +
+> wide/CJK optimized: #266/#269/#277/#283, all merged, pin at `77190bd02`). This session's job
+> is the remaining backlog. **State on respawn (2026-07-15):** machine CONTENDED (loadavg 8.75
+> rising on 12 cores, WindowServer 47%, mediaanalysisd 69%, Josh active on Firefox) → the
+> scoreboard refresh is blocked AND clean perf before/after numbers can't be taken. Oracle infra
+> intact: `77190bd02` lib at `~/local/ghostty/zig-out/lib` + `~/local/ghostty-pin77190` worktree.
+>
+> **Upstream perf scan (bootstrap item 3, done this session):** fetched `~/local/ghostty`
+> origin/main; 81 commits touch `src/simd`/`src/terminal` since the pin. Only three are perf
+> levers (rest are search/generation-marker correctness): **(a) `8c523ed03` vectorize APC
+> payload scanning** — +42% on a 64 MiB kitty-graphics corpus; self-contained (43 lines in
+> `stream.zig`, scalar tail + full fallback). Our APC path is per-byte (`ApcPut(u8)` through the
+> state machine one byte at a time) → same structural bottleneck upstream fixed; **strongest
+> net-new lever**, serves the embeddability/betamax goal. **(b/c) `fedd42e8d`+`7e14347c1`+
+> `65f953e8e` page-map `hash_map.zig` backward-shift deletion** — bounds probe lengths, ~5.5% on
+> a cell-move bench, net −136 lines; large interdependent rewrite of the hyperlink/grapheme map,
+> differential-critical, coupled to a further pin-bump decision (Josh's call). Both need full
+> rigor + a quiet machine for clean numbers.
 
-- **Current item:** 🗄️ **ARCHIVED** (see banner above). Thread retired after #266/#269/#277/#283
-  all merged + the pin bump. Remaining backlog for a fresh thread (all gated or big-effort):
+- **Current item:** machine-blocked on the scoreboard; assessing net-new levers. Awaiting Josh
+  steer on whether to invest a focused session in the **APC SIMD vectorize** (recommended
+  net-new lever) vs. hold for the scoreboard. Backlog (all gated / big-effort / need quiet box):
+  - **(0, NEW) APC SIMD vectorize** (port of upstream `8c523ed03`) — +42% kitty-graphics APC
+    parsing upstream; our path is per-byte. Strongest net-new lever, embeddability-relevant.
+    `std::arch::aarch64` NEON (stable) or `core::arch` per-target width + scalar tail/fallback;
+    gate `cfg(target_arch)`. Differential-CRITICAL (parser boundary) → full rigor: differential,
+    generative sweep, Miri on the unsafe, 3-min parser fuzz, and clean before/after (add an
+    `apc`/kitty stream to `profile_streams` first — profile FIRST). Needs a quiet machine for
+    numbers. Awaiting Josh go/hold.
   - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
-    BLOCKED on a quiet machine (re-checked 2026-07-15 repeatedly: WindowServer 43–44%, loadavg
-    ~5–6, Josh's interactive apps active → the render-heavy region suites are contended and
+    BLOCKED on a quiet machine (re-checked 2026-07-15: WindowServer 47%, loadavg 8.75 rising,
+    mediaanalysisd 69%, Josh active on Firefox → the render-heavy region suites are contended and
     would read 3–4× inflated on ALL builds; see the A/B caveat in
     `docs/analysis/scroll-region-opt.md`). Run `scripts/bench-vtebench.sh` across all three
     terminals (qt, ghostty-main, ghostty-1.3.1), 3 load-gated rounds each, when loadavg is below
@@ -36,7 +50,10 @@
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
 - **Last merged:** **#283** (wide pair-write, `9e51aad3`); **#277** (unchecked interior UTF-8
   decode, `2708b267`); **#269** (change 1 + pin bump, `36256c78`); **#266** (change 2, `0fb53969`).
-- **Blockers:** none. **Workspace:** forgotten + deleted (thread retired).
+- **Blockers:** machine contention (loadavg 8.75, WindowServer 47%) blocks the scoreboard AND
+  clean perf before/after numbers; the box is unlikely to quiet while Josh works. Net-new levers
+  (APC vectorize / hash_map backward-shift) await a Josh go/hold. **Workspace:** `work/perf`
+  (recreated this session).
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
@@ -162,3 +179,20 @@ New tests: `hand_scroll_region_fast_path` (vt-diff, wide+deep), `index_region_sc
   `36256c78`). Verified green vs the new oracle: generative sweep 259→0, differential, corpus,
   afl, release + paranoid (1618), Miri, resize fuzz 76k. **All 4 region-scroll suites now
   addressed.** Next: quiet-machine vtebench scoreboard refresh; then the wide/CJK engine gap.
+
+## Session — respawn 2026-07-15 (Opus)
+
+- Bootstrapped `work/perf` fresh (predecessor workspace was deleted; name was free). Read
+  AGENTS.md, threads/README, this status file, `docs/analysis/perf.md` +
+  `scroll-region-opt.md`. Confirmed pin at `77190bd02`, oracle infra intact.
+- Machine check: loadavg **8.75/7.73/6.60** (rising) on 12 cores, WindowServer 47%,
+  mediaanalysisd 69%, Josh active on Firefox → **scoreboard blocked** and no clean perf numbers
+  obtainable. Won't publish contaminated numbers.
+- Sibling scan: no thread names `perf` as a blocker; my Inbox empty. No cross-thread asks.
+- **Upstream perf scan (bootstrap item 3):** `git -C ~/local/ghostty fetch` → 81 commits touch
+  `src/simd`/`src/terminal` since the pin. Perf-relevant: `8c523ed03` (APC SIMD scan, +42%
+  kitty-graphics — strongest net-new lever; our path is per-byte `ApcPut(u8)`), and the
+  `hash_map.zig` backward-shift-deletion cluster `fedd42e8d`/`7e14347c1`/`65f953e8e` (~5.5% cell
+  move, big + pin-bump-coupled). Rest are search/generation-marker correctness, not perf.
+- Un-archived this file; recorded findings; presented Josh the go/hold decision on the APC
+  vectorize vs. hold-for-scoreboard. Awaiting steer.
