@@ -250,7 +250,14 @@ struct Surface {
     engine: Arc<Mutex<Engine>>,
     /// This surface's own terminal IO stack (rustix pty + read pipeline + mailbox
     /// writer loop). Dropping it joins the io threads.
-    io: TabIo,
+    ///
+    /// `None` for a **display-only** tmux pane surface (ADR 006 slice 5b-native):
+    /// such a surface has no pty and no shell — its bytes arrive via `%output`
+    /// through the control surface's [`TmuxSession`] Viewer, which owns the pane
+    /// `Terminal` it renders (see [`Surface::display`]). Every pty write / resize
+    /// / event drain is a no-op for it; input+resize routing to tmux panes is
+    /// slice 5d.
+    io: Option<TabIo>,
     /// The render engine (cell buffers + Metal draw), if a Metal device exists.
     /// One per surface (multiple already coexist across tabs today).
     render: Option<RenderEngine>,
@@ -371,6 +378,32 @@ struct Surface {
     /// [`ReconcilePlan`](crate::tmux_reconcile::ReconcilePlan) for the native
     /// tab/split layer (ADR 006 slice 5c). `None` for an ordinary shell pane.
     tmux: Option<crate::tmux_session::TmuxSession>,
+    /// Set on a **display-only** tmux pane surface (ADR 006 slice 5b-native):
+    /// this surface renders a `Terminal` it does *not* own — the one the control
+    /// surface's [`TmuxSession`] Viewer owns for this tmux pane. The render pass
+    /// snapshots that foreign terminal by reference each frame
+    /// ([`Controller::render_tmux_panes`]); this surface's own [`Surface::engine`]
+    /// stays empty and unused. `None` for an ordinary shell pane (which renders
+    /// its own engine). See [`DisplaySource`].
+    display: Option<DisplaySource>,
+}
+
+/// Where a display-only tmux pane surface sources its `Terminal` from (ADR 006
+/// slice 5b-native, Option (a): the Viewer stays the single owner/feeder of pane
+/// bytes; the pane surface renders it by reference).
+///
+/// The surface's own [`SurfaceId`] (its key in the tab's surface map, minted by
+/// the [`Reconciler`](crate::tmux_reconcile::Reconciler)) is what
+/// [`TmuxSession::pane_terminal`](crate::tmux_session::TmuxSession::pane_terminal)
+/// resolves back to the pane `Terminal`, so this only needs to locate the
+/// control surface that owns the session.
+#[derive(Debug, Clone, Copy)]
+struct DisplaySource {
+    /// The tab holding the control surface running `tmux -CC`.
+    control_tab: TabId,
+    /// The control surface (within `control_tab`) whose `TmuxSession` owns this
+    /// pane's `Terminal`.
+    control_surface: SurfaceId,
 }
 
 /// Lock an engine mutex, recovering a poisoned lock instead of panicking.
@@ -416,13 +449,12 @@ struct PumpResult {
 
 /// One tmux control-mode reconcile event, collected during the per-surface
 /// pump loop and applied to native tabs after that borrow drops (ADR 006 slice
-/// 5c). `plan` is the native tab/split intent; `exit` tears the session's tabs
-/// down. `pane_count` is a snapshot for the diagnostic log.
+/// 5b-native). `plan` is the native tab/split intent; `exit` tears the session's
+/// tabs down.
 struct TmuxReconcileEvent {
     tab: TabId,
     surface: SurfaceId,
     plan: Option<crate::tmux_reconcile::ReconcilePlan>,
-    pane_count: usize,
     exit: bool,
 }
 
@@ -463,6 +495,21 @@ impl Surface {
         }
     }
 
+    /// Write bytes to this surface's pty, if it has one. A display-only tmux
+    /// pane surface ([`Surface::display`] set) has no pty — its bytes arrive via
+    /// `%output` through the Viewer — so the write is silently dropped. Routing
+    /// real input to a tmux pane (`send-keys`) is slice 5d.
+    fn send_pty(&self, bytes: &[u8]) {
+        if let Some(io) = &self.io {
+            io.write(bytes);
+        }
+    }
+
+    /// This surface's display-only source, if it is a tmux pane surface.
+    fn display_source(&self) -> Option<DisplaySource> {
+        self.display
+    }
+
     /// Whether this surface has been marked dead by a poison observation.
     fn is_dead(&self) -> bool {
         self.dead.get()
@@ -483,12 +530,16 @@ impl Surface {
             self.cols = cols;
             self.rows = rows;
             self.engine().resize(cols, rows);
-            self.io.resize(
-                cols as u16,
-                rows as u16,
-                self.font.cell_width,
-                self.font.cell_height,
-            );
+            // A display-only tmux pane surface has no pty to resize; its grid is
+            // driven by tmux's layout, and native→tmux resize is slice 5d.
+            if let Some(io) = &self.io {
+                io.resize(
+                    cols as u16,
+                    rows as u16,
+                    self.font.cell_width,
+                    self.font.cell_height,
+                );
+            }
         }
     }
 
@@ -528,6 +579,14 @@ impl Surface {
     /// title/password state so the tab can reflect the *focused* pane's title in
     /// the window title.
     fn pump(&mut self) -> PumpResult {
+        // A display-only tmux pane surface has no pty and no engine of its own to
+        // service — its bytes flow through the control surface's `TmuxSession`
+        // (pumped when that control surface is pumped) and it renders that
+        // session's pane `Terminal` by reference in `render_tmux_panes`. Nothing
+        // to drain here.
+        if self.display.is_some() {
+            return PumpResult::default();
+        }
         // A poison-dead surface has (or is about to have) its io shut down; skip
         // all io servicing for it. It is neither "exited" (which would close it)
         // nor generating password events — it just shows its crash banner.
@@ -552,7 +611,7 @@ impl Surface {
             return PumpResult::default();
         }
         if !out.is_empty() {
-            self.io.write(&out);
+            self.send_pty(&out);
         }
         // tmux control-mode lifecycle (ADR 006 slice 5c). Feed the drained
         // notifications to this surface's live `TmuxSession` — created on the
@@ -579,7 +638,12 @@ impl Surface {
         }
         let mut exited = false;
         let mut password: Option<bool> = None;
-        for event in self.io.drain_events() {
+        let io_events = self
+            .io
+            .as_ref()
+            .map(|io| io.drain_events())
+            .unwrap_or_default();
+        for event in io_events {
             match event {
                 IoEvent::ChildExited { exit_code, .. } => {
                     if exit_code != 0 {
@@ -637,7 +701,7 @@ impl Surface {
         // Write each command block back to the control pty (already newline-
         // terminated). This is the in-band request half of control mode.
         for command in &update.commands {
-            self.io.write(command);
+            self.send_pty(command);
         }
         // On exit (or a defunct session) drop it so a later re-entry starts
         // fresh; the controller tears the native tabs down from `tmux_exit`.
@@ -671,7 +735,9 @@ impl Surface {
             return;
         }
         self.banner_drawn.set(true);
-        self.io.shutdown();
+        if let Some(io) = &mut self.io {
+            io.shutdown();
+        }
 
         let reason = self.dead_reason().unwrap_or_else(|| "unknown".to_string());
         // A simple, self-contained banner: reset the screen, move to home, and
@@ -769,7 +835,7 @@ impl Surface {
         if self.render.is_none() {
             return;
         }
-        let (mut window, range) = {
+        let (window, range) = {
             let mut engine = self.engine();
             // Resolve the selection range first (immutable borrow), then take
             // the per-frame tracking capture (which mutably clears dirty state).
@@ -779,6 +845,30 @@ impl Surface {
             let window = engine.snapshot_window_tracking(self.scrollback_offset);
             (window, range)
         };
+        self.render_window(window, range, focused, is_split);
+    }
+
+    /// Draw one already-captured [`SnapshotWindow`] through this surface's render
+    /// engine + font grid, applying the selection / search / unfocused-dim CPU
+    /// tint passes, then present it.
+    ///
+    /// Factored out of [`Surface::render`] so a **display-only tmux pane
+    /// surface** (ADR 006 slice 5b-native) can render a `SnapshotWindow`
+    /// captured *by reference* from the control surface's Viewer-owned pane
+    /// `Terminal` — a terminal this surface does not own — instead of its own
+    /// (empty) engine. The normal path passes the surface's own tracking
+    /// snapshot + selection range; the tmux path passes the foreign pane's
+    /// snapshot and `range: None` (selection/search on tmux panes is slice 5d).
+    fn render_window(
+        &mut self,
+        mut window: qwertty_term_vt::snapshot::SnapshotWindow,
+        range: Option<crate::selection::ScreenRange>,
+        focused: bool,
+        is_split: bool,
+    ) {
+        if self.render.is_none() {
+            return;
+        }
         if let Some(range) = range {
             tint_selection(&mut window, range, self.selection_colors);
         }
@@ -1065,7 +1155,12 @@ impl Surface {
         if self.is_dead() {
             return;
         }
-        self.io.focus(focused);
+        // A display-only tmux pane surface has no pty: focus (and its 1004
+        // reporting) is routed to tmux in slice 5d, not here.
+        let Some(io) = &self.io else {
+            return;
+        };
+        io.focus(focused);
         // Only emit the 1004 report if the program asked for it. `engine()`
         // degrades a poisoned lock to a dead surface (and returns), so re-check.
         let reporting = self.engine().focus_reporting();
@@ -1074,7 +1169,7 @@ impl Surface {
         }
         // CSI I = focus in, CSI O = focus out (xterm mode 1004).
         let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-        self.io.write(bytes);
+        self.send_pty(bytes);
     }
 
     /// Snap this pane's viewport back to the live active area (offset 0) and
@@ -1258,7 +1353,7 @@ impl Surface {
                 self.gesture.reset();
                 let bytes = arrow_key_bytes(up, cursor_keys);
                 for _ in 0..count {
-                    self.io.write(&bytes);
+                    self.send_pty(&bytes);
                 }
             }
             crate::scroll::WheelOutcome::Report { count, up } => {
@@ -1315,7 +1410,7 @@ impl Surface {
             &mut self.last_mouse_cell,
         );
         if !bytes.is_empty() {
-            self.io.write(&bytes);
+            self.send_pty(&bytes);
         }
     }
 }
@@ -1760,6 +1855,13 @@ pub struct ControllerState {
     /// default false). When true and the program has enabled KAM, keyboard
     /// input to the pty is dropped (upstream `Surface.zig:2699`).
     vt_kam_allowed: bool,
+    /// tmux control-mode native tabs (ADR 006 slice 5b-native). For each control
+    /// surface running `tmux -CC` (keyed by its `(TabId, SurfaceId)`), maps each
+    /// tmux **window id** to the native [`TabId`] mirroring it (tmux window →
+    /// native tab; its panes are the tab's display-only split surfaces). Entries
+    /// are created as windows appear, removed on `RemoveTab`, and the whole
+    /// session's tabs are torn down on control-mode `Exit`.
+    tmux_tabs: HashMap<(TabId, SurfaceId), HashMap<usize, TabId>>,
 }
 
 /// The subset of VT config toggles applied to a surface's engine (the setters
@@ -2063,6 +2165,7 @@ impl Controller {
             image_storage_limit: config.image_storage_limit as usize,
             scrollback_limit: config.scrollback_limit,
             vt_kam_allowed: config.vt_kam_allowed,
+            tmux_tabs: HashMap::new(),
         })))
     }
 
@@ -2117,59 +2220,299 @@ impl Controller {
     // -- tmux control mode ------------------------------------------------
 
     /// Apply the tmux control-mode reconcile events collected during a tick's
-    /// per-surface pump (ADR 006 slice 5c). Called with **no** controller borrow
-    /// held, so it is free to create/remove native tabs.
+    /// per-surface pump (ADR 006 slice 5b-native). Called with **no** controller
+    /// borrow held, so it is free to create/remove native tabs.
     ///
-    /// ## Status: lifecycle live; native tab creation is the 5b-native hook
+    /// Each event carries the control surface `(tab, surface)` running `tmux -CC`
+    /// and either a [`ReconcilePlan`](crate::tmux_reconcile::ReconcilePlan) (the
+    /// window/pane tree changed) or an `exit` flag (control mode ended). The plan
+    /// is applied as Option (a): each tmux **window** becomes a native **tab**
+    /// grouped with the control surface's window, and each tmux **pane** becomes
+    /// a **display-only split surface** in that tab (rendered from the Viewer's
+    /// pane `Terminal` in [`render_tmux_panes`](Self::render_tmux_panes)).
     ///
-    /// The *lifecycle* is fully wired: a pane running `tmux -CC` decodes the
-    /// control-mode stream into notifications, drives its
-    /// [`TmuxSession`](crate::tmux_session::TmuxSession), writes the session's
-    /// commands back to its own pty, and produces the [`ReconcilePlan`] and
-    /// exit events handled here. What remains (deferred, ADR 006 "5c
-    /// surface-binding") is turning each plan into real [`NSWindow`] tabs whose
-    /// panes are **display-only surfaces** rendering the Viewer's per-pane
-    /// `Terminal`s (a new, non-pty `Surface` construction mode not yet present
-    /// in [`build_surface`](Self::build_surface)). Until that lands, this
-    /// records the reconciliation so a live `tmux -CC` session is observable
-    /// and the seam is explicit; the pane terminals are already populated by
-    /// `%output` and reachable via
-    /// [`TmuxSession::pane_terminal`](crate::tmux_session::TmuxSession::pane_terminal).
+    /// The native tab creation is driven off `SetSplitTree` (create-or-update)
+    /// rather than `CreateTab`: the Reconciler emits a `SetSplitTree` for *every*
+    /// present window on each reconcile, and it carries the tree we need to build
+    /// the panes, so [`tmux_tabs`](ControllerState::tmux_tabs) membership is the
+    /// single source of truth for whether a native tab already exists. `RemoveTab`
+    /// closes gone windows; `CreateTab` is implied by the first `SetSplitTree`.
     fn apply_tmux_reconciles(&self, events: Vec<TmuxReconcileEvent>) {
         for event in events {
+            let key = (event.tab, event.surface);
             if event.exit {
-                eprintln!(
-                    "qwertty-term[tmux]: control mode ended on tab {:?} surface {:?} \
-                     (native tabs torn down; 5b-native)",
-                    event.tab.0, event.surface.0
-                );
+                // Tear down every native tab mirroring this control session.
+                let tabs: Vec<TabId> = self
+                    .0
+                    .borrow_mut()
+                    .tmux_tabs
+                    .remove(&key)
+                    .map(|m| m.into_values().collect())
+                    .unwrap_or_default();
+                for tab in tabs {
+                    self.close_tab(tab);
+                }
                 continue;
             }
             let Some(plan) = event.plan else {
                 continue;
             };
-            let (mut creates, mut removes, mut sets) = (0usize, 0usize, 0usize);
+            let control = DisplaySource {
+                control_tab: event.tab,
+                control_surface: event.surface,
+            };
+            // 1. Remove native tabs for windows that disappeared.
             for op in &plan.ops {
-                match op {
-                    crate::tmux_reconcile::ReconcileOp::CreateTab { .. } => creates += 1,
-                    crate::tmux_reconcile::ReconcileOp::RemoveTab { .. } => removes += 1,
-                    crate::tmux_reconcile::ReconcileOp::SetSplitTree { .. } => sets += 1,
+                if let crate::tmux_reconcile::ReconcileOp::RemoveTab { window_id } = op {
+                    let native = self
+                        .0
+                        .borrow_mut()
+                        .tmux_tabs
+                        .get_mut(&key)
+                        .and_then(|m| m.remove(window_id));
+                    if let Some(tab) = native {
+                        self.close_tab(tab);
+                    }
                 }
             }
-            // TODO(ADR 006 slice 5b-native): apply `plan.ops` to the native tab
-            // registry — CreateTab → spawn a display-only tab, RemoveTab → close
-            // it, SetSplitTree → set the tab's `SplitTree` and bind each leaf's
-            // surface to `TmuxSession::pane_terminal`. `plan.dropped_surfaces`
-            // frees the renderer surfaces of closed panes.
-            eprintln!(
-                "qwertty-term[tmux]: reconcile on tab {:?} surface {:?} — \
-                 +{creates} tab(s), -{removes} tab(s), {sets} split-tree(s), \
-                 {} pane(s), {} dropped surface(s) (native apply: 5b-native)",
-                event.tab.0,
-                event.surface.0,
-                event.pane_count,
-                plan.dropped_surfaces.len()
-            );
+            // 2. Create-or-update a native tab for every present window.
+            for op in &plan.ops {
+                if let crate::tmux_reconcile::ReconcileOp::SetSplitTree { window_id, tree } = op {
+                    let existing = self
+                        .0
+                        .borrow()
+                        .tmux_tabs
+                        .get(&key)
+                        .and_then(|m| m.get(window_id))
+                        .copied();
+                    match existing {
+                        Some(tab) => self.update_tmux_tab(tab, control, tree),
+                        None => {
+                            if let Some(tab) = self.spawn_tmux_tab(control, tree) {
+                                self.0
+                                    .borrow_mut()
+                                    .tmux_tabs
+                                    .entry(key)
+                                    .or_default()
+                                    .insert(*window_id, tab);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawn a native tab that mirrors one tmux window (ADR 006 slice 5b-native):
+    /// a window whose content is a [`SplitContainer`] holding one display-only
+    /// [`Surface`] per pane in `tree`, grouped as a native tab of the control
+    /// surface's window. Returns the new [`TabId`], or `None` if no pane surface
+    /// could be built (e.g. no font). The panes are drawn from the Viewer's pane
+    /// terminals by [`render_tmux_panes`](Self::render_tmux_panes).
+    fn spawn_tmux_tab(&self, control: DisplaySource, tree: &SplitTree) -> Option<TabId> {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+        let scale = 2.0; // provisional; corrected from the real window below.
+
+        let id = self.0.borrow_mut().registry.add();
+        let leaves = tree.surfaces();
+
+        // Build a display-only surface per pane (each borrows config internally,
+        // so build outside any state borrow).
+        let container = crate::splitview::SplitContainer::new(
+            mtm,
+            controller_ptr,
+            id,
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+            ),
+        );
+        let mut surfaces: HashMap<SurfaceId, Surface> = HashMap::new();
+        let mut default_bg = (0x18u8, 0x18u8, 0x18u8);
+        for leaf in &leaves {
+            let Some(surface) = self.build_display_surface(mtm, id, *leaf, scale, control) else {
+                continue;
+            };
+            default_bg = surface.default_bg;
+            container.addSubview(&surface.view);
+            surfaces.insert(*leaf, surface);
+        }
+        if surfaces.is_empty() {
+            // Nothing to show; roll back the registry entry.
+            self.0.borrow_mut().registry.remove(id);
+            return None;
+        }
+
+        let tabbing_mode = match self.0.borrow().window_show_tab_bar {
+            crate::config::WindowShowTabBar::Auto => NSWindowTabbingMode::Automatic,
+            crate::config::WindowShowTabBar::Always => NSWindowTabbingMode::Preferred,
+            crate::config::WindowShowTabBar::Never => NSWindowTabbingMode::Disallowed,
+        };
+        let window = make_window(mtm, &container, tabbing_mode);
+        set_window_background(&window, default_bg);
+        let window_delegate = WindowDelegate::new(mtm, self.clone(), id);
+        window.setDelegate(Some(ProtocolObject::from_ref(&*window_delegate)));
+
+        // Correct the scale from the real window and rebuild fonts if it differs.
+        let real_scale = window.backingScaleFactor();
+        if (real_scale - scale).abs() > f64::EPSILON {
+            let family = self.0.borrow().font_family.clone();
+            for surface in surfaces.values_mut() {
+                surface.scale = real_scale;
+                surface.rebuild_font(family.as_deref());
+            }
+        }
+
+        let next_surface = leaves.iter().map(|s| s.0).max().map(|m| m + 1).unwrap_or(0);
+        let mut tab = Tab {
+            tree: tree.clone(),
+            surfaces,
+            window: window.clone(),
+            container: container.clone(),
+            dividers: Vec::new(),
+            _window_delegate: window_delegate,
+            next_surface,
+            created: std::time::Instant::now(),
+            last_title: RefCell::new(String::new()),
+            last_subtitle: RefCell::new(String::new()),
+            bell_ringing: Cell::new(false),
+            resize_overlay: RefCell::new(None),
+            resize_overlay_deadline: Cell::new(None),
+        };
+        tab.relayout(controller_ptr, id, mtm);
+        self.0.borrow_mut().tabs.insert(id, tab);
+
+        // Group the new tmux-window tab into the control surface's window group
+        // so it appears as a native tab (unless tabbing is disallowed).
+        if tabbing_mode != NSWindowTabbingMode::Disallowed {
+            let parent_window = self
+                .0
+                .borrow()
+                .tabs
+                .get(&control.control_tab)
+                .map(|t| t.window.clone());
+            if let Some(pw) = parent_window {
+                pw.addTabbedWindow_ordered(&window, objc2_app_kit::NSWindowOrderingMode::Above);
+            }
+        }
+
+        window.makeKeyAndOrderFront(None);
+        Some(id)
+    }
+
+    /// Re-apply a tmux window's split tree to its existing native tab (ADR 006
+    /// slice 5b-native): add display-only surfaces for newly-appeared panes,
+    /// drop surfaces for panes that vanished, set the tab's tree, and re-lay-out.
+    /// Surviving panes keep their surface (the Reconciler keeps a stable
+    /// `pane_id → SurfaceId` map), so their content/render state is preserved.
+    fn update_tmux_tab(&self, tab_id: TabId, control: DisplaySource, tree: &SplitTree) {
+        let mtm = self.0.borrow().mtm;
+        let controller_ptr: *const Controller = self;
+        let leaves = tree.surfaces();
+
+        // Diff the leaf set against the tab's current surfaces under a scoped
+        // borrow: collect the pane ids to add and the surfaces to drop.
+        let (to_add, scale): (Vec<SurfaceId>, f64) = {
+            let mut state = self.0.borrow_mut();
+            let Some(t) = state.tabs.get_mut(&tab_id) else {
+                return;
+            };
+            let scale = t.window.backingScaleFactor();
+            let present: std::collections::HashSet<SurfaceId> =
+                t.surfaces.keys().copied().collect();
+            let wanted: std::collections::HashSet<SurfaceId> = leaves.iter().copied().collect();
+            // Remove panes no longer in the layout.
+            for gone in present.difference(&wanted) {
+                if let Some(dead) = t.surfaces.remove(gone) {
+                    dead.view.removeFromSuperview();
+                }
+            }
+            let to_add: Vec<SurfaceId> = wanted.difference(&present).copied().collect();
+            (to_add, scale)
+        };
+
+        // Build new display surfaces outside the borrow (config reads borrow).
+        let mut built: Vec<(SurfaceId, Surface)> = Vec::new();
+        for leaf in to_add {
+            if let Some(surface) = self.build_display_surface(mtm, tab_id, leaf, scale, control) {
+                built.push((leaf, surface));
+            }
+        }
+
+        // Insert the new surfaces, set the tree, and re-lay-out under a borrow.
+        let mut state = self.0.borrow_mut();
+        let Some(t) = state.tabs.get_mut(&tab_id) else {
+            return;
+        };
+        for (leaf, surface) in built {
+            t.container.addSubview(&surface.view);
+            t.surfaces.insert(leaf, surface);
+        }
+        t.tree = tree.clone();
+        t.relayout(controller_ptr, tab_id, mtm);
+    }
+
+    /// Draw every display-only tmux pane surface from the pane `Terminal` its
+    /// control session's Viewer owns (ADR 006 slice 5b-native). Two-phase to
+    /// respect the borrow checker: phase 1 reads each display surface's control
+    /// session and snapshots its pane terminal into an owned
+    /// [`SnapshotWindow`](qwertty_term_vt::snapshot::SnapshotWindow) (immutable
+    /// borrow of `state.tabs`, reading one tab's session while identifying
+    /// another tab's display surface); phase 2 draws each snapshot through its
+    /// own surface's render engine (mutable borrow). Called every render tick —
+    /// `%output` updates pane terminals continuously, without a tree change.
+    fn render_tmux_panes(&self) {
+        struct PaneFrame {
+            tab: TabId,
+            surface: SurfaceId,
+            window: qwertty_term_vt::snapshot::SnapshotWindow,
+            focused: bool,
+            is_split: bool,
+        }
+
+        // Phase 1: snapshot each display pane's foreign terminal (immutable).
+        let frames: Vec<PaneFrame> = {
+            let state = self.0.borrow();
+            let mut frames = Vec::new();
+            for (tid, tab) in &state.tabs {
+                let is_split = tab.tree.len() > 1;
+                let focused = tab.tree.focused();
+                for (sid, surface) in &tab.surfaces {
+                    let Some(src) = surface.display_source() else {
+                        continue; // an ordinary pane; already drawn in the tick loop.
+                    };
+                    // Resolve the control surface's live session and this pane's
+                    // Viewer-owned terminal, then snapshot it (non-mutating).
+                    let window = state
+                        .tabs
+                        .get(&src.control_tab)
+                        .and_then(|ct| ct.surfaces.get(&src.control_surface))
+                        .and_then(|cs| cs.tmux_session())
+                        .and_then(|session| session.pane_terminal(*sid))
+                        .map(|term| term.snapshot_window(0));
+                    if let Some(window) = window {
+                        frames.push(PaneFrame {
+                            tab: *tid,
+                            surface: *sid,
+                            window,
+                            focused: *sid == focused,
+                            is_split,
+                        });
+                    }
+                }
+            }
+            frames
+        };
+
+        // Phase 2: draw each snapshot through its own surface (mutable).
+        let mut state = self.0.borrow_mut();
+        for f in frames {
+            if let Some(tab) = state.tabs.get_mut(&f.tab)
+                && let Some(surface) = tab.surfaces.get_mut(&f.surface)
+            {
+                surface.render_window(f.window, None, f.focused, f.is_split);
+            }
         }
     }
 
@@ -2714,7 +3057,7 @@ impl Controller {
                 if let Some(t) = state.tabs.get_mut(&tab) {
                     let sid = t.tree.focused();
                     if let Some(s) = t.surfaces.get_mut(&sid) {
-                        s.io.write(path_str.as_bytes());
+                        s.send_pty(path_str.as_bytes());
                     }
                 }
             }
@@ -3029,7 +3372,7 @@ impl Controller {
     pub fn write_to_surface(&self, tab: TabId, surface: SurfaceId, bytes: &[u8]) {
         let state = self.0.borrow();
         if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
-            s.io.write(bytes);
+            s.send_pty(bytes);
         }
     }
 
@@ -3686,7 +4029,7 @@ impl Controller {
                 .and_then(|t| t.surfaces.get_mut(&surface))
             {
                 s.snap_to_bottom();
-                s.io.write(&bytes);
+                s.send_pty(&bytes);
             }
             return true;
         }
@@ -3813,7 +4156,7 @@ impl Controller {
             .and_then(|t| t.surfaces.get_mut(&surface))
         {
             s.snap_to_bottom();
-            s.io.write(&bytes);
+            s.send_pty(&bytes);
         }
         true
     }
@@ -3853,7 +4196,7 @@ impl Controller {
                     s.engine().clear_selection();
                     s.gesture.reset();
                 }
-                s.io.write(&bytes);
+                s.send_pty(&bytes);
             }
         }
     }
@@ -3880,7 +4223,7 @@ impl Controller {
                 s.engine().clear_selection();
                 s.gesture.reset();
             }
-            s.io.write(text.as_bytes());
+            s.send_pty(text.as_bytes());
         }
     }
 
@@ -3995,7 +4338,7 @@ impl Controller {
         let bytes =
             crate::input::mouse::encode(action, button, mods, x, y, &ctx, &mut s.last_mouse_cell);
         if !bytes.is_empty() {
-            s.io.write(&bytes);
+            s.send_pty(&bytes);
         }
     }
 
@@ -4477,7 +4820,7 @@ impl Controller {
             } else {
                 text.as_bytes().to_vec()
             };
-            s.io.write(&payload);
+            s.send_pty(&payload);
         }
     }
 
@@ -4695,7 +5038,7 @@ impl Controller {
             let mut command_finishes: Vec<(TabId, Option<i32>, std::time::Duration, bool)> =
                 Vec::new();
             // tmux control-mode reconcile events observed this tick (ADR 006
-            // slice 5c): `(tab, control-surface, plan, pane_count, exit)`.
+            // slice 5b-native): `(tab, control-surface, plan, exit)`.
             // Collected here and applied to native tabs after the per-surface
             // borrow drops (creating/removing tabs needs `&mut state.tabs`,
             // which is borrowed by this loop).
@@ -4718,15 +5061,10 @@ impl Controller {
                     // tmux control-mode: a tree change (plan) or an exit is
                     // recorded for post-borrow application to native tabs.
                     if result.tmux_plan.is_some() || result.tmux_exit {
-                        let pane_count = surface
-                            .tmux_session()
-                            .map(|s| s.viewer().pane_count())
-                            .unwrap_or(0);
                         tmux_events.push(TmuxReconcileEvent {
                             tab: *tid,
                             surface: *sid,
                             plan: result.tmux_plan,
-                            pane_count,
                             exit: result.tmux_exit,
                         });
                     }
@@ -4755,7 +5093,12 @@ impl Controller {
                         surface.tick_progress_autoclear(now_tick);
                         // Render only on the combined tick; when a display link
                         // drives presentation, `tick_render` does this at vsync.
-                        if render_panes {
+                        // A display-only tmux pane surface renders a foreign pane
+                        // `Terminal` it doesn't own, so it can't be drawn from
+                        // this per-surface borrow (the owner is another tab's
+                        // control surface); it's drawn afterwards in
+                        // `render_tmux_panes`, once this borrow drops.
+                        if render_panes && surface.display.is_none() {
                             surface.render(*sid == focused, is_split);
                             surface.sync_progress_layer();
                         }
@@ -4800,6 +5143,14 @@ impl Controller {
         // released (creating/removing native tabs needs `&mut state.tabs`).
         if !tmux_events.is_empty() {
             self.apply_tmux_reconciles(tmux_events);
+        }
+        // Draw every display-only tmux pane surface from its (foreign) pane
+        // `Terminal`. Done every render tick, not just on a tree change: `%output`
+        // updates pane terminals continuously without a reconcile. Runs with no
+        // controller borrow held (it takes its own two-phase borrow to read one
+        // tab's control session and draw into another).
+        if render_panes {
+            self.render_tmux_panes();
         }
         // Fire the once-per-tick audible/attention bell effects with no
         // controller borrow held (these are AppKit calls). The per-tab title
@@ -4905,6 +5256,43 @@ impl Controller {
         scale: f64,
         cwd: Option<&std::path::Path>,
     ) -> Option<Surface> {
+        self.build_surface_with(mtm, tab, surface, scale, cwd, None)
+    }
+
+    /// Build a **display-only** tmux pane surface (ADR 006 slice 5b-native): a
+    /// [`Surface`] with **no pty and no shell** (`io: None`) that renders the
+    /// pane `Terminal` owned by `control`'s [`TmuxSession`] Viewer, sourced by
+    /// reference each frame in [`Controller::render_tmux_panes`]. Its own engine
+    /// is created (to satisfy the struct + any incidental `engine()` read) but
+    /// stays empty and is never fed. `surface` must be the
+    /// [`Reconciler`](crate::tmux_reconcile::Reconciler)-minted id for this tmux
+    /// pane, so [`TmuxSession::pane_terminal`](crate::tmux_session::TmuxSession::pane_terminal)
+    /// resolves it back to the right pane.
+    fn build_display_surface(
+        &self,
+        mtm: MainThreadMarker,
+        tab: TabId,
+        surface: SurfaceId,
+        scale: f64,
+        control: DisplaySource,
+    ) -> Option<Surface> {
+        self.build_surface_with(mtm, tab, surface, scale, None, Some(control))
+    }
+
+    /// Shared body of [`build_surface`](Self::build_surface) and
+    /// [`build_display_surface`](Self::build_display_surface). When `display` is
+    /// `Some`, no pty is spawned (`io: None`) and the surface renders a foreign
+    /// tmux pane terminal; otherwise it spawns a shell in `cwd` and renders its
+    /// own engine, exactly as before.
+    fn build_surface_with(
+        &self,
+        mtm: MainThreadMarker,
+        tab: TabId,
+        surface: SurfaceId,
+        scale: f64,
+        cwd: Option<&std::path::Path>,
+        display: Option<DisplaySource>,
+    ) -> Option<Surface> {
         let (
             family,
             default_size,
@@ -4953,7 +5341,16 @@ impl Controller {
             Engine::with_options(cols, rows, startup_colors, vt_toggles.scrollback_limit);
         vt_toggles.apply(&mut engine_inner);
         let engine = Arc::new(Mutex::new(engine_inner));
-        let io = TabIo::spawn(Arc::clone(&engine), cols as u16, rows as u16, cw, ch, cwd).ok()?;
+        // A display-only tmux pane surface has no pty: its bytes arrive via
+        // `%output` through the control surface's Viewer, which owns the
+        // `Terminal` this surface renders. Everything else (font, render engine,
+        // view) is identical to a normal pane.
+        let io = match display {
+            None => Some(
+                TabIo::spawn(Arc::clone(&engine), cols as u16, rows as u16, cw, ch, cwd).ok()?,
+            ),
+            Some(_) => None,
+        };
         let render = RenderEngine::new(cw, ch).ok();
 
         let frame_dump = crate::frame_dump::FrameDump::from_env();
@@ -5021,6 +5418,7 @@ impl Controller {
             progress_deadline: None,
             progress_layer: None,
             tmux: None,
+            display,
         })
     }
 

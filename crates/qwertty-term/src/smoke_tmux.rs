@@ -273,6 +273,37 @@ pub fn run() -> Result<(), String> {
         return Err("pane 1 lost its content across the layout change".to_string());
     }
 
+    // Per-pane surface binding: this is exactly the seam the native render pass
+    // (`Controller::render_tmux_panes`) depends on — each split-tree leaf's
+    // `SurfaceId` must resolve to *its own* pane `Terminal`, so `%output` for one
+    // pane never bleeds into another's surface. Route output to pane 3 and assert
+    // it lands in s3's terminal and NOT in s1's. We snapshot through the same
+    // `snapshot_window` call the render path uses, not just `plain_string`, so
+    // the binding is exercised end to end.
+    server.send_line(&mut engine, "%output %3 hello-from-pane-3");
+    drive(&mut engine, &mut session, &mut native, &mut server);
+    let term3 = session
+        .pane_terminal(s3)
+        .ok_or("pane 3 surface did not resolve to a terminal")?;
+    if !term3.plain_string().contains("hello-from-pane-3") {
+        return Err(format!(
+            "pane 3's %output did not reach its own terminal; screen = {:?}",
+            term3.plain_string()
+        ));
+    }
+    // The render pass reads each pane via `snapshot_window(0)`; make sure that
+    // call resolves a window sized to the pane (non-empty), not a panic/empty.
+    if term3.snapshot_window(0).window.is_empty() {
+        return Err("pane 3 snapshot_window returned no rows".to_string());
+    }
+    let term1 = session
+        .pane_terminal(s1)
+        .ok_or("pane 1 terminal missing")?
+        .plain_string();
+    if term1.contains("hello-from-pane-3") {
+        return Err("pane 3's output bled into pane 1's surface/terminal".to_string());
+    }
+
     // --- A 2nd %window-add @2 opens a 2nd native tab ----------------------
     server.windows.push((2, "83x44,0,0,2".to_string()));
     server.send_line(&mut engine, "%window-add @2");
