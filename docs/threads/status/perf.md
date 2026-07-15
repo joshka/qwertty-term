@@ -129,6 +129,6 @@ New tests: `hand_scroll_region_fast_path` (vt-diff, wide+deep), `index_region_sc
   the lib into the default path, old lib backed up to `zig-out/lib-backup-2da015cd6/`); bumped
   the authoritative pin docs (AGENTS.md / handoff.md / vt-diff ffi.rs); tracked the 3
   font/sprite cursor-height commits in `issues.md`; merged **#269** (change 1 + pin bump,
-  `36256c78`). Verified green vs the new oracle: generative sweep 259→0, differential + corpus
-  + afl, release + paranoid (1618), Miri, resize fuzz 76k. **All 4 region-scroll suites now
+  `36256c78`). Verified green vs the new oracle: generative sweep 259→0, differential, corpus,
+  afl, release + paranoid (1618), Miri, resize fuzz 76k. **All 4 region-scroll suites now
   addressed.** Next: quiet-machine vtebench scoreboard refresh; then the wide/CJK engine gap.
