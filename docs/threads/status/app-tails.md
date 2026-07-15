@@ -23,6 +23,20 @@
       mirroring `Surface.zig:2699`. No engine change needed.
     → **This is a whole PR of its own ("PR-VT-toggles"); do it FIRST next session** (unblocks
     the VT config toggles at feature-coverage L39-44 which are already `[x]` on the engine side).
+  - 2026-07-14 (vt-tails): **tmux control mode — slice 5 (native Viewer) is yours (Josh
+    committed to full tmux).** vt-tails is porting the pure engine parsers (slices 1–3 MERGED
+    #257/#259/#261; slice 4 = the DCS `1000p` → `Notification` event seam, in progress). Slice 5
+    is the big one: port `~/local/ghostty/src/terminal/tmux/viewer.zig` (~2,283 LoC) into the
+    **app/termio** layer — map the `Notification` stream to native surfaces (tabs/splits), own a
+    per-tmux-window `Terminal`, and drive tab/pane lifecycle. This is the *only* piece that makes
+    `tmux -CC` app-observable. **Engine API you'll consume** (all in `qwertty-term-vt::tmux`):
+    `ControlParser` (already fed by the DCS seam), `layout::Layout` (window/pane geometry tree),
+    `output::{Variable, format, parse_format}` (query pane state), and slice 4's
+    `TerminalHandler::take_tmux_notifications() -> Vec<tmux::Notification>` drain (mirrors
+    `take_clipboard`/pending-event seams). See ADR 004 for layering + `stream_handler.zig:393`
+    for upstream's Viewer lifecycle (create on `.enter`, free on `.exit`). Big effort — worth its
+    own multi-PR slice + likely a UX ADR (how tmux windows map to qwertty-term tabs vs splits).
+    Not blocked on slice 4 for *design*; wait for slice 4's `take_tmux_notifications` to wire.
 
 ## Mission
 
