@@ -1,17 +1,16 @@
 # linux status (Linux port — ADR 003 Wave-1 done; P4 windowed app GREENLIT)
 
-- **Current item:** **P4 in progress (GTK4, ADR 005 #270).** Shipped: slice 1 **OpenGL
-  `GpuBackend`** (#279) + GTK plan (#280) + coordination (#281) + slice-2 **GTK crate scaffold**
-  (#284 — `crates/qwertty-term-gtk`: adw window + GtkGLArea that realizes a GL 4.3 context and
-  renders a clear frame, Docker+Xvfb-validated). **CRITICAL PATH now: the on-screen present seam**
-  (`GpuBackend::present`, **T2 core → BLOCKED on T2's reply** to the heads-up in their Inbox;
-  don't author until T2 agrees the design or hands it over) → then wire the terminal render into
-  the GTK GLArea (two seams marked in `qwertty-term-gtk/src/app.rs`) → keyboard = **user-testable
-  window milestone**. `qwertty-term` confirmed clean on Linux (reuse its platform-free modules).
-- **Recycle recommended:** the `work/linux` jj workspace hit a **spurious cross-workspace conflict**
-  (an unrelated thread's `perf.md` materialized as a conflict in the local jj view; origin/main is
-  clean — git-verified). #284 was shipped via a git worktree to bypass it. A fresh workspace
-  (bootstrap below) starts clean; tear down the old `work/linux`.
+- **Current item:** **P4 — the GTK4 window RENDERS REAL TERMINAL TEXT on Linux (milestone hit).**
+  Shipped: slice 1 OpenGL backend (#279), GTK plan (#280), coordination (#281), GTK scaffold
+  (#284), **present seam** (#290 — `GpuBackend::present`, merged into T2 core per Josh's call, T2
+  notified post-hoc), **terminal render wiring** (#291 — pty→vt→`Engine<OpenGL>`→GLArea; Docker+
+  Xvfb-verified: 1480 glyph pixels via `glReadPixels`). **NEXT = keyboard input → typeable window
+  (the milestone worth Josh's eyes).** Then: per-surface resize (re-grid + `TIOCSWINSZ`),
+  dirty-tracked redraw (drop the 60Hz tick), DPI/font-config; later winproto/tabs/splits/IME.
+- **Keyboard chunk (next, additive to the gtk crate — my territory, no T2 core):** `EventController
+  Key` → GDK keyval → `qwertty_term_input::KeyEvent` → `key_encode::encode` → pty write
+  (`termio::Subprocess` write side). Seam: `qwertty-term-gtk/src/{app,surface}.rs`. Validate
+  headless: a scripted keypress reaches the pty (strongest as a `TabIo::write`→snapshot-echo test).
 - **Last merged:** #284 (GTK scaffold). All P4 PRs merged: #270, #279, #280, #281, #284. Wave-1
   (#245/#248/#254/#258/#260/#262/#264/#265) done. Everything Docker-validated on arm64 Linux.
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
