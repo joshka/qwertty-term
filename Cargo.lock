@@ -2983,6 +2983,8 @@ dependencies = [
  "base64",
  "block2 0.6.2",
  "dispatch2",
+ "glow",
+ "khronos-egl",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-graphics",
