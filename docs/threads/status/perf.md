@@ -1,7 +1,29 @@
-# perf status — 🗄️ RECYCLED 2026-07-15 (hash_map lever complete + oracle fixed)
+# perf status — ACTIVE 2026-07-15 (profile-first pivot: decode → print-scan lever)
 
-> **Session recycled after completing the hash_map backward-shift lever + fixing a fleet-wide
-> stale-oracle bug.** Both PRs MERGED to origin/main (verified ancestors): **#297** `0babde7a`
+> **ACTIVE (respawn 2026-07-15, Opus).** Profile-first pass over the whole stream→print
+> pipeline **retired the NEON UTF-8 decode lever on evidence** and **promoted a concrete,
+> representative print-scan lever**. Full writeup + numbers: `docs/analysis/print-slice-scan.md`.
+> Key data (M2 Max, release, machine contended → ratios/self-time hold):
+> **every stream is print/execute-bound, not decode-bound** (print is 44–92% of full-pipeline
+> time; decode+dispatch ≤56%). The scalar decode is already SWAR-optimized (u64 ASCII scan +
+> multibyte fast path; DFA only for ill-formed), and its NOOP ceiling (ascii 1623, cjk 1305,
+> mixed-utf8 855 MiB/s) is above what any FULL stream hits — so a NEON decoder helps only a
+> speculative decode-only consumer at the codebase's highest differential risk. **Not worth it.**
+> The hot print work is `print_slice_fill::<narrow>` (~20–27% of the real light/medium_cells
+> vtebench payloads), whose two hottest lines are **read-only find-first scans**: the `run_len`
+> scan (`print.rs:246`, u32, 4-lane) and the `simple-cell` scan (`print.rs:372`, u64, 2-lane) —
+> the exact shape of the shipped `apc_scan_prefix_neon` lever (#289), low-risk (read-only, scalar
+> fallback, cfg-gated, differential+fuzz catch any wrong length). Run lengths on the real payloads
+> are long (median ~28–31 cells, 66–76% ≥16) → NEON-favorable (representative-workload checked, no
+> hash_map churn-trap). **Plan:** PR-1 run_len narrow prescan (safe slice, hottest+lowest-risk),
+> then PR-2 simple-cell scan (needs Miri on the pointer walk). Machine still not quiet for the
+> scoreboard (WindowServer ~47%, loadavg >3, projclean+Ghostty.app running).
+>
+> ---
+>
+> **[archived recycle banner]** Session recycled after completing the hash_map backward-shift
+> lever + fixing a fleet-wide
+> stale-oracle bug. Both PRs MERGED to origin/main (verified ancestors): **#297** `0babde7a`
 > (backward-shift deletion) and **#303** `d0a62c8c` (80% hyperlink load factor) — the full faithful
 > port of the upstream hash_map cluster (`fedd42e8d` + `7e14347c1`; `65f953e8e` already present).
 > Both oracle-neutral (**no pin bump** — proven, not assumed). Analysis:
@@ -46,12 +68,18 @@
 > region-scroll suites down ~1.5–1.7 ms (18→16.4) consistent with the shipped region-scroll
 > levers. A real 3-round median refresh still wants a quiet box.
 
-- **Current item:** 🗄️ **RECYCLED** — hash_map lever DONE + MERGED (#297 `0babde7a`, #303
-  `d0a62c8c`, both verified on origin/main) + stale oracle fixed (fleet-wide). Backlog for a fresh
-  thread:
+- **Current item:** **PR-1 run_len narrow prescan** (print-scan lever, `print.rs:246`). Profiling
+  done (`docs/analysis/print-slice-scan.md`); next = representative criterion bench → NEON impl →
+  full gate → ship. Reprioritized backlog:
   - **(DONE) hash_map backward-shift + load factor** — both PRs merged; full faithful port complete,
     oracle-neutral. Analysis `docs/analysis/hash-map-backward-shift.md`.
-  - **(1) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
+  - **(NEW, top) print-scan NEON lever** — `print_slice_fill` read-only find-first scans, the real
+    full-pipeline bottleneck (~20–27% on real light/medium_cells). PR-1 run_len (u32, 4-lane, safe);
+    PR-2 simple-cell (u64, 2-lane, Miri). Analysis `docs/analysis/print-slice-scan.md`.
+  - **(RETIRED) SIMD NEON UTF-8 decode** — profile shows decode is not the bottleneck (print is);
+    would only lift a NOOP ceiling nothing hits, at max differential risk. Evidence in the analysis
+    doc. Superseded by the print-scan lever.
+  - **(blocked) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15: WindowServer 47%, loadavg 8.75 rising,
     mediaanalysisd 69%, Josh active on Firefox → the render-heavy region suites are contended and
     would read 3–4× inflated on ALL builds; see the A/B caveat in
@@ -76,6 +104,20 @@
   (WindowServer idle, no sibling GUI app). A directional vibes run this session (loadavg ~7) showed
   no regression vs the 2026-07-13 baseline. **Workspace:** `work/perf` still live at recycle — a
   fresh thread can reuse it or re-create; both PRs merged so nothing uncommitted of value remains.
+
+## Session — respawn 2026-07-15 part 4 (Opus) — profile-first pivot to print-scan
+
+- Bootstrapped `work/perf` fresh (predecessor deleted). Read AGENTS.md, threads/README, this
+  status, both method-template analysis docs (hash-map + apc). Pin `77190bd02` confirmed; oracle
+  intact. Machine not quiet (WindowServer ~47%, loadavg >3) → scoreboard still blocked.
+- **Profile-first over the whole pipeline** (`profile_streams` NOOP-vs-FULL sweep + samply
+  line-level on real vtebench `light/medium_cells`). Two decisive findings: (1) **every stream is
+  print/execute-bound, not decode-bound** → **retired the NEON UTF-8 decode lever** (it lifts a
+  NOOP ceiling nothing hits, at max differential risk); (2) the hot print work is two **read-only
+  find-first scans** in `print_slice_fill::<narrow>` (run_len `print.rs:246` u32; simple-cell
+  `print.rs:372` u64) — representative (hot on the real scoreboard payloads), long runs
+  (median ~28–31 → NEON-favorable), low-risk (APC-scan precedent). Wrote
+  `docs/analysis/print-slice-scan.md`. Next: PR-1 run_len prescan (bench → NEON → gate → ship).
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
