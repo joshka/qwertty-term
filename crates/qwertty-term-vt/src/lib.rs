@@ -29,6 +29,7 @@ pub mod stream;
 pub mod tabstops;
 pub mod terminal;
 pub mod terminfo;
+pub mod tmux;
 pub mod unicode;
 pub mod utf8_decoder;
 

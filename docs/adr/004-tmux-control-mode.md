@@ -1,10 +1,11 @@
 # ADR 004: tmux control mode — scope, layering, and PR slices
 
-- Status: **PROPOSED** (Josh un-gated the work 2026-07-14: "start tmux control mode"). This
-  ADR fixes the layering and slice plan; the engine-parser slices (1–3) are unambiguous and
-  proceed immediately. The two decisions that want Josh's confirmation are flagged under
-  "Open questions" (build-gate default; viewer ownership split with app-tails) — they do not
-  block the parser work.
+- Status: **ACCEPTED** (Josh 2026-07-14: "start tmux control mode" + "confirm adr
+  recommendations"). Both open questions are resolved in favour of the recommendations:
+  (1) tmux control mode ships **always-compiled, runtime-inert** until a `\ePtmux;` entry
+  arrives (no Cargo feature, no config gate for the engine parsers); (2) the native **Viewer
+  (slice 5) is app-tails territory** — vt-tails delivers slices 1–4 (the pure parsers + the
+  DCS seam) and hands the Viewer off via app-tails' Inbox. See "Resolution" below.
 - Date: 2026-07-14
 - Thread: vt-tails (VT engine) · succeeds T5 · Spec: `docs/threads/status/vt-tails.md`
 - Upstream: Ghostty `2da015cd6`, `src/terminal/tmux/` (4,363 LoC) + `src/termio/stream_handler.zig`
@@ -86,16 +87,19 @@ vt-tails owns everything above the dashed line; app-tails/termio owns the Viewer
 - Deferred (Josh's call, not this thread): the native Viewer UX (how tmux windows map to
   qwertty-term tabs vs splits) is an app-design decision for app-tails.
 
-## Open questions (need Josh / app-tails, do not block slices 1–3)
+## Resolution (Josh confirmed 2026-07-14)
 
-1. **Build-gate default.** Upstream compiles tmux control mode behind
-   `tmux_control_mode`. Do we ship it always-on, behind a Cargo feature, or behind a TOML
-   config key? Recommendation: always-compiled (it's pure Rust, no heavy deps beyond a regex
-   crate we already have), runtime-inert until a `\ePtmux;` entry arrives — simplest and
-   matches how the rest of the engine ships. Confirm.
-2. **Viewer ownership.** Slice 5 (native surfaces) is app-tails territory. Confirm app-tails
-   takes it once the engine parsers land, or whether vt-tails carries a headless reference
-   consumer (betamax-style) for testing.
+1. **Build-gate default → always-compiled, runtime-inert.** No Cargo feature and no TOML gate
+   for the engine parsers: they are pure Rust with no heavy dependency (the notification
+   matchers are hand-rolled, so not even a regex crate), and stay dormant until a `\ePtmux;`
+   DCS entry activates control mode. This matches how the rest of the engine ships. (Upstream's
+   compile-time `tmux_control_mode` flag existed mainly to keep the oniguruma dependency
+   optional — moot for us.)
+2. **Viewer ownership → app-tails.** vt-tails delivers slices 1–4 (the three parsers + the DCS
+   `TmuxRaw` seam that surfaces a `Notification` stream). The native Viewer (slice 5: mapping
+   notifications to tabs/splits) is app-tails territory, handed off via their Inbox once the
+   parsers land. No headless reference consumer is carried in vt-tails; the parsers are proven
+   by unit tests.
 
 ## Consequences
 

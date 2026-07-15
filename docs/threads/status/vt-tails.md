@@ -1,11 +1,10 @@
 # vt-tails status
 
-- **Current item:** **REOPENED for tmux control mode** (Josh un-gated 2026-07-14). Scoping
-  done → ADR 004 written + slice plan. Next: **slice 1 — port `tmux::ControlParser`
-  (`control.zig`, 839 LoC) + inline tests.** (This session is recycling after the ADR; a
-  fresh session executes the slices with full context — boot from ADR 004 + this file.)
-- **Last merged:** #250 (VT-tail closeout). VT-completeness tail is all `[x]`/`[—]` except tmux.
-- **Blockers:** none (slices 1–3 are unambiguous; open questions in ADR 004 don't block them).
+- **Current item:** **tmux control mode — slice 1 (`tmux::ControlParser`) shipping.** ADR 004
+  ACCEPTED (Josh confirmed recommendations: always-compiled/runtime-inert; Viewer = app-tails).
+  Next: slice 2 (`layout::Layout`), slice 3 (`output`), slice 4 (wire the DCS `TmuxRaw` seam).
+- **Last merged:** #255 (ADR 004). VT-completeness tail (#241/#244/#249/#250) already on main.
+- **Blockers:** none (slices 1–4 are vt-tails; slice 5 Viewer is app-tails, routed at slice 4).
 - **Claims:** none.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
@@ -47,5 +46,9 @@ Open questions (ADR 004, need Josh/app-tails; do NOT block 1–3): build-gate de
   port-status. jj lesson saved to memory ([[jj-new-before-next-pr]]).
 - 2026-07-14: Josh un-gated tmux control mode. Scoped upstream `src/terminal/tmux/` (4,363
   LoC: control 839 / layout 638 / output 590 / viewer 2,283). Wrote **ADR 004** (layering:
-  engine parsers = vt-tails, Viewer = app-tails; 5 PR slices). Recycling after the ADR so a
-  fresh session executes slice 1 (`ControlParser`) with full context budget.
+  engine parsers = vt-tails, Viewer = app-tails; 5 PR slices). #255 merged.
+- 2026-07-14: Josh confirmed ADR recommendations → ADR 004 ACCEPTED (always-compiled/
+  runtime-inert; Viewer = app-tails). Slice 1 — ported `control.zig` → `src/tmux/control.rs`
+  (`ControlParser` state machine + `Notification` enum); the oniguruma matchers are hand-rolled
+  byte scanners (no regex dep). 26 tests (18 ported + 8 edge: idle/broken/exit/overflow/greedy
+  splits). Next: slice 2 `layout::Layout`.
