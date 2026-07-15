@@ -1194,4 +1194,59 @@ mod tests {
         assert!(a.iter().all(Option::is_none));
         assert_eq!(p.state(), State::DcsPassthrough);
     }
+
+    // Regression: a DCS passthrough body carrying raw UTF-8 / 8-bit bytes must
+    // Put every body byte and stay in DcsPassthrough until a real ST. Before
+    // the `0x80..=0xFF` -> Put override, the first byte >= 0x80 (e.g. an
+    // emoji's `0x80` continuation byte, or a C1 introducer like `0x9C`) fell
+    // through to the anywhere C1 rules and terminated the DCS -- which is what
+    // silently truncated tmux control-mode `%output` payloads.
+    #[test]
+    fn dcs_passthrough_carries_utf8_and_high_bytes() {
+        let mut p = Parser::new();
+        _ = p.next(0x1B);
+        _ = p.next(b'P');
+        let a = p.next(b'p'); // hook -> DcsPassthrough
+        assert!(matches!(a[2], Some(Action::DcsHook(_))));
+        assert_eq!(p.state(), State::DcsPassthrough);
+
+        // Body: ASCII + 🦀 (F0 9F A6 80) + box-drawing ─ (E2 94 80) + every
+        // C1 byte that would otherwise terminate/redirect (0x9C, 0x90, 0x9B,
+        // 0x9D, 0x9F, 0x80).
+        let body: &[u8] = &[
+            b'a', b'b', 0xF0, 0x9F, 0xA6, 0x80, // ASCII + 🦀
+            0xE2, 0x94, 0x80, // ─
+            0x9C, 0x90, 0x9B, 0x9D, 0x9F, 0x80, // C1 bytes that used to end DCS
+            b'z',
+        ];
+        for &byte in body {
+            let a = p.next(byte);
+            // Exactly one action, DcsPut(byte), on the transition slot; no
+            // DcsUnhook, no return to Ground.
+            assert_eq!(
+                a[0], None,
+                "byte {byte:#04x}: unexpected exit action (spurious DcsUnhook?)"
+            );
+            assert_eq!(
+                a[1],
+                Some(Action::DcsPut(byte)),
+                "byte {byte:#04x}: expected DcsPut"
+            );
+            assert_eq!(a[2], None, "byte {byte:#04x}: unexpected entry action");
+            assert_eq!(
+                p.state(),
+                State::DcsPassthrough,
+                "byte {byte:#04x}: DCS terminated early"
+            );
+        }
+
+        // Real 7-bit ST (ESC \) still terminates: ESC exits passthrough
+        // (DcsUnhook), then `\` dispatches from Escape back to Ground.
+        let a = p.next(0x1B);
+        assert_eq!(a[0], Some(Action::DcsUnhook));
+        assert_eq!(p.state(), State::Escape);
+        let a = p.next(b'\\');
+        assert!(matches!(a[1], Some(Action::EscDispatch(_))));
+        assert_eq!(p.state(), State::Ground);
+    }
 }

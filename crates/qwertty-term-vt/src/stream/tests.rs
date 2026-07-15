@@ -623,6 +623,75 @@ fn tmux_dcs_seam_surfaces_notification_stream() {
     assert!(s.handler.take_tmux_notifications().is_empty());
 }
 
+// Regression for the real `tmux -CC` repro (PR #286): a `%output` payload that
+// carries raw UTF-8 (an emoji like 🦀 = F0 9F A6 80) must NOT terminate control
+// mode. Before the parser's `0x80..=0xFF` -> Put DCS-passthrough override, the
+// emoji's `0x9F`/`0x80` bytes fell through to the anywhere C1 rules, unhooked
+// the DCS mid-body, and dropped back to Ground — after which every subsequent
+// `%output` line leaked to the screen as raw text. The `--tmux-smoke` harness
+// missed this because its fake server only ever emitted ASCII output.
+#[test]
+fn tmux_control_mode_survives_utf8_output() {
+    use crate::tmux::Notification;
+
+    let mut s = term(20, 10);
+
+    // A realistic control-mode session: enter, a `%begin`/`%end` handshake
+    // block, a window + layout announcement, then a `%output` line whose data
+    // contains an emoji, then a FURTHER notification (proving control mode is
+    // still alive after the `0x80` byte), then ST to exit.
+    let mut stream: Vec<u8> = Vec::new();
+    stream.extend_from_slice(b"\x1bP1000p"); // ESC P 1000 p -> enter
+    stream.extend_from_slice(b"%begin 1600000000 1 0\n");
+    stream.extend_from_slice(b"config ok\n");
+    stream.extend_from_slice(b"%end 1600000000 1 0\n");
+    stream.extend_from_slice(b"%window-add @0\n");
+    stream.extend_from_slice(b"%layout-change @0 abc,80x24,0,0 abc,80x24,0,0 *\n");
+    // The payload contains 🦀 (F0 9F A6 80); the trailing 0x80 is the byte
+    // that used to silently end control mode.
+    stream.extend_from_slice("%output %0 prompt 🦀 done\n".as_bytes());
+    // This notification arrives AFTER the emoji: it only surfaces if control
+    // mode did NOT exit early on the 0x80 byte.
+    stream.extend_from_slice(b"%window-add @1\n");
+    stream.extend_from_slice(b"\x1b\\"); // ST -> exit
+
+    s.feed(&stream);
+
+    let notifications = s.handler.take_tmux_notifications();
+    assert_eq!(
+        notifications,
+        vec![
+            Notification::Enter,
+            Notification::BlockEnd(b"config ok".to_vec()),
+            Notification::WindowAdd { id: 0 },
+            Notification::LayoutChange {
+                window_id: 0,
+                layout: b"abc,80x24,0,0".to_vec(),
+                visible_layout: b"abc,80x24,0,0".to_vec(),
+                raw_flags: b"*".to_vec(),
+            },
+            Notification::Output {
+                pane_id: 0,
+                data: "prompt 🦀 done".as_bytes().to_vec(),
+            },
+            Notification::WindowAdd { id: 1 },
+            Notification::Exit,
+        ]
+    );
+
+    // The Output payload round-trips the exact emoji bytes (F0 9F A6 80).
+    let Some(Notification::Output { data, .. }) = notifications
+        .iter()
+        .find(|n| matches!(n, Notification::Output { .. }))
+    else {
+        panic!("expected an Output notification carrying the emoji");
+    };
+    assert!(
+        data.windows(4).any(|w| w == [0xF0, 0x9F, 0xA6, 0x80]),
+        "Output data must contain the raw 🦀 bytes: {data:02x?}"
+    );
+}
+
 // OSC 133 C/D marks are surfaced as an ordered command-boundary queue for
 // `notify-on-command-finish` (in addition to the row-tagging semantic prompt).
 #[test]
