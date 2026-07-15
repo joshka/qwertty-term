@@ -28,7 +28,11 @@ pub(crate) type StringAlloc = BitmapAllocator<32>;
 pub type Id = HyperlinkCountInt;
 
 /// The cell-offset -> hyperlink-id map. Port of `hyperlink.zig` `Map`.
-pub type Map = OffsetHashMap<Offset<Cell>, Id>;
+///
+/// Capped at an 80% load factor: OSC 8 churn removes+reinserts entries as cells
+/// are rewritten, so reserving probe headroom keeps missing-key lookups bounded
+/// (upstream `7e14347c1`). The grapheme map stays at 100% (its default).
+pub type Map = OffsetHashMap<Offset<Cell>, Id, 80>;
 
 /// A hyperlink ID as stored in a [`PageEntry`]. Port of `PageEntry.Id`.
 #[derive(Clone, Copy)]

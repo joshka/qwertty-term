@@ -78,17 +78,29 @@ post-removal slot arrangement and iteration order differ, and no observable VT
 output depends on map iteration order). Therefore **oracle-neutral** — no pin
 bump. Verified below.
 
-## Load factor (`7e14347c1`) — deferred, evaluated separately
+## Load factor (`7e14347c1`) — PR-2, implemented, ORACLE-NEUTRAL (no pin bump)
 
-Upstream additionally caps the hyperlink map at an 80% load factor
-(`max_load_percentage`, via `layoutForSize`) to bound probe length on a
-fully-populated map and to structurally dodge the same-key-churn regression
-(which only bites at 90–100% load). That change alters the hyperlink map's raw
-capacity and per-page memory layout, so — unlike backward-shift — it *may* be
-observable in the differential and require a pin bump. It is deferred to a
-follow-up so it can be evaluated on evidence: implement it, run the differential,
-and take the pin-bump decision only if it actually diverges. Backward-shift is a
-strict prerequisite and delivers the sliding-churn win on its own.
+Upstream additionally caps the hyperlink map at an 80% load factor to bound
+probe length on a fully-populated map and to structurally dodge the same-key
+regression (which only bites at 90–100% load). PR-2 ports this: a defaulted
+const generic `OffsetHashMap<K, V, const MAX_LOAD: u8 = 100>` (grapheme map keeps
+the 100% default; hyperlink map = `…, 80`), a `layout_for_size` that scales the
+requested entry count up to the raw slot count the load factor needs (rounding to
+a power of two), `max_load()` used as the insertion ceiling in `get_or_put` /
+`ensure_unused_capacity`, and `hyperlink_capacity()` returning `max_load()`. The
+page hyperlink-map layout now requests the raw entry count and lets
+`layout_for_size` do the scaling+rounding (no double-rounding).
+
+This *does* change the hyperlink map's raw capacity and per-page memory layout,
+so — unlike backward-shift — it was not obviously oracle-neutral. **Evaluated on
+evidence: it is.** Page growth on a full hyperlink map is lossless (Ghostty grows
+the page via `increaseCapacity`, it never drops hyperlinks), so *when* a page
+grows (at 80% vs 100% fill) is invisible to observable output. Confirmed: the
+full `vt-diff --features reference` suite — corpus + AFL + hand + formatter +
+generative sweep — is **0-divergence against the `77190bd02` oracle** with PR-2
+applied. So **no pin bump is required** for the full faithful port. The 100%-load
+`get_or_put`/`churn`/`lookup` cliffs (see numbers above) are now structurally
+unreachable for the hyperlink map, which operates at ≤80% fill.
 
 ## Verification
 

@@ -118,18 +118,23 @@ const fn align_forward(v: usize, align: usize) -> usize {
 /// Port of `hash_map.zig` `OffsetHashMap` (`metadata: Offset(Metadata)`).
 ///
 /// Reconstruct a usable [`Map`] view against the page base with [`OffsetHashMap::map`].
-pub struct OffsetHashMap<K, V> {
+///
+/// `MAX_LOAD` is the maximum load factor in percent (Port of upstream's
+/// `max_load_percentage` comptime param). The default 100 lets every raw slot
+/// be occupied; a map that sees removal-heavy churn should pick a lower value
+/// so free slots stay in every probe chain and probe lengths stay bounded.
+pub struct OffsetHashMap<K, V, const MAX_LOAD: u8 = 100> {
     metadata: Offset<u8>,
     _marker: std::marker::PhantomData<fn() -> (K, V)>,
 }
 
-impl<K, V> Copy for OffsetHashMap<K, V> {}
-impl<K, V> Clone for OffsetHashMap<K, V> {
+impl<K, V, const MAX_LOAD: u8> Copy for OffsetHashMap<K, V, MAX_LOAD> {}
+impl<K, V, const MAX_LOAD: u8> Clone for OffsetHashMap<K, V, MAX_LOAD> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<K, V> Default for OffsetHashMap<K, V> {
+impl<K, V, const MAX_LOAD: u8> Default for OffsetHashMap<K, V, MAX_LOAD> {
     fn default() -> Self {
         Self {
             metadata: Offset::default(),
@@ -138,7 +143,7 @@ impl<K, V> Default for OffsetHashMap<K, V> {
     }
 }
 
-impl<K: MapKey, V: Copy> OffsetHashMap<K, V> {
+impl<K: MapKey, V: Copy, const MAX_LOAD: u8> OffsetHashMap<K, V, MAX_LOAD> {
     /// Required alignment for the backing buffer's true base.
     pub fn base_align() -> usize {
         align_of::<Header<K, V>>()
@@ -187,6 +192,37 @@ impl<K: MapKey, V: Copy> OffsetHashMap<K, V> {
         }
     }
 
+    /// The maximum number of live entries a `cap`-slot map holds at `MAX_LOAD`.
+    /// Port of `maxLoadForCapacity`.
+    #[inline]
+    pub fn max_load_for_capacity(cap: Size) -> Size {
+        if cap == 0 {
+            return 0;
+        }
+        (cap as u64 * MAX_LOAD as u64 / 100) as Size
+    }
+
+    /// Returns the buffer layout with enough raw slots to hold `new_size` live
+    /// entries at the configured `MAX_LOAD`, rounding the raw slot count up to a
+    /// power of two. Port of `layoutForSize`. For `MAX_LOAD == 100` this is just
+    /// `layout(ceil_pow2(new_size))`.
+    pub fn layout_for_size(new_size: Size) -> MapLayout {
+        assert!(MAX_LOAD > 0 && MAX_LOAD <= 100);
+        if new_size == 0 {
+            return Self::layout(0);
+        }
+        // Scale the requested entries up to the raw slots the load factor needs.
+        // Widen so `new_size * 100` cannot overflow Size.
+        let minimum_capacity = (new_size as u64 * 100).div_ceil(MAX_LOAD as u64);
+        // Powers of two only; the largest that fits in Size is its high bit.
+        let max_capacity = 1u64 << (Size::BITS - 1);
+        if minimum_capacity > max_capacity {
+            return Self::layout(max_capacity as Size);
+        }
+        let raw_capacity = minimum_capacity.next_power_of_two() as Size;
+        Self::layout(raw_capacity)
+    }
+
     /// Initialize a new map into `buf` with the given layout, zeroing metadata.
     ///
     /// # Safety
@@ -228,7 +264,7 @@ impl<K: MapKey, V: Copy> OffsetHashMap<K, V> {
     ///
     /// `base` must be the true base this map was initialized against, with the
     /// map's regions valid and (for mutation) not aliased elsewhere.
-    pub unsafe fn map(self, base: *mut u8) -> Map<K, V> {
+    pub unsafe fn map(self, base: *mut u8) -> Map<K, V, MAX_LOAD> {
         // SAFETY: metadata offset in bounds per caller contract.
         let metadata = unsafe { self.metadata.ptr(base) }.cast::<Metadata>();
         Map {
@@ -241,19 +277,19 @@ impl<K: MapKey, V: Copy> OffsetHashMap<K, V> {
 /// A live, pointer-based view of an [`OffsetHashMap`] against a page base.
 /// Port of `hash_map.zig` `Unmanaged`. Holds raw pointers; create with
 /// [`OffsetHashMap::map`] and drop before any relocation of page memory.
-pub struct Map<K, V> {
+pub struct Map<K, V, const MAX_LOAD: u8 = 100> {
     metadata: *mut Metadata,
     _marker: std::marker::PhantomData<fn() -> (K, V)>,
 }
 
-impl<K, V> Copy for Map<K, V> {}
-impl<K, V> Clone for Map<K, V> {
+impl<K, V, const MAX_LOAD: u8> Copy for Map<K, V, MAX_LOAD> {}
+impl<K, V, const MAX_LOAD: u8> Clone for Map<K, V, MAX_LOAD> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<K: MapKey, V: Copy> Map<K, V> {
+impl<K: MapKey, V: Copy, const MAX_LOAD: u8> Map<K, V, MAX_LOAD> {
     #[inline]
     unsafe fn header(&self) -> *mut Header<K, V> {
         // SAFETY: header sits immediately before the metadata array.
@@ -288,6 +324,14 @@ impl<K: MapKey, V: Copy> Map<K, V> {
     pub fn count(&self) -> Size {
         // SAFETY: header always present for a live map.
         unsafe { (*self.header()).size }
+    }
+
+    /// Maximum number of live entries this map holds. Less than `capacity` when
+    /// `MAX_LOAD < 100`, which keeps free slots in every probe chain and bounds
+    /// probe lengths. Port of `maxLoad`.
+    #[inline]
+    pub fn max_load(&self) -> Size {
+        OffsetHashMap::<K, V, MAX_LOAD>::max_load_for_capacity(self.capacity())
     }
 
     #[inline]
@@ -414,8 +458,10 @@ impl<K: MapKey, V: Copy> Map<K, V> {
     pub unsafe fn get_or_put(&mut self, key: K) -> Result<GetOrPut<V>, OutOfMemory> {
         // SAFETY: per caller contract.
         unsafe {
-            // growIfNeeded(1): if full and key absent, error.
-            let available = self.capacity() - (*self.header()).size;
+            // checkCapacity(1): if at max load and key absent, error. The load
+            // factor (not raw capacity) is the ceiling so a free slot always
+            // remains for the probe below to terminate on.
+            let available = self.max_load() - (*self.header()).size;
             if available == 0 {
                 if let Some(idx) = self.get_index(&key) {
                     return Ok(GetOrPut {
@@ -630,7 +676,7 @@ impl<K: MapKey, V: Copy> Map<K, V> {
     pub unsafe fn ensure_unused_capacity(&self, additional: Size) -> Result<(), OutOfMemory> {
         // SAFETY: per caller contract.
         unsafe {
-            let available = self.capacity() - (*self.header()).size;
+            let available = self.max_load() - (*self.header()).size;
             if additional > available {
                 Err(OutOfMemory)
             } else {

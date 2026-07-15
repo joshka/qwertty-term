@@ -17,11 +17,15 @@
 > release lane 1631, corpus/afl/hand/formatter differential green, Miri 15/15, resize fuzz 85 257
 > runs clean, fmt/clippy/check clean.
 >
-> **PR-2 (80% hyperlink load factor, `7e14347c1`) — DEFERRED, next.** Strict superset of PR-1;
-> the *only* added risk is a layout change that MAY need a pin bump. To be evaluated empirically
-> (implement → run differential; pin-bump only if it actually diverges). Bounds full-map probes +
-> dodges the same-key regression for the hyperlink map. `65f953e8e` (no-clobber moves) already
-> present in our port.
+> **PR-2 (80% hyperlink load factor, `7e14347c1`) — GATE-GREEN, ORACLE-NEUTRAL, shipping.**
+> Defaulted const generic `OffsetHashMap<K, V, const MAX_LOAD: u8 = 100>` (hyperlink map = 80,
+> grapheme stays 100), `layout_for_size` scaling + `max_load()` ceiling, `hyperlink_capacity()` →
+> `max_load()`. **Evaluated the pin-bump question empirically: NO pin bump.** The full `vt-diff
+> --features reference` suite is 0-divergence vs the (now-correct) `77190bd02` oracle — page growth
+> is lossless, so 80%-vs-100% fill timing is invisible. Bounds the full-map probe cliffs (the map
+> now operates at ≤80% fill). Gates: 1631 lib + release lane, differential 0-divergence, Miri
+> 15/15, resize fuzz 87 561 runs clean, fmt/clippy. `65f953e8e` (no-clobber moves) already present.
+> The full faithful port (backward-shift + load factor) is complete and cheap.
 >
 > **✅ Fixed a stale-oracle repo issue (fleet-wide).** The installed reference lib
 > `~/local/ghostty/zig-out/lib/libghostty-vt.a` was the old Jul-7 `2da015cd6`-era artifact
