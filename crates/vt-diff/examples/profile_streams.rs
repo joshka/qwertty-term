@@ -6,7 +6,7 @@
 //!   cargo build -p vt-diff --release --example profile_streams
 //!   samply record ./target/release/examples/profile_streams <stream> <iters>
 //!
-//! `<stream>` is one of: ascii sgr utf8 cursor dense erase redraw cjk scrolling scroll-region all
+//! `<stream>` is one of: ascii sgr utf8 cursor dense erase redraw cjk scrolling scroll-region kitty all
 //! `<iters>` repeats the payload feed that many times (default sized for ~seconds).
 
 use std::time::Instant;
@@ -171,6 +171,31 @@ fn scroll_region_stream() -> Vec<u8> {
     v
 }
 
+/// APC-heavy stream: well-formed Kitty graphics transmit commands, each with a
+/// large base64 payload — the shape that leaves the parser APC-bound (mirrors
+/// upstream's `ghostty-gen +kitty` synthetic corpus, f6f79acce). The payload is
+/// not valid image data; this exercises the stream -> APC -> kitty parse path,
+/// not image decode. Each command: `ESC _ G <control kv> ; <base64> ESC \`.
+fn kitty_stream() -> Vec<u8> {
+    // A fixed 4 KiB base64-ish payload (A-Z a-z 0-9 + /), deterministic so the
+    // stream is reproducible without Math.random.
+    const PAYLOAD_LEN: usize = 4096;
+    const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let payload: Vec<u8> = (0..PAYLOAD_LEN)
+        .map(|i| B64[(i * 7 + 13) % B64.len()])
+        .collect();
+
+    let mut v = Vec::with_capacity(STREAM_MIB * 1024 * 1024 + PAYLOAD_LEN + 64);
+    while v.len() < STREAM_MIB * 1024 * 1024 {
+        // f=24 (RGB), one chunk, direct transmission. Control keys before ';',
+        // then the payload, then the APC string terminator ESC \.
+        v.extend_from_slice(b"\x1b_Gf=24,s=32,v=32,a=T,m=0;");
+        v.extend_from_slice(&payload);
+        v.extend_from_slice(b"\x1b\\");
+    }
+    v
+}
+
 fn feed(stream: &[u8], iters: usize) {
     for _ in 0..iters {
         let (cols, rows) = geom();
@@ -257,6 +282,7 @@ fn main() {
         ("redraw", redraw_stream()),
         ("scrolling", scrolling_stream()),
         ("scroll-region", scroll_region_stream()),
+        ("kitty", kitty_stream()),
     ];
 
     for (name, stream) in &all {

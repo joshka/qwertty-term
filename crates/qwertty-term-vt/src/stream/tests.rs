@@ -2028,3 +2028,94 @@ fn kitty_unicode_placeholder_end_to_end() {
     assert_eq!(rp.offset_x, 5);
     assert_eq!(rp.offset_y, 0);
 }
+
+// -------------------------------------------------------------------------
+// APC bulk-slice dispatch (f6f79acce): the stream must hand APC-string payload
+// bytes to the handler as `apc_put_slice` runs, byte-for-byte equivalent to the
+// per-byte `apc_put` path taken by scalar `next`.
+// -------------------------------------------------------------------------
+
+/// Records APC events whether they arrive per-byte (`apc_put`) or bulk
+/// (`apc_put_slice`). Mirrors upstream's `ApcTestHandler`.
+#[derive(Default)]
+struct ApcSpy {
+    buf: Vec<u8>,
+    started: usize,
+    ended: usize,
+    puts: usize,
+    slices: usize,
+}
+
+impl Handler for ApcSpy {
+    fn apc_start(&mut self) {
+        self.started += 1;
+    }
+    fn apc_put(&mut self, byte: u8) {
+        self.buf.push(byte);
+        self.puts += 1;
+    }
+    fn apc_put_slice(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+        self.slices += 1;
+    }
+    fn apc_end(&mut self) {
+        self.ended += 1;
+    }
+}
+
+/// `feed` (bulk) and per-byte `next` must produce identical APC payloads and
+/// start/end counts, across chunk boundaries and terminators (ESC \, CAN, SUB).
+/// Port of upstream's "stream: apc bulk slice" + boundary-match tests.
+#[test]
+fn apc_bulk_slice_matches_scalar() {
+    let long: Vec<u8> = {
+        // ESC _ G <control>;<200 payload bytes> ESC \
+        let mut v = Vec::new();
+        v.extend_from_slice(b"\x1b_Gf=24,s=10,v=20;");
+        v.extend(std::iter::repeat_n(b'A', 200));
+        v.extend_from_slice(b"\x1b\\");
+        v
+    };
+    let cases: &[&[u8]] = &[
+        b"\x1b_Gf=24,s=10,v=20;aGVsbG8=\x1b\\",
+        // CAN (0x18) aborts the APC string; trailing bytes are printed.
+        b"\x1b_Gabcdefghijklmnopqrstuvwxyz0123456789\x18def",
+        // SUB (0x1A) aborts likewise.
+        b"\x1b_Gpayload\x1adef",
+        // Two APC strings back to back.
+        b"\x1b_Gfirst\x1b\\\x1b_Gsecond\x1b\\",
+        &long,
+    ];
+
+    for case in cases {
+        // Bulk path (single feed of the whole slice).
+        let mut bulk = Stream::new(ApcSpy::default());
+        bulk.feed(case);
+
+        // Bulk path fed in awkward 7-byte chunks (crosses runs mid-payload).
+        let mut chunked = Stream::new(ApcSpy::default());
+        for chunk in case.chunks(7) {
+            chunked.feed(chunk);
+        }
+
+        // Scalar path, one byte at a time.
+        let mut scalar = Stream::new(ApcSpy::default());
+        for &b in *case {
+            scalar.next(b);
+        }
+
+        assert_eq!(
+            bulk.handler.buf, scalar.handler.buf,
+            "bulk vs scalar: {case:?}"
+        );
+        assert_eq!(
+            chunked.handler.buf, scalar.handler.buf,
+            "chunked vs scalar: {case:?}"
+        );
+        assert_eq!(
+            bulk.handler.started, scalar.handler.started,
+            "started: {case:?}"
+        );
+        assert_eq!(bulk.handler.ended, scalar.handler.ended, "ended: {case:?}");
+    }
+}
