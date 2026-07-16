@@ -16,18 +16,26 @@ does a burst (spawn the next queued thread / integrate anything not self-merged 
 decision to Josh), and ends. Don't run a long-lived orchestrator — it's the expensive
 long-context anti-pattern; recycle instead.
 
-**Current state:** 0.3.0 published on crates.io (all 8 crates; release is self-serve via
-release-plz + Trusted Publishing — merge the `chore: release vX` PR to publish). A **0.4.0
-release PR is queued** (merge when ready). feature-coverage ≈ 108 `[x]` / 19 `[~]` / 38
-`[ ]`; ~0 open issues (triage closed them). Repo root is a bare store (see root `AGENTS.md`;
-the `root` jj workspace recurs as a phantom — forget it when seen; real fix is the never-run
-jj-source thread at `~/local/jj/work/`).
+**Current state (2026-07-15):** **0.4.0 published** on crates.io (all 8 crates; release is
+self-serve — merge the `chore: release vX` PR to publish, Josh-gated). **0.5.0 release PR
+(#273) is queued.** feature-coverage ≈ 117 `[x]` / 19 `[~]` / 31 `[ ]`; ~0 open issues.
+VT-engine tail recertified closed (port-status snapshot); **tmux control mode ratified**
+(ADR 004, engine slices 1–4 + native Viewer app-side). **Upstream drift: CLEAN, no re-pin
+warranted** (analysis 2026-07-15: pin `2da015cd6` → upstream HEAD `73534c468`; new range =
+12 commits, none applicable; real backlog is the pass-1 mirror-verify clusters, now
+tracked). **Perf is the one competitive gap** — needs a *quiet-machine* three-way vtebench
+to confirm the latest gains (loadavg was ~11 with the fleet running; the perf thread
+archived itself blocked on machine-quiet; ready cmd in `scripts/bench-vtebench.sh`). Repo
+root is a bare store; the `root` jj workspace recurs as a phantom — forget it when seen.
 
-**Live threads (each in `work/<id>`, disjoint crates):** `app-tails` (app + config tails),
-`vt-tails` (vt + vt-diff completeness), `linux` (ADR-003 renderer/font/apprt). **Queued:**
-`perf` — waits for `vt-tails` to free the `qwertty-term-vt` crate, then whole-app parity vs
-Ghostty `main`. Priority order: tails → Linux → perf. Recent completed threads: issue-triage,
-changelog (hand-curated + release-plz auto-gen disabled), divergence-hygiene.
+**Threads:** the fleet self-runs, recycles on length (e.g. `app-tails` → `app-tails-2`), and
+spawns sub-threads (fontzoom, compositing, tmux-app) — it self-grew to ~7-9 concurrent,
+which saturates the machine (a consolidation-vs-leave decision Josh has deferred). Recently
+launched: `drift3` (record drift pass 3 + file the mirror-verify tracking issue),
+`mirror-verify` (verify-or-mirror 5 upstream engine-bugfix clusters against the Rust port,
+clash-aware with `vt-tails`). Done: perf (archived), release-docs (0.4.0 changelog + ADR-004
+ratify), issue-triage, divergence-hygiene, changelog. **Orchestration recycled here** — this
+handoff is the boot point for the next on-demand session.
 
 ## Thread plan authored (2026-07-10, Fable pass)
 
