@@ -736,17 +736,20 @@ impl Surface {
             self.tmux = Some(crate::tmux_session::TmuxSession::new(
                 self.startup_colors.clone(),
             ));
-            // Control mode is live on this surface: stop painting its grid and
-            // wipe anything already there. tmux's `tmux%` prompt and stray `%…`
-            // status lines arrive *outside* the DCS wrapper, so they would paint
+            // Control mode is live on this surface: stop painting its grid. tmux's
+            // `tmux%` prompt and any stray non-DCS `%…` bytes would otherwise paint
             // this (soon-hidden) control surface's real grid and flash into view
-            // whenever it is momentarily shown (ADR 006 gap 5 — exit-flash). The
-            // erase (CSI 2J/H — a control sequence, not a ground print) still
-            // runs under suppression; cleared on `%exit` below so the underlying
-            // shell repaints when it regains the pty.
-            let mut engine = self.engine();
-            engine.write(b"\x1b[2J\x1b[H");
-            engine.set_tmux_suppress_print(true);
+            // whenever it is momentarily shown (ADR 006 gap 5 — exit-flash).
+            // Cleared on `%exit` below so the underlying shell repaints.
+            //
+            // Do NOT write an erase sequence here: control-mode output is one long
+            // DCS passthrough (`\eP1000p …`) that stays open for the whole session,
+            // and injecting an `ESC`-based CSI from this (main) thread would
+            // terminate that live DCS mid-stream — the parser unhooks, emits a
+            // spurious tmux `Exit`, and every following `%output` prints as raw
+            // text. Suppression alone (below) prevents the flash without touching
+            // the byte stream.
+            self.engine().set_tmux_suppress_print(true);
         }
         let Some(update) = self.tmux.as_mut().map(|s| s.ingest(notifications)) else {
             return (None, false, None);
