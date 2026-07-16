@@ -19,6 +19,18 @@ fn main() -> std::process::ExitCode {
             eprintln!("text-smoke: FAILED");
             std::process::ExitCode::FAILURE
         }
+    } else if args.iter().any(|a| a == "--tab-smoke") {
+        // Prove the tabbed window's create/switch/close lifecycle: open two
+        // independent per-tab terminals, switch, and close one.
+        let outcome = qwertty_term_gtk::run_tab_lifecycle_smoke();
+        println!("tab-smoke: {outcome}");
+        if outcome.is_ok() {
+            println!("tab-smoke: OK");
+            std::process::ExitCode::SUCCESS
+        } else {
+            eprintln!("tab-smoke: FAILED");
+            std::process::ExitCode::FAILURE
+        }
     } else if args.iter().any(|a| a == "--resize-smoke") {
         // Prove a GLArea resize re-grids the terminal and re-sizes the render
         // target (render at one size → resize → render again, no GL error).

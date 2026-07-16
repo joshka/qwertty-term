@@ -229,7 +229,12 @@ impl Pty {
     /// Spawn the default shell on a pty of `cols`×`rows` (`w`×`h` px) and start
     /// reading it. `None` on any spawn failure (the caller falls back to a
     /// static banner so the window still shows real glyphs).
-    pub fn spawn(cols: u16, rows: u16, w: u32, h: u32) -> Option<Self> {
+    ///
+    /// `cwd` is the working directory the child shell starts in (used by the tab
+    /// host to inherit the active tab's pwd for a new tab, mirroring upstream's
+    /// `working_directory` override in `Window.newTab` → `Tab.new`,
+    /// `class/window.zig:434`). `None` inherits the launching process's cwd.
+    pub fn spawn(cols: u16, rows: u16, w: u32, h: u32, cwd: Option<&str>) -> Option<Self> {
         use qwertty_term_termio::size::{GridSize, ScreenSize};
         use qwertty_term_termio::{Config, Subprocess};
 
@@ -241,6 +246,7 @@ impl Pty {
         // COLORTERM / TERMINFO on top).
         let config = Config {
             env: std::env::vars().collect(),
+            working_directory: cwd.map(str::to_owned),
             ..Config::default()
         };
         let mut subprocess = Subprocess::init(config);
