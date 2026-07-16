@@ -106,6 +106,15 @@ pub struct FrameOptions {
     /// forced underline (R7). `None` disables the hover underline. The host
     /// supplies this from its mouse plumbing.
     pub hovered_cell: Option<(usize, usize)>,
+    /// Force a full cell rebuild this frame regardless of the snapshot's dirty
+    /// signals. The host sets this when a purely host-side overlay that tints
+    /// existing cells changed without moving the viewport or dirtying any engine
+    /// row — e.g. the search-match highlight when the needle changes but the
+    /// matches are already on screen. Without it the partial-rebuild path skips
+    /// the clean rows and the tint never reaches the GPU. Analogous to the
+    /// engine's `selection` global-dirty bit, but for overlays the engine
+    /// doesn't know about.
+    pub force_full_rebuild: bool,
 }
 
 impl Default for FrameOptions {
@@ -119,6 +128,7 @@ impl Default for FrameOptions {
             default_bg: Rgb::new(0x18, 0x18, 0x18),
             min_contrast: 1.0,
             hovered_cell: None,
+            force_full_rebuild: false,
         }
     }
 }
@@ -450,6 +460,7 @@ impl<B: GpuBackend> Engine<B> {
         let full_rebuild = size_changed
             || signals.global_forces_full
             || hover_changed
+            || opts.force_full_rebuild
             || self.prev_frame_key != Some(signals.frame_key);
         self.prev_frame_key = Some(signals.frame_key);
 

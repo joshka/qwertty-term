@@ -189,6 +189,110 @@ pub fn run() -> Result<bool, String> {
         );
     }
 
+    // --- Search highlight needs + honors force_full_rebuild (regression) --
+    //
+    // The live app renders through `snapshot_window_tracking`, which reports
+    // only the rows the engine actually dirtied. A search-needle change tints
+    // existing cells host-side without moving the viewport or dirtying any
+    // engine row, so the renderer's partial-rebuild path skips every (clean)
+    // row and the tint never reaches the GPU — the on-screen highlight only
+    // appeared when navigation happened to scroll the viewport (changing the
+    // `FrameKey`). The host now sets `FrameOptions::force_full_rebuild` on a
+    // search change to force the repaint. This proves both halves at the pixel
+    // level: without the flag the tint is skipped; with it, it lands.
+    {
+        use crate::selection::{MatchColors, ScreenRange, tint_matches};
+
+        // Row 0 holds the static marker text and is never touched by the idle
+        // shell (its prompt is at the bottom), so a clean-vs-forced comparison
+        // there is deterministic.
+        let (tx, ty) = (0usize, 0usize);
+        let match_range = ScreenRange {
+            top_left: (tx, ty),
+            bottom_right: (tx, ty),
+            rectangle: false,
+        };
+        let delta = |a: Px, b: Px| {
+            (a.r as i32 - b.r as i32).abs()
+                + (a.g as i32 - b.g as i32).abs()
+                + (a.b as i32 - b.b as i32).abs()
+        };
+
+        // 1. Settle a plain frame through the *tracking* snapshot: this clears
+        //    the engine's per-row dirty bits and pins the frame_key, so the next
+        //    tracking snapshot at the same viewport is all-clean.
+        let w0 = engine.lock().unwrap().snapshot_window_tracking(0);
+        let s0 = FullSnapshot::from_window(w0);
+        render.update_frame(&s0, &mut grid, FrameOptions::default());
+        render
+            .sync_atlas(&grid)
+            .map_err(|e| format!("sync atlas (settle): {e}"))?;
+        let base_px = render
+            .draw_frame()
+            .map_err(|e| format!("draw frame (settle): {e}"))?;
+        let base = cell_avg(&base_px, sw, sh, cw as usize, ch as usize, tx, ty);
+
+        // 2. Tint the (now clean) match row WITHOUT forcing: the partial rebuild
+        //    skips the clean row, so the readback must be unchanged — this is
+        //    exactly the bug the force flag exists to fix.
+        let mut w1 = engine.lock().unwrap().snapshot_window_tracking(0);
+        tint_matches(&mut w1, &[match_range], Some(0), MatchColors::default());
+        let s1 = FullSnapshot::from_window(w1);
+        render.update_frame(&s1, &mut grid, FrameOptions::default());
+        render
+            .sync_atlas(&grid)
+            .map_err(|e| format!("sync atlas (unforced): {e}"))?;
+        let unforced_px = render
+            .draw_frame()
+            .map_err(|e| format!("draw frame (unforced): {e}"))?;
+        let unforced = cell_avg(&unforced_px, sw, sh, cw as usize, ch as usize, tx, ty);
+
+        // 3. Tint again WITH force_full_rebuild: now the tint must land.
+        let mut w2 = engine.lock().unwrap().snapshot_window_tracking(0);
+        tint_matches(&mut w2, &[match_range], Some(0), MatchColors::default());
+        let s2 = FullSnapshot::from_window(w2);
+        render.update_frame(
+            &s2,
+            &mut grid,
+            FrameOptions {
+                force_full_rebuild: true,
+                ..FrameOptions::default()
+            },
+        );
+        render
+            .sync_atlas(&grid)
+            .map_err(|e| format!("sync atlas (forced): {e}"))?;
+        let forced_px = render
+            .draw_frame()
+            .map_err(|e| format!("draw frame (forced): {e}"))?;
+        let forced = cell_avg(&forced_px, sw, sh, cw as usize, ch as usize, tx, ty);
+
+        let unforced_delta = delta(unforced, base);
+        let forced_delta = delta(forced, base);
+        // Without the force, the clean row is skipped: the tint must NOT show
+        // (this asserts the fix is actually load-bearing).
+        if unforced_delta > 60 {
+            return Err(format!(
+                "an unforced partial rebuild unexpectedly repainted the tinted \
+                 clean row (base→unforced delta {unforced_delta}); the \
+                 force_full_rebuild regression scenario no longer holds"
+            ));
+        }
+        // With the force, the amber tint must land.
+        if forced_delta <= 60 {
+            return Err(format!(
+                "force_full_rebuild did not repaint the search highlight over a \
+                 clean row (base→forced delta {forced_delta}); typing a needle \
+                 whose matches are already on screen would not highlight"
+            ));
+        }
+        eprintln!(
+            "offscreen: search highlight needs+honors force_full_rebuild \
+             (unforced clean-row skip delta {unforced_delta}, forced repaint \
+             delta {forced_delta})"
+        );
+    }
+
     Ok(true)
 }
 

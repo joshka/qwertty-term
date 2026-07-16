@@ -332,6 +332,13 @@ struct Surface {
     /// Drives the match highlights in [`Surface::render`] and the counter in
     /// the overlay. Empty/inactive when search is closed.
     search: crate::search::SearchState,
+    /// Set whenever the search-match highlight state changes (open/close, needle
+    /// re-run, navigation) so the next [`Surface::render`] forces a full cell
+    /// rebuild. The highlight is a host-side tint the engine's dirty tracking
+    /// doesn't know about, so without this a needle change whose matches are
+    /// already on screen (no viewport move, no dirtied row) would not repaint —
+    /// the tint would never reach the GPU. Cleared once the forcing frame draws.
+    search_highlight_dirty: Cell<bool>,
     /// The AppKit search-bar overlay for this pane, created lazily on first
     /// Cmd+F and reused thereafter (shown/hidden). `None` until first opened.
     search_overlay: Option<Retained<crate::search_overlay::SearchOverlay>>,
@@ -797,9 +804,15 @@ impl Surface {
         }
         let snapshot = FullSnapshot::from_window(window);
         let render = self.render.as_mut().expect("checked above");
+        // A host-side search-highlight change (needle re-run / navigation /
+        // open / close) tints existing cells without moving the viewport or
+        // dirtying an engine row, so force a full rebuild this frame or the
+        // partial path would skip the clean rows and never upload the tint.
+        let force_full_rebuild = self.search_highlight_dirty.replace(false);
         let opts = FrameOptions {
             focused,
             hovered_cell: self.hovered_cell,
+            force_full_rebuild,
             ..FrameOptions::default()
         };
         render.update_frame(&snapshot, &mut self.font.grid, opts);
@@ -1090,6 +1103,7 @@ impl Surface {
         surface: SurfaceId,
     ) {
         self.search.open();
+        self.search_highlight_dirty.set(true);
         let bounds = self.view_bounds();
         if self.search_overlay.is_none() {
             let overlay =
@@ -1110,6 +1124,8 @@ impl Surface {
             overlay.close();
         }
         self.search.close();
+        // Repaint to drop the now-cleared match highlights.
+        self.search_highlight_dirty.set(true);
         // Returning to the live view after a scrolled-to match is the least
         // surprising default (matches scroll-to-bottom on keystroke).
         self.scrollback_offset = 0;
@@ -1124,6 +1140,9 @@ impl Surface {
         }
         let matches = self.engine().search_all(needle.as_bytes());
         self.search.set_results(needle.to_string(), matches);
+        // The highlight set changed; force a repaint even if no match scrolls the
+        // viewport (the common "search for something already on screen" case).
+        self.search_highlight_dirty.set(true);
         if let Some(range) = self.search.current_match() {
             self.scroll_match_into_view(range);
         }
@@ -1143,6 +1162,9 @@ impl Surface {
         } else {
             self.search.previous()
         };
+        // The current-match tint moved; force a repaint (a same-viewport step,
+        // e.g. two matches on one screen, wouldn't otherwise redraw).
+        self.search_highlight_dirty.set(true);
         if let Some(range) = range {
             self.scroll_match_into_view(range);
         }
@@ -4972,6 +4994,7 @@ impl Controller {
             dead_reason: RefCell::new(None),
             banner_drawn: Cell::new(false),
             search: crate::search::SearchState::default(),
+            search_highlight_dirty: Cell::new(false),
             search_overlay: None,
             match_colors: crate::selection::MatchColors::default(),
             dim_colors: crate::selection::DimColors {
