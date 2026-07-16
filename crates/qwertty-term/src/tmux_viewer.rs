@@ -359,6 +359,21 @@ impl Pane {
         self.stream.terminal_mut()
     }
 
+    /// Resize the pane terminal to a new layout size (cells). tmux reports each
+    /// pane's WxH in the `%layout-change` layout string; when a split, close, or
+    /// window resize changes it, the terminal must follow so its content reflows
+    /// to the new geometry — otherwise it stays frozen at its create-time size
+    /// (the "contents don't resize" bug). No-op if unchanged.
+    fn resize(&mut self, width: usize, height: usize) {
+        let (w, h) = (clamp_cells(width), clamp_cells(height));
+        let t = self.stream.terminal_mut();
+        let pages = &t.screen().pages;
+        if pages.cols() == w && pages.rows() == h {
+            return;
+        }
+        t.resize(w, h);
+    }
+
     /// The most recent parsed `list-panes` state, if captured.
     pub fn state(&self) -> Option<&PaneState> {
         self.state.as_ref()
@@ -954,7 +969,11 @@ impl Viewer {
         let mut rebuilt: Vec<Pane> = Vec::with_capacity(leaves.len());
         for (id, width, height) in &leaves {
             if let Some(pos) = old.iter().position(|p| p.id == *id) {
-                rebuilt.push(old.remove(pos));
+                // Existing pane: follow its new layout size so a split/close/
+                // window-resize actually reflows its content (not just new panes).
+                let mut pane = old.remove(pos);
+                pane.resize(*width, *height);
+                rebuilt.push(pane);
             } else {
                 let mut pane = Pane::new(*width, *height, &self.colors);
                 pane.id = *id;

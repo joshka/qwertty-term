@@ -3144,6 +3144,56 @@ impl Controller {
                 }
             }
         }
+        drop(state);
+        // If this is a tmux-window tab, tell tmux the new window size by resizing
+        // the (hidden) control surface's pty — tmux re-lays-out and emits
+        // `%layout-change`, which reflows the pane terminals (bug: a window resize
+        // otherwise never reaches tmux; the control surface is in a separate tab).
+        self.propagate_tmux_window_resize(tab);
+    }
+
+    /// Resize the `tmux -CC` control surface's pty to match the current window
+    /// size for a tmux-window tab, so tmux re-lays-out its panes to the new
+    /// client dimensions (ADR 006 — native→tmux resize). No-op for an ordinary
+    /// tab or when the size is unchanged (the unchanged guard also prevents a
+    /// resize↔`%layout-change` feedback loop).
+    fn propagate_tmux_window_resize(&self, tab: TabId) {
+        // Compute the target control-client grid + locate the control surface.
+        let Some((control, cols, rows, cw, ch)) = (|| {
+            let state = self.0.borrow();
+            let t = state.tabs.get(&tab)?;
+            // A tmux-window tab's surfaces are all display panes; grab one's
+            // control source. `None` for an ordinary tab.
+            let src = t.surfaces.values().find_map(|s| s.display_source())?;
+            let surface = t.surfaces.values().next()?;
+            let (cw, ch) = (surface.font.cell_width, surface.font.cell_height);
+            let scale = t.window.backingScaleFactor();
+            let bounds = t.container.bounds();
+            let (w, h) = (
+                (bounds.size.width * scale) as usize,
+                (bounds.size.height * scale) as usize,
+            );
+            let (cols, rows) = crate::geometry::grid_size(w, h, cw, ch);
+            Some((src, cols, rows, cw, ch))
+        })() else {
+            return;
+        };
+        // Resize the control surface's engine + pty. The pty resize (TIOCSWINSZ)
+        // is what tmux reads as its client size.
+        let mut state = self.0.borrow_mut();
+        if let Some(cs) = state
+            .tabs
+            .get_mut(&control.control_tab)
+            .and_then(|t| t.surfaces.get_mut(&control.control_surface))
+            && (cs.cols != cols || cs.rows != rows)
+        {
+            cs.cols = cols;
+            cs.rows = rows;
+            cs.engine().resize(cols, rows);
+            if let Some(io) = &cs.io {
+                io.resize(cols as u16, rows as u16, cw, ch);
+            }
+        }
     }
 
     /// The tab's [`SplitContainer`](crate::splitview::SplitContainer) was resized

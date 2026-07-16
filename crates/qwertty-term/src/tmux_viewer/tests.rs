@@ -365,6 +365,26 @@ fn ignored_steady_state_notifications_are_noops() {
     assert_eq!(v.pane_count(), 1);
 }
 
+#[test]
+fn layout_change_resizes_existing_pane_terminal() {
+    // A split / close / window resize re-lays-out; an EXISTING pane's terminal
+    // must follow its new layout size, not stay frozen at its create-time size
+    // (the "contents don't resize in tmux mode" bug).
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let t = v.pane(0).unwrap().terminal();
+    assert_eq!((t.screen().pages.cols(), t.screen().pages.rows()), (83, 44));
+
+    // tmux re-lays-out the same pane at a smaller size (e.g. after a split).
+    v.next(layout_change(0, &checksummed("40x30,0,0,0")));
+    let t = v.pane(0).unwrap().terminal();
+    assert_eq!(
+        (t.screen().pages.cols(), t.screen().pages.rows()),
+        (40, 30),
+        "existing pane terminal must resize to the new layout size"
+    );
+}
+
 // ---- send-keys (ADR 006 slice 5d input) ------------------------------------
 
 /// A full checksummed layout string for `body` (mirrors the smoke helper).
