@@ -1,14 +1,13 @@
 # mirror-verify status
 
-- **Current item:** All 17 SHAs dispositioned — mission complete. **16 VERIFIED**; **1
-  MIRRORED** (`a55850c98`). Gap-closure PR **#316 OPEN** (full local gate green; CI running).
-  Left open for Josh — the fix is in the core print path (`print.rs`), so not self-merging
-  per hot-path caution. Backlog drained; closing out on merge.
-- **Last merged:** PR #316 open (not yet merged)
+- **Current item:** **CLOSED — mission complete.** All 17 SHAs dispositioned: **16 VERIFIED**;
+  **1 MIRRORED** (`a55850c98`). Gap-closure PR **#316 MERGED** (`bc7bf326`, tip of main;
+  verified ancestor — no orphaning). Backlog drained. Respawn only if the 2 test-only
+  follow-ups (`30b42f42a`, `e6e4a9fdc`) are wanted — code is already verified correct.
+- **Last merged:** #316 (a55850c98 print-path OOB fix + 0aaedf436/afbf5ba15 regression tests
+  + 627518447 Phase-2 note), merged 2026-07-16.
 - **Blockers:** none
-- **Claims:** `crates/qwertty-term-vt/src/terminal/print.rs` (a55850c98 fix),
-  `.../terminal/tests.rs`, `.../pagelist/tests.rs`, `.../search/mod.rs` (doc note) — all vt;
-  vt-tails has no active claims. Drop on merge.
+- **Claims:** none (dropped on merge of #316).
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
 ## Disposition table (17 SHAs across 5 clusters) — all dispositioned
