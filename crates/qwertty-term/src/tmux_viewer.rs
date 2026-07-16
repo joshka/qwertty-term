@@ -195,6 +195,13 @@ enum Command {
     /// so bare `split-window`, the active-pane indicator, and any no-`-t` command
     /// operate on the pane the user is actually in. A *write* command.
     SelectPane { pane_id: usize },
+    /// `detach-client`: detach *this* `tmux -CC` client so the control process
+    /// exits and the control surface returns to a plain shell (I1). Sent when a
+    /// reconcile leaves the session with zero windows (the user closed every
+    /// tmux tab): with `detach-on-destroy off` tmux would otherwise keep the
+    /// client attached, orphaning `tmux -CC`. Leaves the server/other sessions
+    /// alive. tmux answers with `%exit`. A *write* command.
+    DetachClient,
 }
 
 impl Command {
@@ -266,6 +273,9 @@ impl Command {
             }
             // `select-pane -t %<id>`: make the target pane the active pane.
             Command::SelectPane { pane_id } => format!("select-pane -t %{pane_id}\n").into_bytes(),
+            // `detach-client`: detach this control client (no `-t`, so the
+            // current client) → `tmux -CC` exits, control pty returns to the shell.
+            Command::DetachClient => b"detach-client\n".to_vec(),
         }
     }
 }
@@ -686,6 +696,22 @@ impl Viewer {
         self.enqueue_write(Command::SelectPane { pane_id })
     }
 
+    /// Detach this `tmux -CC` client (ADR 006 slice 5e — orphan teardown /
+    /// invariant I1). Issued when a reconcile leaves the session with zero
+    /// windows (the user closed every tmux tab): with `detach-on-destroy off`
+    /// tmux keeps the client attached to another session instead of exiting, so
+    /// `tmux -CC` would linger and the restored control surface would show a
+    /// still-attached client rather than a plain shell. `detach-client` makes
+    /// tmux answer `%exit` and the client process exit. Returns the command to
+    /// send now (empty outside steady state). Idempotent enough: a redundant
+    /// detach on an already-exiting client hits a dead pty harmlessly.
+    pub fn detach_client(&mut self) -> Vec<Action> {
+        if self.state != State::CommandQueue {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::DetachClient)
+    }
+
     /// Queue a *write* control command (send-keys / split-window / new-window /
     /// kill-pane) onto the in-flight command queue and return the action to send
     /// it now, if the queue was idle. Threading writes through the same queue as
@@ -749,6 +775,10 @@ impl Viewer {
             Command::KillPane { .. } | Command::KillWindow { .. } => {
                 self.command_queue.push_back(Command::ListWindows);
             }
+            // `detach-client`: tmux answers this block, then emits `%exit` as it
+            // tears the client down. Nothing to apply from the reply — the
+            // `%exit` drives teardown (`Notification::Exit`).
+            Command::DetachClient => {}
         }
     }
 

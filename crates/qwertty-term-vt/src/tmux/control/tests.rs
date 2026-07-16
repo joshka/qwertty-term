@@ -194,6 +194,19 @@ fn window_close_and_unlinked_window_close_decoded() {
 }
 
 #[test]
+fn exit_notification_decoded() {
+    // Bare `%exit` (session destroyed / client detached) ends control mode.
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%exit");
+    assert_eq!(put_newline(&mut c), Notification::Exit);
+
+    // `%exit <reason>` — the reason is informational; still an exit.
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%exit server-exited");
+    assert_eq!(put_newline(&mut c), Notification::Exit);
+}
+
+#[test]
 fn window_renamed() {
     let mut c = ControlParser::new();
     put_all_none(&mut c, "%window-renamed @42 bar");

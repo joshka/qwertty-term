@@ -385,6 +385,16 @@ fn parse_line(line: &[u8]) -> Option<Notification> {
         return None;
     }
 
+    // %exit [reason]: tmux is leaving control mode — the session was destroyed,
+    // the client was detached (`detach-client`), or the server is shutting down.
+    // This is the deterministic end-of-control-session signal; any trailing
+    // reason is informational. Without this arm, control mode's end was noticed
+    // only heuristically (the first non-`%` byte once the underlying shell wrote
+    // output — see `State::Idle`), so a client that lingered was missed.
+    if line == b"%exit" || strip_prefix(line, b"%exit ").is_some() {
+        return Some(Notification::Exit);
+    }
+
     // Unknown command: upstream logs and returns to idle.
     None
 }

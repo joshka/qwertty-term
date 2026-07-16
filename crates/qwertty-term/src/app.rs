@@ -1364,10 +1364,26 @@ impl Surface {
         precision: bool,
         mods: qwertty_term_input::key_mods::Mods,
         mult: crate::scroll::ScrollMultiplier,
+        display_max: Option<usize>,
     ) {
         let cell_h = self.font.cell_height as f64;
         let delta = self.wheel.row_delta(yoff, precision, cell_h, mult);
         if delta == 0 {
+            return;
+        }
+
+        // Display-only tmux pane: no pty, no live mode state of its own — just
+        // move the scrollback viewport, clamped to the Viewer pane terminal's
+        // real history length. Reporting / alt-scroll / cursor-key paths need a
+        // pty and are slice-5d (mouse routing to panes); a pane in alt-screen
+        // has 0 scrollback, so this naturally no-ops there.
+        if let Some(max) = display_max {
+            if let crate::scroll::WheelOutcome::Viewport { rows_up } =
+                crate::scroll::decide(delta, false, false, false)
+            {
+                let cur = self.scrollback_offset as isize;
+                self.scrollback_offset = (cur + rows_up).clamp(0, max as isize) as usize;
+            }
             return;
         }
 
@@ -2393,16 +2409,21 @@ impl Controller {
         // surfaces (I1 — never-empty window). `restore_control_tab` is a no-op if
         // the control tab was never hidden (the pre-first-window case), and
         // `hide_control_tab` is a no-op once already hidden.
-        let has_native_tab = self
-            .0
-            .borrow()
-            .tmux_tabs
-            .get(&key)
-            .is_some_and(|m| !m.is_empty());
-        if has_native_tab {
-            self.hide_control_tab(control.control_tab);
-        } else {
-            self.restore_control_tab(control.control_tab);
+        // `Some(true)` ≥1 tmux window → hide the control tab (I4). `Some(false)`
+        // the map entry exists but is empty → the session had windows and the
+        // user just closed the last one: restore the control tab (I1) *and*
+        // detach the `tmux -CC` client so it exits instead of lingering (with
+        // `detach-on-destroy off` tmux keeps the client attached otherwise —
+        // the "closing both tabs doesn't kill tmux -CC" orphan). `None` no entry
+        // → pre-first-window startup: restore only, nothing to detach.
+        let map_populated = self.0.borrow().tmux_tabs.get(&key).map(|m| !m.is_empty());
+        match map_populated {
+            Some(true) => self.hide_control_tab(control.control_tab),
+            Some(false) => {
+                self.restore_control_tab(control.control_tab);
+                self.detach_tmux_control(control);
+            }
+            None => self.restore_control_tab(control.control_tab),
         }
     }
 
@@ -2714,13 +2735,18 @@ impl Controller {
                     };
                     // Resolve the control surface's live session and this pane's
                     // Viewer-owned terminal, then snapshot it (non-mutating).
+                    // Snapshot at this pane's own scrollback offset so wheel
+                    // scrolling into the pane's history is honored (the offset
+                    // is advanced by `apply_wheel` against the pane terminal's
+                    // real scrollback length — the surface's own engine is
+                    // empty). Live view is offset 0.
                     let window = state
                         .tabs
                         .get(&src.control_tab)
                         .and_then(|ct| ct.surfaces.get(&src.control_surface))
                         .and_then(|cs| cs.tmux_session())
                         .and_then(|session| session.pane_terminal(*sid))
-                        .map(|term| term.snapshot_window(0));
+                        .map(|term| term.snapshot_window(surface.scrollback_offset));
                     if let Some(window) = window {
                         frames.push(PaneFrame {
                             tab: *tid,
@@ -4623,6 +4649,29 @@ impl Controller {
         }
     }
 
+    /// Detach the `tmux -CC` client hosted by `control`'s control surface (ADR
+    /// 006 slice 5e — orphan teardown / I1). Writes `detach-client` to the
+    /// control pty so the client exits and the surface returns to a plain shell,
+    /// even under `detach-on-destroy off`. Called from the reconcile when the
+    /// last tmux window closes. No-op if the control surface/session is gone.
+    fn detach_tmux_control(&self, control: DisplaySource) {
+        let mut state = self.0.borrow_mut();
+        if let Some(cs) = state
+            .tabs
+            .get_mut(&control.control_tab)
+            .and_then(|t| t.surfaces.get_mut(&control.control_surface))
+        {
+            let commands = cs
+                .tmux
+                .as_mut()
+                .map(|sess| sess.detach_client())
+                .unwrap_or_default();
+            for cmd in &commands {
+                cs.send_pty(cmd);
+            }
+        }
+    }
+
     /// If `tab` is a **tmux-window tab** (it mirrors a tmux window under some
     /// live control session), return `(control_tab, control_surface,
     /// window_id)` — everything the window-close delegate needs to redirect a
@@ -4845,13 +4894,34 @@ impl Controller {
         mods: qwertty_term_input::key_mods::Mods,
     ) {
         let mult = self.0.borrow().scroll_multiplier;
+        // A display-only tmux pane's own engine is empty, so it can't clamp the
+        // scrollback viewport — the real history lives in the Viewer's pane
+        // `Terminal`. Resolve its scrollback length (read borrow) and hand it to
+        // `apply_wheel` as the clamp bound; `None` for an ordinary pty pane.
+        let display_max = {
+            let state = self.0.borrow();
+            state
+                .tabs
+                .get(&tab)
+                .and_then(|t| t.surfaces.get(&surface))
+                .and_then(|s| s.display_source())
+                .and_then(|src| {
+                    state
+                        .tabs
+                        .get(&src.control_tab)
+                        .and_then(|ct| ct.surfaces.get(&src.control_surface))
+                        .and_then(|cs| cs.tmux_session())
+                        .and_then(|sess| sess.pane_terminal(surface))
+                        .map(|term| term.scrollback_len())
+                })
+        };
         let mut state = self.0.borrow_mut();
         if let Some(s) = state
             .tabs
             .get_mut(&tab)
             .and_then(|t| t.surfaces.get_mut(&surface))
         {
-            s.apply_wheel(yoff, precision, mods, mult);
+            s.apply_wheel(yoff, precision, mods, mult, display_max);
         }
     }
 

@@ -728,6 +728,15 @@ impl Terminal {
         snap
     }
 
+    /// Rows of scrollback history above the active area — the maximum a
+    /// viewport can scroll up. Mirrors the app engine's `scrollback_len`;
+    /// cheap (no snapshot). Used by the tmux display-pane wheel path, whose
+    /// surface has no engine of its own to clamp against.
+    pub fn scrollback_len(&self) -> usize {
+        let pages = &self.screen().pages;
+        pages.total_rows().saturating_sub(pages.rows() as usize)
+    }
+
     /// Build an owned [`SnapshotWindow`] of just the rows needed to render a
     /// viewport `scrollback_offset` rows up from the bottom. Convenience
     /// wrapper over [`Screen::snapshot_window`] that also reports the real

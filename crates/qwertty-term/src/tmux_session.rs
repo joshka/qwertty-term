@@ -269,6 +269,14 @@ impl TmuxSession {
         };
         commands_of(self.viewer.select_pane(pane_id))
     }
+
+    /// Detach this `tmux -CC` client so the control process exits and its
+    /// surface returns to a plain shell (ADR 006 slice 5e — orphan teardown /
+    /// I1). Issued when a reconcile leaves the session with zero windows.
+    /// Returns the control-pty bytes to write (empty outside steady state).
+    pub fn detach_client(&mut self) -> Vec<Vec<u8>> {
+        commands_of(self.viewer.detach_client())
+    }
 }
 
 /// Keep only the `Command` bytes from a Viewer action list (the write helpers

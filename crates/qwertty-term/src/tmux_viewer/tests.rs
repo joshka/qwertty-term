@@ -521,6 +521,28 @@ fn kill_window_guards_pre_steady_and_unknown_window() {
 }
 
 #[test]
+fn detach_client_emits_bare_detach_and_guards_pre_steady() {
+    // Orphan teardown (I1): closing the last tmux tab detaches the -CC client.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.detach_client()).expect("detach-client command");
+    assert!(
+        bytes_contains(&cmd, b"detach-client\n"),
+        "unexpected detach-client bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+    // Its %begin/%end reply carries nothing to apply and queues no follow-up
+    // (unlike kill-*); tmux's own `%exit` drives teardown.
+    assert!(
+        v.next(block_end("")).is_empty(),
+        "detach-client reply should queue nothing"
+    );
+    // Not yet in steady state: no command.
+    let mut fresh = Viewer::new(Colors::default());
+    assert!(fresh.detach_client().is_empty());
+}
+
+#[test]
 fn new_window_emits_bare_new_window() {
     let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
     drain_to_idle(&mut v);
