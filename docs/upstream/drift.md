@@ -5,8 +5,8 @@ should mirror them. Maintained by thread T8. Re-run each session: `git -C ~/loca
 then diff `origin/main` against the pin for the ported subsystems.
 
 - **Port pin:** `2da015cd6` (2026-07-06)
-- **Upstream main at last scan:** `a3ac713b7` (2026-07-12, drift pass 2)
-- **Last scan:** 2026-07-12 (T8, drift pass 2 — incremental `a887df42c..a3ac713b7`)
+- **Upstream main at last scan:** `73534c468` (2026-07-15, drift pass 3)
+- **Last scan:** 2026-07-15 (drift3, drift pass 3 — incremental `a3ac713b7..73534c468`)
 - **Range (cumulative, pin → pass-1 scan `a887df42c`):** 102 non-merge commits upstream since the
   pin; 92 unique touch a ported subsystem (`src/terminal/` 80, `src/renderer/` 9, `src/termio/` 5,
   `src/font/` 3, `src/Surface.zig` 1, `src/input*` 0). See the classification below.
@@ -24,6 +24,37 @@ Only 2 non-merge commits upstream since pass 1; 1 touches a ported subsystem:
   file, not code.
 
 No new Inbox lines filed this pass. Cumulative classification (pass 1) unchanged below.
+
+## Drift pass 3 (`a3ac713b7..73534c468`, 2026-07-15) — CLEAN, no must-mirror items
+
+12 non-merge commits upstream since pass 2; 1 touches a ported subsystem, and it does **not**
+apply to the port. No new Inbox lines filed this pass.
+
+Ported-subsystem commit — non-applicable:
+
+- `bc8bb6c0f` — `terminal/search`: don't clear storage when updating fingerprint. **non-applicable**
+  — this fixes a use-after-free/aliasing UB introduced by the pass-2 fingerprint-storage-reuse
+  design (`9659167ec`, "reuse viewport fingerprint storage"). The port **predates that design**
+  (it never adopted the storage-reuse refactor, itself classified irrelevant/perf-only in pass 2),
+  so the bug it fixes was never introduced here. Even if the port later mirrors that perf refactor,
+  Rust's borrow checker precludes the specific aliasing UB (the retained `&mut` backing slice
+  aliased across the update). Nothing to mirror.
+
+The other 11 are CI/deps/governance/dead-code — irrelevant, nothing ported:
+
+- `68376f5ac` — bump `cachix/install-nix-action` (CI dep).
+- `42b4c5972` — remove a dead code line (Zig cleanup).
+- `59c3a0836` — bump `softprops/action-gh-release` (CI dep).
+- `f8041e849` — Update VOUCHED list (#13330) (contributor governance).
+- `0ac423d57` — bump `mitchellh/vouch/action/sync-codeowners` (CI dep).
+- `97f70cccf` — bump `mitchellh/vouch/action/manage-by-discussion` (CI dep).
+- `3f6b9a16b` — bump `mitchellh/vouch/action/check-issue` (CI dep).
+- `8093d2d43` — bump `mitchellh/vouch/action/check-pr` (CI dep).
+- `76222008e` — bump `mitchellh/vouch/action/manage-by-issue` (CI dep).
+- `71522c311` — remove unneeded comments (Zig cleanup).
+- `7fa43764b` — add nushell complete attribute (shell-completion metadata).
+
+Cumulative classification (pass 1) unchanged below.
 
 Classification: **mirror** = a bug fix in logic the port has (likely) already ported — replicate
 it. **feature** = new functionality the port lacks — owning thread's backlog, not urgent.
