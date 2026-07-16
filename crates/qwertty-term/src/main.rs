@@ -374,14 +374,28 @@ fn run_window() {
     );
 }
 
+/// The non-macOS message for both entry points: this binary is the **macOS**
+/// (AppKit/Metal) app; the Linux terminal is a separate binary in the
+/// `qwertty-term-gtk` crate (GTK4 + OpenGL, ADR 005). Point the user there
+/// rather than dead-ending — running `qwertty-term` is the natural first thing
+/// to try on Linux.
 #[cfg(not(target_os = "macos"))]
-fn run_offscreen_smoke() {
-    eprintln!("qwertty-term is macOS-only");
+fn wrong_platform() -> ! {
+    eprintln!("qwertty-term (this binary) is the macOS app — AppKit + Metal.");
+    eprintln!();
+    eprintln!("On Linux, run the GTK4 app instead:");
+    eprintln!("    cargo run -p qwertty-term-gtk");
+    eprintln!();
+    eprintln!("It needs libgtk-4-dev, libadwaita-1-dev, libepoxy-dev and Mesa/GL.");
     std::process::exit(1);
 }
 
 #[cfg(not(target_os = "macos"))]
+fn run_offscreen_smoke() {
+    wrong_platform();
+}
+
+#[cfg(not(target_os = "macos"))]
 fn run_window() {
-    eprintln!("qwertty-term is macOS-only");
-    std::process::exit(1);
+    wrong_platform();
 }
