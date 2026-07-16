@@ -50,6 +50,7 @@ use qwertty_term::tabkeys::TabAction;
 use qwertty_term::tabs::inherit_pwd;
 use qwertty_term_input::key::Action;
 use qwertty_term_input::key_encode::Options as EncodeOptions;
+use qwertty_term_renderer::opengl::{MIN_VERSION_MAJOR, MIN_VERSION_MINOR};
 
 /// Word-boundary codepoints for double-click word selection (the vt default
 /// set, the same one the macOS gesture path passes).
@@ -305,6 +306,49 @@ fn make_glow() -> glow::Context {
     // SAFETY: the GLArea's context is current; `epoxy::get_proc_addr` returns
     // valid entry points (or null, which glow treats as unsupported).
     unsafe { glow::Context::from_loader_function(epoxy::get_proc_addr) }
+}
+
+/// What we need and how to get unstuck, printed on any GL setup failure. The
+/// `LIBGL_ALWAYS_SOFTWARE` hint carries the most weight in a VM: Mesa's llvmpipe
+/// advertises GL 4.5 core, so it runs (slowly) where a translated guest GL can't.
+// (No `\`-continuation after the opening quote: it would swallow the first
+// line's indent along with the newline.)
+const GL_HELP: &str =
+    "  This terminal needs a desktop OpenGL 4.3 core context: the renderer's shaders
+  are `#version 430 core` and bind SSBOs, which require GL 4.3+ (on GLES, 3.1+).
+  See what your driver offers with:
+      glxinfo -B
+  If \"Max core profile version\" is below 4.3 — common in VMs, where the guest's
+  GL is translated to the host's — software rendering works:
+      LIBGL_ALWAYS_SOFTWARE=1 cargo run -p qwertty-term-gtk";
+
+/// The raw `GL_VERSION` string. Read as a string rather than via
+/// `GL_MAJOR_VERSION`, which exists only on GL 3.0+ — querying it would itself
+/// fail on exactly the too-old contexts this is here to diagnose — and it's the
+/// most useful thing to show a user when we refuse to run.
+fn gl_version_string(gl: &glow::Context) -> String {
+    // SAFETY: called with the GLArea's context current.
+    unsafe { gl.get_parameter_string(glow::VERSION) }
+}
+
+/// `<major>.<minor>` from a desktop `GL_VERSION`, whose spec-mandated prefix is
+/// exactly that (`"4.6.0 NVIDIA …"`, `"2.1 Mesa …"`).
+///
+/// `None` for anything else — including a GLES context's `"OpenGL ES 3.2 …"`,
+/// which has no leading digit. Rejecting that is correct rather than incidental:
+/// the shaders are `#version 430 core`, which GLES cannot compile at any
+/// version. We ask for desktop GL via `set_allowed_apis`, so that's belt and
+/// braces.
+fn parse_gl_version(version: &str) -> Option<(i32, i32)> {
+    let (major, rest) = version.split_whitespace().next()?.split_once('.')?;
+    Some((major.parse().ok()?, rest.split('.').next()?.parse().ok()?))
+}
+
+/// `GL_RENDERER` — the string that actually names the culprit when a VM caps the
+/// version, e.g. `virgl (ANGLE (Apple, Apple M2 Max, OpenGL 4.1 Metal))`.
+fn gl_renderer(gl: &glow::Context) -> String {
+    // SAFETY: called with the GLArea's context current.
+    unsafe { gl.get_parameter_string(glow::RENDERER) }
 }
 
 /// The framebuffer GTK has bound for drawing (`GL_DRAW_FRAMEBUFFER_BINDING`) —
@@ -982,10 +1026,29 @@ fn build_surface_glarea(app: &adw::Application, shared: &Rc<Shared>, mode: Mode)
     // upstream ui/1.2/surface.blp:34-36
     gl_area.set_has_depth_buffer(false);
     gl_area.set_has_stencil_buffer(false);
-    // GL 4.3 core (upstream renderer/OpenGL.zig). Requiring 4.3 already forces a
-    // *desktop* GL context (GLES has no 4.3), which is what upstream's
-    // `allowed-apis: gl` (surface.blp:36) achieves.
-    gl_area.set_required_version(4, 3);
+    // Desktop GL, not GLES — upstream's `allowed-apis: gl` (surface.blp:36).
+    // GTK's default is BOTH, and GLES can't satisfy us anyway: the shaders are
+    // `#version 430 core` and bind SSBOs, which need GL 4.3 / GLES 3.1+.
+    //
+    // `GtkGLArea:allowed-apis` is GTK **4.12+** — not 4.6, which is when the
+    // similarly-named `GdkGLContext` one landed. So it's absent on our oldest
+    // supported GTK (Debian bookworm ships 4.8) and `set_property` would panic
+    // with "property 'allowed-apis' not found". Set it where it exists — modern
+    // GTK is where a spurious GLES pick actually happens — and elsewhere let the
+    // version gate in `realize` catch it, which rejects a GLES context anyway.
+    //
+    // Assigned as a property rather than through `GLAreaExt::set_allowed_apis`
+    // so we keep a GTK 4.6 build floor: gtk4-rs gates that setter behind
+    // `v4_12`, and it only assigns this same property (auto/gl_area.rs:422-427).
+    if gl_area.find_property("allowed-apis").is_some() {
+        gl_area.set_property("allowed-apis", gdk::GLAPI::GL);
+    }
+    // Deliberately NO `set_required_version(4, 3)`, matching upstream (which
+    // sets no required-version anywhere). Asking GTK for 4.3 up front makes a
+    // too-old driver fail inside GTK with a bare "unable to create GL context",
+    // which names neither the version we need nor the one we got. Instead we
+    // take whatever context GTK builds and check it ourselves in `realize`,
+    // mirroring upstream's own gate in prepareContext (OpenGL.zig:141-148).
 
     // realize: make current, check for a context error, load `glow`.
     // Mirrors glareaRealize (surface.zig:3247-3282).
@@ -993,16 +1056,48 @@ fn build_surface_glarea(app: &adw::Application, shared: &Rc<Shared>, mode: Mode)
         let shared = shared.clone();
         gl_area.connect_realize(move |area| {
             area.make_current();
-            // Fully-qualified: `error()` also exists on `GLContextExt`.
-            if let Some(err) = gtk::prelude::GLAreaExt::error(area) {
-                let msg = err.to_string();
+            let fail = |msg: String| {
                 shared.smoke.borrow_mut().realize_error = Some(msg.clone());
                 shared.text.borrow_mut().realize_error = Some(msg.clone());
                 shared.resize.borrow_mut().realize_error = Some(msg);
+            };
+            // Fully-qualified: `error()` also exists on `GLContextExt`.
+            if let Some(err) = gtk::prelude::GLAreaExt::error(area) {
+                let msg = err.to_string();
+                // GTK paints its own terse error into the widget; print an
+                // actionable one too, since "unable to create GL context" alone
+                // tells a user nothing about what their driver lacks.
+                // GTK's own text is already a full sentence ("Unable to create a
+                // GL context"), so don't wrap it in a second one.
+                eprintln!("qwertty-term-gtk: {msg}");
+                eprintln!("{GL_HELP}");
+                fail(msg);
                 return;
             }
             ensure_gl_loader();
-            *shared.gl.borrow_mut() = Some(make_glow());
+            let gl = make_glow();
+
+            // Upstream's version gate (OpenGL.zig:141-148). GTK hands back the
+            // best context the driver offers, so a too-old one realizes happily
+            // and would otherwise fail later and far less legibly, down in
+            // shader compilation.
+            let version = gl_version_string(&gl);
+            let usable = matches!(
+                parse_gl_version(&version),
+                Some(v) if v >= (MIN_VERSION_MAJOR, MIN_VERSION_MINOR)
+            );
+            if !usable {
+                let msg = format!(
+                    "unusable OpenGL: this driver reports GL_VERSION {version:?}, but \
+                     qwertty-term requires OpenGL {MIN_VERSION_MAJOR}.{MIN_VERSION_MINOR} core"
+                );
+                eprintln!("qwertty-term-gtk: {msg}");
+                eprintln!("  GL_RENDERER: {}", gl_renderer(&gl));
+                eprintln!("{GL_HELP}");
+                fail(msg);
+                return;
+            }
+            *shared.gl.borrow_mut() = Some(gl);
             shared.smoke.borrow_mut().realized = true;
             shared.text.borrow_mut().realized = true;
             shared.resize.borrow_mut().realized = true;
@@ -2157,4 +2252,45 @@ pub fn run_headerbar_smoke() -> HeaderbarOutcome {
 
     let _ = app.run_with_args::<&str>(&[]);
     outcome.borrow().clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real `GL_VERSION` strings. The 2.1/virgl case is a QEMU guest on an Apple
+    /// Silicon host, where the guest's GL is translated through ANGLE onto Metal
+    /// and lands far below our floor — the failure this gate exists to explain.
+    #[test]
+    fn parses_desktop_gl_versions() {
+        assert_eq!(parse_gl_version("4.6.0 NVIDIA 550.54.14"), Some((4, 6)));
+        assert_eq!(
+            parse_gl_version("4.5 (Core Profile) Mesa 24.0.0 (llvmpipe)"),
+            Some((4, 5))
+        );
+        assert_eq!(parse_gl_version("4.3.0 build 31.0.101"), Some((4, 3)));
+        assert_eq!(parse_gl_version("2.1 Mesa 26.0.3-1ubuntu1"), Some((2, 1)));
+    }
+
+    /// A GLES context has no leading digit, so it fails to parse — and the
+    /// caller treats "unparseable" as unusable, which is the right answer for
+    /// GLES regardless of version: `#version 430 core` is desktop-only.
+    #[test]
+    fn rejects_gles_and_garbage() {
+        assert_eq!(parse_gl_version("OpenGL ES 3.2 Mesa 26.0.3"), None);
+        assert_eq!(parse_gl_version("OpenGL ES 3.0 Mesa 26.0.3"), None);
+        assert_eq!(parse_gl_version(""), None);
+        assert_eq!(parse_gl_version("nonsense"), None);
+    }
+
+    /// The gate itself: only >= 4.3 desktop survives.
+    #[test]
+    fn version_floor_matches_upstream() {
+        let usable = |s: &str| matches!(parse_gl_version(s), Some(v) if v >= (MIN_VERSION_MAJOR, MIN_VERSION_MINOR));
+        assert!(usable("4.5 (Core Profile) Mesa 24.0.0 (llvmpipe)"));
+        assert!(usable("4.3.0 build 31.0.101"));
+        assert!(!usable("4.2.0 build 31.0.101"));
+        assert!(!usable("2.1 Mesa 26.0.3-1ubuntu1"));
+        assert!(!usable("OpenGL ES 3.2 Mesa 26.0.3"));
+    }
 }
