@@ -46,6 +46,8 @@ use gtk::{gdk, gio, glib};
 use crate::input::gdk_key_to_bytes;
 use crate::surface::{Pty, SurfaceState};
 use qwertty_term::gesture::{DEFAULT_BEHAVIORS, Drag, Geometry, Press, SelectionGesture};
+use qwertty_term::tabkeys::TabAction;
+use qwertty_term::tabs::inherit_pwd;
 use qwertty_term_input::key::Action;
 use qwertty_term_input::key_encode::Options as EncodeOptions;
 
@@ -324,6 +326,14 @@ struct Shared {
     /// The pty feeding the terminal (interactive mode); `None` until spawned or
     /// if the spawn failed (then a static banner is fed once).
     pty: RefCell<Option<Pty>>,
+    /// The working directory the pty should spawn in — the cwd inherited from
+    /// the active tab when this surface is a newly-opened tab
+    /// (`qwertty_term::tabs::inherit_pwd`). `None` inherits the process cwd.
+    cwd: RefCell<Option<std::path::PathBuf>>,
+    /// Count of interactive frames this surface has presented. A nonzero value
+    /// means the GLArea realized, built its surface, and rendered at least once
+    /// — the per-tab render signal the tab-lifecycle proof reads.
+    frames: std::cell::Cell<u64>,
     /// Whether the fallback banner was already fed (interactive, no pty).
     banner_fed: RefCell<bool>,
     /// The mouse selection-gesture state machine (reused from the app crate:
@@ -387,7 +397,15 @@ fn ensure_surface(area: &gtk::GLArea, shared: &Shared, feed_shell: bool) -> bool
     };
     if feed_shell {
         let (cols, rows) = surface.grid_size();
-        let pty = Pty::spawn(cols as u16, rows as u16, w as u32, h as u32);
+        let cwd = shared.cwd.borrow();
+        let pty = Pty::spawn(
+            cols as u16,
+            rows as u16,
+            w as u32,
+            h as u32,
+            cwd.as_ref().and_then(|p| p.to_str()),
+        );
+        drop(cwd);
         *shared.pty.borrow_mut() = pty;
     }
     *shared.surface.borrow_mut() = Some(surface);
@@ -582,6 +600,9 @@ fn render_interactive(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
     if feed_banner {
         *shared.banner_fed.borrow_mut() = true;
     }
+    // Record that this surface presented an interactive frame (the per-tab
+    // render signal the tab-lifecycle proof reads).
+    shared.frames.set(shared.frames.get() + 1);
 }
 
 /// Attach a [`gtk::EventControllerKey`] to the GLArea and translate each
@@ -599,10 +620,20 @@ fn render_interactive(area: &gtk::GLArea, gl: &glow::Context, shared: &Shared) {
 /// modes). TODO(modes): thread live terminal state (DECCKM, kitty flags) from
 /// the `SurfaceState`'s `Terminal` into [`EncodeOptions`] so app-cursor-mode
 /// arrows and the kitty protocol encode correctly.
-fn attach_keyboard(gl_area: &gtk::GLArea, shared: Rc<Shared>) {
+fn attach_keyboard(gl_area: &gtk::GLArea, shared: Rc<Shared>, tabs: TabControl) {
     let controller = gtk::EventControllerKey::new();
     let area = gl_area.clone();
     controller.connect_key_pressed(move |_ctrl, keyval, keycode, state| {
+        // Tab-management chords take precedence over everything: new/close/next/
+        // prev/goto-N. They map to `qwertty_term::tabkeys::TabAction` (the same
+        // action enum the macOS app dispatches), so shortcuts match across
+        // platforms. Upstream binds these as `new_tab` / `close_tab` /
+        // `{next,previous}_tab` / `goto_tab N` (`Config.zig` defaults; dispatched
+        // by `Window.performBindingAction`, `class/window.zig:1383`).
+        if let Some(action) = tab_shortcut(keyval, state) {
+            tabs.perform(&area, &shared, action);
+            return glib::Propagation::Stop;
+        }
         // Clipboard shortcuts take precedence over the encode path: Ctrl+Shift+C
         // copies the selection, Ctrl+Shift+V pastes. Upstream binds these as the
         // default `copy_to_clipboard` / `paste_from_clipboard` keybinds
@@ -931,9 +962,18 @@ fn context_menu_model(has_selection: bool) -> gio::Menu {
     menu
 }
 
-/// Build the GLArea and its parent window, wiring the realize/render/resize
-/// signals for `mode`.
-fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
+/// Build a single terminal GLArea and wire its realize/render/resize signals
+/// for `mode`. This is the **per-surface** widget factory: every tab gets its
+/// own independent instance of this (its own [`Shared`] holding a
+/// [`SurfaceState`] + [`Pty`]), mirroring upstream's per-tab surface
+/// (`class/tab.zig`, one `Surface` widget per `Tab`). The caller parents it
+/// (a plain window for the headless smokes, or an `AdwTabView` page for the
+/// interactive tabbed app) and, for the interactive path, attaches the
+/// keyboard/mouse controllers + repaint tick.
+///
+/// For the headless smoke modes the render callback quits the app after one
+/// frame; the interactive mode renders continuously and never quits here.
+fn build_surface_glarea(app: &adw::Application, shared: &Rc<Shared>, mode: Mode) -> gtk::GLArea {
     let gl_area = gtk::GLArea::new();
     gl_area.set_hexpand(true);
     gl_area.set_vexpand(true);
@@ -1042,6 +1082,26 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
         });
     }
 
+    // For the headless smokes, tear down after a single frame (and a hard 5s
+    // backstop so a run can never hang). The interactive/tabbed path renders
+    // continuously and is torn down by the window closing instead.
+    if matches!(mode, Mode::ClearSmoke | Mode::TextSmoke | Mode::ResizeSmoke) {
+        gl_area.queue_render();
+        let app = app.clone();
+        glib::timeout_add_local_once(Duration::from_secs(5), move || {
+            app.quit();
+        });
+    }
+
+    gl_area
+}
+
+/// Build a single-surface window for one of the headless smoke `mode`s (the
+/// GL-plumbing / text-render / resize proofs). The interactive app uses
+/// [`build_tabbed_window`] instead. Mirrors the pre-tabs single-surface window
+/// (`class/window.zig:272`), kept for the smoke harnesses.
+fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
+    let gl_area = build_surface_glarea(app, &shared, mode);
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .default_width(800)
@@ -1050,42 +1110,320 @@ fn build_window(app: &adw::Application, shared: Rc<Shared>, mode: Mode) {
         .content(&gl_area)
         .build();
     window.present();
+}
 
-    match mode {
-        Mode::Interactive => {
-            // Wire keyboard input: keystrokes → encoded bytes → pty.
-            attach_keyboard(&gl_area, shared.clone());
-            // Wire mouse selection, clipboard, and the right-click menu.
-            attach_mouse(&gl_area, shared.clone());
-            // Repaint at ~60fps so pty output shows promptly (no dirty-tracking
-            // wakeup yet). Cheap: a full redraw of a small grid.
-            let area = gl_area.clone();
-            glib::timeout_add_local(Duration::from_millis(16), move || {
-                area.queue_render();
-                glib::ControlFlow::Continue
-            });
-        }
-        Mode::ClearSmoke | Mode::TextSmoke | Mode::ResizeSmoke => {
-            // Force a first frame and guarantee termination even if `render`
-            // never fires (e.g. the GLArea never maps), so a headless run can't
-            // hang.
-            gl_area.queue_render();
-            let app = app.clone();
-            glib::timeout_add_local_once(Duration::from_secs(5), move || {
-                app.quit();
-            });
+// ============================ TABS ============================
+//
+// The interactive app is a **multi-surface, tabbed** window. Structure
+// (mirrors upstream `class/window.zig`, which composes an `AdwToolbarView`
+// holding an `AdwTabBar` top bar + an `AdwTabView` content — `window.zig:264`):
+//
+//   adw::ApplicationWindow
+//     └── gtk::Box (vertical)
+//           ├── adw::TabBar   (top bar; `+` new-tab button in its start slot)
+//           └── adw::TabView  (content; one page per terminal)
+//                 └── gtk::GLArea  (a per-tab `build_surface_glarea` surface)
+//
+// We substitute a plain vertical `gtk::Box` for `AdwToolbarView` because
+// `AdwToolbarView` is libadwaita **1.4** and the minimum-supported runtime
+// (Debian bookworm) ships libadwaita **1.2**; the Box gives the identical
+// layout (tab bar above, tab content below) with no version bump. `AdwTabView`
+// / `AdwTabBar` are 1.0/1.2 and present on bookworm.
+//
+// Each `AdwTabPage`'s child is a per-tab GLArea; its `Rc<Shared>` (holding the
+// tab's own `SurfaceState` + `Pty`) is stashed on the widget via glib object
+// data so the active tab's pwd can be read when opening a new tab.
+
+/// The glib object-data key under which each tab GLArea stores its `Rc<Shared>`.
+const SHARED_KEY: &str = "qwertty-shared";
+
+/// Stash a tab surface's [`Shared`] on its GLArea widget so it can be recovered
+/// from an `AdwTabPage` later (e.g. to read the active tab's pwd).
+fn store_shared(area: &gtk::GLArea, shared: &Rc<Shared>) {
+    // SAFETY: we only ever read this back as the same `Rc<Shared>` type via
+    // `shared_of`, and the widget outlives every such read (both happen on the
+    // GTK main thread while the page is live).
+    unsafe {
+        area.set_data(SHARED_KEY, shared.clone());
+    }
+}
+
+/// Recover the [`Shared`] stashed on a tab GLArea by [`store_shared`].
+fn shared_of(area: &gtk::GLArea) -> Option<Rc<Shared>> {
+    // SAFETY: the only writer is `store_shared`, which always stores an
+    // `Rc<Shared>`; the pointer is valid for as long as the widget lives.
+    unsafe {
+        area.data::<Rc<Shared>>(SHARED_KEY)
+            .map(|p| p.as_ref().clone())
+    }
+}
+
+/// A handle to the window's tab group, passed to each surface's key controller
+/// so tab chords (new/close/next/prev/goto-N) can act on the shared
+/// `AdwTabView`. Cheap to clone (GObject ref-counts).
+#[derive(Clone)]
+struct TabControl {
+    app: adw::Application,
+    tab_view: adw::TabView,
+}
+
+impl TabControl {
+    /// Execute a tab chord against the tab group. `area`/`shared` are the
+    /// surface the chord came from (its own pwd seeds an inherited new tab).
+    fn perform(&self, area: &gtk::GLArea, shared: &Rc<Shared>, action: TabShortcut) {
+        match action {
+            TabShortcut::New => {
+                // Inherit the triggering (active) tab's pwd if it reported one.
+                let pwd = shared
+                    .surface
+                    .borrow()
+                    .as_ref()
+                    .and_then(|s| s.engine().pwd());
+                add_tab(&self.app, &self.tab_view, inherit_pwd(pwd.as_deref()));
+            }
+            TabShortcut::Close => {
+                if let Some(page) = self.tab_view.selected_page() {
+                    self.tab_view.close_page(&page);
+                }
+            }
+            TabShortcut::Nav(nav) => {
+                let _ = area; // nav acts on the group, not the source surface
+                select_tab(&self.tab_view, nav);
+            }
         }
     }
 }
 
-/// Run the GTK application interactively — opens a window that renders the live
-/// terminal (a pty running the user's shell). Returns the process exit code.
+/// A tab-management chord: create a new tab, close the active one, or a
+/// navigation ([`TabAction`], reused from the app crate so semantics match
+/// macOS). Upstream splits these across `new_tab` / `close_tab` /
+/// `{next,previous,goto,last}_tab` keybinds (`class/window.zig:1383`,
+/// `selectTab` at `:517`).
+#[derive(Clone, Copy)]
+enum TabShortcut {
+    New,
+    Close,
+    Nav(TabAction),
+}
+
+/// Classify a GDK key event as a tab-management chord, if it is one:
+/// - Ctrl+Shift+T → new tab
+/// - Ctrl+Shift+W → close active tab
+/// - Ctrl+PageDown / Ctrl+PageUp → next / previous tab
+/// - Alt+1..9 → goto tab N (1-based)
+///
+/// Mirrors upstream's default tab keybinds (`Config.zig`: `ctrl+shift+t`,
+/// `ctrl+shift+w`, `ctrl+page_down`/`ctrl+page_up`, `alt+one`..`alt+nine`).
+fn tab_shortcut(keyval: gdk::Key, state: gdk::ModifierType) -> Option<TabShortcut> {
+    let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+    let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+    let alt = state.contains(gdk::ModifierType::ALT_MASK);
+
+    // Alt+1..9 → goto tab N (no Ctrl/Shift). Matches upstream `alt+one`… .
+    if alt && !ctrl {
+        match keyval.to_unicode().and_then(|c| c.to_digit(10)) {
+            Some(n) if (1..=9).contains(&n) => {
+                return Some(TabShortcut::Nav(TabAction::GotoTab(n as usize)));
+            }
+            _ => {}
+        }
+    }
+
+    if ctrl {
+        // Ctrl+PageDown / Ctrl+PageUp → next / previous (upstream default).
+        match keyval {
+            gdk::Key::Page_Down => return Some(TabShortcut::Nav(TabAction::NextTab)),
+            gdk::Key::Page_Up => return Some(TabShortcut::Nav(TabAction::PreviousTab)),
+            _ => {}
+        }
+        if shift {
+            match keyval.to_unicode().map(|c| c.to_ascii_lowercase()) {
+                Some('t') => return Some(TabShortcut::New),
+                Some('w') => return Some(TabShortcut::Close),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Select a tab by [`TabAction`] against the `AdwTabView`. Direct port of
+/// upstream `Window.selectTab` (`class/window.zig:517-566`): next/previous wrap,
+/// `GotoTab(n)` is 1-based and clamps to the last tab, `LastTab` is the last.
+/// Returns whether the selection changed.
+fn select_tab(tab_view: &adw::TabView, action: TabAction) -> bool {
+    let total = tab_view.n_pages();
+    if total == 0 {
+        return false;
+    }
+    let Some(selected) = tab_view.selected_page() else {
+        return false;
+    };
+    let current = tab_view.page_position(&selected);
+    let goto: i32 = match action {
+        TabAction::PreviousTab => {
+            if current > 0 {
+                current - 1
+            } else {
+                total - 1
+            }
+        }
+        TabAction::NextTab => {
+            if current < total - 1 {
+                current + 1
+            } else {
+                0
+            }
+        }
+        TabAction::LastTab => total - 1,
+        TabAction::GotoTab(n) => {
+            if n == 0 {
+                return false;
+            }
+            // 1-based; clamp to the last tab (upstream `min(n-1, total-1)`).
+            ((n as i32) - 1).min(total - 1)
+        }
+    };
+    if goto == current {
+        return false;
+    }
+    let page = tab_view.nth_page(goto);
+    tab_view.set_selected_page(&page);
+    true
+}
+
+/// Create a new terminal tab: build a fresh per-tab surface (its own [`Shared`]
+/// → [`SurfaceState`] + [`Pty`]), wire its keyboard/mouse controllers + repaint
+/// tick, append it as an `AdwTabView` page, and select it. `inherit` is the
+/// working directory the new tab's shell starts in (the active tab's pwd, via
+/// `inherit_pwd`); `None` uses the process cwd. Returns the tab's [`Shared`].
+///
+/// Mirrors upstream `Window.newTab` → `Tab.new` + `tab_view.insert` +
+/// `setSelectedPage` (`class/window.zig:434-470`).
+fn add_tab(
+    app: &adw::Application,
+    tab_view: &adw::TabView,
+    inherit: Option<std::path::PathBuf>,
+) -> Rc<Shared> {
+    let shared = Rc::new(Shared::default());
+    *shared.cwd.borrow_mut() = inherit;
+
+    let gl_area = build_surface_glarea(app, &shared, Mode::Interactive);
+    store_shared(&gl_area, &shared);
+
+    let tabs = TabControl {
+        app: app.clone(),
+        tab_view: tab_view.clone(),
+    };
+    // Wire keyboard (encode + clipboard + tab chords) and mouse/selection to
+    // this surface, scoped to its own `Shared`.
+    attach_keyboard(&gl_area, shared.clone(), tabs);
+    attach_mouse(&gl_area, shared.clone());
+
+    // Repaint this tab at ~60fps while it lives (no dirty-tracking wakeup yet).
+    // A weak ref lets the timer stop itself once the page is closed and the
+    // GLArea dropped, so closed tabs don't keep ticking.
+    let weak = gl_area.downgrade();
+    glib::timeout_add_local(Duration::from_millis(16), move || match weak.upgrade() {
+        Some(area) => {
+            area.queue_render();
+            glib::ControlFlow::Continue
+        }
+        None => glib::ControlFlow::Break,
+    });
+
+    let page = tab_view.append(&gl_area);
+    tab_view.set_selected_page(&page);
+    gl_area.grab_focus();
+    shared
+}
+
+/// The active tab's inheritable pwd (its OSC 7 cwd if still a directory), for
+/// the `+` new-tab button. Reads the selected page's GLArea `Shared`.
+fn active_pwd(tab_view: &adw::TabView) -> Option<std::path::PathBuf> {
+    let page = tab_view.selected_page()?;
+    let area = page.child().downcast::<gtk::GLArea>().ok()?;
+    let shared = shared_of(&area)?;
+    let pwd = shared
+        .surface
+        .borrow()
+        .as_ref()
+        .and_then(|s| s.engine().pwd());
+    inherit_pwd(pwd.as_deref())
+}
+
+/// Assemble the tabbed window: a vertical `gtk::Box` with an `AdwTabBar` (plus a
+/// `+` new-tab button) above an `AdwTabView`, and wire the group signals
+/// (deterministic page close; close the window when the last tab goes away).
+/// Adds an initial tab and presents. Mirrors upstream `class/window.zig` window
+/// composition + `tabViewClosePage` (`:1500`) + `tabViewNPages` (`:1662`).
+fn build_tabbed_window(app: &adw::Application) {
+    let tab_view = adw::TabView::new();
+    tab_view.set_vexpand(true);
+
+    let tab_bar = adw::TabBar::new();
+    tab_bar.set_view(Some(&tab_view));
+
+    // The `+` new-tab button (AdwTabBar has no built-in one) in the bar's start
+    // slot, inheriting the active tab's pwd. Upstream exposes new-tab via a
+    // header/menu action (`class/window.zig:1926`); the chord is Ctrl+Shift+T.
+    let new_button = gtk::Button::from_icon_name("tab-new-symbolic");
+    new_button.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));
+    {
+        let app = app.clone();
+        let tab_view = tab_view.clone();
+        new_button.connect_clicked(move |_| {
+            let pwd = active_pwd(&tab_view);
+            add_tab(&app, &tab_view, pwd);
+        });
+    }
+    tab_bar.set_start_action_widget(Some(&new_button));
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.append(&tab_bar);
+    vbox.append(&tab_view);
+
+    // Close a page deterministically when requested (no confirmation dialog in
+    // this MVP): finish the close immediately. Upstream `tabViewClosePage`
+    // (`class/window.zig:1500`) optionally shows a confirmation first.
+    tab_view.connect_close_page(move |tv, page| {
+        tv.close_page_finish(page, true);
+        glib::Propagation::Stop
+    });
+
+    let window = adw::ApplicationWindow::builder()
+        .application(app)
+        .default_width(800)
+        .default_height(600)
+        .title("qwertty-term")
+        .content(&vbox)
+        .build();
+
+    // When the last tab closes, close the window (upstream `tabViewNPages`,
+    // `class/window.zig:1662`). Weak ref so the closure doesn't pin the window.
+    {
+        let weak = window.downgrade();
+        tab_view.connect_n_pages_notify(move |tv| {
+            if tv.n_pages() != 0 {
+                return;
+            }
+            if let Some(win) = weak.upgrade() {
+                win.close();
+            }
+        });
+    }
+
+    window.present();
+    // The first tab (inherits nothing — process cwd).
+    add_tab(app, &tab_view, None);
+}
+
+/// Run the GTK application interactively — opens the tabbed window, each tab an
+/// independent terminal (its own `GLArea` + `SurfaceState` + `Pty`). Returns the
+/// process exit code.
 pub fn run() -> std::process::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    let shared = Rc::new(Shared::default());
-    app.connect_activate(move |app| {
-        build_window(app, shared.clone(), Mode::Interactive);
-    });
+    app.connect_activate(build_tabbed_window);
     // Empty arg list: our own flags (e.g. `--smoke`) are handled before this and
     // must not be parsed by GTK.
     let code = app.run_with_args::<&str>(&[]);
@@ -1143,4 +1481,214 @@ pub fn run_resize_smoke() -> ResizeSmokeOutcome {
     }
     let _ = app.run_with_args::<&str>(&[]);
     shared.resize.borrow().clone()
+}
+
+/// Outcome of the tab-lifecycle smoke: proof that the tabbed window creates,
+/// switches, and closes independent per-tab terminals. Two tabs are opened, each
+/// given a chance to realize + render its own surface, the selection is switched
+/// between them, and one is closed — recording the tab count and per-tab surface
+/// independence at each step.
+#[derive(Debug, Clone, Default)]
+pub struct TabLifecycleOutcome {
+    /// `AdwTabView.n_pages()` after opening the two tabs (expect 2).
+    pub pages_after_two_opened: usize,
+    /// The two tabs' `Shared` are distinct allocations (independent state).
+    pub distinct_surfaces: bool,
+    /// Tab 1 built its own `SurfaceState` / spawned its own `Pty` / rendered.
+    pub tab1_surface_init: bool,
+    pub tab1_pty: bool,
+    pub tab1_rendered: bool,
+    /// Tab 2 built its own `SurfaceState` / spawned its own `Pty` / rendered.
+    pub tab2_surface_init: bool,
+    pub tab2_pty: bool,
+    pub tab2_rendered: bool,
+    /// Switching the selected page (to tab 1) took effect.
+    pub switch_selected_ok: bool,
+    /// `AdwTabView.n_pages()` after closing one tab (expect 1).
+    pub pages_after_close: usize,
+    /// A GL context error seen in any tab's `realize`, if any.
+    pub realize_error: Option<String>,
+}
+
+impl TabLifecycleOutcome {
+    /// True iff the full lifecycle held: two independent tabs each realized +
+    /// rendered their own surface + pty, switching worked, and closing dropped
+    /// the count from 2 to 1.
+    pub fn is_ok(&self) -> bool {
+        self.realize_error.is_none()
+            && self.pages_after_two_opened == 2
+            && self.distinct_surfaces
+            && self.tab1_surface_init
+            && self.tab1_pty
+            && self.tab1_rendered
+            && self.tab2_surface_init
+            && self.tab2_pty
+            && self.tab2_rendered
+            && self.switch_selected_ok
+            && self.pages_after_close == 1
+    }
+}
+
+impl std::fmt::Display for TabLifecycleOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pages_after_two_opened={} distinct_surfaces={} \
+             tab1(surface_init={} pty={} rendered={}) \
+             tab2(surface_init={} pty={} rendered={}) \
+             switch_selected_ok={} pages_after_close={} realize_error={:?}",
+            self.pages_after_two_opened,
+            self.distinct_surfaces,
+            self.tab1_surface_init,
+            self.tab1_pty,
+            self.tab1_rendered,
+            self.tab2_surface_init,
+            self.tab2_pty,
+            self.tab2_rendered,
+            self.switch_selected_ok,
+            self.pages_after_close,
+            self.realize_error,
+        )
+    }
+}
+
+/// Record one tab's per-surface state (surface built / pty spawned / rendered /
+/// realize error) into the lifecycle outcome.
+fn record_tab(o: &mut TabLifecycleOutcome, shared: &Rc<Shared>, tab1: bool) {
+    let surface_init = shared.surface.borrow().is_some();
+    let pty = shared.pty.borrow().is_some();
+    let rendered = shared.frames.get() > 0;
+    if o.realize_error.is_none() {
+        o.realize_error = shared.text.borrow().realize_error.clone();
+    }
+    if tab1 {
+        o.tab1_surface_init = surface_init;
+        o.tab1_pty = pty;
+        o.tab1_rendered = rendered;
+    } else {
+        o.tab2_surface_init = surface_init;
+        o.tab2_pty = pty;
+        o.tab2_rendered = rendered;
+    }
+}
+
+/// Run the tab-lifecycle smoke headlessly: build the tabbed window, open a
+/// second tab, let each realize + render its own surface, switch the selected
+/// page, then close one tab — proving the multi-surface tab model
+/// (create/switch/close, one independent `SurfaceState`+`Pty` per tab). Driven
+/// by chained main-loop timeouts (rather than injected GTK key events) so it
+/// stays deterministic under Xvfb.
+pub fn run_tab_lifecycle_smoke() -> TabLifecycleOutcome {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    let outcome = Rc::new(RefCell::new(TabLifecycleOutcome::default()));
+
+    // Per-step dwell: enough for a headless GLArea to map + realize + render.
+    const STEP: Duration = Duration::from_millis(300);
+
+    {
+        let outcome = outcome.clone();
+        app.connect_activate(move |app| {
+            // Build the tab group directly (like `build_tabbed_window`) but keep
+            // the handles so the orchestrator can drive it.
+            let tab_view = adw::TabView::new();
+            tab_view.set_vexpand(true);
+            let tab_bar = adw::TabBar::new();
+            tab_bar.set_view(Some(&tab_view));
+            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            vbox.append(&tab_bar);
+            vbox.append(&tab_view);
+            tab_view.connect_close_page(move |tv, page| {
+                tv.close_page_finish(page, true);
+                glib::Propagation::Stop
+            });
+            let window = adw::ApplicationWindow::builder()
+                .application(app)
+                .default_width(800)
+                .default_height(600)
+                .title("qwertty-term")
+                .content(&vbox)
+                .build();
+            window.present();
+
+            // Tab 1.
+            let s1 = add_tab(app, &tab_view, None);
+
+            // Step 1: after tab 1 has rendered, open tab 2.
+            let app1 = app.clone();
+            let tv1 = tab_view.clone();
+            let out1 = outcome.clone();
+            glib::timeout_add_local_once(STEP, move || {
+                let s2 = add_tab(&app1, &tv1, None);
+
+                // Step 2: after tab 2 (now selected) has rendered, record both,
+                // then switch the selection back to tab 1.
+                let tv2 = tv1.clone();
+                let out2 = out1.clone();
+                let s1b = s1.clone();
+                let s2b = s2.clone();
+                glib::timeout_add_local_once(STEP, move || {
+                    {
+                        let mut o = out2.borrow_mut();
+                        o.pages_after_two_opened = tv2.n_pages() as usize;
+                        o.distinct_surfaces = !Rc::ptr_eq(&s1b, &s2b);
+                        // Tab 2 is currently selected → it has had its render.
+                        record_tab(&mut o, &s2b, false);
+                    }
+                    // Switch selection to tab 1 (page 0).
+                    let page0 = tv2.nth_page(0);
+                    tv2.set_selected_page(&page0);
+                    {
+                        let mut o = out2.borrow_mut();
+                        o.switch_selected_ok = tv2
+                            .selected_page()
+                            .map(|p| tv2.page_position(&p) == 0)
+                            .unwrap_or(false);
+                    }
+
+                    // Step 3: after tab 1 re-renders as the selected page, record
+                    // it, then close tab 2.
+                    let tv3 = tv2.clone();
+                    let out3 = out2.clone();
+                    let s1c = s1b.clone();
+                    glib::timeout_add_local_once(STEP, move || {
+                        record_tab(&mut out3.borrow_mut(), &s1c, true);
+                        if tv3.n_pages() >= 2 {
+                            let last = tv3.nth_page(1);
+                            tv3.close_page(&last);
+                        }
+
+                        // Step 4: record the post-close count and quit.
+                        let tv4 = tv3.clone();
+                        let out4 = out3.clone();
+                        glib::timeout_add_local_once(STEP, move || {
+                            out4.borrow_mut().pages_after_close = tv4.n_pages() as usize;
+                            if let Some(app) = tv4
+                                .root()
+                                .and_then(|r| r.downcast::<gtk::Window>().ok())
+                                .and_then(|w| w.application())
+                            {
+                                app.quit();
+                            }
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    // Hard backstop so a run can never hang (e.g. a GLArea that never maps).
+    {
+        let app_weak = app.downgrade();
+        glib::timeout_add_local_once(Duration::from_secs(20), move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.quit();
+            }
+        });
+    }
+
+    let _ = app.run_with_args::<&str>(&[]);
+    // Clone the result out of the shared cell: the `connect_activate` closure
+    // still holds an `Rc` clone (it lives as long as `app`), so `Rc::into_inner`
+    // would see >1 strong ref. The same pattern the other smoke runners use.
+    outcome.borrow().clone()
 }
