@@ -121,12 +121,24 @@ define_class!(
         /// and AppKit proceeds to `keyDown:` → the encoder unchanged.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            // Leader-key sequences (`ctrl+a>c`) get first crack: a leader key, or
-            // any key while a sequence is in progress, is consumed here. Only when
-            // the key is not sequence-related do we fall to the single-chord lookup
-            // (search / split / tab), which must fire whether the search field or
-            // the terminal is first responder.
-            self.try_handle_keybind_sequence(event) || self.try_handle_keybind_chord(event)
+            // While the search field is being edited its field editor is first
+            // responder. Keep it behaving like a standard macOS text box: forward
+            // the standard editing chords (Cmd+A/C/X/V/Z) to the field editor and
+            // let everything else — typing, arrows, and the user's own system
+            // Ctrl-emacs bindings — fall through untouched, instead of letting the
+            // terminal's keybind chords steal them (Cmd+C would copy the terminal
+            // selection, Cmd+V would paste into the shell, Ctrl+A could trip a
+            // leader). The search-navigation chords still resolve normally.
+            if let Some(editor) = self.focused_field_editor() {
+                self.perform_field_editor_key_equivalent(event, &editor)
+            } else {
+                // Leader-key sequences (`ctrl+a>c`) get first crack: a leader key,
+                // or any key while a sequence is in progress, is consumed here.
+                // Only when the key is not sequence-related do we fall to the
+                // single-chord lookup (search / split / tab), which must fire
+                // whether the search field or the terminal is first responder.
+                self.try_handle_keybind_sequence(event) || self.try_handle_keybind_chord(event)
+            }
         }
 
         /// Accept first responder so we receive key events.
@@ -530,6 +542,90 @@ impl TerminalView {
             .unwrap_or(false)
     }
 
+    /// The window's first responder if it is a text field editor (an `NSText`),
+    /// i.e. the search box is currently being edited. `None` when this terminal
+    /// view (or anything that isn't an editable field) holds focus. AppKit's
+    /// field editor is the actual first responder while an `NSTextField` is being
+    /// edited, so this is the precise "is the user typing in the search box"
+    /// signal — the only editable text field in the app is the search needle.
+    fn focused_field_editor(&self) -> Option<Retained<AnyObject>> {
+        let window = self.window()?;
+        // SAFETY: main-thread AppKit accessors. `firstResponder` returns a +0
+        // (autoreleased) responder or nil; we retain it before use. `NSText` is
+        // the field-editor superclass (the concrete editor is an `NSTextView`).
+        unsafe {
+            let responder: *mut AnyObject = msg_send![&*window, firstResponder];
+            if responder.is_null() {
+                return None;
+            }
+            let is_text: bool = msg_send![responder, isKindOfClass: objc2::class!(NSText)];
+            if is_text {
+                Retained::retain(responder)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Handle a `performKeyEquivalent:` while the search field's editor (`editor`)
+    /// is first responder. Returns `true` when the event was consumed.
+    ///
+    /// The search box is a plain `NSTextField`, so its field editor already does
+    /// all native editing — caret movement, word/line motion, selection, and the
+    /// user's own system-configured Ctrl-emacs key bindings — *as long as we
+    /// don't intercept the keys first*. So this only handles two things and lets
+    /// everything else fall through to the field editor untouched:
+    ///
+    /// 1. The standard Command editing chords (Cmd+A/C/X/V/Z), which the app
+    ///    would otherwise route to the terminal (Cmd+C would copy the terminal
+    ///    selection; Cmd+V would paste into the shell). They are forwarded to the
+    ///    field editor via the standard AppKit selectors so the search box
+    ///    copies/pastes/selects its own text.
+    /// 2. The search-navigation chords (Cmd+G / Cmd+Shift+G to move, Cmd+Shift+F /
+    ///    Escape to close), which still resolve through the keybind path so
+    ///    next/previous/close work while the field has focus. Only *search*
+    ///    chords are consumed here — clipboard/tab/split/font chords and leaders
+    ///    are deliberately not, so a bound `ctrl+a` leader can't steal the emacs
+    ///    "start of line" the field editor gives it.
+    fn perform_field_editor_key_equivalent(&self, event: &NSEvent, editor: &AnyObject) -> bool {
+        // 1. Standard editing chords → the field editor.
+        if let Some(selector) = standard_edit_selector(event) {
+            // SAFETY: `editor` is the field editor (checked by the caller). Guard
+            // with `respondsToSelector:` so a chord it can't service (e.g. undo:
+            // with no undo manager) falls through instead of raising an
+            // unrecognized-selector exception. `sender` is nil, as AppKit passes
+            // for menu-driven edits.
+            let handled = unsafe {
+                let responds: bool = msg_send![editor, respondsToSelector: selector];
+                if responds {
+                    let sender: *mut AnyObject = core::ptr::null_mut();
+                    let _: *mut AnyObject =
+                        msg_send![editor, performSelector: selector, withObject: sender];
+                }
+                responds
+            };
+            if handled {
+                return true;
+            }
+        }
+
+        // 2. Search-navigation chords still fire while typing.
+        let key = key_from_macos_keycode(event.keyCode());
+        let mods = tab_mods_from_flags(event.modifierFlags());
+        let tab = self.ivars().tab;
+        if self
+            .with_controller(|c| c.handle_search_field_chord(tab, key, mods))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // 3. Everything else — typing, caret/word/line motion, selection, and the
+        //    user's system Ctrl-emacs bindings — reaches the field editor
+        //    untouched.
+        false
+    }
+
     /// If `event` matches a user `text:` keybind, send its bytes to this
     /// surface's pty (via the controller) and return `true` (consuming it before
     /// the encoder). Otherwise `false`. Uses the same layout-independent physical
@@ -762,6 +858,38 @@ fn tab_mods_from_flags(flags: NSEventModifierFlags) -> TabMods {
         ctrl: flags.contains(NSEventModifierFlags::Control),
         alt: flags.contains(NSEventModifierFlags::Option),
         super_: flags.contains(NSEventModifierFlags::Command),
+    }
+}
+
+/// Map a key-equivalent event to the standard AppKit text-editing selector it
+/// should drive in a text field: Cmd+A → `selectAll:`, Cmd+C → `copy:`, Cmd+X →
+/// `cut:`, Cmd+V → `paste:`, Cmd+Z → `undo:`, Cmd+Shift+Z → `redo:`. `None` for
+/// anything else (so the caller lets it fall through). Matches on
+/// `charactersIgnoringModifiers` — the character the key produces in the current
+/// layout, ignoring Cmd/Shift — exactly as `NSMenu` matches its key equivalents,
+/// so these work on non-US layouts. Any Ctrl/Option modifier disqualifies the
+/// event (those belong to the field editor's own key bindings).
+fn standard_edit_selector(event: &NSEvent) -> Option<Sel> {
+    let flags = event.modifierFlags();
+    if !flags.contains(NSEventModifierFlags::Command)
+        || flags.contains(NSEventModifierFlags::Control)
+        || flags.contains(NSEventModifierFlags::Option)
+    {
+        return None;
+    }
+    let shift = flags.contains(NSEventModifierFlags::Shift);
+    let ch = event
+        .charactersIgnoringModifiers()
+        .and_then(|s| s.to_string().chars().next())
+        .map(|c| c.to_ascii_lowercase());
+    match (ch, shift) {
+        (Some('a'), false) => Some(sel!(selectAll:)),
+        (Some('c'), false) => Some(sel!(copy:)),
+        (Some('x'), false) => Some(sel!(cut:)),
+        (Some('v'), false) => Some(sel!(paste:)),
+        (Some('z'), false) => Some(sel!(undo:)),
+        (Some('z'), true) => Some(sel!(redo:)),
+        _ => None,
     }
 }
 
