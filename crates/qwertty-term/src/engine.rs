@@ -41,6 +41,40 @@ pub struct Engine {
 // This assertion is scoped to the app's wrapper, not upstream's `Terminal`.
 unsafe impl Send for Engine {}
 
+/// The active mouse-reporting event mode of a bare terminal — for callers
+/// holding a `&Terminal` rather than an [`Engine`] (a tmux display pane, whose
+/// own engine is empty, reads its live mode off the Viewer's pane terminal).
+/// Precedence matches [`Engine::mouse_event`].
+pub fn terminal_mouse_event(t: &Terminal) -> MouseEvent {
+    if t.modes.get(Mode::MouseEventAny) {
+        MouseEvent::Any
+    } else if t.modes.get(Mode::MouseEventButton) {
+        MouseEvent::Button
+    } else if t.modes.get(Mode::MouseEventNormal) {
+        MouseEvent::Normal
+    } else if t.modes.get(Mode::MouseEventX10) {
+        MouseEvent::X10
+    } else {
+        MouseEvent::None
+    }
+}
+
+/// The requested mouse report format of a bare terminal (see
+/// [`terminal_mouse_event`]). Precedence matches [`Engine::mouse_format`].
+pub fn terminal_mouse_format(t: &Terminal) -> MouseFormat {
+    if t.modes.get(Mode::MouseFormatSgrPixels) {
+        MouseFormat::SgrPixels
+    } else if t.modes.get(Mode::MouseFormatSgr) {
+        MouseFormat::Sgr
+    } else if t.modes.get(Mode::MouseFormatUrxvt) {
+        MouseFormat::Urxvt
+    } else if t.modes.get(Mode::MouseFormatUtf8) {
+        MouseFormat::Utf8
+    } else {
+        MouseFormat::X10
+    }
+}
+
 impl Engine {
     /// Create a new engine with the given grid size.
     pub fn new(cols: usize, rows: usize) -> Self {
@@ -653,33 +687,13 @@ impl Engine {
 
     /// The terminal's requested mouse reporting mode (`None` if off).
     pub fn mouse_event(&self) -> MouseEvent {
-        if self.mode(Mode::MouseEventAny) {
-            MouseEvent::Any
-        } else if self.mode(Mode::MouseEventButton) {
-            MouseEvent::Button
-        } else if self.mode(Mode::MouseEventNormal) {
-            MouseEvent::Normal
-        } else if self.mode(Mode::MouseEventX10) {
-            MouseEvent::X10
-        } else {
-            MouseEvent::None
-        }
+        terminal_mouse_event(self.terminal())
     }
 
     /// The terminal's requested mouse report format. Precedence matches upstream:
     /// SGR-pixels, SGR, urxvt, UTF-8, else X10.
     pub fn mouse_format(&self) -> MouseFormat {
-        if self.mode(Mode::MouseFormatSgrPixels) {
-            MouseFormat::SgrPixels
-        } else if self.mode(Mode::MouseFormatSgr) {
-            MouseFormat::Sgr
-        } else if self.mode(Mode::MouseFormatUrxvt) {
-            MouseFormat::Urxvt
-        } else if self.mode(Mode::MouseFormatUtf8) {
-            MouseFormat::Utf8
-        } else {
-            MouseFormat::X10
-        }
+        terminal_mouse_format(self.terminal())
     }
 
     /// Whether the alternate screen is currently active (a full-screen program

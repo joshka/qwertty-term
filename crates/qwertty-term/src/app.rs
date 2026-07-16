@@ -4889,7 +4889,99 @@ impl Controller {
             },
             Release,
         }
+        use qwertty_term_input::mouse_encode::{MouseEvent, MouseFormat};
         let mut state = self.0.borrow_mut();
+
+        // Step 0: mouse REPORTING. If the pane's program has mouse tracking on
+        // (read off the Viewer's pane terminal — this surface's engine is empty)
+        // and shift isn't held (shift forces local selection, matching the normal
+        // path), encode the event against the pane's mode and deliver it to the
+        // pane as `send-keys` instead of selecting. Covers any button, so a
+        // mouse-driven TUI (vim, htop, …) inside a pane receives clicks/drags.
+        let Some((src, cols, rows, cell_w, cell_h, button_down)) = (|| {
+            let s = state
+                .tabs
+                .get_mut(&tab)
+                .and_then(|t| t.surfaces.get_mut(&surface))?;
+            let src = s.display_source()?; // ordinary pane — not handled here.
+            if let Some(p) = pressed {
+                s.mouse_button_down = p;
+            }
+            Some((
+                src,
+                s.cols,
+                s.rows,
+                s.font.cell_width,
+                s.font.cell_height,
+                s.mouse_button_down,
+            ))
+        })() else {
+            return false;
+        };
+        let (event_mode, format) = state
+            .tabs
+            .get(&src.control_tab)
+            .and_then(|ct| ct.surfaces.get(&src.control_surface))
+            .and_then(|cs| cs.tmux_session())
+            .and_then(|sess| sess.pane_terminal(surface))
+            .map(|t| {
+                (
+                    crate::engine::terminal_mouse_event(t),
+                    crate::engine::terminal_mouse_format(t),
+                )
+            })
+            .unwrap_or((MouseEvent::None, MouseFormat::X10));
+        if event_mode != MouseEvent::None && !mods.shift {
+            let bytes = {
+                let Some(s) = state
+                    .tabs
+                    .get_mut(&tab)
+                    .and_then(|t| t.surfaces.get_mut(&surface))
+                else {
+                    return true;
+                };
+                let ctx = crate::input::mouse::MouseContext {
+                    event_mode,
+                    format,
+                    screen_width: (cols * cell_w as usize) as f64,
+                    screen_height: (rows * cell_h as usize) as f64,
+                    cell_width: cell_w as f64,
+                    cell_height: cell_h as f64,
+                    any_button_pressed: button_down,
+                };
+                crate::input::mouse::encode(
+                    action,
+                    button,
+                    mods,
+                    x,
+                    y,
+                    &ctx,
+                    &mut s.last_mouse_cell,
+                )
+            };
+            if !bytes.is_empty() {
+                self.route_keys_to_tmux(&mut state, src, surface, &bytes);
+            }
+            // Reporting owns the pointer: drop any local selection + drag state.
+            if let Some(pt) = state
+                .tabs
+                .get_mut(&src.control_tab)
+                .and_then(|t| t.surfaces.get_mut(&src.control_surface))
+                .and_then(|cs| cs.tmux.as_mut())
+                .and_then(|sess| sess.pane_terminal_mut(surface))
+            {
+                pt.clear_selection();
+            }
+            if let Some(s) = state
+                .tabs
+                .get_mut(&tab)
+                .and_then(|t| t.surfaces.get_mut(&surface))
+            {
+                s.pane_sel_anchor = None;
+            }
+            return true;
+        }
+
         // Step 1: on the display pane, update the drag anchor / button state and
         // decide the op. Bail (not handled) for an ordinary pty pane.
         let (src, op) = {
