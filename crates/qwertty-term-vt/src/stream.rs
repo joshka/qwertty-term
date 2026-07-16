@@ -2134,6 +2134,16 @@ pub struct TerminalHandler {
     /// `CSI 21 t` reply is suppressed; the 14/16/18 t geometry reports are
     /// unaffected.
     title_reporting: bool,
+    /// When set, ground-state printing (`print`/`print_slice`/`print_repeat`) is
+    /// dropped instead of painting the grid — everything else (control
+    /// sequences, DCS/tmux interception, replies) is unaffected. The app enables
+    /// this on a `tmux -CC` **control surface** while its session is live: tmux's
+    /// control-mode `tmux%` readline prompt and stray `%…` status lines arrive
+    /// *outside* the DCS wrapper and would otherwise paint the control surface's
+    /// real grid, flashing into view whenever that (normally hidden) surface is
+    /// momentarily shown (ADR 006 gap 5 — the exit-flash). Cleared on `%exit` so
+    /// the underlying shell repaints normally.
+    suppress_print: bool,
 }
 
 /// OSC color-query reply format. Port of `configpkg.Config.OSCColorReportFormat`.
@@ -2197,7 +2207,16 @@ impl TerminalHandler {
             osc_color_report_format: OscColorReportFormat::Bit16,
             xtversion: String::from("qwertty-term"),
             title_reporting: true,
+            suppress_print: false,
         }
+    }
+
+    /// Enable/disable dropping ground-state printing (see [`suppress_print`]).
+    /// The app toggles this on a `tmux -CC` control surface: `true` on the
+    /// control-mode `Enter`, `false` on `%exit`. Control sequences, DCS/tmux
+    /// interception, and replies are unaffected — only grid painting is dropped.
+    pub fn set_suppress_print(&mut self, suppress: bool) {
+        self.suppress_print = suppress;
     }
 
     /// Provide the cell dimensions in pixels so `CSI 14/16/18 t` XTWINOPS size
@@ -2438,9 +2457,15 @@ impl TerminalHandler {
 
 impl Handler for TerminalHandler {
     fn print(&mut self, cp: u32) {
+        if self.suppress_print {
+            return;
+        }
         self.terminal.print(cp);
     }
     fn print_slice(&mut self, cps: &[u32]) {
+        if self.suppress_print {
+            return;
+        }
         self.terminal.print_slice(cps);
     }
 
@@ -3100,6 +3125,9 @@ impl Handler for TerminalHandler {
 
     // ---- REP ------------------------------------------------------------
     fn print_repeat(&mut self, count: u16) {
+        if self.suppress_print {
+            return;
+        }
         self.terminal.print_repeat(count as usize);
     }
 

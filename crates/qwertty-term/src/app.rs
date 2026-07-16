@@ -729,6 +729,17 @@ impl Surface {
             self.tmux = Some(crate::tmux_session::TmuxSession::new(
                 self.startup_colors.clone(),
             ));
+            // Control mode is live on this surface: stop painting its grid and
+            // wipe anything already there. tmux's `tmux%` prompt and stray `%…`
+            // status lines arrive *outside* the DCS wrapper, so they would paint
+            // this (soon-hidden) control surface's real grid and flash into view
+            // whenever it is momentarily shown (ADR 006 gap 5 — exit-flash). The
+            // erase (CSI 2J/H — a control sequence, not a ground print) still
+            // runs under suppression; cleared on `%exit` below so the underlying
+            // shell repaints when it regains the pty.
+            let mut engine = self.engine();
+            engine.write(b"\x1b[2J\x1b[H");
+            engine.set_tmux_suppress_print(true);
         }
         let Some(update) = self.tmux.as_mut().map(|s| s.ingest(notifications)) else {
             return (None, false, None);
@@ -743,6 +754,9 @@ impl Surface {
         // fresh; the controller tears the native tabs down from `tmux_exit`.
         if update.exit || self.tmux.as_ref().is_some_and(|s| s.is_defunct()) {
             self.tmux = None;
+            // Control mode ended: resume normal grid painting so the underlying
+            // shell (which regains this pty as `tmux -CC` exits) repaints.
+            self.engine().set_tmux_suppress_print(false);
         }
         (update.plan, update.exit, focus)
     }

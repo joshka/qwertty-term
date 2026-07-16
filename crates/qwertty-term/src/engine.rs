@@ -140,6 +140,17 @@ impl Engine {
         self.stream.handler.take_tmux_notifications()
     }
 
+    /// Drop ground-state printing into this engine's grid while a `tmux -CC`
+    /// control session is live on this surface (ADR 006 gap 5 — exit-flash).
+    /// The control-mode `tmux%` prompt and stray `%…` lines arrive outside the
+    /// DCS wrapper and would paint the (hidden) control surface's grid, flashing
+    /// into view on restore. Control sequences, DCS/tmux interception, and
+    /// replies are unaffected. Set `true` on the control-mode `Enter`, `false`
+    /// on `%exit`.
+    pub fn set_tmux_suppress_print(&mut self, suppress: bool) {
+        self.stream.handler.set_suppress_print(suppress);
+    }
+
     /// Drain the most recent OSC 9;4 ConEmu progress report, if one arrived
     /// since the last drain. The app renders it as an in-surface progress bar
     /// (gated by `progress-style`; see `crate::progress`).
