@@ -1,30 +1,34 @@
 # linux status (Linux port — ADR 003 Wave-1 done; P4 windowed app GREENLIT)
 
-- **Current item:** **P4 — GTK4 Linux terminal is USABLE (typeable + copy/paste + resize).**
-  `cargo run -p qwertty-term-gtk` = a GTK4 window running a real shell (FreeType via
-  `Engine<OpenGL>`, keyboard, shell env), **mouse selection (drag/word/line) + clipboard
-  copy/paste (CLIPBOARD + PRIMARY, bracketed) + right-click menu** (#299), and **window resize**
-  (re-grid + TIOCSWINSZ, #301). Shipped: #279 backend, #284 scaffold, #290 present seam, #291
-  render, #294 keyboard, #296 shell-env, #299 selection/clipboard, #301 resize (+ #298 app-crate
-  theme dead_code fix). **All Docker/Xvfb-verified.** Screenshot: `~/Downloads/qwertty-term-linux.png`.
-  **RECYCLED here** (context length) — the terminal is at a coherent usable milestone; the
-  remaining chrome (tabs/splits especially) deserves fresh context. Respawn to continue.
+- **Current item:** **P4 — GTK4 Linux terminal is APP-LIKE (tabs + headerbar + copy/paste +
+  resize).** `cargo run -p qwertty-term-gtk` = a GTK4 window with a real shell, FreeType glyphs
+  via `Engine<OpenGL>`, keyboard, shell env, **selection + clipboard copy/paste + right-click
+  menu** (#299), **resize** (#301), **tabs** (AdwTabView; new/close/next/prev/goto, cwd
+  inheritance, #309), and a **headerbar + hamburger menu + terminal titles** (OSC 0/2, #314).
+  Shipped: #279/#284/#290/#291/#294/#296/#299/#301/#309/#314 (+ #298 app-crate theme fix). **All
+  Docker/Xvfb-verified.** Screenshot: `~/Downloads/qwertty-term-linux.png`.
+  **RECYCLED here** (context length) — app-like milestone reached; **splits** (the last big
+  structural refactor) deserves fresh context. Respawn to continue.
 - **NEXT — feature buildout (sequential subagents, one writer/workspace, highest-value first):**
-  1. **tabs** — `AdwTabView`/`AdwTabBar`: one terminal `SurfaceState`+`Pty` per page; new-tab
-     (Ctrl+Shift+T), close, switch. Biggest "feels like a real app" win; reuses the app crate's
-     `tabs`/`tabkeys` logic (`crates/qwertty-term/src/{tabs,tabkeys}.rs`). Requires refactoring
-     `app.rs` from one surface to a per-page surface map. Mirror `apprt/gtk/class/{window,tab}.zig`.
-  2. **headerbar + menu** — `adw::HeaderBar` + `MenuButton`/`gio::Menu` (new-tab, split, prefs,
-     copy/paste); pairs with tabs (tab bar lives in/under the headerbar).
-  3. **splits** — `gtk::Paned` tree; reuse the app crate's split logic. Mirror `class/split_tree.zig`.
-  4. **IME/compose** — `GtkIMMulticontext` filtering before the direct key path
+  1. **splits** — `gtk::Paned` tree, one terminal surface per pane; split-h/v (Ctrl+Shift+O / E),
+     focus-move, close-pane. The last big structural refactor (like tabs was). Reuse the app
+     crate's split logic (`crates/qwertty-term/src/split*`). Mirror `class/split_tree.zig`.
+  2. **IME/compose** — `GtkIMMulticontext` filtering before the direct key path
      (`surface.zig:1246-1334`); `TODO(ime)` seam in `input.rs`.
-  5. **Polish:** HiDPI scale (`TODO(scale)` in `surface.rs`/`app.rs::connect_resize`), dirty-tracked
+  3. **Polish:** HiDPI scale (`TODO(scale)` in `surface.rs`/`app.rs::connect_resize`), dirty-tracked
      redraw (drop the 60Hz tick), live encode modes (DECCKM/kitty → `EncodeOptions`), paste-safety
-     dialog (`qwertty_term::paste::is_unsafe`), rectangle-select + autoscroll-drag, DPI/font-config.
+     dialog (`qwertty_term::paste::is_unsafe`), rectangle-select + autoscroll-drag, real Preferences
+     UI (`TODO(prefs)`), drag-detach tabs, tab overview, `window-new-tab-position`, DPI/font-config.
   - Outstanding coordination: **T8 CI** (headless-GL + `--features fontconfig` + GTK-dev-libs steps
     — filed in their Inbox); **T2** post-hoc review of the present seam (#290; T2 thread closed);
     **app-tails** FYI on the theme fix (#298/#300 — no action needed).
+- **Buildout playbook (proven, reuse it):** one file-mutating subagent per workspace (concurrent =
+  divergence, see [[subagents-one-writer-per-workspace]]); subagent leaves changes in the tree +
+  reports; orchestrator verifies in Docker (`rust:1-bookworm` + `libgtk-4-dev libadwaita-1-dev
+  libepoxy-dev` + Mesa `llvmpipe` + `xvfb`; `xvfb-run cargo test -p qwertty-term-gtk`) + ships via
+  `git push origin <sha>:refs/heads/<b>`. Each feature reuses `crates/qwertty-term/src/*`
+  platform-free logic (clean on Linux). libadwaita on Debian bookworm is **1.2** — stay on
+  1.0/1.2 widgets (no `AdwToolbarView`/`AdwAboutWindow`/`v1_4`+ feature bumps).
 - **The keyboard chunk (DONE #294):** `EventControllerKey` → GDK keyval →
   headless: a scripted keypress reaches the pty (strongest as a `TabIo::write`→snapshot-echo test).
 - **Last merged:** #284 (GTK scaffold). All P4 PRs merged: #270, #279, #280, #281, #284. Wave-1
