@@ -321,6 +321,13 @@ struct Surface {
     /// Per-pane wheel accumulator (sub-cell pixel remainder). Port of
     /// upstream `mouse.pending_scroll_y`.
     wheel: crate::scroll::WheelState,
+    /// Mouse-selection anchor for a **display-only tmux pane** (ADR 006 slice
+    /// 5d): the `(col, row, scrollback_offset)` of the left-button press, in
+    /// this surface's visible-window space. A display pane's selection lives on
+    /// the Viewer's pane `Terminal` (this surface's own engine is empty), so the
+    /// anchor is tracked here and mapped through the pane terminal on each drag.
+    /// `None` when not mid-drag. Unused by ordinary pty panes.
+    pane_sel_anchor: Option<(usize, usize, usize)>,
     /// Poison-resilience (app-hardening): set once this surface's engine mutex
     /// is observed poisoned — i.e. some thread (the io-reader parse thread is
     /// the field-observed culprit) panicked while holding the engine lock. A
@@ -2732,48 +2739,61 @@ impl Controller {
             tab: TabId,
             surface: SurfaceId,
             window: qwertty_term_vt::snapshot::SnapshotWindow,
+            range: Option<crate::selection::ScreenRange>,
             focused: bool,
             is_split: bool,
         }
 
         // Phase 1: snapshot each display pane's foreign terminal (immutable).
-        let frames: Vec<PaneFrame> = {
-            let state = self.0.borrow();
-            let mut frames = Vec::new();
-            for (tid, tab) in &state.tabs {
-                let is_split = tab.tree.len() > 1;
-                let focused = tab.tree.focused();
-                for (sid, surface) in &tab.surfaces {
-                    let Some(src) = surface.display_source() else {
-                        continue; // an ordinary pane; already drawn in the tick loop.
-                    };
-                    // Resolve the control surface's live session and this pane's
-                    // Viewer-owned terminal, then snapshot it (non-mutating).
-                    // Snapshot at this pane's own scrollback offset so wheel
-                    // scrolling into the pane's history is honored (the offset
-                    // is advanced by `apply_wheel` against the pane terminal's
-                    // real scrollback length — the surface's own engine is
-                    // empty). Live view is offset 0.
-                    let window = state
-                        .tabs
-                        .get(&src.control_tab)
-                        .and_then(|ct| ct.surfaces.get(&src.control_surface))
-                        .and_then(|cs| cs.tmux_session())
-                        .and_then(|session| session.pane_terminal(*sid))
-                        .map(|term| term.snapshot_window(surface.scrollback_offset));
-                    if let Some(window) = window {
-                        frames.push(PaneFrame {
-                            tab: *tid,
-                            surface: *sid,
-                            window,
-                            focused: *sid == focused,
-                            is_split,
-                        });
+        let frames: Vec<PaneFrame> =
+            {
+                let state = self.0.borrow();
+                let mut frames = Vec::new();
+                for (tid, tab) in &state.tabs {
+                    let is_split = tab.tree.len() > 1;
+                    let focused = tab.tree.focused();
+                    for (sid, surface) in &tab.surfaces {
+                        let Some(src) = surface.display_source() else {
+                            continue; // an ordinary pane; already drawn in the tick loop.
+                        };
+                        // Resolve the control surface's live session and this pane's
+                        // Viewer-owned terminal, then snapshot it (non-mutating).
+                        // Snapshot at this pane's own scrollback offset so wheel
+                        // scrolling into the pane's history is honored (the offset
+                        // is advanced by `apply_wheel` against the pane terminal's
+                        // real scrollback length — the surface's own engine is
+                        // empty). Live view is offset 0.
+                        let term = state
+                            .tabs
+                            .get(&src.control_tab)
+                            .and_then(|ct| ct.surfaces.get(&src.control_surface))
+                            .and_then(|cs| cs.tmux_session())
+                            .and_then(|session| session.pane_terminal(*sid));
+                        if let Some(term) = term {
+                            let window = term.snapshot_window(surface.scrollback_offset);
+                            // Selection tint (ADR 006 slice 5d): the pane terminal
+                            // owns any selection built by `tmux_pane_mouse`; convert
+                            // its pin-free screen rect for the tint pass.
+                            let range = term.selection_screen_rect().map(
+                                |(tlx, tly, brx, bry, rectangle)| crate::selection::ScreenRange {
+                                    top_left: (tlx, tly),
+                                    bottom_right: (brx, bry),
+                                    rectangle,
+                                },
+                            );
+                            frames.push(PaneFrame {
+                                tab: *tid,
+                                surface: *sid,
+                                window,
+                                range,
+                                focused: *sid == focused,
+                                is_split,
+                            });
+                        }
                     }
                 }
-            }
-            frames
-        };
+                frames
+            };
 
         // One-shot diagnostic: confirm this path (which draws tmux panes from
         // the Viewer's terminals) actually runs on the live render loop. Fires
@@ -2797,7 +2817,7 @@ impl Controller {
             if let Some(tab) = state.tabs.get_mut(&f.tab)
                 && let Some(surface) = tab.surfaces.get_mut(&f.surface)
             {
-                surface.render_window(f.window, None, f.focused, f.is_split);
+                surface.render_window(f.window, f.range, f.focused, f.is_split);
             }
         }
     }
@@ -4778,6 +4798,120 @@ impl Controller {
         }
     }
 
+    /// Handle a mouse event on a **display-only tmux pane** (ADR 006 slice 5d):
+    /// drive left-button selection directly on the Viewer's pane `Terminal`,
+    /// since this surface's own engine is empty. Returns `true` if `surface` is
+    /// a display pane and the event was consumed — the caller then skips the
+    /// normal engine-selection / mouse-reporting path. `false` for an ordinary
+    /// pane. Selection is linear (or rectangular with option held); word/line
+    /// double-click and mouse *reporting* into the pane remain future work.
+    #[allow(clippy::too_many_arguments)]
+    fn tmux_pane_mouse(
+        &self,
+        tab: TabId,
+        surface: SurfaceId,
+        action: qwertty_term_input::mouse::Action,
+        button: Option<qwertty_term_input::mouse::Button>,
+        mods: qwertty_term_input::key_mods::Mods,
+        x: f32,
+        y: f32,
+        pressed: Option<bool>,
+        copy_on_select: bool,
+    ) -> bool {
+        use qwertty_term_input::mouse::{Action, Button};
+        enum Op {
+            Clear,
+            Extend {
+                anchor: (usize, usize, usize),
+                current: (usize, usize, usize),
+                rectangle: bool,
+            },
+            Release,
+        }
+        let mut state = self.0.borrow_mut();
+        // Step 1: on the display pane, update the drag anchor / button state and
+        // decide the op. Bail (not handled) for an ordinary pty pane.
+        let (src, op) = {
+            let Some(s) = state
+                .tabs
+                .get_mut(&tab)
+                .and_then(|t| t.surfaces.get_mut(&surface))
+            else {
+                return false;
+            };
+            let Some(src) = s.display_source() else {
+                return false; // ordinary pane — not handled here.
+            };
+            if let Some(p) = pressed {
+                s.mouse_button_down = p;
+            }
+            // Only the left button drives selection; still consume every other
+            // button/event on a display pane (no pty to report to; hover/links
+            // use the empty engine) so the normal path is fully bypassed.
+            if button != Some(Button::Left) {
+                return true;
+            }
+            let (col, row) = s.cell_at_clamped(x, y);
+            let cur = (col, row, s.scrollback_offset);
+            let op = match action {
+                Action::Press => {
+                    s.pane_sel_anchor = Some(cur);
+                    Op::Clear
+                }
+                Action::Motion => {
+                    if !s.mouse_button_down {
+                        return true;
+                    }
+                    match s.pane_sel_anchor {
+                        Some(anchor) => Op::Extend {
+                            anchor,
+                            current: cur,
+                            rectangle: mods.alt,
+                        },
+                        None => return true,
+                    }
+                }
+                Action::Release => {
+                    s.pane_sel_anchor = None;
+                    Op::Release
+                }
+            };
+            (src, op)
+        };
+        // Step 2: apply the op to the Viewer's pane terminal (a separate
+        // surface, so this is a sequential — not aliasing — borrow).
+        let Some(pt) = state
+            .tabs
+            .get_mut(&src.control_tab)
+            .and_then(|t| t.surfaces.get_mut(&src.control_surface))
+            .and_then(|cs| cs.tmux.as_mut())
+            .and_then(|sess| sess.pane_terminal_mut(surface))
+        else {
+            return true;
+        };
+        match op {
+            Op::Clear => pt.clear_selection(),
+            Op::Extend {
+                anchor,
+                current,
+                rectangle,
+            } => {
+                if let (Some(a), Some(b)) = (
+                    pt.window_to_screen_point(anchor.0, anchor.1, anchor.2),
+                    pt.window_to_screen_point(current.0, current.1, current.2),
+                ) {
+                    pt.select_screen_points(a, b, rectangle);
+                }
+            }
+            Op::Release => {
+                if copy_on_select && let Some(text) = pt.selection_text(true) {
+                    crate::clipboard::write(&text);
+                }
+            }
+        }
+        true
+    }
+
     /// Encode a mouse event (view-space pixels, relative to *this pane's* grid)
     /// against `surface`'s live mouse tracking mode/format and write it to the
     /// PTY. Mouse coordinates are per-pane because each pane view is flipped and
@@ -4799,6 +4933,22 @@ impl Controller {
             let s = self.0.borrow();
             (s.copy_on_select, s.mouse_interval, s.mouse_shift_capture)
         };
+        // A display-only tmux pane routes selection to the Viewer's pane
+        // terminal (its own engine is empty); handle it there and bypass the
+        // normal engine-selection / mouse-reporting path below.
+        if self.tmux_pane_mouse(
+            tab,
+            surface,
+            action,
+            button,
+            mods,
+            x,
+            y,
+            pressed,
+            copy_on_select,
+        ) {
+            return;
+        }
         let mut state = self.0.borrow_mut();
         let Some(s) = state
             .tabs
@@ -5987,6 +6137,7 @@ impl Controller {
             capture_present,
             scrollback_offset: 0,
             wheel: crate::scroll::WheelState::default(),
+            pane_sel_anchor: None,
             dead: Cell::new(false),
             dead_reason: RefCell::new(None),
             banner_drawn: Cell::new(false),

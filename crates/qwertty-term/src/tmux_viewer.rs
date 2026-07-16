@@ -353,6 +353,12 @@ impl Pane {
         self.stream.terminal()
     }
 
+    /// Mutable access to the pane terminal (for driving mouse selection on a
+    /// display pane — ADR 006 slice 5d).
+    pub fn terminal_mut(&mut self) -> &mut Terminal {
+        self.stream.terminal_mut()
+    }
+
     /// The most recent parsed `list-panes` state, if captured.
     pub fn state(&self) -> Option<&PaneState> {
         self.state.as_ref()
@@ -451,6 +457,11 @@ impl Viewer {
     /// The pane with the given id, if tracked.
     pub fn pane(&self, id: usize) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
+    }
+
+    /// Mutable access to the pane with the given id (for display-pane selection).
+    pub fn pane_mut(&mut self, id: usize) -> Option<&mut Pane> {
+        self.panes.iter_mut().find(|p| p.id == id)
     }
 
     /// The number of tracked panes.

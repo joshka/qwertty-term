@@ -183,6 +183,14 @@ impl TmuxSession {
         Some(self.viewer.pane(pane_id)?.terminal())
     }
 
+    /// Mutable access to the pane `Terminal` a native [`SurfaceId`] renders, so
+    /// the app can drive mouse selection on a display pane (ADR 006 slice 5d).
+    /// `None` if the surface id isn't bound to a live pane.
+    pub fn pane_terminal_mut(&mut self, surface: SurfaceId) -> Option<&mut Terminal> {
+        let pane_id = self.reconciler.pane_of_surface(surface)?;
+        Some(self.viewer.pane_mut(pane_id)?.terminal_mut())
+    }
+
     /// Whether the session has become defunct (tmux exited). Once defunct it
     /// should be dropped along with its native tabs.
     pub fn is_defunct(&self) -> bool {
