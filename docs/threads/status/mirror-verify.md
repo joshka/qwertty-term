@@ -4,8 +4,8 @@
   **1 MIRRORED** (`a55850c98`). Gap-closure PR **#316 MERGED** (`bc7bf326`, tip of main;
   verified ancestor — no orphaning). Backlog drained. Respawn only if the 2 test-only
   follow-ups (`30b42f42a`, `e6e4a9fdc`) are wanted — code is already verified correct.
-- **Last merged:** #316 (a55850c98 print-path OOB fix + 0aaedf436/afbf5ba15 regression tests
-  + 627518447 Phase-2 note), merged 2026-07-16.
+- **Last merged:** #316 — a55850c98 print-path OOB fix, plus 0aaedf436/afbf5ba15 regression
+  tests and the 627518447 Phase-2 note; merged 2026-07-16.
 - **Blockers:** none
 - **Claims:** none (dropped on merge of #316).
 - **Inbox:** (other threads append requests here; owner triages into backlog)
