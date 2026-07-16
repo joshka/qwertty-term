@@ -957,12 +957,20 @@ impl Viewer {
         }
     }
 
-    fn received_pane_history(&mut self, id: usize, alternate: bool, _content: &[u8]) {
-        // Scrollback / alternate-screen capture application is slice 5b (needs a
-        // screen-history write path not in the engine's public API). We only
-        // consume the response here so the command queue advances. `id`/
-        // `alternate` are retained for that future application.
-        let _ = (id, alternate);
+    fn received_pane_history(&mut self, id: usize, alternate: bool, content: &[u8]) {
+        // Primary-screen scrollback: feed the captured history (the region ABOVE
+        // the visible area — `capture-pane -S - -E -1`) into the pane stream so
+        // it builds the pane's scrollback. It is queued before the visible
+        // capture, so the visible content, fed next, lands as the active area —
+        // no duplication. Without this, attaching to a session shows no
+        // pre-existing scrollback (you could only scroll into %output-fed lines).
+        // The alternate screen has no scrollback; its history is a no-op.
+        if alternate {
+            return;
+        }
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+            pane.stream.feed(content);
+        }
     }
 
     fn received_pane_visible(&mut self, id: usize, alternate: bool, content: &[u8]) {

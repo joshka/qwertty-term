@@ -5687,10 +5687,24 @@ impl Controller {
         if s.is_dead() {
             return false;
         }
+        // A display pane's own engine is empty, so read the prompt state off the
+        // Viewer's pane terminal (fed by `%output`) — otherwise a tmux pane sitting
+        // at a shell prompt is wrongly treated as "running" and always confirms.
+        let at_prompt = match s.display_source() {
+            Some(src) => state
+                .tabs
+                .get(&src.control_tab)
+                .and_then(|ct| ct.surfaces.get(&src.control_surface))
+                .and_then(|cs| cs.tmux_session())
+                .and_then(|sess| sess.pane_terminal(surface))
+                .map(|t| t.cursor_is_at_prompt())
+                .unwrap_or(false),
+            None => s.engine().cursor_is_at_prompt(),
+        };
         match mode {
             C::Never => false,
             C::Always => true,
-            C::OnRunning => !s.engine().cursor_is_at_prompt(),
+            C::OnRunning => !at_prompt,
         }
     }
 

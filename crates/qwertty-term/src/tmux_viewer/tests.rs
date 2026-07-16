@@ -541,6 +541,25 @@ fn kill_window_guards_pre_steady_and_unknown_window() {
 }
 
 #[test]
+fn pane_history_capture_builds_scrollback() {
+    // Attaching to an existing session: the `capture-pane` history response must
+    // be fed into the pane so its scrollback exists (else you can only scroll
+    // into %output-fed lines). The pane is 44 rows; feed 60 history lines.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    let history: String = (1..=60)
+        .map(|i| format!("LINE-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The first queued capture is PaneHistory; feed it as the block response.
+    v.next(block_end(&history));
+    let t = v.pane(0).expect("pane 0").terminal();
+    assert!(
+        t.scrollback_len() > 0,
+        "history capture must build pane scrollback, got scrollback_len=0"
+    );
+}
+
+#[test]
 fn resize_pane_emits_targeted_resize_and_guards() {
     // A divider drag on a tmux tab (I3) → `resize-pane -t %<id> -x/-y <cells>`.
     let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
