@@ -18,6 +18,14 @@
 //! reach the whole responder chain even while the field is first responder), so
 //! they work whether focus is in the field or the terminal.
 //!
+//! Otherwise the field is a plain `NSTextField`, so it behaves like a standard
+//! macOS text box while focused: its field editor handles caret/word/line
+//! motion, selection, and the user's system Ctrl-emacs key bindings natively.
+//! `TerminalView`'s `performKeyEquivalent:` detects that the field editor holds
+//! focus and, instead of letting the terminal's keybind chords steal them,
+//! forwards the standard editing chords (Cmd+A/C/X/V/Z) to the field editor —
+//! so copy/paste/select-all act on the search text, not the terminal.
+//!
 //! All state flows back to the [`Controller`](crate::app::Controller) via an
 //! owned clone (the controller is `Rc`-backed and main-thread-only) plus the
 //! `(tab, surface)` this overlay belongs to. The controller owns the actual

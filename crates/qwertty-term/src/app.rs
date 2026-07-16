@@ -1191,6 +1191,11 @@ impl Surface {
         self.search.current_index()
     }
 
+    /// This pane's current search needle (smoke/test).
+    fn search_needle(&self) -> String {
+        self.search.needle().to_string()
+    }
+
     /// Apply one wheel event to this pane: run the decision ladder over the
     /// live mode state and either report (buttons 4/5), emit alternate-scroll
     /// cursor keys, or move the scrollback viewport. Port of the body of
@@ -2751,6 +2756,36 @@ impl Controller {
             .and_then(|s| s.search_current_index())
     }
 
+    /// The focused pane's current search needle (smoke/test).
+    pub fn active_search_needle(&self) -> Option<String> {
+        let state = self.0.borrow();
+        let tab = state.registry.active()?;
+        state
+            .tabs
+            .get(&tab)
+            .and_then(|t| t.focused_surface())
+            .map(|s| s.search_needle())
+    }
+
+    /// Whether the active window's first responder is a text-field editor — i.e.
+    /// the search box is currently being edited (its native `NSTextField` field
+    /// editor holds focus). The only editable field in the app is the search
+    /// needle, so this is the "typing in the search box" signal. Smoke/test only.
+    pub fn active_search_field_is_editing(&self) -> bool {
+        let Some(window) = self.active_window() else {
+            return false;
+        };
+        // SAFETY: main-thread AppKit accessors. `firstResponder` is a +0
+        // responder or nil; `NSText` is the field-editor superclass.
+        unsafe {
+            let responder: *mut AnyObject = msg_send![&*window, firstResponder];
+            if responder.is_null() {
+                return false;
+            }
+            msg_send![responder, isKindOfClass: objc2::class!(NSText)]
+        }
+    }
+
     /// Mark `tab` active (called when its window becomes key).
     pub fn set_active(&self, tab: TabId) {
         self.0.borrow_mut().registry.activate(tab);
@@ -3185,6 +3220,53 @@ impl Controller {
                 }
                 true
             }
+        }
+    }
+
+    /// Resolve `key`+`mods` against the keybind set while the search field is
+    /// being edited, performing **only** the search-navigation chords (start /
+    /// next / previous / end) and reporting whether one fired.
+    ///
+    /// This is the search-focused counterpart to [`Self::handle_keybind_chord`].
+    /// Non-search chords — clipboard, tab, split, font, and leader sequences — are
+    /// deliberately *not* performed here: while the field editor holds focus they
+    /// must fall through to it so the search box behaves like a standard macOS
+    /// text box (its own copy/paste, and the user's system Ctrl-emacs bindings).
+    /// `end_search` keeps its self-gate on an open search so a stray Escape is a
+    /// no-op rather than a false consume.
+    pub fn handle_search_field_chord(
+        &self,
+        tab: TabId,
+        key: qwertty_term_input::key::Key,
+        mods: crate::tabkeys::TabMods,
+    ) -> bool {
+        use crate::searchkeys::SearchAction;
+        use qwertty_term_input::binding::Action as A;
+        use qwertty_term_input::binding::action::NavigateSearch;
+
+        let actions = {
+            let state = self.0.borrow();
+            crate::keybind::resolve_actions(&state.keybinds, key, mods)
+        };
+        // Only a single, exact search chord is honoured while typing.
+        match actions.as_slice() {
+            [A::StartSearch] => {
+                self.handle_search_action(tab, SearchAction::Start);
+                true
+            }
+            [A::NavigateSearch(NavigateSearch::Next)] => {
+                self.handle_search_action(tab, SearchAction::Next);
+                true
+            }
+            [A::NavigateSearch(NavigateSearch::Previous)] => {
+                self.handle_search_action(tab, SearchAction::Previous);
+                true
+            }
+            [A::EndSearch] if self.active_search_is_active() => {
+                self.handle_search_action(tab, SearchAction::End);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -7135,34 +7217,34 @@ impl AppDelegate {
         let view = controller
             .active_view()
             .unwrap_or_else(|| fail("no active view for interception check".into()));
-        let consumed_ctrl_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_CTRL);
+        let consumed_ctrl_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_CTRL, "");
         if !consumed_ctrl_tab {
             fail("ctrl+tab was NOT consumed by performKeyEquivalent (would reach the pty)".into());
         }
         let consumed_ctrl_shift_tab =
-            Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_CTRL_SHIFT);
+            Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_CTRL_SHIFT, "");
         if !consumed_ctrl_shift_tab {
             fail("ctrl+shift+tab was NOT consumed by performKeyEquivalent".into());
         }
-        let consumed_cmd_3 = Self::perform_on_view(&view, mtm, KEYCODE_3, TAB_MOD_CMD);
+        let consumed_cmd_3 = Self::perform_on_view(&view, mtm, KEYCODE_3, TAB_MOD_CMD, "");
         if !consumed_cmd_3 {
             fail("cmd+3 was NOT consumed by performKeyEquivalent".into());
         }
 
         // Plain Tab, Shift+Tab, and Ctrl+I must NOT be consumed — they fall
         // through to keyDown → the encoder. (performKeyEquivalent returns false.)
-        let consumed_plain_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_NONE);
+        let consumed_plain_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_NONE, "");
         if consumed_plain_tab {
             fail(
                 "plain Tab was WRONGLY consumed by performKeyEquivalent (won't reach the pty)"
                     .into(),
             );
         }
-        let consumed_shift_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_SHIFT);
+        let consumed_shift_tab = Self::perform_on_view(&view, mtm, KEYCODE_TAB, TAB_MOD_SHIFT, "");
         if consumed_shift_tab {
             fail("Shift+Tab was WRONGLY consumed (CSI Z won't reach the pty)".into());
         }
-        let consumed_ctrl_i = Self::perform_on_view(&view, mtm, KEYCODE_I, TAB_MOD_CTRL);
+        let consumed_ctrl_i = Self::perform_on_view(&view, mtm, KEYCODE_I, TAB_MOD_CTRL, "");
         if consumed_ctrl_i {
             fail("Ctrl+I was WRONGLY consumed (its byte won't reach the pty)".into());
         }
@@ -7227,20 +7309,36 @@ impl AppDelegate {
         keycode: u16,
         mods: NSEventModifierFlags,
     ) {
+        Self::send_key_equiv_chars(controller, mtm, keycode, mods, "");
+    }
+
+    /// Like [`Self::send_key_equiv`] but carries `chars` as the event's
+    /// `characters` / `charactersIgnoringModifiers`. The search field's editing
+    /// chords (Cmd+A/C/X/V/Z) resolve on the produced character, so this variant
+    /// is needed to exercise that path (e.g. Cmd+V with `chars = "v"`).
+    fn send_key_equiv_chars(
+        controller: &Controller,
+        mtm: MainThreadMarker,
+        keycode: u16,
+        mods: NSEventModifierFlags,
+        chars: &str,
+    ) {
         if let Some(view) = controller.active_view() {
-            let _ = Self::perform_on_view(&view, mtm, keycode, mods);
+            let _ = Self::perform_on_view(&view, mtm, keycode, mods, chars);
         }
     }
 
-    /// Build a synthetic keyDown `NSEvent` for `keycode`+`mods` and send it to
-    /// `view.performKeyEquivalent:`. Returns whether the view consumed it.
+    /// Build a synthetic keyDown `NSEvent` for `keycode`+`mods` (carrying `chars`
+    /// as its characters) and send it to `view.performKeyEquivalent:`. Returns
+    /// whether the view consumed it.
     fn perform_on_view(
         view: &TerminalView,
         _mtm: MainThreadMarker,
         keycode: u16,
         mods: NSEventModifierFlags,
+        chars: &str,
     ) -> bool {
-        let empty = NSString::from_str("");
+        let chars = NSString::from_str(chars);
         // SAFETY: standard keyEvent constructor; nil context; then a normal
         // performKeyEquivalent: dispatch on the main thread.
         unsafe {
@@ -7253,8 +7351,8 @@ impl AppDelegate {
                 timestamp: 0.0_f64,
                 windowNumber: 0_isize,
                 context: std::ptr::null::<AnyObject>(),
-                characters: &*empty,
-                charactersIgnoringModifiers: &*empty,
+                characters: &*chars,
+                charactersIgnoringModifiers: &*chars,
                 isARepeat: false,
                 keyCode: keycode,
             ];
@@ -8194,6 +8292,47 @@ impl AppDelegate {
             fail(format!(
                 "navigating back to a match must land on the same viewport offset \
                  (off1={off1}, off1b={off1b})"
+            ));
+        }
+
+        // The search field behaves like a standard text box: while it is being
+        // edited, Cmd+V must paste into the FIELD, not the shell. (Before the
+        // field-editor routing this pasted the clipboard into the pty — a real
+        // hazard.) The overlay made the field first responder when Cmd+F opened
+        // it, so assert that, then drive Cmd+V through the real key-equiv path.
+        if !controller.active_search_field_is_editing() {
+            fail(
+                "search field is not first responder after opening — cannot verify \
+                 field-editor key routing (the overlay should have focused it)"
+                    .into(),
+            );
+        }
+        // A distinctive clipboard payload that does NOT occur in the scrollback,
+        // so if it (wrongly) reached the pty it would be unmistakable on screen.
+        let paste_guard = "PASTEGUARDZZ";
+        if !crate::clipboard::write(paste_guard) {
+            fail("could not seed the clipboard for the paste-routing check".into());
+        }
+        Self::send_key_equiv_chars(controller, mtm, KEYCODE_V, TAB_MOD_CMD, "v");
+        // Let any (erroneous) pty paste echo at the prompt.
+        Self::spin(0.5);
+        let screen = controller
+            .surface_screen_text(tab, surface)
+            .unwrap_or_default();
+        if screen.contains(paste_guard) {
+            fail(format!(
+                "Cmd+V while editing the search field pasted into the shell (marker \
+                 '{paste_guard}' appeared on screen) — the field-editor routing did \
+                 not intercept it.\n--- screen ---\n{screen}"
+            ));
+        }
+        // ...and it DID land in the field: the paste fires the field delegate's
+        // controlTextDidChange, so the needle now carries the pasted text.
+        if controller.active_search_needle().as_deref() != Some(paste_guard) {
+            fail(format!(
+                "Cmd+V while editing the search field did not paste into the field \
+                 (needle is {:?}, expected {paste_guard:?})",
+                controller.active_search_needle()
             ));
         }
 
@@ -10260,6 +10399,7 @@ fn tabkeys_fail(msg: String) -> ! {
 const KEYCODE_TAB: u16 = 0x30; // kVK_Tab
 const KEYCODE_RETURN: u16 = 0x24; // kVK_Return
 const KEYCODE_F: u16 = 0x03; // kVK_ANSI_F
+const KEYCODE_V: u16 = 0x09; // kVK_ANSI_V
 const KEYCODE_ESCAPE: u16 = 0x35; // kVK_Escape
 const KEYCODE_I: u16 = 0x22; // kVK_ANSI_I
 const KEYCODE_1: u16 = 0x12; // kVK_ANSI_1
