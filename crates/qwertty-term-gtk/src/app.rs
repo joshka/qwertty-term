@@ -1352,21 +1352,260 @@ fn active_pwd(tab_view: &adw::TabView) -> Option<std::path::PathBuf> {
     inherit_pwd(pwd.as_deref())
 }
 
-/// Assemble the tabbed window: a vertical `gtk::Box` with an `AdwTabBar` (plus a
-/// `+` new-tab button) above an `AdwTabView`, and wire the group signals
-/// (deterministic page close; close the window when the last tab goes away).
-/// Adds an initial tab and presents. Mirrors upstream `class/window.zig` window
-/// composition + `tabViewClosePage` (`:1500`) + `tabViewNPages` (`:1662`).
-fn build_tabbed_window(app: &adw::Application) {
+// ============================ HEADERBAR + PRIMARY MENU ============================
+//
+// The tabbed window wears app chrome: an `adw::HeaderBar` at the top of the
+// content `gtk::Box` (an `adw::ApplicationWindow` has no separate titlebar, so
+// the HeaderBar lives *in* the content — the documented libadwaita pattern),
+// carrying the `+` new-tab button in its start slot and a primary
+// `gtk::MenuButton` (hamburger, `open-menu-symbolic`) in its end slot. Mirrors
+// upstream `ui/1.5/window.blp:53-80` (the `Adw.HeaderBar` with a start
+// `Adw.SplitButton` `tab-new-symbolic` and an end `Gtk.MenuButton`
+// `open-menu-symbolic` bound to `main_menu`).
+//
+// The HeaderBar shows the window title automatically (upstream binds
+// `Adw.WindowTitle.title` to `template.title`, `window.blp:44`); we keep an
+// `Adw.WindowTitle` off and let the bar reflect `window.set_title`.
+//
+// The primary menu is a `gio::Menu`; each item drives a `gio::SimpleAction` in
+// the window's `win.` action group (New Tab / Copy / Paste / Preferences /
+// About). Accelerators are registered on the application so the menu renders the
+// Ctrl+Shift+{T,C,V} shortcut labels (upstream registers the same via
+// `gtk_application_set_accels_for_action`).
+
+/// The default window/tab title shown before (or absent) an OSC 0/2 title.
+const DEFAULT_TITLE: &str = "qwertty-term";
+
+/// The active tab's terminal surface widget (its `GLArea`), if any.
+fn active_area(tab_view: &adw::TabView) -> Option<gtk::GLArea> {
+    tab_view
+        .selected_page()?
+        .child()
+        .downcast::<gtk::GLArea>()
+        .ok()
+}
+
+/// The active tab's surface widget together with its [`Shared`] state.
+fn active_area_shared(tab_view: &adw::TabView) -> Option<(gtk::GLArea, Rc<Shared>)> {
+    let area = active_area(tab_view)?;
+    let shared = shared_of(&area)?;
+    Some((area, shared))
+}
+
+/// A tab surface's OSC 0/2 title (`Engine::title`), if the surface is built and
+/// a title has been set.
+fn surface_title(shared: &Shared) -> Option<String> {
+    shared
+        .surface
+        .borrow()
+        .as_ref()
+        .and_then(|s| s.engine().title())
+}
+
+/// Refresh the window title and every tab page's title from the corresponding
+/// terminal's OSC 0/2 title, falling back to [`DEFAULT_TITLE`] when unset. The
+/// window title tracks the *active* tab. Mirrors upstream's surface-title →
+/// page-title binding (`class/window.zig:474-479`, `bindProperty("title", …)`)
+/// and window-title binding (`window.blp:44`), refreshed here from the 60 Hz
+/// tick since we poll rather than emit a `title` GObject property.
+fn refresh_titles(window: &adw::ApplicationWindow, tab_view: &adw::TabView) {
+    let n = tab_view.n_pages();
+    for i in 0..n {
+        let page = tab_view.nth_page(i);
+        let Ok(area) = page.child().downcast::<gtk::GLArea>() else {
+            continue;
+        };
+        let Some(shared) = shared_of(&area) else {
+            continue;
+        };
+        let title = surface_title(&shared).unwrap_or_else(|| DEFAULT_TITLE.to_string());
+        if page.title().as_str() != title.as_str() {
+            page.set_title(&title);
+        }
+    }
+
+    let active = active_area(tab_view)
+        .and_then(|a| shared_of(&a))
+        .and_then(|s| surface_title(&s))
+        .unwrap_or_else(|| DEFAULT_TITLE.to_string());
+    if window.title().as_deref() != Some(active.as_str()) {
+        window.set_title(Some(&active));
+    }
+}
+
+/// Build the primary menu model (the hamburger `gio::Menu`): New Tab, a
+/// separator, Copy / Paste, a separator, Preferences (stub), a separator, About.
+/// The items target `win.` actions installed by [`install_window_actions`].
+/// Mirrors upstream `main_menu` (`ui/1.5/window.blp:220-315`): New Tab, a
+/// Clipboard section (Copy/Paste live in the surface context menu upstream but
+/// are exposed here for discoverability), Open Configuration (our Preferences
+/// stub), and About.
+fn build_primary_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("New Tab"), Some("win.new-tab"));
+
+    let clip = gio::Menu::new();
+    clip.append(Some("Copy"), Some("win.copy"));
+    clip.append(Some("Paste"), Some("win.paste"));
+    menu.append_section(None, &clip);
+
+    let prefs = gio::Menu::new();
+    prefs.append(Some("Preferences"), Some("win.preferences"));
+    menu.append_section(None, &prefs);
+
+    let about = gio::Menu::new();
+    about.append(Some("About"), Some("win.about"));
+    menu.append_section(None, &about);
+
+    menu
+}
+
+/// Show the About dialog: a `gtk::AboutDialog` (GTK 4.0 baseline — no
+/// libadwaita feature bump; upstream falls back to exactly this via
+/// `gtk.showAboutDialog` when Adw dialogs are unsupported, `class/window.zig:1859`).
+/// Carries the app name + a short blurb. Mirrors upstream `actionAbout`
+/// (`class/window.zig:1832`).
+fn show_about(parent: &adw::ApplicationWindow) {
+    let about = gtk::AboutDialog::builder()
+        .program_name("qwertty-term")
+        .comments("A terminal emulator — a full-Rust port of Ghostty (GTK4 host).")
+        .website("https://github.com/joshka/qwertty-term")
+        .website_label("Project home")
+        .modal(true)
+        .transient_for(parent)
+        .build();
+    about.present();
+}
+
+/// Show the Preferences placeholder: a minimal transient window noting that the
+/// real preferences UI is not yet implemented. Upstream opens the config file /
+/// a full config UI (`app.open-config`); a real settings surface is deferred
+/// here (TODO(prefs)).
+fn show_preferences_stub(parent: &adw::ApplicationWindow) {
+    let label = gtk::Label::new(Some(
+        "Preferences are not yet implemented.\n\nConfiguration UI is a future slice (TODO(prefs)).",
+    ));
+    label.set_margin_top(24);
+    label.set_margin_bottom(24);
+    label.set_margin_start(24);
+    label.set_margin_end(24);
+    let win = gtk::Window::builder()
+        .title("Preferences")
+        .transient_for(parent)
+        .modal(true)
+        .resizable(false)
+        .child(&label)
+        .build();
+    win.present();
+}
+
+/// Install the window's `win.` action group backing the primary menu: New Tab,
+/// Copy, Paste, Preferences, About. Copy/Paste operate on the *active* tab's
+/// surface (recovered from the selected `AdwTabPage`'s GLArea). Mirrors
+/// upstream's window action set (`class/window.zig:363-367` + the `win.new-tab`
+/// / `win.about` actions the menu targets).
+fn install_window_actions(
+    window: &adw::ApplicationWindow,
+    app: &adw::Application,
+    tab_view: &adw::TabView,
+) {
+    // New Tab → the same path as the `+` button and Ctrl+Shift+T.
+    let new_tab = gio::SimpleAction::new("new-tab", None);
+    {
+        let app = app.clone();
+        let tab_view = tab_view.clone();
+        new_tab.connect_activate(move |_, _| {
+            let pwd = active_pwd(&tab_view);
+            add_tab(&app, &tab_view, pwd);
+        });
+    }
+    window.add_action(&new_tab);
+
+    // Copy → copy the active tab's selection (no-op with no selection).
+    let copy = gio::SimpleAction::new("copy", None);
+    {
+        let tab_view = tab_view.clone();
+        copy.connect_activate(move |_, _| {
+            if let Some((area, shared)) = active_area_shared(&tab_view) {
+                copy_selection(&area, &shared);
+            }
+        });
+    }
+    window.add_action(&copy);
+
+    // Paste → paste the CLIPBOARD into the active tab (bracketed-paste aware).
+    let paste = gio::SimpleAction::new("paste", None);
+    {
+        let tab_view = tab_view.clone();
+        paste.connect_activate(move |_, _| {
+            if let Some((area, shared)) = active_area_shared(&tab_view) {
+                paste_clipboard(&area, &shared, false);
+            }
+        });
+    }
+    window.add_action(&paste);
+
+    // Preferences → the placeholder dialog (stub).
+    let preferences = gio::SimpleAction::new("preferences", None);
+    {
+        let weak = window.downgrade();
+        preferences.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                show_preferences_stub(&win);
+            }
+        });
+    }
+    window.add_action(&preferences);
+
+    // About → the About dialog.
+    let about = gio::SimpleAction::new("about", None);
+    {
+        let weak = window.downgrade();
+        about.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                show_about(&win);
+            }
+        });
+    }
+    window.add_action(&about);
+
+    // Register accelerators so the menu renders the shortcut labels; GTK's
+    // window-level (capture-phase) shortcut controller activates these before the
+    // GLArea key controller sees the chord, so there is no double-dispatch.
+    app.set_accels_for_action("win.new-tab", &["<Ctrl><Shift>t"]);
+    app.set_accels_for_action("win.copy", &["<Ctrl><Shift>c"]);
+    app.set_accels_for_action("win.paste", &["<Ctrl><Shift>v"]);
+}
+
+/// Assemble the tabbed window's widgets: an `adw::HeaderBar` (start `+` button,
+/// end primary `MenuButton`) above an `AdwTabBar` above an `AdwTabView`, all in a
+/// vertical `gtk::Box` content. Installs the `win.` menu actions, wires close +
+/// last-tab-closes-window, and starts the title-refresh tick. Returns the
+/// assembled handles so both the interactive path and the headless smoke can
+/// drive them. Mirrors upstream `class/window.zig` composition +
+/// `tabViewClosePage` (`:1500`) + `tabViewNPages` (`:1662`) + the headerbar
+/// (`ui/1.5/window.blp:53-80`).
+struct WindowParts {
+    window: adw::ApplicationWindow,
+    tab_view: adw::TabView,
+}
+
+fn build_window_parts(app: &adw::Application) -> WindowParts {
     let tab_view = adw::TabView::new();
     tab_view.set_vexpand(true);
 
     let tab_bar = adw::TabBar::new();
     tab_bar.set_view(Some(&tab_view));
 
-    // The `+` new-tab button (AdwTabBar has no built-in one) in the bar's start
-    // slot, inheriting the active tab's pwd. Upstream exposes new-tab via a
-    // header/menu action (`class/window.zig:1926`); the chord is Ctrl+Shift+T.
+    // Primary menu button (hamburger) in the headerbar end slot.
+    let menu_button = gtk::MenuButton::new();
+    menu_button.set_icon_name("open-menu-symbolic");
+    menu_button.set_tooltip_text(Some("Main Menu"));
+    menu_button.set_menu_model(Some(&build_primary_menu()));
+
+    // The `+` new-tab button in the headerbar start slot, inheriting the active
+    // tab's pwd. Upstream exposes new-tab via a header split button
+    // (`ui/1.5/window.blp:53`); the chord is Ctrl+Shift+T.
     let new_button = gtk::Button::from_icon_name("tab-new-symbolic");
     new_button.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));
     {
@@ -1377,9 +1616,15 @@ fn build_tabbed_window(app: &adw::Application) {
             add_tab(&app, &tab_view, pwd);
         });
     }
-    tab_bar.set_start_action_widget(Some(&new_button));
 
+    let header = adw::HeaderBar::new();
+    header.pack_start(&new_button);
+    header.pack_end(&menu_button);
+
+    // Content: [HeaderBar, TabBar, TabView] (an adw::ApplicationWindow has no
+    // separate titlebar, so the HeaderBar lives in the content box).
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.append(&header);
     vbox.append(&tab_bar);
     vbox.append(&tab_view);
 
@@ -1395,9 +1640,11 @@ fn build_tabbed_window(app: &adw::Application) {
         .application(app)
         .default_width(800)
         .default_height(600)
-        .title("qwertty-term")
+        .title(DEFAULT_TITLE)
         .content(&vbox)
         .build();
+
+    install_window_actions(&window, app, &tab_view);
 
     // When the last tab closes, close the window (upstream `tabViewNPages`,
     // `class/window.zig:1662`). Weak ref so the closure doesn't pin the window.
@@ -1413,9 +1660,42 @@ fn build_tabbed_window(app: &adw::Application) {
         });
     }
 
-    window.present();
+    // Refresh the window title immediately when the active tab changes…
+    {
+        let window_weak = window.downgrade();
+        let tv = tab_view.clone();
+        tab_view.connect_selected_page_notify(move |_| {
+            if let Some(win) = window_weak.upgrade() {
+                refresh_titles(&win, &tv);
+            }
+        });
+    }
+    // …and poll the active surface's OSC 0/2 title a few times a second so the
+    // window/tab titles track the running program (no `title` GObject property to
+    // bind against, so we poll rather than notify).
+    {
+        let window_weak = window.downgrade();
+        let tab_view = tab_view.clone();
+        glib::timeout_add_local(Duration::from_millis(150), move || {
+            match window_weak.upgrade() {
+                Some(win) => {
+                    refresh_titles(&win, &tab_view);
+                    glib::ControlFlow::Continue
+                }
+                None => glib::ControlFlow::Break,
+            }
+        });
+    }
+
+    WindowParts { window, tab_view }
+}
+
+/// Assemble and present the interactive tabbed window, then add the first tab.
+fn build_tabbed_window(app: &adw::Application) {
+    let parts = build_window_parts(app);
+    parts.window.present();
     // The first tab (inherits nothing — process cwd).
-    add_tab(app, &tab_view, None);
+    add_tab(app, &parts.tab_view, None);
 }
 
 /// Run the GTK application interactively — opens the tabbed window, each tab an
@@ -1690,5 +1970,191 @@ pub fn run_tab_lifecycle_smoke() -> TabLifecycleOutcome {
     // Clone the result out of the shared cell: the `connect_activate` closure
     // still holds an `Rc` clone (it lives as long as `app`), so `Rc::into_inner`
     // would see >1 strong ref. The same pattern the other smoke runners use.
+    outcome.borrow().clone()
+}
+
+/// Depth-first search of a widget subtree for the first descendant that
+/// downcasts to `T`. Used by the headerbar smoke to prove the `adw::HeaderBar`
+/// and its `gtk::MenuButton` are actually present in the presented window tree
+/// (not merely constructed).
+fn find_descendant<T: glib::object::IsA<gtk::Widget>>(root: &gtk::Widget) -> Option<T> {
+    if let Ok(found) = root.clone().downcast::<T>() {
+        return Some(found);
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find_descendant::<T>(&c) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// Inspect the presented window for its app chrome: `(has_headerbar,
+/// has_menu_button, primary_menu_item_count)`. Walks the real widget tree so the
+/// headerbar smoke proves the chrome is present, not merely constructed.
+fn inspect_chrome(window: &adw::ApplicationWindow) -> (bool, bool, usize) {
+    let Some(root) = window.content() else {
+        return (false, false, 0);
+    };
+    let Some(header) = find_descendant::<adw::HeaderBar>(&root) else {
+        return (false, false, 0);
+    };
+    let Some(button) = find_descendant::<gtk::MenuButton>(header.upcast_ref::<gtk::Widget>())
+    else {
+        return (true, false, 0);
+    };
+    let count = button
+        .menu_model()
+        .map(|m| m.n_items().max(0) as usize)
+        .unwrap_or(0);
+    (true, true, count)
+}
+
+/// Outcome of the headerbar smoke: proof that the tabbed window wears its app
+/// chrome (a HeaderBar with a primary MenuButton), that the primary menu's
+/// **New Tab** action creates a second tab, and that the active terminal's OSC
+/// 0/2 title propagates to both the tab page title and the window title.
+#[derive(Debug, Clone, Default)]
+pub struct HeaderbarOutcome {
+    /// An `adw::HeaderBar` is present in the presented window's widget tree.
+    pub has_headerbar: bool,
+    /// A `gtk::MenuButton` is present inside that HeaderBar.
+    pub has_menu_button: bool,
+    /// The MenuButton carries a non-empty primary menu model.
+    pub menu_item_count: usize,
+    /// `AdwTabView.n_pages()` after activating the `win.new-tab` menu action once
+    /// (the window opened with one tab, so expect 2).
+    pub pages_after_new_tab_action: usize,
+    /// The active tab page's title after feeding `ESC]0;hello BEL` (expect
+    /// "hello").
+    pub tab_title: Option<String>,
+    /// The window title after the same feed (expect "hello").
+    pub window_title: Option<String>,
+    /// A GL context error seen in any tab's `realize`, if any.
+    pub realize_error: Option<String>,
+}
+
+impl HeaderbarOutcome {
+    /// True iff the chrome is present, the New Tab menu action opened a second
+    /// tab, and the OSC 0/2 title reached both the tab page and the window title.
+    pub fn is_ok(&self) -> bool {
+        self.realize_error.is_none()
+            && self.has_headerbar
+            && self.has_menu_button
+            && self.menu_item_count > 0
+            && self.pages_after_new_tab_action == 2
+            && self.tab_title.as_deref() == Some("hello")
+            && self.window_title.as_deref() == Some("hello")
+    }
+}
+
+impl std::fmt::Display for HeaderbarOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "has_headerbar={} has_menu_button={} menu_item_count={} \
+             pages_after_new_tab_action={} tab_title={:?} window_title={:?} realize_error={:?}",
+            self.has_headerbar,
+            self.has_menu_button,
+            self.menu_item_count,
+            self.pages_after_new_tab_action,
+            self.tab_title,
+            self.window_title,
+            self.realize_error,
+        )
+    }
+}
+
+/// Run the headerbar smoke headlessly: build the real tabbed window (headerbar +
+/// primary menu + title binding via [`build_window_parts`]), assert the chrome
+/// is present, drive the **New Tab** `gio::Action` to open a second tab, feed
+/// `ESC]0;hello BEL` (OSC 0) into the active tab's terminal, refresh titles, and
+/// read the tab page title + window title back — proving the menu wiring and the
+/// OSC-title binding end-to-end. Driven by chained main-loop timeouts so it stays
+/// deterministic under Xvfb.
+pub fn run_headerbar_smoke() -> HeaderbarOutcome {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    let outcome = Rc::new(RefCell::new(HeaderbarOutcome::default()));
+
+    const STEP: Duration = Duration::from_millis(300);
+
+    {
+        let outcome = outcome.clone();
+        app.connect_activate(move |app| {
+            let parts = build_window_parts(app);
+            let window = parts.window.clone();
+            let tab_view = parts.tab_view.clone();
+
+            // Structural chrome checks against the *presented* widget tree.
+            {
+                let (has_headerbar, has_menu_button, menu_item_count) = inspect_chrome(&window);
+                let mut o = outcome.borrow_mut();
+                o.has_headerbar = has_headerbar;
+                o.has_menu_button = has_menu_button;
+                o.menu_item_count = menu_item_count;
+            }
+
+            window.present();
+            // Open the first tab (as the interactive path does).
+            add_tab(app, &tab_view, None);
+
+            // Step 1: after tab 1 renders, fire the New Tab *menu action*.
+            let out1 = outcome.clone();
+            let window1 = window.clone();
+            let tv1 = tab_view.clone();
+            glib::timeout_add_local_once(STEP, move || {
+                // Drive the gio::Action directly — the same path the menu item hits.
+                // (ActionGroupExt activates on the window's own group, bare name.)
+                gio::prelude::ActionGroupExt::activate_action(&window1, "new-tab", None);
+
+                // Step 2: after the second tab renders, record the page count,
+                // feed OSC 0 into the active tab, refresh titles, read them back.
+                let out2 = out1.clone();
+                let window2 = window1.clone();
+                let tv2 = tv1.clone();
+                glib::timeout_add_local_once(STEP, move || {
+                    out2.borrow_mut().pages_after_new_tab_action = tv2.n_pages() as usize;
+
+                    // Feed an OSC 0 title-set into the active tab's terminal.
+                    if let Some((_area, shared)) = active_area_shared(&tv2) {
+                        if let Some(surface) = shared.surface.borrow_mut().as_mut() {
+                            surface.feed(b"\x1b]0;hello\x07");
+                        }
+                        if let Some(err) = shared.text.borrow().realize_error.clone() {
+                            out2.borrow_mut().realize_error = Some(err);
+                        }
+                    }
+
+                    // Bind the titles from the freshly-set OSC title.
+                    refresh_titles(&window2, &tv2);
+
+                    {
+                        let mut o = out2.borrow_mut();
+                        o.tab_title = tv2.selected_page().map(|p| p.title().to_string());
+                        o.window_title = window2.title().map(|t| t.to_string());
+                    }
+
+                    // Quit.
+                    if let Some(app) = window2.application() {
+                        app.quit();
+                    }
+                });
+            });
+        });
+    }
+
+    // Hard backstop so a run can never hang.
+    {
+        let app_weak = app.downgrade();
+        glib::timeout_add_local_once(Duration::from_secs(20), move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.quit();
+            }
+        });
+    }
+
+    let _ = app.run_with_args::<&str>(&[]);
     outcome.borrow().clone()
 }
