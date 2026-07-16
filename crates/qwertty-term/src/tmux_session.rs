@@ -191,6 +191,12 @@ impl TmuxSession {
         Some(self.viewer.pane_mut(pane_id)?.terminal_mut())
     }
 
+    /// Re-apply the app's palette/theme to every pane terminal (config reload).
+    /// Display panes render these terminals, so a theme reload must reach them.
+    pub fn recolor_panes(&mut self, colors: &qwertty_term_vt::terminal::Colors) {
+        self.viewer.recolor_panes(colors);
+    }
+
     /// Whether the session has become defunct (tmux exited). Once defunct it
     /// should be dropped along with its native tabs.
     pub fn is_defunct(&self) -> bool {

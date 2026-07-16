@@ -479,6 +479,18 @@ impl Viewer {
         self.panes.iter_mut().find(|p| p.id == id)
     }
 
+    /// Re-apply the app's palette/theme to every pane terminal (config reload).
+    /// A display pane renders these terminals, not the surface's own (empty)
+    /// engine, so a theme reload must reach here or tmux panes keep their
+    /// create-time colors. Mirrors `Engine::set_colors` per pane.
+    pub fn recolor_panes(&mut self, colors: &Colors) {
+        for pane in &mut self.panes {
+            let t = pane.terminal_mut();
+            t.colors = colors.clone();
+            t.screen_mut().pages.mark_all_dirty();
+        }
+    }
+
     /// The number of tracked panes.
     pub fn pane_count(&self) -> usize {
         self.panes.len()

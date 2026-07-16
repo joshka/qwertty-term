@@ -4347,9 +4347,17 @@ impl Controller {
             for surface in tab.surfaces.values_mut() {
                 surface.selection_colors = selection_colors;
                 surface.metric_modifiers = metric_modifiers.clone();
-                let (mut engine, _recovered) = lock_or_recover(&surface.engine);
-                engine.set_colors(startup_colors.clone());
-                vt_toggles.apply(&mut engine);
+                {
+                    let (mut engine, _recovered) = lock_or_recover(&surface.engine);
+                    engine.set_colors(startup_colors.clone());
+                    vt_toggles.apply(&mut engine);
+                }
+                // A control surface's tmux panes render their own Viewer-owned
+                // terminals, not this engine — recolor those too, or a theme
+                // reload leaves the tmux panes at their create-time colors.
+                if let Some(sess) = surface.tmux.as_mut() {
+                    sess.recolor_panes(&startup_colors);
+                }
             }
         }
 
@@ -5381,12 +5389,22 @@ impl Controller {
     fn paste_text(&self, tab: TabId, surface: SurfaceId, text: &str) {
         let bracketed = {
             let state = self.0.borrow();
-            state
-                .tabs
-                .get(&tab)
-                .and_then(|t| t.surfaces.get(&surface))
-                .map(|s| s.engine().bracketed_paste())
-                .unwrap_or(false)
+            let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) else {
+                return;
+            };
+            match s.display_source() {
+                // Display pane: its own engine is empty; read the live mode off
+                // the Viewer's pane terminal (fed by `%output`).
+                Some(src) => state
+                    .tabs
+                    .get(&src.control_tab)
+                    .and_then(|ct| ct.surfaces.get(&src.control_surface))
+                    .and_then(|cs| cs.tmux_session())
+                    .and_then(|sess| sess.pane_terminal(surface))
+                    .map(|t| t.modes.get(qwertty_term_vt::modes::Mode::BracketedPaste))
+                    .unwrap_or(false),
+                None => s.engine().bracketed_paste(),
+            }
         };
         let protection = self.0.borrow().paste_protection;
         if crate::paste::is_unsafe(text, bracketed, protection) && !self.confirm_unsafe_paste(text)
@@ -5591,18 +5609,32 @@ impl Controller {
     /// Write `text` to `surface`'s pty as a paste (bracketed if `bracketed`).
     /// Split out so the confirmed and direct paths share the encoding.
     fn write_paste(&self, tab: TabId, surface: SurfaceId, text: &str, bracketed: bool) {
-        let state = self.0.borrow();
-        if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
-            let payload = if bracketed {
-                let mut p = Vec::with_capacity(text.len() + 12);
-                p.extend_from_slice(b"\x1b[200~");
-                p.extend_from_slice(text.as_bytes());
-                p.extend_from_slice(b"\x1b[201~");
-                p
-            } else {
-                text.as_bytes().to_vec()
-            };
-            s.send_pty(&payload);
+        let payload = if bracketed {
+            let mut p = Vec::with_capacity(text.len() + 12);
+            p.extend_from_slice(b"\x1b[200~");
+            p.extend_from_slice(text.as_bytes());
+            p.extend_from_slice(b"\x1b[201~");
+            p
+        } else {
+            text.as_bytes().to_vec()
+        };
+        // A display-only tmux pane has no pty, so `send_pty` would silently drop
+        // the paste; route it to tmux as `send-keys`, exactly like keyboard input.
+        let src = {
+            let state = self.0.borrow();
+            match state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
+                Some(s) => s.display_source(),
+                None => return,
+            }
+        };
+        let mut state = self.0.borrow_mut();
+        match src {
+            Some(src) => self.route_keys_to_tmux(&mut state, src, surface, &payload),
+            None => {
+                if let Some(s) = state.tabs.get(&tab).and_then(|t| t.surfaces.get(&surface)) {
+                    s.send_pty(&payload);
+                }
+            }
         }
     }
 
@@ -5736,8 +5768,8 @@ impl Controller {
         let mut state = self.0.borrow_mut();
         let family = state.font_family.clone();
         let mtm = state.mtm;
+        let mut any_changed = false;
         if let Some(t) = state.tabs.get_mut(&tab) {
-            let mut any_changed = false;
             for s in t.surfaces.values_mut() {
                 let changed = match step {
                     FontStep::Up => s.font_size.increase(),
@@ -5752,6 +5784,14 @@ impl Controller {
             if any_changed {
                 t.relayout(controller_ptr, tab, mtm);
             }
+        }
+        drop(state);
+        // A font-size change resizes the grid (bigger/smaller cells → fewer/more
+        // cols/rows fit the window). For a tmux-window tab, propagate the new
+        // grid to tmux so it re-lays-out and the pane terminals reflow — same
+        // omission (and fix) as a window resize.
+        if any_changed {
+            self.propagate_tmux_window_resize(tab);
         }
     }
 
