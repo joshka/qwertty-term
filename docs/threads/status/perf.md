@@ -1,11 +1,23 @@
-# perf status — 🗄️ RECYCLED 2026-07-15 (print-scan pivot + PR-1 merged; PR-2 next)
+# perf status — 🗄️ RECYCLED 2026-07-15 (print-scan lever COMPLETE — PR-1 + PR-2 merged)
 
-> **RECYCLED after the profile-first pivot + PR-1.** Shipped + MERGED **#304** (`6f8735ef`, the
-> pivot docs) and **#305** (`47f42f46`, PR-1 run_len NEON prescan — **+5–8% full-pipeline on the
-> real vtebench cell payloads**, both verified ancestors of origin/main). Retired the NEON UTF-8
-> decode lever on evidence (pipeline is print-bound, not decode-bound). **NEXT = PR-2 simple-cell
-> scan, fully specced below + in `docs/analysis/print-slice-scan.md`.** To resume, spawn a fresh
-> thread off this file; `jj new main@origin` before PR-2 edits (PR-1 is merged — don't stack).
+> **RECYCLED — the print-scan lever is DONE (both PRs merged, verified ancestors of origin/main).**
+> This session: profile-first pivot → retired the NEON UTF-8 decode lever on evidence (pipeline is
+> print-bound, not decode-bound) → shipped both print-scan PRs. Merged: **#304** (`6f8735ef`, pivot
+> docs), **#305** (`47f42f46`, PR-1 run_len NEON prescan `latin1_narrow_prefix`), **#306**
+> (`30819e43`, mid status), **#307** (`6c113b04`, PR-2 cell-scan NEON `simple_cell_prefix`).
+> **Full-pipeline wins (real vtebench cell payloads, compounding): light_cells ~+14%, medium_cells
+> ~+11%, dense_cells ~+9%** vs the pre-session baseline (PR-1 +5–8%, PR-2 +4–6% on top); redraw
+> ~+24% combined. All gates green each PR (0-divergence differential vs `77190bd02`, release +
+> paranoid lanes, parser fuzz, Miri, boundary tests, cross-platform CI). Analysis + numbers:
+> `docs/analysis/print-slice-scan.md`.
+>
+> **BACKLOG NOW DRAINED to the machine-blocked scoreboard.** The print-scan lever is fully mined
+> (the remaining `print_slice_fill` fill-writes line is ~4% + write-side/higher-risk → not worth
+> it). Decode retired. The only remaining perf deliverable is the **whole-app vtebench scoreboard
+> refresh**, which needs a genuinely quiet box (never quieted this session). A fresh thread should:
+> (a) poll `uptime`/`ps` and run the scoreboard when quiet (see the item below), or (b) if new
+> upstream perf commits appear, port them. To resume, spawn off this file; `jj new main@origin`
+> before any edits.
 >
 > ---
 >
@@ -77,23 +89,18 @@
 > region-scroll suites down ~1.5–1.7 ms (18→16.4) consistent with the shipped region-scroll
 > levers. A real 3-round median refresh still wants a quiet box.
 
-- **Current item:** **PR-2 simple-cell scan** next. **PR-1 run_len narrow prescan SHIPPED** (this
-  PR): `latin1_narrow_prefix` NEON find-first over the Latin-1 `[0x10,0xFF]` prefix + scalar
-  fallback, `cfg(not(miri))`. **Full-pipeline win on real vtebench payloads: light_cells +7.6–8.0%,
-  medium_cells +5.3–6.3%, dense_cells +5.2%** (ascii +11–12%, redraw +9.8% synthetic; A/B best-of-5,
-  order-verified). Gate all green: differential 0-divergence vs `77190bd02` oracle (corpus+afl+
-  generative+hand+formatter), workspace tests, release lane, paranoid lane (1634), boundary tests +
-  `print_slice_differential_fuzz`, parser fuzz 1.04M runs no crash, Miri clean (scalar path),
-  fmt/clippy/check. Reprioritized backlog:
+- **Current item:** none active — **print-scan lever COMPLETE**; recycled. Backlog:
+  - **(DONE) print-scan NEON lever** — both PRs merged. **PR-1** run_len prescan `latin1_narrow_prefix`
+    (u32, 4-lane, `#305` `47f42f46`); **PR-2** cell-scan `simple_cell_prefix` (u64, 2-lane, `#307`
+    `6c113b04`). Read-only find-first over the `print_slice_fill` scans (the real print bottleneck).
+    Compounding full-pipeline win on the real vtebench cell payloads (~+9–14%). Analysis
+    `docs/analysis/print-slice-scan.md`. **Fully mined** — the residual fill-writes line (~4%) is
+    write-side/higher-risk, not worth it.
   - **(DONE) hash_map backward-shift + load factor** — both PRs merged; full faithful port complete,
     oracle-neutral. Analysis `docs/analysis/hash-map-backward-shift.md`.
-  - **(top, in progress) print-scan NEON lever** — `print_slice_fill` read-only find-first scans, the
-    real full-pipeline bottleneck (~20–27% on real light/medium_cells). **PR-1 run_len (u32, 4-lane,
-    safe) SHIPPED**; PR-2 simple-cell (u64, 2-lane, needs Miri on the pointer walk) next. Analysis
-    `docs/analysis/print-slice-scan.md`.
   - **(RETIRED) SIMD NEON UTF-8 decode** — profile shows decode is not the bottleneck (print is);
     would only lift a NOOP ceiling nothing hits, at max differential risk. Evidence in the analysis
-    doc. Superseded by the print-scan lever.
+    doc (`print-slice-scan.md` Finding 1). Superseded by the print-scan lever.
   - **(blocked) whole-app vtebench scoreboard refresh** — the mission's remaining "Done" deliverable;
     BLOCKED on a quiet machine (re-checked 2026-07-15: WindowServer 47%, loadavg 8.75 rising,
     mediaanalysisd 69%, Josh active on Firefox → the render-heavy region suites are contended and
@@ -112,10 +119,11 @@
     run_len) is correctness-load-bearing / already-minimal → diminishing returns, higher risk.
     Only pursue with fresh line-level profiling showing a concrete hot spot.
   - **(4) font/sprite pin-delta verification** (routed to T2/sprite in `issues.md`).
-- **Last merged:** **#305** (print run_len NEON prescan, `47f42f46`, +5–8% real cell payloads);
-  **#304** (profile-first pivot docs, `6f8735ef`); **#303** (80% hyperlink load factor, `d0a62c8c`);
-  **#297** (backward-shift deletion, `0babde7a`); **#289** (APC SIMD scan, `50e9814f`); **#287** (APC
-  bulk dispatch, `8fa6772a`); **#283** (`9e51aad3`); **#277** (`2708b267`); **#269** (`36256c78`).
+- **Last merged:** **#307** (print cell-scan NEON prescan, `6c113b04`, +4–6% real cell payloads on
+  top of PR-1); **#306** (mid status, `30819e43`); **#305** (print run_len NEON prescan, `47f42f46`,
+  +5–8%); **#304** (profile-first pivot docs, `6f8735ef`); **#303** (80% hyperlink load factor,
+  `d0a62c8c`); **#297** (backward-shift, `0babde7a`); **#289** (APC SIMD, `50e9814f`); **#287** (APC
+  bulk dispatch, `8fa6772a`); **#283** (`9e51aad3`); **#277** (`2708b267`).
 - **Blockers:** the **scoreboard refresh** remains machine-blocked — needs a genuinely quiet box
   (WindowServer idle, no sibling GUI app; re-checked end of this session: CGPDFService 91% +
   WindowServer 47% + projclean → still contended). **Workspace:** `work/perf` live; both PRs merged,
@@ -156,6 +164,14 @@
   before touching the next one's files.
 - **Recycled** here: PR-2 (simple-cell scan) is fully specced above + in the analysis doc. Context
   was long after the profiling + two PRs; a fresh session resumes PR-2 cheaply from this file.
+- **Resumed on Josh's "pr 2?" nudge — shipped + self-merged PR-2** (`#307`, `6c113b04`,
+  `simple_cell_prefix`). `Cell` is `#[repr(transparent)]` u64, so the NEON `u64` load reads exactly
+  `cval()`; verified the layout before implementing. A/B (baseline = main WITH PR-1): incremental
+  redraw +10–13%, light_cells +6.1–6.3%, medium_cells +5.0%, dense_cells +3.9%, ascii +7.5% —
+  compounds with PR-1 to ~+14% light_cells vs pre-session. Full gate green (0-divergence, release +
+  paranoid 1637, parser fuzz 734,860 runs, Miri clean on helpers + real print_slice integration
+  tests, boundary tests, cross-platform CI). Verified ancestor of origin/main. **Both print-scan
+  levers now done → backlog drained to the machine-blocked scoreboard. Recycled.**
 
 ## Pin bump 2da015cd6 → 77190bd02 (Josh approved "fine to pin bump") — STATE
 
