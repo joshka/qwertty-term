@@ -385,8 +385,19 @@ impl Terminal {
 
             let mut k = 0usize; // cells written this row
             'fill: while k < cell_count {
-                // Find the run of simple cells (branch-free store below).
-                let mut simple = k;
+                // Find the run of simple cells (branch-free store below). A
+                // vector prescan skips the matching cells two at a time; the
+                // scalar loop then pinpoints the boundary within the last pair.
+                // SAFETY: cells `[k, cell_count)` from `base_cell` are within the
+                // current row.
+                let mut simple = k + unsafe {
+                    simple_cell_prefix(
+                        base_cell.add(k),
+                        cell_count - k,
+                        Cell::SIMPLE_MASK,
+                        check_expected,
+                    )
+                };
                 while simple < cell_count {
                     let bits = unsafe { (*base_cell.add(simple)).cval() };
                     if (bits & Cell::SIMPLE_MASK) != check_expected {
@@ -446,7 +457,19 @@ impl Terminal {
                         debug_assert!(old_style != style_id);
 
                         // Find the run of cells with identical masked bits.
-                        let mut m = k + 1;
+                        // Same vector prescan (two cells at a time) as the simple
+                        // scan above; the scalar loop finishes the boundary pair.
+                        // SAFETY: cells `[k + 1, cell_count)` are within the row.
+                        let mut m = k
+                            + 1
+                            + unsafe {
+                                simple_cell_prefix(
+                                    base_cell.add(k + 1),
+                                    cell_count - (k + 1),
+                                    Cell::SIMPLE_MASK,
+                                    first,
+                                )
+                            };
                         while m < cell_count {
                             let bits = unsafe { (*base_cell.add(m)).cval() };
                             if (bits & Cell::SIMPLE_MASK) != first {
@@ -1058,14 +1081,85 @@ unsafe fn latin1_narrow_prefix_neon(cps: &[u32]) -> usize {
     end
 }
 
+/// Vector prescan for the two [`Terminal::print_slice_fill`] cell scans: count
+/// the leading cells at `base` (up to `len`) whose masked content
+/// `cval() & mask` equals `target`, stopping at the first cell that differs.
+/// Returns a count (a multiple of the vector width on NEON); the caller's scalar
+/// loop resumes there to pinpoint the exact boundary. Returns 0 on targets
+/// without a vector implementation. Same shape as [`latin1_narrow_prefix`] but
+/// over the `u64` cell words. `Cell` is `#[repr(transparent)]` over `u64`, so a
+/// cell load reads exactly `cval()`.
+///
+/// # Safety
+///
+/// `base` must be valid for reads of `len` [`Cell`]s.
+#[inline]
+unsafe fn simple_cell_prefix(base: *const Cell, len: usize, mask: u64, target: u64) -> usize {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    {
+        // SAFETY: NEON is mandatory on aarch64; loads are bounded by
+        // `end + 2 <= len` and the caller's validity guarantee. Excluded under
+        // Miri, which does not model these intrinsics.
+        unsafe { simple_cell_prefix_neon(base, len, mask, target) }
+    }
+    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+    {
+        let _ = (base, len, mask, target);
+        0
+    }
+}
+
+/// NEON implementation of [`simple_cell_prefix`]. Processes 2 cells (`u64`
+/// lanes) per iteration.
+///
+/// # Safety
+///
+/// Requires the `neon` target feature (guaranteed on all `aarch64`). Reads only
+/// within `base[..len]` (each load is guarded by `end + 2 <= len`); `Cell` is
+/// `#[repr(transparent)]` over `u64`, so the reinterpret to `*const u64` is
+/// sound.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[target_feature(enable = "neon")]
+unsafe fn simple_cell_prefix_neon(base: *const Cell, len: usize, mask: u64, target: u64) -> usize {
+    use std::arch::aarch64::*;
+
+    let mut end = 0;
+    let vmask = vdupq_n_u64(mask);
+    let vtarget = vdupq_n_u64(target);
+
+    while end + 2 <= len {
+        // SAFETY: `end + 2 <= len` guarantees 2 readable cells at `base + end`.
+        let v = unsafe { vld1q_u64(base.add(end) as *const u64) };
+        let masked = vandq_u64(v, vmask);
+        // Per-lane equality: all-ones where the masked cell equals `target`.
+        let eq = vceqq_u64(masked, vtarget);
+        // Both lanes must match to advance the pair. Reinterpret as four `u32`
+        // lanes: two all-ones `u64` lanes → all four `u32` lanes all-ones →
+        // horizontal min non-zero; any mismatch → a zero lane → min 0.
+        if vminvq_u32(vreinterpretq_u32_u64(eq)) == 0 {
+            break;
+        }
+        end += 2;
+    }
+    end
+}
+
 #[cfg(test)]
 mod prefix_tests {
-    use super::latin1_narrow_prefix;
+    use super::{Cell, latin1_narrow_prefix, simple_cell_prefix};
 
     /// Scalar reference: the exact count of leading codepoints in [0x10, 0xFF].
     fn ref_prefix(cps: &[u32]) -> usize {
         cps.iter()
             .take_while(|&&c| (0x10..=0xFF).contains(&c))
+            .count()
+    }
+
+    /// Scalar reference: the exact count of leading cells matching the mask/target.
+    fn ref_cell_prefix(cells: &[Cell], mask: u64, target: u64) -> usize {
+        cells
+            .iter()
+            .take_while(|c| c.cval() & mask == target)
             .count()
     }
 
@@ -1117,5 +1211,70 @@ mod prefix_tests {
     fn latin1_prefix_fast_path_engages_on_aarch64() {
         let all: Vec<u32> = std::iter::repeat_n(0x41u32, 16).collect();
         assert_eq!(latin1_narrow_prefix(&all), 16);
+    }
+
+    /// The cell prescan must never over-count past the first non-matching cell,
+    /// and every cell it reports must actually match `cval() & mask == target`.
+    /// A mismatching cell (wrong style, or a differing masked structural bit) is
+    /// placed just before, on, and after each 2-lane (`u64`) vector edge — the
+    /// offsets where a SIMD prescan could miscount. The caller's scalar loop
+    /// finds the exact boundary, so an undercount is still correct.
+    #[test]
+    fn simple_cell_prefix_never_overcounts_at_vector_boundaries() {
+        let mask = Cell::SIMPLE_MASK;
+        let target = Cell::simple_check_expected(7);
+        let matching = Cell::from_cval(target);
+        // Two flavours of mismatch: a different style_id (still a simple cell),
+        // and a differing masked structural bit (the hyperlink flag, bit 45).
+        let other_style = Cell::from_cval(Cell::simple_check_expected(9));
+        let structural = Cell::from_cval(target | (1 << 45));
+        for mismatch in [other_style, structural] {
+            for position in 0..=12usize {
+                let mut cells: Vec<Cell> = std::iter::repeat_n(matching, 14).collect();
+                cells[position] = mismatch;
+                // SAFETY: `cells` is a live slice of `cells.len()` cells.
+                let got = unsafe { simple_cell_prefix(cells.as_ptr(), cells.len(), mask, target) };
+                let want = ref_cell_prefix(&cells, mask, target);
+                assert!(got <= want, "over-counted at {position}: {got} > {want}");
+                assert!(
+                    cells[..got].iter().all(|c| c.cval() & mask == target),
+                    "reported non-matching cell at {position}: got {got}"
+                );
+            }
+        }
+    }
+
+    /// Short inputs (below the vector width) and a leading mismatch must not
+    /// panic and must report 0-or-matching.
+    #[test]
+    fn simple_cell_prefix_short_and_leading_mismatch() {
+        let mask = Cell::SIMPLE_MASK;
+        let target = Cell::simple_check_expected(3);
+        let m = Cell::from_cval(target);
+        for n in 0..2usize {
+            let s: Vec<Cell> = std::iter::repeat_n(m, n).collect();
+            // SAFETY: `s` is a live slice of `n` cells.
+            assert!(unsafe { simple_cell_prefix(s.as_ptr(), s.len(), mask, target) } <= n);
+        }
+        let lead: Vec<Cell> = vec![Cell::from_cval(Cell::simple_check_expected(1)), m, m];
+        // SAFETY: `lead` is a live slice of 3 cells.
+        assert_eq!(
+            unsafe { simple_cell_prefix(lead.as_ptr(), lead.len(), mask, target) },
+            0
+        );
+    }
+
+    /// On the primary target the cell fast path must actually engage.
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    #[test]
+    fn simple_cell_prefix_fast_path_engages_on_aarch64() {
+        let mask = Cell::SIMPLE_MASK;
+        let target = Cell::simple_check_expected(5);
+        let all: Vec<Cell> = std::iter::repeat_n(Cell::from_cval(target), 8).collect();
+        // SAFETY: `all` is a live slice of 8 cells.
+        assert_eq!(
+            unsafe { simple_cell_prefix(all.as_ptr(), all.len(), mask, target) },
+            8
+        );
     }
 }

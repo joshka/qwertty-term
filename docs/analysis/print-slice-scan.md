@@ -170,3 +170,44 @@ reference` **0-divergence** vs the `77190bd02` oracle (corpus + afl + generative
 sweep + hand + formatter); workspace tests + release lane (5×) + paranoid lane
 (1634) green; Miri clean on the print path (scalar fallback); parser fuzz clean;
 fmt/clippy/check clean.
+
+## PR-2 — simple-cell scan (`simple_cell_prefix`) — SHIPPED
+
+The two `print_slice_fill` narrow cell scans — the simple-cell scan (finds the
+run of destination cells matching the cursor's `check_expected`) and the
+style-run scan (finds the run of same-old-style cells to bulk-release/reuse) —
+now vector-skip matching cells via `simple_cell_prefix`, the same read-only
+find-first shape over the `u64` cell words. `Cell` is `#[repr(transparent)]` over
+`u64`, so a cell load reads exactly `cval()`; NEON on aarch64 loads 2 cells per
+`vld1q_u64`, `vand`s with `Cell::SIMPLE_MASK`, `vceqq_u64` against the splatted
+target, and reduces with `vminvq_u32(vreinterpretq_u32_u64(..))` (both `u64`
+lanes must be all-ones to advance the pair). Scalar-fallback `0` elsewhere,
+`cfg(not(miri))`. The scalar boundary loops are unchanged; the prescan only
+*undercounts*, so the run boundary — and the cells written / ref-counts adjusted
+— are identical.
+
+**Numbers** (M2 Max, release, best-of-5 interleaved A/B, **baseline = main with
+PR-1**, so this is the *incremental* gain on top of PR-1; order-swapped-verified):
+
+| stream (real vtebench payload / synthetic) | base MiB/s | new MiB/s | delta     |
+| ------------------------------------------ | ---------: | --------: | --------: |
+| redraw (synthetic bulk, style-run heavy)   | ~488–508   | ~550–559  | +10–13%   |
+| **light_cells** (real)                     | ~391–394   | ~415–418  | +6.1–6.3% |
+| **medium_cells** (real)                    | ~341       | ~358      | +5.0%     |
+| **dense_cells** (real)                     | ~342       | ~355      | +3.9%     |
+| ascii (synthetic bulk)                     | ~655       | ~704      | +7.5%     |
+
+Incremental over PR-1, so **light_cells compounds to ~+14%** over the original
+pre-PR-1 baseline. redraw gains most (style-run scan, loop 2); the cell payloads
+gain from the simple-cell scan (loop 1). Deltas held with A/B order swapped.
+
+**Verification:** `simple_cell_prefix` boundary tests (never over-counts with a
+mismatching cell — wrong style or a differing masked structural bit — at every
+offset around each 2-lane edge; short/leading-mismatch; aarch64 fast-path-
+engages); `print_slice_differential_fuzz_vs_print` green (68 print tests); full
+`vt-diff --features reference` **0-divergence** vs the `77190bd02` oracle;
+workspace tests + release lane + paranoid lane green; Miri clean on the print
+path (scalar fallback — the NEON `u64` load is `cfg(not(miri))`, so the change
+reduces to the unchanged scalar loops under Miri, and its on-hardware safety is
+bounded by `end + 2 <= len` + the caller's row-bounds guarantee, exercised by the
+parser fuzz); parser fuzz clean; fmt/clippy/check clean.
