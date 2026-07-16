@@ -202,6 +202,17 @@ enum Command {
     /// client attached, orphaning `tmux -CC`. Leaves the server/other sessions
     /// alive. tmux answers with `%exit`. A *write* command.
     DetachClient,
+    /// `resize-pane -t %<id> -x <w> / -y <h>`: set a pane's size in cells (ADR
+    /// 006 — native divider drag). A drag on a native split divider in a tmux
+    /// tab is redirected here instead of mutating the native tree (I3); tmux
+    /// re-lays-out and the follow-up `%layout-change` reflows the panes. `width`
+    /// and/or `height` are the target cell extents (at least one is `Some`). A
+    /// *write* command.
+    ResizePane {
+        pane_id: usize,
+        width: Option<usize>,
+        height: Option<usize>,
+    },
 }
 
 impl Command {
@@ -276,6 +287,22 @@ impl Command {
             // `detach-client`: detach this control client (no `-t`, so the
             // current client) → `tmux -CC` exits, control pty returns to the shell.
             Command::DetachClient => b"detach-client\n".to_vec(),
+            // `resize-pane -t %<id> [-x <w>] [-y <h>]`: set the pane's cell size.
+            Command::ResizePane {
+                pane_id,
+                width,
+                height,
+            } => {
+                let mut cmd = format!("resize-pane -t %{pane_id}");
+                if let Some(w) = width {
+                    cmd.push_str(&format!(" -x {w}"));
+                }
+                if let Some(h) = height {
+                    cmd.push_str(&format!(" -y {h}"));
+                }
+                cmd.push('\n');
+                cmd.into_bytes()
+            }
         }
     }
 }
@@ -691,6 +718,31 @@ impl Viewer {
         self.enqueue_write(Command::NewWindow)
     }
 
+    /// Resize a tmux pane to a target cell size (ADR 006 — native divider drag).
+    /// `width`/`height` are cell extents; at least one should be `Some`. Returns
+    /// the control command to send now (empty when not in steady state, the pane
+    /// is unknown, or neither dimension is given). tmux re-lays-out and the
+    /// follow-up `%layout-change` reflows the panes — the caller must NOT mutate
+    /// the native split tree directly (I3).
+    pub fn resize_pane(
+        &mut self,
+        pane_id: usize,
+        width: Option<usize>,
+        height: Option<usize>,
+    ) -> Vec<Action> {
+        if self.state != State::CommandQueue
+            || (width.is_none() && height.is_none())
+            || !self.panes.iter().any(|p| p.id == pane_id)
+        {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::ResizePane {
+            pane_id,
+            width,
+            height,
+        })
+    }
+
     /// Kill the tmux pane a native surface renders (ADR 006 slice 5e — the
     /// Cmd-W redirect). Returns the control command to send now (empty when not
     /// in steady state or the pane is unknown). The native surface/tab is torn
@@ -798,7 +850,10 @@ impl Viewer {
             // nothing to apply either. The pop advanced the queue; the layout
             // effect arrives later as a `%layout-change` / `%window-add` that
             // drives the reconcile (ADR 006 slice 5e).
-            Command::SplitWindow { .. } | Command::NewWindow | Command::SelectPane { .. } => {}
+            Command::SplitWindow { .. }
+            | Command::NewWindow
+            | Command::SelectPane { .. }
+            | Command::ResizePane { .. } => {}
             // Window-removing writes (kill-pane / kill-window): tmux signals the
             // removal of the *last* pane of a window (or a whole window) with
             // `%window-close` / `%unlinked-window-close`, which the control-mode

@@ -541,6 +541,29 @@ fn kill_window_guards_pre_steady_and_unknown_window() {
 }
 
 #[test]
+fn resize_pane_emits_targeted_resize_and_guards() {
+    // A divider drag on a tmux tab (I3) → `resize-pane -t %<id> -x/-y <cells>`.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.resize_pane(0, Some(40), None)).expect("resize-pane command");
+    assert!(
+        bytes_contains(&cmd, b"resize-pane -t %0 -x 40\n"),
+        "unexpected resize bytes: {:?}",
+        String::from_utf8_lossy(&cmd)
+    );
+    // Height variant.
+    let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));
+    drain_to_idle(&mut v);
+    let cmd = command_bytes(&v.resize_pane(0, None, Some(20))).expect("resize-pane command");
+    assert!(bytes_contains(&cmd, b"resize-pane -t %0 -y 20\n"));
+    // Guards: no dimension, unknown pane, and pre-steady all yield nothing.
+    assert!(v.resize_pane(0, None, None).is_empty());
+    assert!(v.resize_pane(999, Some(10), None).is_empty());
+    let mut fresh = Viewer::new(Colors::default());
+    assert!(fresh.resize_pane(0, Some(10), None).is_empty());
+}
+
+#[test]
 fn detach_client_emits_bare_detach_and_guards_pre_steady() {
     // Orphan teardown (I1): closing the last tmux tab detaches the -CC client.
     let mut v = viewer_with_window(&checksummed("83x44,0,0,0"));

@@ -6829,6 +6829,13 @@ impl Controller {
         let Some(t) = state.tabs.get_mut(&tab) else {
             return;
         };
+        // tmux owns the layout (I3): mutating the native tree on a tmux tab would
+        // desync and snap back. The divider *drag* routes to `resize-pane`;
+        // keyboard split-resize is a no-op here until it's wired to a relative
+        // `resize-pane -L/-R/-U/-D` (follow-up).
+        if t.surfaces.values().any(|s| s.display_source().is_some()) {
+            return;
+        }
         let scale = t.window.backingScaleFactor();
         let bounds = t.container.bounds();
         let container_px = crate::splits::Rect::new(
@@ -6855,6 +6862,11 @@ impl Controller {
         let Some(t) = state.tabs.get_mut(&tab) else {
             return;
         };
+        // I3: tmux owns a tmux tab's layout; equalizing the native tree would
+        // desync. No-op here (a tmux `select-layout even-*` wiring is a follow-up).
+        if t.surfaces.values().any(|s| s.display_source().is_some()) {
+            return;
+        }
         t.tree.equalize();
         t.relayout(controller_ptr, tab, mtm);
     }
@@ -6959,9 +6971,86 @@ impl Controller {
             crate::splits::Axis::Horizontal => (split_rect.x, (split_rect.w - divider_px).max(1.0)),
             crate::splits::Axis::Vertical => (split_rect.y, (split_rect.h - divider_px).max(1.0)),
         };
-        let ratio = (coord_px - origin) / span;
-        t.tree.set_ratio(path, ratio);
-        t.relayout(controller_ptr, tab, mtm);
+        let ratio = crate::splits::clamp_ratio((coord_px - origin) / span);
+
+        // On a tmux-window tab, tmux owns the layout (I3): translate the drag
+        // into a `resize-pane` and let the `%layout-change` reconcile move the
+        // native divider — do NOT mutate the tree directly (it would desync and
+        // snap back, and the pane terminals wouldn't reflow). `None` = ordinary
+        // tab; do the native ratio drag.
+        let tmux_resize = if let Some(src) = t.surfaces.values().find_map(|s| s.display_source()) {
+            let first_extent = ratio * span;
+            let (cw, ch) = t
+                .surfaces
+                .values()
+                .next()
+                .map(|s| {
+                    (
+                        s.font.cell_width.max(1) as f64,
+                        s.font.cell_height.max(1) as f64,
+                    )
+                })
+                .unwrap_or((1.0, 1.0));
+            // Probe the centre of the first (before-side) child to pick a pane in
+            // that row/column; tmux resizes its shared border. Target the child's
+            // new cell extent along the split axis.
+            let (probe_x, probe_y, width, height) = match axis {
+                crate::splits::Axis::Horizontal => (
+                    origin + first_extent * 0.5,
+                    split_rect.y + split_rect.h * 0.5,
+                    Some((first_extent / cw).max(1.0) as usize),
+                    None,
+                ),
+                crate::splits::Axis::Vertical => (
+                    split_rect.x + split_rect.w * 0.5,
+                    origin + first_extent * 0.5,
+                    None,
+                    Some((first_extent / ch).max(1.0) as usize),
+                ),
+            };
+            let layout = t.tree.layout(container_px, divider_px);
+            t.tree
+                .hit_test(probe_x, probe_y, &layout)
+                .map(|pane_surface| (src, pane_surface, width, height))
+        } else {
+            t.tree.set_ratio(path, ratio);
+            t.relayout(controller_ptr, tab, mtm);
+            None
+        };
+        drop(state);
+        if let Some((src, pane_surface, width, height)) = tmux_resize {
+            self.redirect_tmux_resize_pane(src, pane_surface, width, height);
+        }
+    }
+
+    /// Redirect a native split-divider drag on a tmux tab to a tmux `resize-pane`
+    /// (ADR 006 — I3: tmux owns the layout). `pane_surface` is a display pane on
+    /// the before-side of the divider; `width`/`height` its target cell extent.
+    /// The native divider is moved by the follow-up `%layout-change` reconcile;
+    /// the caller must NOT mutate the native tree. No-op if the control surface
+    /// is gone.
+    fn redirect_tmux_resize_pane(
+        &self,
+        control: DisplaySource,
+        pane_surface: SurfaceId,
+        width: Option<usize>,
+        height: Option<usize>,
+    ) {
+        let mut state = self.0.borrow_mut();
+        if let Some(cs) = state
+            .tabs
+            .get_mut(&control.control_tab)
+            .and_then(|t| t.surfaces.get_mut(&control.control_surface))
+        {
+            let commands = cs
+                .tmux
+                .as_mut()
+                .map(|sess| sess.resize_pane(pane_surface, width, height))
+                .unwrap_or_default();
+            for cmd in &commands {
+                cs.send_pty(cmd);
+            }
+        }
     }
 }
 

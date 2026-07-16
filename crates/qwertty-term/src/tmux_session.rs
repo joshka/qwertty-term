@@ -258,6 +258,23 @@ impl TmuxSession {
         commands_of(self.viewer.kill_pane(pane_id))
     }
 
+    /// Resize the tmux pane a native surface renders to a target cell size (ADR
+    /// 006 — native divider drag). `width`/`height` are cell extents (at least
+    /// one `Some`). Returns the control-pty bytes to write (empty for an unknown
+    /// surface / before steady state). The native tree is reflowed by the
+    /// resulting `%layout-change` — the caller must NOT mutate it directly (I3).
+    pub fn resize_pane(
+        &mut self,
+        surface: SurfaceId,
+        width: Option<usize>,
+        height: Option<usize>,
+    ) -> Vec<Vec<u8>> {
+        let Some(pane_id) = self.reconciler.pane_of_surface(surface) else {
+            return Vec::new();
+        };
+        commands_of(self.viewer.resize_pane(pane_id, width, height))
+    }
+
     /// Redirect a native tab-close action on a tmux-managed tab into a tmux
     /// `kill-window` control command (ADR 006 slice 5e — gap 1). Unlike the
     /// pane/surface-keyed helpers this takes the tmux **window id** directly:
