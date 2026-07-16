@@ -206,6 +206,13 @@ fn initial_flow_builds_tree_and_routes_output() {
             alternate_on: false,
         })
     );
+    // The cursor state is APPLIED to the pane terminal on attach, not just parsed.
+    let cur = v.pane(0).unwrap().terminal().snapshot().cursor;
+    assert_eq!(
+        (cur.col, cur.row),
+        (5, 7),
+        "list-panes cursor position must be applied to the pane terminal"
+    );
 
     // Live %output is routed to the right pane's terminal.
     let a = v.next(output(0, " live"));

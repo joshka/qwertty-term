@@ -952,6 +952,33 @@ impl Viewer {
                 alternate_on: bool_at(&values, 7),
             };
             if let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id) {
+                // Apply the cursor state on attach: the capture sets the pane's
+                // content but not its cursor, so without this the cursor sits
+                // wherever the captured text ended (usually the wrong cell) until
+                // live %output refines it. Primary screen only — the alternate
+                // screen isn't populated yet (slice 5b), so leave it be.
+                if !state.alternate_on {
+                    // DECSCUSR shape: block=2, underline=4, bar=6, default=0.
+                    let shape = match state.cursor_shape.as_str() {
+                        "block" => 2,
+                        "underline" => 4,
+                        "bar" => 6,
+                        _ => 0,
+                    };
+                    let vis = if state.cursor_visible {
+                        "\x1b[?25h"
+                    } else {
+                        "\x1b[?25l"
+                    };
+                    let seq = format!(
+                        "\x1b[{};{}H\x1b[{} q{}",
+                        state.cursor_y + 1,
+                        state.cursor_x + 1,
+                        shape,
+                        vis,
+                    );
+                    pane.stream.feed(seq.as_bytes());
+                }
                 pane.state = Some(state);
             }
         }
