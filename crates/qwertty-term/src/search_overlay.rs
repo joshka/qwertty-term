@@ -1,6 +1,8 @@
 //! The Cmd+F search bar overlay: a small `NSVisualEffectView` pinned to the
-//! top-right of the focused pane's view, holding an `NSTextField` for the needle
-//! and a counter label (`"3/17"`).
+//! top-right of the focused pane's view, holding an `NSTextField` for the
+//! needle, a counter label (`"3/17"`), and — matching upstream Ghostty's search
+//! bar — previous (↑), next (↓), and close (✕) buttons wired to the pane's
+//! search navigation / dismissal.
 //!
 //! # Structure
 //!
@@ -37,7 +39,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSControl, NSControlTextEditingDelegate, NSTextField, NSTextFieldDelegate,
+    NSButton, NSControl, NSControlTextEditingDelegate, NSImage, NSTextField, NSTextFieldDelegate,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
 };
 use objc2_foundation::{
@@ -49,10 +51,14 @@ use crate::splits::SurfaceId;
 use crate::tabs::TabId;
 
 /// Overlay dimensions in points.
-const OVERLAY_W: f64 = 280.0;
+const OVERLAY_W: f64 = 320.0;
 const OVERLAY_H: f64 = 32.0;
 const MARGIN: f64 = 8.0;
-const COUNTER_W: f64 = 60.0;
+const COUNTER_W: f64 = 44.0;
+/// Width of each nav/close button (square-ish).
+const BTN_W: f64 = 24.0;
+/// Small gap between the field, counter, and buttons.
+const GAP: f64 = 4.0;
 
 /// Interior state for the search overlay.
 pub struct SearchOverlayIvars {
@@ -65,6 +71,10 @@ pub struct SearchOverlayIvars {
     field: Retained<NSTextField>,
     /// The "N/M" counter label.
     counter: Retained<NSTextField>,
+    /// Previous-match (↑), next-match (↓), and close (✕) buttons.
+    prev: Retained<NSButton>,
+    next: Retained<NSButton>,
+    close: Retained<NSButton>,
 }
 
 define_class!(
@@ -119,6 +129,33 @@ define_class!(
             }
         }
     }
+
+    impl SearchOverlay {
+        /// Previous-match button (the up chevron): step to the previous match,
+        /// keeping keyboard focus in the field so typing continues.
+        #[unsafe(method(searchPrev:))]
+        fn search_prev(&self, _sender: &AnyObject) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.ivars().controller.search_navigate_previous(tab, surface);
+            self.refocus_field();
+        }
+
+        /// Next-match button (the down chevron): step to the next match, keeping
+        /// keyboard focus in the field.
+        #[unsafe(method(searchNext:))]
+        fn search_next(&self, _sender: &AnyObject) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.ivars().controller.search_navigate_next(tab, surface);
+            self.refocus_field();
+        }
+
+        /// Close button (the ✕): end the search and return focus to the terminal.
+        #[unsafe(method(searchClose:))]
+        fn search_close(&self, _sender: &AnyObject) {
+            let (tab, surface) = (self.ivars().tab, self.ivars().surface);
+            self.ivars().controller.search_end(tab, surface);
+        }
+    }
 );
 
 impl SearchOverlay {
@@ -135,6 +172,11 @@ impl SearchOverlay {
     ) -> Retained<Self> {
         let field = make_field(mtm);
         let counter = make_counter(mtm);
+        // Parity with upstream: prev = up chevron, next = down chevron, close =
+        // ✕. Targets are wired to `this` after the object exists.
+        let prev = make_button(mtm, "chevron.up", sel!(searchPrev:));
+        let next = make_button(mtm, "chevron.down", sel!(searchNext:));
+        let close = make_button(mtm, "xmark", sel!(searchClose:));
 
         let this = Self::alloc(mtm).set_ivars(SearchOverlayIvars {
             controller,
@@ -142,6 +184,9 @@ impl SearchOverlay {
             surface,
             field: field.clone(),
             counter: counter.clone(),
+            prev: prev.clone(),
+            next: next.clone(),
+            close: close.clone(),
         });
         let frame = overlay_frame(pane_bounds);
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -157,25 +202,49 @@ impl SearchOverlay {
             layer.setCornerRadius(6.0);
         }
 
-        // Lay out the field (left) + counter (right) inside the overlay.
-        let (field_frame, counter_frame) = inner_frames();
-        field.setFrame(field_frame);
-        counter.setFrame(counter_frame);
+        // Lay out the field (left) + counter, then the prev/next/close buttons
+        // (right) inside the overlay.
+        let layout = inner_frames();
+        field.setFrame(layout.field);
+        counter.setFrame(layout.counter);
+        prev.setFrame(layout.prev);
+        next.setFrame(layout.next);
+        close.setFrame(layout.close);
+
+        // Wire the button actions to this overlay (created target-less above).
+        let target: &AnyObject = this.as_ref();
+        // SAFETY: `setTarget:` holds an unretained (weak) reference; the overlay
+        // owns each button as a subview, so the target always outlives them.
+        unsafe {
+            prev.setTarget(Some(target));
+            next.setTarget(Some(target));
+            close.setTarget(Some(target));
+        }
 
         // The overlay is the field's delegate (incremental search + key
         // interception).
-        let delegate_obj: &AnyObject = this.as_ref();
         // SAFETY: `this` conforms to NSTextFieldDelegate; setDelegate holds a
         // weak ref, and the overlay outlives the field (both dropped together
         // when the pane closes).
         unsafe {
-            let _: () = msg_send![&*field, setDelegate: delegate_obj];
+            let _: () = msg_send![&*field, setDelegate: target];
         }
 
         this.addSubview(&field);
         this.addSubview(&counter);
+        this.addSubview(&prev);
+        this.addSubview(&next);
+        this.addSubview(&close);
         this.setHidden(true);
         this
+    }
+
+    /// Return keyboard focus to the needle field (after a nav-button click) so
+    /// the user can keep typing without re-clicking the field.
+    fn refocus_field(&self) {
+        if let Some(window) = self.window() {
+            window.makeFirstResponder(Some(&self.ivars().field));
+        }
     }
 
     /// Show the overlay and make its field first responder (so typing goes to
@@ -219,6 +288,21 @@ impl SearchOverlay {
     pub fn reposition(&self, pane_bounds: NSRect) {
         self.setFrame(overlay_frame(pane_bounds));
     }
+
+    /// Smoke/test: fire the previous / next / close buttons through the real
+    /// target-action path (`performClick:`), exactly as a mouse click would.
+    ///
+    /// SAFETY: `performClick:` is a standard main-thread `NSControl` send; the
+    /// button and its target (this overlay) are both alive here.
+    pub fn click_prev(&self) {
+        unsafe { self.ivars().prev.performClick(None) };
+    }
+    pub fn click_next(&self) {
+        unsafe { self.ivars().next.performClick(None) };
+    }
+    pub fn click_close(&self) {
+        unsafe { self.ivars().close.performClick(None) };
+    }
 }
 
 /// The overlay's frame: pinned to the top-right of the pane, inset by `MARGIN`.
@@ -228,18 +312,39 @@ fn overlay_frame(pane_bounds: NSRect) -> NSRect {
     NSRect::new(NSPoint::new(x, MARGIN), NSSize::new(OVERLAY_W, OVERLAY_H))
 }
 
-/// The field (left) and counter (right) frames within the overlay.
-fn inner_frames() -> (NSRect, NSRect) {
-    let field_w = OVERLAY_W - COUNTER_W - 3.0 * MARGIN;
-    let field = NSRect::new(
-        NSPoint::new(MARGIN, 5.0),
-        NSSize::new(field_w, OVERLAY_H - 10.0),
-    );
-    let counter = NSRect::new(
-        NSPoint::new(MARGIN + field_w + MARGIN, 5.0),
-        NSSize::new(COUNTER_W, OVERLAY_H - 10.0),
-    );
-    (field, counter)
+/// The laid-out frames of the overlay's controls, left→right:
+/// `field | counter | prev | next | close`.
+struct InnerFrames {
+    field: NSRect,
+    counter: NSRect,
+    prev: NSRect,
+    next: NSRect,
+    close: NSRect,
+}
+
+/// Compute the control frames within the overlay. The three buttons hug the
+/// right edge; the counter sits just left of them; the field takes the rest.
+fn inner_frames() -> InnerFrames {
+    let ctrl_h = OVERLAY_H - 10.0;
+    let y = 5.0;
+    let rect = |x: f64, w: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, ctrl_h));
+
+    // Buttons hug the right edge.
+    let close_x = OVERLAY_W - MARGIN - BTN_W;
+    let next_x = close_x - BTN_W;
+    let prev_x = next_x - BTN_W;
+    // Counter just left of the first button.
+    let counter_x = prev_x - GAP - COUNTER_W;
+    // Field fills the remaining left span.
+    let field_w = counter_x - GAP - MARGIN;
+
+    InnerFrames {
+        field: rect(MARGIN, field_w),
+        counter: rect(counter_x, COUNTER_W),
+        prev: rect(prev_x, BTN_W),
+        next: rect(next_x, BTN_W),
+        close: rect(close_x, BTN_W),
+    }
 }
 
 /// Build the needle input field.
@@ -256,4 +361,27 @@ fn make_field(mtm: MainThreadMarker) -> Retained<NSTextField> {
 fn make_counter(mtm: MainThreadMarker) -> Retained<NSTextField> {
     // A borderless, non-editable label.
     NSTextField::labelWithString(&NSString::from_str(""), mtm)
+}
+
+/// Build a borderless SF-Symbol nav/close button carrying `action`. `symbol` is
+/// an SF Symbol name (e.g. `chevron.up`); its own name doubles as the
+/// accessibility description. Falls back to a titled button if the symbol can't
+/// be loaded (older systems / missing symbol). The target is wired separately
+/// in [`SearchOverlay::new`] once the overlay object exists.
+fn make_button(mtm: MainThreadMarker, symbol: &str, action: Sel) -> Retained<NSButton> {
+    let sym = NSString::from_str(symbol);
+    // `imageWithSystemSymbolName` is nil on failure (older systems / missing
+    // symbol), which we handle by falling back to a titled button.
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&sym, Some(&sym));
+    // SAFETY: standard AppKit class-method sends on the main thread; the button
+    // is autoreleased/retained by objc2.
+    let button = match image {
+        Some(image) => unsafe {
+            NSButton::buttonWithImage_target_action(&image, None, Some(action), mtm)
+        },
+        None => unsafe { NSButton::buttonWithTitle_target_action(&sym, None, Some(action), mtm) },
+    };
+    // Borderless, inline look (like upstream's SearchButtonStyle).
+    button.setBordered(false);
+    button
 }

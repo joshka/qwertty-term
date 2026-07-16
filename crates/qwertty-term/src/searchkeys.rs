@@ -14,6 +14,16 @@
 //! search-bar convention handled by the overlay's text-field delegate (the field
 //! is first responder while typing), not a keybind.
 
+/// One of the search overlay's clickable buttons (upstream parity: prev = up
+/// chevron, next = down chevron, close = ✕). Used by the smoke to fire a button
+/// through its real target-action path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchButton {
+    Prev,
+    Next,
+    Close,
+}
+
 /// A scrollback-search action a binding maps to. Executed against the focused
 /// pane by [`crate::app::Controller`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

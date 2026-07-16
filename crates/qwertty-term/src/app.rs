@@ -1218,6 +1218,13 @@ impl Surface {
         self.search.needle().to_string()
     }
 
+    /// Smoke/test: a retained handle to this pane's search overlay, if created.
+    /// Cloned out so the caller can drop the controller borrow before firing a
+    /// button (whose action re-enters the controller).
+    fn search_overlay_cloned(&self) -> Option<Retained<crate::search_overlay::SearchOverlay>> {
+        self.search_overlay.clone()
+    }
+
     /// Apply one wheel event to this pane: run the decision ladder over the
     /// live mode state and either report (buttons 4/5), emit alternate-scroll
     /// cursor keys, or move the scrollback viewport. Port of the body of
@@ -2787,6 +2794,30 @@ impl Controller {
             .get(&tab)
             .and_then(|t| t.focused_surface())
             .map(|s| s.search_needle())
+    }
+
+    /// Smoke/test: fire the focused pane's search overlay prev/next/close button
+    /// through the real target-action path. The overlay handle is cloned out and
+    /// the borrow dropped first, because the button action re-enters the
+    /// controller (search_navigate_* / search_end).
+    pub fn active_search_click_button(&self, button: crate::searchkeys::SearchButton) {
+        use crate::searchkeys::SearchButton;
+        let overlay = {
+            let state = self.0.borrow();
+            state
+                .registry
+                .active()
+                .and_then(|tab| state.tabs.get(&tab))
+                .and_then(|t| t.focused_surface())
+                .and_then(|s| s.search_overlay_cloned())
+        };
+        if let Some(overlay) = overlay {
+            match button {
+                SearchButton::Prev => overlay.click_prev(),
+                SearchButton::Next => overlay.click_next(),
+                SearchButton::Close => overlay.click_close(),
+            }
+        }
     }
 
     /// Whether the active window's first responder is a text-field editor — i.e.
@@ -8318,6 +8349,29 @@ impl AppDelegate {
             ));
         }
 
+        // The overlay's nav buttons drive next/previous through their real
+        // target-action wiring (upstream parity: ↓ = next, ↑ = previous). We're
+        // at index 1; the down button advances to 2, the up button steps back.
+        use crate::searchkeys::SearchButton;
+        controller.active_search_click_button(SearchButton::Next);
+        if controller.active_search_current_index() != Some(2) {
+            fail(format!(
+                "next button should advance to index 2, saw {:?}",
+                controller.active_search_current_index()
+            ));
+        }
+        controller.active_search_click_button(SearchButton::Prev);
+        if controller.active_search_current_index() != Some(1) {
+            fail(format!(
+                "previous button should step back to index 1, saw {:?}",
+                controller.active_search_current_index()
+            ));
+        }
+        // A nav button keeps keyboard focus in the field (so typing continues).
+        if !controller.active_search_field_is_editing() {
+            fail("a nav-button click dropped keyboard focus from the search field".into());
+        }
+
         // The search field behaves like a standard text box: while it is being
         // edited, Cmd+V must paste into the FIELD, not the shell. (Before the
         // field-editor routing this pasted the clipboard into the pty — a real
@@ -8406,12 +8460,24 @@ impl AppDelegate {
             ));
         }
 
+        // The close (✕) button ends the search through its real target-action
+        // wiring: re-open, then click close and assert the search is inactive.
+        controller.search_start(tab);
+        if !controller.active_search_is_active() {
+            fail("re-opening search for the close-button check did not activate it".into());
+        }
+        controller.active_search_click_button(SearchButton::Close);
+        if controller.active_search_is_active() {
+            fail("the close (✕) button did not end the search".into());
+        }
+
         println!(
             "OK: search smoke — Cmd+F opened the overlay, typing the needle found \
              all 3 markers across scrollback (counter 1/3), next/next/prev moved the \
              current match and scrolled the viewport to each match's row (offsets \
-             {off0} → {off1} → {off2}, back to {off1b}), and Escape closed the bar, \
-             restoring PTY input (typed text reached the shell)."
+             {off0} → {off1} → {off2}, back to {off1b}), the ↓/↑ nav buttons stepped \
+             the match, Escape closed the bar restoring PTY input, and the ✕ button \
+             ended a re-opened search."
         );
         std::process::exit(0);
     }
