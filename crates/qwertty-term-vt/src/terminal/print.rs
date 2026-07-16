@@ -965,7 +965,7 @@ impl Terminal {
     /// Clear a stale spacer_head at the end of the previous row when a wide
     /// char near the left edge is overwritten. Port of the `cursorCellEndOfPrev`
     /// cleanup in `printCell`.
-    fn clear_stale_spacer_head(&mut self) {
+    pub(super) fn clear_stale_spacer_head(&mut self) {
         if self.screen().cursor.y == 0 || self.screen().cursor.x > 1 {
             return;
         }
@@ -975,7 +975,11 @@ impl Terminal {
             let page = pin_up.page();
             let (row, _) = pin_up.row_and_cell();
             let cells = (*page).get_cells(row) as *mut Cell;
-            let end_cell = cells.add((self.cols - 1) as usize);
+            // Use the reached page's OWN width, not the global desired width:
+            // incomplete reflow can leave the previous page narrower, and
+            // indexing it at the global `cols - 1` reads out of bounds. Port
+            // of upstream a55850c98 (`page_pin.node.cols() - 1`).
+            let end_cell = cells.add(((*page).size.cols - 1) as usize);
             if (*end_cell).wide() == Wide::SpacerHead {
                 (*end_cell).set_wide(Wide::Narrow);
             }

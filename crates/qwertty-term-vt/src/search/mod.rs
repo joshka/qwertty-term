@@ -20,6 +20,14 @@
 //! deferred (Phase 2 / needs `Screen`); see `docs/analysis/search.md`. Everything here is
 //! synchronous and thread-ready: a future thread calls `update`/`feed`/`next` under a lock.
 //!
+//! **Phase-2 porting note (upstream `627518447`):** when `ScreenSearch` is ported, mirror
+//! its *post-fix* shape — a `reset_if_dimensions_changed` helper invalidated **before**
+//! `feed`, `reload_active`, AND `select` inspect cached state. Upstream originally reset
+//! dimensions only in `feed`, so selecting/reloading a cached result immediately after a
+//! resize dereferenced page nodes freed by reflow and crashed. The bug cannot occur here
+//! today (the whole `ScreenSearch` result cache is unported); this note keeps the fix from
+//! being silently reintroduced by porting the pre-`627518447` code.
+//!
 //! # Unsafe boundary
 //!
 //! Like the pagelist and highlight modules, the searchers hold raw `*mut Node`/`*mut Pin`

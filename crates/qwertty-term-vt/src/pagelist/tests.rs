@@ -1711,6 +1711,17 @@ fn jump_zero_prompts() {
     assert_eq!(s.viewport_state(), before);
 }
 
+// Regression (upstream afbf5ba15 "PageList: jump minimum prompt delta"): a
+// DeltaPrompt of isize::MIN must not panic. `scroll_prompt` takes the magnitude
+// with `unsigned_abs()`; `-n` would overflow negating isize::MIN. With no
+// prompts to jump to, the viewport stays at the active area.
+#[test]
+fn jump_minimum_prompt_delta_does_not_overflow() {
+    let mut s = PageList::init(10, 3, None);
+    s.scroll(Scroll::DeltaPrompt(isize::MIN));
+    assert_eq!(s.viewport_state(), Viewport::Active);
+}
+
 #[test]
 fn jump_back_one_prompt() {
     use crate::page::SemanticPrompt;

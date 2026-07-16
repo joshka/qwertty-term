@@ -81,6 +81,25 @@ fn set_cursor_position_origin_mode() {
     assert_eq!(t.screen().cursor.y, 39);
 }
 
+// Zig: "Terminal: setCursorPos saturates overflowing origin offsets" (upstream
+// 0aaedf436). In origin mode, `set_cursor_pos` adds the region offsets to the
+// requested row/col; a request near `usize::MAX` must saturate instead of
+// overflowing, then clamp onto the bottom-right margin. Guards the
+// `saturating_add` in `set_cursor_pos`.
+#[test]
+fn set_cursor_pos_saturates_overflowing_origin_offsets() {
+    let mut t = term(10, 10);
+    t.scrolling_region.top = 2;
+    t.scrolling_region.bottom = 7;
+    t.scrolling_region.left = 3;
+    t.scrolling_region.right = 8;
+    t.modes.set(Mode::Origin, true);
+
+    t.set_cursor_pos(usize::MAX, usize::MAX);
+    assert_eq!(t.screen().cursor.x, 8);
+    assert_eq!(t.screen().cursor.y, 7);
+}
+
 // Zig: "Terminal: cursorLeft no wrap" (motion clamp).
 #[test]
 fn cursor_left_no_wrap() {
@@ -333,6 +352,48 @@ fn print_wide_char_at_edge_spacer_head() {
         .cell;
     unsafe {
         assert_eq!((*tail).wide(), Wide::SpacerTail);
+    }
+}
+
+// Regression (upstream a55850c98 "use previous page width for cursor cells"):
+// clearing a stale spacer_head at the end of the previous row must index that
+// row's OWN page width, not the global desired width. Incomplete reflow can
+// leave the previous page narrower; indexing it at the global `cols - 1` reads
+// a cell outside the logical row and leaves the real stale spacer_head behind
+// (in runtime-safety builds upstream panicked). Mirrors the Zig test
+// "Screen: cursorCellEndOfPrev across mixed-width pages".
+#[test]
+fn clear_stale_spacer_head_uses_previous_page_width() {
+    let mut t = term(4, 2);
+    // Two single-row pages, then narrow the first (the "previous" page) to
+    // simulate a mid-reflow narrower page.
+    let first = t.screen().pages.first_node();
+    t.screen_mut().pages.split(Pin::with(first, 1, 0)).unwrap();
+    let second = unsafe { (*first).next };
+    unsafe { (*first).data.size.cols = 2 };
+
+    // Plant a stale spacer_head at the narrow page's REAL last column (1).
+    // The pre-fix code indexes the global last column (3) — beyond this row's
+    // 2-cell logical width — so it finds nothing there and wrongly leaves the
+    // real spacer_head in place.
+    unsafe {
+        let (_, real_end) = (*first).data.get_row_and_cell(1, 0);
+        (*real_end).set_wide(Wide::SpacerHead);
+    }
+
+    // Cursor on the wider page's row at x <= 1, y > 0 — the trigger condition.
+    t.screen_mut().cursor_absolute(0, 1);
+    assert_eq!(t.screen().cursor.y, 1);
+    assert_eq!(t.screen().cursor.x, 0);
+    let _ = second;
+
+    t.clear_stale_spacer_head();
+
+    // The fix targets the narrow page's own last column, so the real stale
+    // spacer_head is cleared to narrow.
+    unsafe {
+        let (_, real_end) = (*first).data.get_row_and_cell(1, 0);
+        assert_eq!((*real_end).wide(), Wide::Narrow);
     }
 }
 
