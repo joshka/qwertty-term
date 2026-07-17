@@ -5,8 +5,9 @@ Disable markdownlint here — changelog content routinely trips line-length,
 bare-url, list-style, and duplicate-heading rules, and shouldn't block CI. -->
 <!-- markdownlint-disable -->
 
-All notable changes to the qwertty-term crate family. The eight crates share one
-workspace version and release together. This project adheres to
+All notable changes to the qwertty-term crate family. The nine crates share one
+workspace version and release together (`qwertty-term-gtk`, the Linux GTK4 host,
+joined as the ninth — reserved on crates.io at 0.0.0 and released from 0.5.0 on). This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0, a minor
 bump (`0.x.0`) may carry breaking changes and a patch bump (`0.x.y`) is
 additive.

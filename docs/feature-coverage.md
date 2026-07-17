@@ -571,16 +571,17 @@ GL 4.5). Build floor is GTK 4.6 / libadwaita 1.0 (Debian bookworm = 4.8 / 1.2).
 - [x] Injectable clock: deterministic render proven; cursor-blink *phase* injected via
       `FrameOptions.cursor_blink_visible`, and the blink *mode* (DEC 12) now threads through
       `SnapshotCursor.blinking` (#57, T2)
-- [x] **crates.io publish — all 8 crates, latest 0.4.0** (`qwertty-term` + `-vt`/`-font`/
+- [x] **crates.io publish — 8 library/bin crates at 0.4.0** (`qwertty-term` + `-vt`/`-font`/
       `-renderer`/`-termio`/`-input`/`-sprite`/`-ffi`; 0.1.0 2026-07-08, 0.2.0 2026-07-13,
       0.3.0 2026-07-14, 0.4.0 2026-07-15 via release-plz + Trusted Publishing, docs.rs built).
       **0.5.0 is queued in an unmerged release-plz PR, not released**
-- [ ] **DECISION NEEDED — `qwertty-term-gtk` publishing.** The new GTK crate has **no
-      `publish = false`** and inherits `version.workspace`, so merging the queued 0.5.0
-      release-plz PR would **first-publish it to crates.io**, irreversibly claiming the name
-      (yanking never frees a name). Meanwhile `release-plz.toml`, `CHANGELOG.md` and
-      `docs/embedding.md` all still say "eight crates". Decide *before* that PR merges:
-      publish a GTK app crate deliberately, or add `publish = false`
+- [x] **`qwertty-term-gtk` is the ninth crate** — reserved at **0.0.0** by a manual publish
+      (2026-07-16) and given a trusted publisher matching the other eight, so it releases
+      normally from 0.5.0 on. The manual step is unavoidable, not a shortcut: crates.io
+      Trusted Publishing can only *update* an existing crate, never create one, so a new
+      workspace member must be published once by hand before a trusted publisher can be
+      attached. Without it the 0.5.0 release job would have **failed** on this crate. Recipe
+      for the next new crate is in `.github/workflows/release-plz.yml`'s header
 - [x] MB5 API polish (Display/Error on font errors [already in 0.1.0]; matched `Engine::for_grid`;
       typed `Frame` RGBA readback; one-call `Engine::render`; `Stream::terminal()`;
       `capture_live`) — shipped in #5; docs.rs full-API + quickstart in #51

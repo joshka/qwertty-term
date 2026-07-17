@@ -1,7 +1,10 @@
 # release-plz configuration — https://release-plz.dev/docs/config
 #
-# The eight crates share ONE workspace version (`version.workspace = true` in the
+# The nine crates share ONE workspace version (`version.workspace = true` in the
 # root Cargo.toml) and release together, under a single root CHANGELOG.md.
+# (`qwertty-term-gtk` joined as the ninth; it was reserved at 0.0.0 by a manual
+# publish because Trusted Publishing can only update an existing crate, never
+# create one — a new crate must exist before a trusted publisher can be added.)
 # release-plz opens a release PR (version bump + changelog); merging it publishes
 # every crate in dependency order. Nothing publishes without merging that PR.
 
