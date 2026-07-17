@@ -1,1 +1,0 @@
-user@host % printf '\e[38;5;196mREADY\e[0m'\r\nREADY\r\nuser@host %

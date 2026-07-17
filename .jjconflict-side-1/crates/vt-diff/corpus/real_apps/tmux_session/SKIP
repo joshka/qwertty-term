@@ -1,6 +1,0 @@
-Same underlying divergence as reply_diffing/da2_secondary_version: tmux issues a DA2 (CSI > c) query on startup, and the Rust engine's hardcoded firmware/patch-version field (10) disagrees with the reference/upstream default (0). See regression_da2_firmware_version_mismatch in tests/corpus.rs.
-
-Additionally: tmux issues an XTVERSION query (CSI > q) and our reply reports the product
-name "qwertty-term" (trademark) whereas the reference/upstream reports "libghostty" — an
-intentional product-string divergence (T5 #35). This case already can't be un-skipped without
-the DA2 fix above; when it is, keep it skipped or normalize the version string.

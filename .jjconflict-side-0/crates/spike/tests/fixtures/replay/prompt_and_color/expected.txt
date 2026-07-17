@@ -1,3 +1,0 @@
-user@host % printf 'READY'
-READY
-user@host %
