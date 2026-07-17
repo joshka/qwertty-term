@@ -16,14 +16,14 @@ name = "qwertty-term"
 path = "src/main.rs"
 
 [dependencies]
-qwertty-term-vt = { version = "0.4.0", path = "../qwertty-term-vt" }
-qwertty-term-input = { version = "0.4.0", path = "../qwertty-term-input" }
-qwertty-term-font = { version = "0.4.0", path = "../qwertty-term-font" }
-qwertty-term-renderer = { version = "0.4.0", path = "../qwertty-term-renderer" }
+qwertty-term-vt = { version = "0.5.0", path = "../qwertty-term-vt" }
+qwertty-term-input = { version = "0.5.0", path = "../qwertty-term-input" }
+qwertty-term-font = { version = "0.5.0", path = "../qwertty-term-font" }
+qwertty-term-renderer = { version = "0.5.0", path = "../qwertty-term-renderer" }
 # The real terminal IO stack (M2 chunk E): rustix PTY + the two-stage read
 # pipeline + the ADR-002 mailbox writer loop. Replaces the interim
 # `portable-pty` path (`src/pty.rs`, now deleted).
-qwertty-term-termio = { version = "0.4.0", path = "../qwertty-term-termio" }
+qwertty-term-termio = { version = "0.5.0", path = "../qwertty-term-termio" }
 # Small TOML config (theme / copy-on-select / font-size), a trimmed copy of the
 # spike's config module (the spike's is `pub(crate)`, so it can't be reused via
 # a path dep without modifying the spike).
