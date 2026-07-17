@@ -30,8 +30,12 @@
   them, 894/930 byte-identical to the live tree, and the lone real conflict
   (`docs/threads/status/perf.md`, a cosmetic rewrap) had all three sides reachable as committed
   history (`60ac19dc`/`ba622f26`/`09c3c3e2`). `.gitignore` now blocks a recurrence.
-  **RECYCLED here** (context length) — app-like milestone reached; **splits** (the last big
-  structural refactor) deserves fresh context. Respawn to continue.
+- **RECYCLED 2026-07-16** (context length) — shipped #320–#325 this session: GL diagnostics,
+  the repo-junk removal, the coverage audit, and the gtk publish bootstrap. **Nothing is in
+  flight**: working copy clean, every PR merged and verified as an ancestor of `origin/main`,
+  `work/linux` reset onto main. **Resume at CONFIG WIRING** — see the NEXT bullet, which
+  carries the order, the reuse notes, and the file:line seams. Read `docs/feature-coverage.md`
+  first (freshly audited): it now states honestly what Linux does and does not do.
 - **NEXT — Josh chose CONFIG WIRING (2026-07-16), then splits.** The GTK app currently reads
   **none** of the 73 TOML config keys — font family/size hardcoded (`Face::load_embedded`,
   `FONT_SIZE` const in `app.rs`), no theme (selection uses inverse video as a stand-in,
@@ -65,8 +69,9 @@
   1.0/1.2 widgets (no `AdwToolbarView`/`AdwAboutWindow`/`v1_4`+ feature bumps).
 - **The keyboard chunk (DONE #294):** `EventControllerKey` → GDK keyval →
   headless: a scripted keypress reaches the pty (strongest as a `TabIo::write`→snapshot-echo test).
-- **Last merged:** #284 (GTK scaffold). All P4 PRs merged: #270, #279, #280, #281, #284. Wave-1
-  (#245/#248/#254/#258/#260/#262/#264/#265) done. Everything Docker-validated on arm64 Linux.
+- **Last merged:** #325 (this handoff). Session #320–#325; earlier P4 #270/#279/#280/#281/#284,
+  the buildout #290–#314, and Wave-1 (#245/#248/#254/#258/#260/#262/#264/#265). Everything
+  Docker-validated on arm64 Linux.
 - **Blockers:** none. (Session note: 1Password SSH-signing can lock mid-session — if `jj git
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
