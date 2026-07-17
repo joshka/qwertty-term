@@ -32,10 +32,21 @@
   history (`60ac19dc`/`ba622f26`/`09c3c3e2`). `.gitignore` now blocks a recurrence.
   **RECYCLED here** (context length) — app-like milestone reached; **splits** (the last big
   structural refactor) deserves fresh context. Respawn to continue.
-- **NEXT — feature buildout (sequential subagents, one writer/workspace, highest-value first):**
+- **NEXT — Josh chose CONFIG WIRING (2026-07-16), then splits.** The GTK app currently reads
+  **none** of the 73 TOML config keys — font family/size hardcoded (`Face::load_embedded`,
+  `FONT_SIZE` const in `app.rs`), no theme (selection uses inverse video as a stand-in,
+  `surface.rs:185`), keybinds via a bespoke table (`app.rs:719`) instead of the ported `Set`.
+  This is the largest gap between `docs/feature-coverage.md` and what a Linux user gets, and
+  it makes the app untestable against a real config. Reuse `qwertty_term::config` (the parse
+  layer is platform-free — 2422 lines, 73 keys); the macOS app is the reference for how each
+  key reaches a surface. Suggested order: font (family/size, via fontconfig `load_by_name`)
+  → theme/colors → keybinds (adopt `binding::Set` + `build_other()`'s 35 non-macOS defaults,
+  retiring the bespoke table) → live reload. Watch: `qwertty-term-gtk` must stay
+  Linux-gated and the macOS gate green.
   1. **splits** — `gtk::Paned` tree, one terminal surface per pane; split-h/v (Ctrl+Shift+O / E),
-     focus-move, close-pane. The last big structural refactor (like tabs was). Reuse the app
-     crate's split logic (`crates/qwertty-term/src/split*`). Mirror `class/split_tree.zig`.
+     focus-move, close-pane. **Cheaper than it looks**: the model (`crates/qwertty-term/src/
+     splits.rs`, 1386 lines) is un-gated pure geometry — GTK needs a *view*, not a port.
+     Mirror `class/split_tree.zig`.
   2. **IME/compose** — `GtkIMMulticontext` filtering before the direct key path
      (`surface.zig:1246-1334`); `TODO(ime)` seam in `input.rs`.
   3. **Polish:** HiDPI scale (`TODO(scale)` in `surface.rs`/`app.rs::connect_resize`), dirty-tracked
@@ -60,6 +71,19 @@
   push` fails with `op-ssh-sign: failed to fill whole buffer`, push the commit object directly:
   `git push origin <sha>:refs/heads/<branch>` bypasses jj's re-sign. See the
   `jj-push-signing-workaround` memory.)
+- **2026-07-16 — coverage doc audited + release unblocked (#323, #324).**
+  `docs/feature-coverage.md` was substantially overclaiming; six read-only agents audited it
+  against the code and I re-verified the severe ones. Highlights worth carrying: emoji is
+  **broken on Linux at four layers** (no `FT_LOAD_COLOR`, pre-seed cfg'd off, no embedded
+  NotoColorEmoji, `set_pixel_sizes` fails on CBDT) and `resolver.rs:510` passes anyway
+  (asserts cmap, never rasterization); **kitty images on OpenGL are silently wrong** —
+  `GL_TEXTURE_RECTANGLE` textures bound to a `sampler2D` (`opengl/texture.rs:5` vs
+  `image.f.glsl:3`); the `Uniforms.bools` seam (`opengl/mod.rs:27`) means wiring `display-p3`
+  would mis-render on GL rather than fail; Nerd-icon constraints are a no-op on FreeType
+  (`rasterize_constrained`). Follow-ups nobody owns yet. Also: **`qwertty-term-gtk` is now the
+  9th published crate** — reserved at 0.0.0 by hand + trusted publisher added, because
+  Trusted Publishing cannot create a crate (the queued 0.5.0 job would have failed on it);
+  recipe in the release-plz workflow header.
 - **Claims:** `docs/adr/005-*` for the ADR PR.
 - **Inbox:** (other threads append requests here; owner triages into backlog)
 
