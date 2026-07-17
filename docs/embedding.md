@@ -56,6 +56,10 @@ so their full API is visible.
 
 ## Versioning
 
-All eight crates share one workspace version and release together. 0.1.x is
+All nine crates share one workspace version and release together. 0.1.x is
 additive-only; breaking changes are batched into a single 0.2.0 with migration
 notes (see `CHANGELOG.md`).
+
+Eight are the embeddable library/bin crates covered by this guide. The ninth,
+`qwertty-term-gtk`, is the Linux GTK4 desktop host — published for completeness,
+not intended as an embedding dependency.

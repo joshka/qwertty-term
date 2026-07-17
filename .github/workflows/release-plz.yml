@@ -11,9 +11,18 @@
 # Publishing uses crates.io **Trusted Publishing** (OIDC) via
 # `rust-lang/crates-io-auth-action`, which mints a short-lived token from the
 # `id-token: write` permission + the `release` GitHub environment. No long-lived
-# `CARGO_REGISTRY_TOKEN` secret. Before the first release, add a Trusted
-# Publisher to EACH of the eight crates on crates.io (owner `joshka`, repo
-# `qwertty-term`, workflow `release-plz.yml`, environment `release`).
+# `CARGO_REGISTRY_TOKEN` secret. Each of the nine crates needs a Trusted
+# Publisher on crates.io (owner `joshka`, repo `qwertty-term`, workflow
+# `release-plz.yml`, environment `release`) — all nine are configured.
+#
+# Adding a NEW crate to the workspace takes two manual steps first, because
+# Trusted Publishing can only *update* an existing crate, never create one:
+#   1. reserve the name with a manual `cargo publish` (e.g. version 0.0.0);
+#   2. add its trusted publisher — `POST /api/v1/trusted_publishing/github_configs`
+#      with `{"github_config":{"crate":…,"repository_owner":"joshka",
+#      "repository_name":"qwertty-term","workflow_filename":"release-plz.yml",
+#      "environment":"release"}}`, or the crates.io UI.
+# Skip them and the release job fails on that crate.
 
 name: Release-plz
 
