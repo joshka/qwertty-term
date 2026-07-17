@@ -21,11 +21,15 @@
   in Docker via `MESA_GL_VERSION_OVERRIDE=2.1`. NOTE `GtkGLArea:allowed-apis` is GTK **4.12+** (the
   4.6 API of that name is `GdkGLContext`'s), so it is set only when present — build floor stays 4.6
   for bookworm.
-- **REPO HAZARD (needs Josh):** `origin/main` carries **2791 junk files** —
-  `.jjconflict-{base-0,side-0,side-1}/` + `JJ-CONFLICT-README` — jj's git representation of a
-  **conflicted commit** that was pushed (added by `c918271d`, 2026-07-07). Builds are unaffected
-  (workspace members are explicit), which is why it went unnoticed. Fixing it is a jj-level
-  conflict resolution, not a `git rm`; not actioned.
+- **REPO JUNK — REMOVED (#322):** main carried **2791 junk files** for nine days —
+  `.jjconflict-{base-0,side-0,side-1}/` + `JJ-CONFLICT-README`, jj's git representation of a
+  conflicted commit, pushed by `c918271d` (2026-07-07) as collateral to an otherwise-good doc
+  recovery. Builds were unaffected (workspace members are explicit), which is why nobody noticed;
+  the repo rename even swept through them. Verified safe before deleting: jj reported
+  `conflict=no` (plain files, so a plain delete — not a jj resolution), **zero** paths unique to
+  them, 894/930 byte-identical to the live tree, and the lone real conflict
+  (`docs/threads/status/perf.md`, a cosmetic rewrap) had all three sides reachable as committed
+  history (`60ac19dc`/`ba622f26`/`09c3c3e2`). `.gitignore` now blocks a recurrence.
   **RECYCLED here** (context length) — app-like milestone reached; **splits** (the last big
   structural refactor) deserves fresh context. Respawn to continue.
 - **NEXT — feature buildout (sequential subagents, one writer/workspace, highest-value first):**

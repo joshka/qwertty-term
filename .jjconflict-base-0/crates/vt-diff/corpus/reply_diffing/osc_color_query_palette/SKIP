@@ -1,8 +1,0 @@
-OSC color query (OSC 4/10/11/12): our vt-core now answers per upstream 14c829883
-("terminal: report OSC color queries in lib-vt"), reporting palette/dynamic colors
-in the 16-bit rgb form. The pinned reference build (~/local/ghostty, pre-14c829883)
-has NO color-query response in its lib core, so it stays silent and this diverges.
-Remove this SKIP once the reference lib is rebuilt from a commit >= 14c829883.
-Covered by unit tests in crates/qwertty-term-vt/src/stream/tests.rs
-(osc4_palette_query_reports_16bit, osc10_11_query_when_set_and_silent_when_unset,
-osc12_query_falls_back_to_foreground, osc_color_query_coalesces, osc21_kitty_query).

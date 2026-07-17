@@ -1,1 +1,0 @@
-DECRQSS SGR (DCS $ q m): Rust vt-core answers with a real SGR report; upstream's core Terminal.zig has no DCS-hook/DECRQSS response logic at all (it lives only in the app-layer termio/stream_handler.zig, outside libghostty-vt). See regression_decrqss_answered_by_core_engine in tests/corpus.rs.

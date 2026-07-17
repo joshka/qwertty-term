@@ -3,3 +3,9 @@
 /xtask/data/
 __pycache__/
 *.profraw
+
+# jj materializes a conflicted commit into these when a plain `git` command
+# checks one out. They are never content worth committing — 2791 of them once
+# reached main this way and were carried for nine days.
+/.jjconflict-*
+/JJ-CONFLICT-README
