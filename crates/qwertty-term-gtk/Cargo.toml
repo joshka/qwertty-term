@@ -28,12 +28,22 @@ path = "src/main.rs"
 # macOS (the deps are simply absent there). Versions per ADR 005 / the GTK plan;
 # `glow` and `libloading` already ride in the workspace lockfile via the
 # renderer's OpenGL backend (slice 1), so only `gtk4`/`libadwaita`/`epoxy` are
-# newly fetched. No `v4_x`/`v1_x` version feature is requested, keeping the
-# baseline at GTK 4.0 / libadwaita 1.0 for maximum distro portability (Debian
-# bookworm ships GTK 4.8 / libadwaita 1.2). GL 4.3 core is forced at runtime via
-# `GLArea::set_required_version`, which is baseline.
+# newly fetched. libadwaita stays featureless at the 1.0 baseline (Debian
+# bookworm ships 1.2) — no `AdwToolbarView`/`AdwAboutWindow`.
+#
+# `v4_6` (GTK 4.6, 2022) is required only for the `gdk::GLAPI` type, which
+# `app.rs` uses to pin the GLArea to desktop GL as upstream does (`allowed-apis:
+# gl`, ui/1.2/surface.blp:36). The build floor stays 4.6 — well under every
+# distro we target (Ubuntu 22.04 = 4.6, Debian bookworm = 4.8) — because that
+# property is set dynamically: `GtkGLArea:allowed-apis` is GTK 4.12+, so `app.rs`
+# assigns it only when present rather than take a 4.12 floor (which is what
+# gtk4-rs's typed `set_allowed_apis` would cost) and drop bookworm.
+#
+# This replaces an earlier `GLArea::set_required_version(4, 3)`, which was
+# baseline but made a too-old driver fail opaquely inside GTK; the version gate
+# now lives in `app.rs`'s realize handler, mirroring upstream (OpenGL.zig:141-148).
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = { package = "gtk4", version = "0.9" }
+gtk = { package = "gtk4", version = "0.9", features = ["v4_6"] }
 adw = { package = "libadwaita", version = "0.7" }
 glow = "0.17"
 epoxy = "0.1"
