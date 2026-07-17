@@ -7,6 +7,25 @@
   inheritance, #309), and a **headerbar + hamburger menu + terminal titles** (OSC 0/2, #314).
   Shipped: #279/#284/#290/#291/#294/#296/#299/#301/#309/#314 (+ #298 app-crate theme fix). **All
   Docker/Xvfb-verified.** Screenshot: `~/Downloads/qwertty-term-linux.png`.
+- **RUNNING ON REAL LINUX (2026-07-16, Josh's Mac):** the app needs **desktop GL 4.3 core**
+  (`#version 430 core` + SSBOs) — the same floor upstream sets (`renderer/OpenGL.zig:36-38`), no
+  GLES path, no fallback. **VMware Fusion + Ubuntu 26.04 works** (`glxinfo -B`: SVGA3D, Max core
+  profile 4.3, GLSL 4.30) — plain `cargo run -p qwertty-term-gtk`; but `Accelerated: no`, so it is
+  software and **not perf-representative** (perf needs real Linux hardware), and it sits exactly on
+  the 4.3 floor. **QEMU/UTM cannot run it**: virgl -> ANGLE -> Metal exposes **Max core profile
+  0.0** / GLES 3.0 (SSBOs need GLES 3.1+), workaround `LIBGL_ALWAYS_SOFTWARE=1` (llvmpipe = GL 4.5
+  core). Apple froze GL at 4.1 in 2018, but that only binds GL->GL translation (virgl), not
+  VMware's GL->Metal. #320 replaced `set_required_version(4, 3)` (which made GTK fail opaquely with
+  "unable to create GL context") with upstream's own gate in `realize`, printing GL_VERSION,
+  GL_RENDERER, the requirement and the `LIBGL_ALWAYS_SOFTWARE=1` hint. Simulate any capped driver
+  in Docker via `MESA_GL_VERSION_OVERRIDE=2.1`. NOTE `GtkGLArea:allowed-apis` is GTK **4.12+** (the
+  4.6 API of that name is `GdkGLContext`'s), so it is set only when present — build floor stays 4.6
+  for bookworm.
+- **REPO HAZARD (needs Josh):** `origin/main` carries **2791 junk files** —
+  `.jjconflict-{base-0,side-0,side-1}/` + `JJ-CONFLICT-README` — jj's git representation of a
+  **conflicted commit** that was pushed (added by `c918271d`, 2026-07-07). Builds are unaffected
+  (workspace members are explicit), which is why it went unnoticed. Fixing it is a jj-level
+  conflict resolution, not a `git rm`; not actioned.
   **RECYCLED here** (context length) — app-like milestone reached; **splits** (the last big
   structural refactor) deserves fresh context. Respawn to continue.
 - **NEXT — feature buildout (sequential subagents, one writer/workspace, highest-value first):**
