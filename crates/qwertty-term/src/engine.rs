@@ -41,6 +41,40 @@ pub struct Engine {
 // This assertion is scoped to the app's wrapper, not upstream's `Terminal`.
 unsafe impl Send for Engine {}
 
+/// The active mouse-reporting event mode of a bare terminal — for callers
+/// holding a `&Terminal` rather than an [`Engine`] (a tmux display pane, whose
+/// own engine is empty, reads its live mode off the Viewer's pane terminal).
+/// Precedence matches [`Engine::mouse_event`].
+pub fn terminal_mouse_event(t: &Terminal) -> MouseEvent {
+    if t.modes.get(Mode::MouseEventAny) {
+        MouseEvent::Any
+    } else if t.modes.get(Mode::MouseEventButton) {
+        MouseEvent::Button
+    } else if t.modes.get(Mode::MouseEventNormal) {
+        MouseEvent::Normal
+    } else if t.modes.get(Mode::MouseEventX10) {
+        MouseEvent::X10
+    } else {
+        MouseEvent::None
+    }
+}
+
+/// The requested mouse report format of a bare terminal (see
+/// [`terminal_mouse_event`]). Precedence matches [`Engine::mouse_format`].
+pub fn terminal_mouse_format(t: &Terminal) -> MouseFormat {
+    if t.modes.get(Mode::MouseFormatSgrPixels) {
+        MouseFormat::SgrPixels
+    } else if t.modes.get(Mode::MouseFormatSgr) {
+        MouseFormat::Sgr
+    } else if t.modes.get(Mode::MouseFormatUrxvt) {
+        MouseFormat::Urxvt
+    } else if t.modes.get(Mode::MouseFormatUtf8) {
+        MouseFormat::Utf8
+    } else {
+        MouseFormat::X10
+    }
+}
+
 impl Engine {
     /// Create a new engine with the given grid size.
     pub fn new(cols: usize, rows: usize) -> Self {
@@ -138,6 +172,22 @@ impl Engine {
     /// (ADR 006 slice 5c). Mirrors the other `take_*` event drains.
     pub fn take_tmux_notifications(&mut self) -> Vec<qwertty_term_vt::tmux::Notification> {
         self.stream.handler.take_tmux_notifications()
+    }
+
+    /// Whether grid painting is currently suppressed (diagnostic/test).
+    pub fn tmux_suppress_print(&self) -> bool {
+        self.stream.handler.suppress_print()
+    }
+
+    /// Drop ground-state printing into this engine's grid while a `tmux -CC`
+    /// control session is live on this surface (ADR 006 gap 5 — exit-flash).
+    /// The control-mode `tmux%` prompt and stray `%…` lines arrive outside the
+    /// DCS wrapper and would paint the (hidden) control surface's grid, flashing
+    /// into view on restore. Control sequences, DCS/tmux interception, and
+    /// replies are unaffected. Set `true` on the control-mode `Enter`, `false`
+    /// on `%exit`.
+    pub fn set_tmux_suppress_print(&mut self, suppress: bool) {
+        self.stream.handler.set_suppress_print(suppress);
     }
 
     /// Drain the most recent OSC 9;4 ConEmu progress report, if one arrived
@@ -267,6 +317,12 @@ impl Engine {
 
     /// A plain-text dump of the **full scrollback + active screen** (soft-wrap
     /// boundaries kept as newlines). Backs the `write_scrollback_file` keybind.
+    /// The visible screen as plain text (no styling). Diagnostic/test helper —
+    /// used by the tmux lifecycle smoke to report what a pane actually shows.
+    pub fn plain_string(&self) -> String {
+        self.terminal().plain_string()
+    }
+
     pub fn scrollback_string(&self) -> String {
         self.terminal()
             .screen()
@@ -642,33 +698,13 @@ impl Engine {
 
     /// The terminal's requested mouse reporting mode (`None` if off).
     pub fn mouse_event(&self) -> MouseEvent {
-        if self.mode(Mode::MouseEventAny) {
-            MouseEvent::Any
-        } else if self.mode(Mode::MouseEventButton) {
-            MouseEvent::Button
-        } else if self.mode(Mode::MouseEventNormal) {
-            MouseEvent::Normal
-        } else if self.mode(Mode::MouseEventX10) {
-            MouseEvent::X10
-        } else {
-            MouseEvent::None
-        }
+        terminal_mouse_event(self.terminal())
     }
 
     /// The terminal's requested mouse report format. Precedence matches upstream:
     /// SGR-pixels, SGR, urxvt, UTF-8, else X10.
     pub fn mouse_format(&self) -> MouseFormat {
-        if self.mode(Mode::MouseFormatSgrPixels) {
-            MouseFormat::SgrPixels
-        } else if self.mode(Mode::MouseFormatSgr) {
-            MouseFormat::Sgr
-        } else if self.mode(Mode::MouseFormatUrxvt) {
-            MouseFormat::Urxvt
-        } else if self.mode(Mode::MouseFormatUtf8) {
-            MouseFormat::Utf8
-        } else {
-            MouseFormat::X10
-        }
+        terminal_mouse_format(self.terminal())
     }
 
     /// Whether the alternate screen is currently active (a full-screen program

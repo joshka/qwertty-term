@@ -225,6 +225,40 @@ fn parse_block_terminator(line_raw: &[u8]) -> Option<BlockTerminator> {
     Some(terminator)
 }
 
+/// Decode tmux control-mode `%output` escaping. tmux writes each control /
+/// non-printable byte (and backslash) in `%output` data as a backslash followed
+/// by exactly three octal digits (`\ooo`, e.g. ESC → `\033`, LF → `\012`,
+/// backslash → `\134`). Everything else is passed through verbatim. The pane
+/// terminal needs the raw bytes, so `Notification::Output.data` is the decoded
+/// form (matching upstream's `// unescaped` intent). A backslash not followed by
+/// three octal digits is left as-is (defensive; tmux always emits the escaped
+/// form).
+fn unescape_output(data: &[u8]) -> Vec<u8> {
+    let is_octal = |b: u8| (b'0'..=b'7').contains(&b);
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == b'\\'
+            && i + 3 < data.len()
+            && is_octal(data[i + 1])
+            && is_octal(data[i + 2])
+            && is_octal(data[i + 3])
+        {
+            // 3 octal digits -> one byte. Compute in u16 to avoid an overflow
+            // panic on a malformed `\4xx`+ escape (real tmux only emits 0-255).
+            let v = ((data[i + 1] - b'0') as u16) << 6
+                | ((data[i + 2] - b'0') as u16) << 3
+                | (data[i + 3] - b'0') as u16;
+            out.push(v as u8);
+            i += 4;
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Parse a single notification line (without trailing CR) into a
 /// [`Notification`], or `None` if it doesn't match a recognized shape. This is
 /// the hand-rolled equivalent of `parseNotification`'s per-command regexes.
@@ -238,7 +272,7 @@ fn parse_line(line: &[u8]) -> Option<Notification> {
         }
         return Some(Notification::Output {
             pane_id,
-            data: data.to_vec(),
+            data: unescape_output(data),
         });
     }
 
@@ -283,6 +317,22 @@ fn parse_line(line: &[u8]) -> Option<Notification> {
             return None;
         }
         return Some(Notification::WindowAdd { id });
+    }
+
+    // %window-close @<id> / %unlinked-window-close @<id>: a window closed. tmux
+    // emits `%window-close` for a window linked to the current session and
+    // `%unlinked-window-close` for one that isn't (e.g. the only pane of a
+    // non-active window gets Ctrl-D'd); both mean the native tab for that window
+    // should be dropped. Upstream `control.zig` does not decode these — see
+    // `docs/analysis/tmux-control-mode-states.md` gap 3.
+    if let Some(rest) = strip_prefix(line, b"%window-close @")
+        .or_else(|| strip_prefix(line, b"%unlinked-window-close @"))
+    {
+        let (id, rest) = parse_usize_prefix(rest)?;
+        if !rest.is_empty() {
+            return None;
+        }
+        return Some(Notification::WindowClose { id });
     }
 
     // %window-renamed @<id> <name>   (name non-empty)
@@ -333,6 +383,16 @@ fn parse_line(line: &[u8]) -> Option<Notification> {
             });
         }
         return None;
+    }
+
+    // %exit [reason]: tmux is leaving control mode — the session was destroyed,
+    // the client was detached (`detach-client`), or the server is shutting down.
+    // This is the deterministic end-of-control-session signal; any trailing
+    // reason is informational. Without this arm, control mode's end was noticed
+    // only heuristically (the first non-`%` byte once the underlying shell wrote
+    // output — see `State::Idle`), so a client that lingered was missed.
+    if line == b"%exit" || strip_prefix(line, b"%exit ").is_some() {
+        return Some(Notification::Exit);
     }
 
     // Unknown command: upstream logs and returns to idle.
@@ -463,6 +523,10 @@ pub enum Notification {
 
     /// Window `id` was linked to the current session (`%window-add @<id>`).
     WindowAdd { id: usize },
+
+    /// Window `id` closed (`%window-close @<id>` or `%unlinked-window-close
+    /// @<id>`) — its native tab should be dropped.
+    WindowClose { id: usize },
 
     /// Window `id` was renamed to `name` (`%window-renamed @<id> <name>`).
     WindowRenamed { id: usize, name: Vec<u8> },

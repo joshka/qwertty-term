@@ -54,7 +54,7 @@
 use std::collections::VecDeque;
 
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
-use qwertty_term_vt::terminal::{Options, Terminal};
+use qwertty_term_vt::terminal::{Colors, Options, Terminal};
 use qwertty_term_vt::tmux::Notification;
 use qwertty_term_vt::tmux::layout::{Content, Layout};
 use qwertty_term_vt::tmux::output::{self, Value, Variable};
@@ -153,6 +153,74 @@ enum Command {
     PaneState,
     /// `display-message`: fetch the tmux server version.
     TmuxVersion,
+    /// `send-keys`: deliver keyboard input to a pane (ADR 006 slice 5d). The
+    /// `keys` are Unicode codepoints (from the app's key encoder, decoded from
+    /// its UTF-8 output) sent via `send-keys -H` so raw control bytes and
+    /// escape sequences pass through unmodified. Unlike the other commands this
+    /// is a *write*: its `%begin`/`%end` response carries no data we consume, it
+    /// only advances the command queue.
+    SendKeys { pane_id: usize, keys: Vec<u32> },
+    /// `split-window`: split a tmux pane (ADR 006 slice 5e — tmux-aware native
+    /// actions). A native Cmd-D / split keybind targeting a tmux-managed tab is
+    /// redirected here instead of mutating the native `SplitTree`; the resulting
+    /// `%layout-change` reconcile creates+renders the new pane. `horizontal`
+    /// selects a left/right split (`-h`) vs a top/bottom split (`-v`); `before`
+    /// (`-b`) places the new pane before (left/above) the target. A *write*
+    /// command: its `%begin`/`%end` reply carries nothing, it only advances the
+    /// queue.
+    SplitWindow {
+        pane_id: usize,
+        horizontal: bool,
+        before: bool,
+    },
+    /// `new-window`: create a new tmux window (ADR 006 slice 5e). A native
+    /// Cmd-T / new-tab while focus is in a tmux window is redirected here
+    /// (Josh's iTerm2-style choice): tmux emits `%window-add`, the reconcile
+    /// spawns a fresh native tab in the same session. A *write* command.
+    NewWindow,
+    /// `kill-pane`: close a tmux pane (ADR 006 slice 5e). A native Cmd-W /
+    /// close-surface on a tmux pane is redirected here instead of mutating the
+    /// native tree; tmux's `%layout-change` (or `%window-close` for the last
+    /// pane) reconcile removes the native surface/tab. A *write* command.
+    KillPane { pane_id: usize },
+    /// `kill-window`: close a whole tmux window (ADR 006 slice 5e — the
+    /// close-tab redirect). A native tab close (the tab's red button / close
+    /// button) on a tmux-managed tab is redirected here instead of closing the
+    /// native tab directly (I3); tmux removes the window and the native tab is
+    /// dropped by the follow-up `list-windows` refresh (see
+    /// [`Viewer::received_command_output`]). A *write* command.
+    KillWindow { window_id: usize },
+    /// `select-pane`: make a tmux pane the window's active pane (ADR 006 slice
+    /// 5e — focus sync). Sent when the app's keyboard focus moves to a tmux pane
+    /// so bare `split-window`, the active-pane indicator, and any no-`-t` command
+    /// operate on the pane the user is actually in. A *write* command.
+    SelectPane { pane_id: usize },
+    /// `detach-client`: detach *this* `tmux -CC` client so the control process
+    /// exits and the control surface returns to a plain shell (I1). Sent when a
+    /// reconcile leaves the session with zero windows (the user closed every
+    /// tmux tab): with `detach-on-destroy off` tmux would otherwise keep the
+    /// client attached, orphaning `tmux -CC`. Leaves the server/other sessions
+    /// alive. tmux answers with `%exit`. A *write* command.
+    DetachClient,
+    /// `resize-pane -t %<id> -x <w> / -y <h>`: set a pane's size in cells (ADR
+    /// 006 — native divider drag). A drag on a native split divider in a tmux
+    /// tab is redirected here instead of mutating the native tree (I3); tmux
+    /// re-lays-out and the follow-up `%layout-change` reflows the panes. `width`
+    /// and/or `height` are the target cell extents (at least one is `Some`). A
+    /// *write* command.
+    ResizePane {
+        pane_id: usize,
+        width: Option<usize>,
+        height: Option<usize>,
+    },
+    /// `refresh-client -C <w>x<h>`: declare this **control client's** size in
+    /// cells. A control-mode client's size comes from this command, not from the
+    /// pty winsize, so without it tmux lays windows/panes out at the *session's*
+    /// size and every pane terminal ends up sized to a grid the UI never draws
+    /// at — the garbled-pane bug. Sent once during startup (before the first
+    /// `list-windows`, so the very first layout is already at our grid) and again
+    /// whenever the native window's grid changes. A *write* command.
+    RefreshClient { width: usize, height: usize },
 }
 
 impl Command {
@@ -187,6 +255,65 @@ impl Command {
                 cmd.extend_from_slice(&output::format(TMUX_VERSION_VARS, TMUX_VERSION_DELIM));
                 cmd.extend_from_slice(b"'\n");
                 cmd
+            }
+            // `send-keys -t %<id> -H <hex codepoints…>`: each key is one
+            // hexadecimal Unicode codepoint. `-H` bypasses tmux key-name lookup
+            // so bytes like CR (`d`) / ESC (`1b`) and full escape sequences are
+            // delivered to the pane verbatim.
+            Command::SendKeys { pane_id, keys } => {
+                let mut cmd = format!("send-keys -t %{pane_id} -H");
+                for k in keys {
+                    cmd.push_str(&format!(" {k:x}"));
+                }
+                cmd.push('\n');
+                cmd.into_bytes()
+            }
+            // `split-window -t %<id> -h|-v [-b]`: split the target pane. `-h` is
+            // a left/right split, `-v` a top/bottom one; `-b` puts the new pane
+            // before (left/above) the target.
+            Command::SplitWindow {
+                pane_id,
+                horizontal,
+                before,
+            } => {
+                let orient = if *horizontal { "-h" } else { "-v" };
+                let b = if *before { " -b" } else { "" };
+                format!("split-window -t %{pane_id} {orient}{b}\n").into_bytes()
+            }
+            // `new-window`: create a new window in the attached session (the one
+            // control mode is attached to). tmux picks the target session, so no
+            // `-t` is needed.
+            Command::NewWindow => b"new-window\n".to_vec(),
+            // `kill-pane -t %<id>`: close the target pane.
+            Command::KillPane { pane_id } => format!("kill-pane -t %{pane_id}\n").into_bytes(),
+            // `kill-window -t @<id>`: close the target window (and all its panes).
+            Command::KillWindow { window_id } => {
+                format!("kill-window -t @{window_id}\n").into_bytes()
+            }
+            // `select-pane -t %<id>`: make the target pane the active pane.
+            Command::SelectPane { pane_id } => format!("select-pane -t %{pane_id}\n").into_bytes(),
+            // `detach-client`: detach this control client (no `-t`, so the
+            // current client) → `tmux -CC` exits, control pty returns to the shell.
+            Command::DetachClient => b"detach-client\n".to_vec(),
+            // `refresh-client -C <w>x<h>`: declare the control client's cell size.
+            Command::RefreshClient { width, height } => {
+                format!("refresh-client -C {width}x{height}\n").into_bytes()
+            }
+            // `resize-pane -t %<id> [-x <w>] [-y <h>]`: set the pane's cell size.
+            Command::ResizePane {
+                pane_id,
+                width,
+                height,
+            } => {
+                let mut cmd = format!("resize-pane -t %{pane_id}");
+                if let Some(w) = width {
+                    cmd.push_str(&format!(" -x {w}"));
+                }
+                if let Some(h) = height {
+                    cmd.push_str(&format!(" -y {h}"));
+                }
+                cmd.push('\n');
+                cmd.into_bytes()
             }
         }
     }
@@ -243,13 +370,17 @@ pub struct Pane {
 }
 
 impl Pane {
-    fn new(width: usize, height: usize) -> Pane {
+    fn new(width: usize, height: usize, colors: &Colors) -> Pane {
         Pane {
             // placeholder id; set by the caller.
             id: 0,
             stream: Stream::new(TerminalHandler::new(Terminal::new(Options {
                 cols: clamp_cells(width),
                 rows: clamp_cells(height),
+                // Seed the pane terminal with the app's configured palette/theme
+                // so tmux panes match ordinary shell panes instead of rendering
+                // on the engine default background (ADR 006 theme fix).
+                colors: colors.clone(),
                 ..Default::default()
             }))),
             state: None,
@@ -259,6 +390,27 @@ impl Pane {
     /// The engine terminal for this pane (for the renderer / snapshotting).
     pub fn terminal(&self) -> &Terminal {
         self.stream.terminal()
+    }
+
+    /// Mutable access to the pane terminal (for driving mouse selection on a
+    /// display pane — ADR 006 slice 5d).
+    pub fn terminal_mut(&mut self) -> &mut Terminal {
+        self.stream.terminal_mut()
+    }
+
+    /// Resize the pane terminal to a new layout size (cells). tmux reports each
+    /// pane's WxH in the `%layout-change` layout string; when a split, close, or
+    /// window resize changes it, the terminal must follow so its content reflows
+    /// to the new geometry — otherwise it stays frozen at its create-time size
+    /// (the "contents don't resize" bug). No-op if unchanged.
+    fn resize(&mut self, width: usize, height: usize) {
+        let (w, h) = (clamp_cells(width), clamp_cells(height));
+        let t = self.stream.terminal_mut();
+        let pages = &t.screen().pages;
+        if pages.cols() == w && pages.rows() == h {
+            return;
+        }
+        t.resize(w, h);
     }
 
     /// The most recent parsed `list-panes` state, if captured.
@@ -295,18 +447,35 @@ pub struct Viewer {
     /// to preserve insertion order deterministically — pane counts are tiny and
     /// this mirrors upstream's insertion-ordered `AutoArrayHashMap`.
     panes: Vec<Pane>,
+    /// The app's configured palette/theme, applied to every pane `Terminal` on
+    /// creation so tmux panes honour the user's colors (ADR 006 theme fix).
+    /// Retained across a `%session-changed` reset.
+    colors: Colors,
+    /// The tmux pane id tmux currently considers **active** (ADR 006 slice 5e —
+    /// focus sync). Updated from `%window-pane-changed` (and set optimistically
+    /// when the app sends a `select-pane`). Upstream ignores this and drives its
+    /// own focus (`viewer.zig:508-510`, TODO `viewer.zig:23`); we track it so the
+    /// app's keyboard focus and tmux's active pane stay in sync both ways.
+    active_pane: Option<usize>,
+    /// The native window's grid in cells, if the app has told us. Declared to
+    /// tmux via `refresh-client -C` so tmux lays out at the size the UI actually
+    /// draws at. `last_refresh` is the last size pushed, so repeats are dropped
+    /// (avoids redundant traffic and a resize<->%layout-change loop).
+    client_size: Option<(usize, usize)>,
+    last_refresh: Option<(usize, usize)>,
 }
 
 impl Default for Viewer {
     fn default() -> Self {
-        Self::new()
+        Self::new(Colors::default())
     }
 }
 
 impl Viewer {
     /// Create a fresh Viewer in the `StartupBlock` state. Call this when the
-    /// engine reports [`Notification::Enter`]. Port of `Viewer.init`.
-    pub fn new() -> Viewer {
+    /// engine reports [`Notification::Enter`]. Port of `Viewer.init`. `colors`
+    /// is the app's configured palette, seeded into every pane `Terminal`.
+    pub fn new(colors: Colors) -> Viewer {
         Viewer {
             state: State::StartupBlock,
             session_id: 0,
@@ -314,7 +483,19 @@ impl Viewer {
             command_queue: VecDeque::new(),
             windows: Vec::new(),
             panes: Vec::new(),
+            colors,
+            active_pane: None,
+            client_size: None,
+            last_refresh: None,
         }
+    }
+
+    /// The tmux pane id tmux currently considers active, if known (ADR 006 slice
+    /// 5e). The native layer resolves this to a `SurfaceId` to sync keyboard
+    /// focus after a tmux-initiated active-pane change (e.g. a fresh split makes
+    /// its new pane active).
+    pub fn active_pane(&self) -> Option<usize> {
+        self.active_pane
     }
 
     // ---- query API (the native layer / slice 5b reads through these) -------
@@ -338,6 +519,48 @@ impl Viewer {
     /// The pane with the given id, if tracked.
     pub fn pane(&self, id: usize) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
+    }
+
+    /// Tell the Viewer the native window's grid in cells. Set before startup so
+    /// the size is declared to tmux (`refresh-client -C`) ahead of the first
+    /// `list-windows`; afterwards, call [`refresh_client`](Self::refresh_client)
+    /// to push a change.
+    pub fn set_client_size(&mut self, width: usize, height: usize) {
+        self.client_size = Some((width, height));
+    }
+
+    /// Push a new control-client size to tmux (`refresh-client -C`). Returns the
+    /// command to send now (empty when not in steady state, the size is zero, or
+    /// it is unchanged since the last push — the dedup that keeps a resize from
+    /// ping-ponging with the `%layout-change` it provokes).
+    pub fn refresh_client(&mut self, width: usize, height: usize) -> Vec<Action> {
+        self.client_size = Some((width, height));
+        if self.state != State::CommandQueue
+            || width == 0
+            || height == 0
+            || self.last_refresh == Some((width, height))
+        {
+            return Vec::new();
+        }
+        self.last_refresh = Some((width, height));
+        self.enqueue_write(Command::RefreshClient { width, height })
+    }
+
+    /// Mutable access to the pane with the given id (for display-pane selection).
+    pub fn pane_mut(&mut self, id: usize) -> Option<&mut Pane> {
+        self.panes.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Re-apply the app's palette/theme to every pane terminal (config reload).
+    /// A display pane renders these terminals, not the surface's own (empty)
+    /// engine, so a theme reload must reach here or tmux panes keep their
+    /// create-time colors. Mirrors `Engine::set_colors` per pane.
+    pub fn recolor_panes(&mut self, colors: &Colors) {
+        for pane in &mut self.panes {
+            let t = pane.terminal_mut();
+            t.colors = colors.clone();
+            t.screen_mut().pages.mark_all_dirty();
+        }
     }
 
     /// The number of tracked panes.
@@ -399,7 +622,21 @@ impl Viewer {
             Notification::SessionChanged { id, .. } => {
                 self.session_id = id;
                 // Queue the startup commands and send the first one.
-                self.enter_command_queue(&[Command::TmuxVersion, Command::ListWindows])
+                // Declare our client size *before* `list-windows`, so tmux
+                // re-lays-out first and the very first layout we parse is
+                // already at the native window's grid (control clients size via
+                // `refresh-client`, not the pty winsize).
+                match self.client_size {
+                    Some((width, height)) => {
+                        self.last_refresh = Some((width, height));
+                        self.enter_command_queue(&[
+                            Command::TmuxVersion,
+                            Command::RefreshClient { width, height },
+                            Command::ListWindows,
+                        ])
+                    }
+                    None => self.enter_command_queue(&[Command::TmuxVersion, Command::ListWindows]),
+                }
             }
             _ => Vec::new(),
         }
@@ -446,8 +683,21 @@ impl Viewer {
                 self.command_queue.push_back(Command::ListWindows);
             }
 
-            // The active pane changed: we drive our own focus, so ignore.
-            Notification::WindowPaneChanged { .. } => {}
+            Notification::WindowClose { .. } => {
+                // A window closed (incl. a non-active window's last pane being
+                // Ctrl-D'd → `%unlinked-window-close`). Refresh the window list
+                // so the reconcile drops the vanished window's tab (I3 / gap 3).
+                self.command_queue.push_back(Command::ListWindows);
+            }
+
+            // The active pane changed (ADR 006 slice 5e — focus sync). Unlike
+            // upstream (which ignores this and drives its own focus,
+            // `viewer.zig:508-510`), we record tmux's active pane so the native
+            // layer can move the app's keyboard focus to match — e.g. a fresh
+            // `split-window` makes its new pane active and tmux reports it here.
+            Notification::WindowPaneChanged { pane_id, .. } => {
+                self.active_pane = Some(pane_id);
+            }
             // A session was created/destroyed elsewhere: we'll get exit or
             // session_changed for our own; ignore otherwise.
             Notification::SessionsChanged => {}
@@ -468,6 +718,171 @@ impl Viewer {
         actions
     }
 
+    /// Queue keyboard input for a pane and return the command(s) to send now.
+    /// ADR 006 slice 5d: control mode has no pane pty, so input is delivered as
+    /// a `send-keys` control command on the same control pty.
+    ///
+    /// `bytes` is the app key encoder's output (UTF-8); it is decoded into
+    /// Unicode codepoints and sent via `send-keys -H`. The command is threaded
+    /// through the same in-flight command queue as every other control command
+    /// so its `%begin`/`%end` reply correlates correctly (a stray reply would
+    /// otherwise be mis-attributed to whatever command was in flight). When the
+    /// queue is idle the command is emitted immediately; otherwise it is emitted
+    /// once the in-flight command completes.
+    ///
+    /// Returns an empty vec (no action) when not in steady state, the pane is
+    /// unknown, or `bytes` decodes to nothing.
+    pub fn send_keys(&mut self, pane_id: usize, bytes: &[u8]) -> Vec<Action> {
+        if self.state != State::CommandQueue {
+            return Vec::new();
+        }
+        if !self.panes.iter().any(|p| p.id == pane_id) {
+            return Vec::new();
+        }
+        let keys: Vec<u32> = String::from_utf8_lossy(bytes)
+            .chars()
+            .map(|c| c as u32)
+            .collect();
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::SendKeys { pane_id, keys })
+    }
+
+    /// Split the tmux pane a native surface renders, in the given orientation
+    /// (ADR 006 slice 5e). `horizontal` picks a left/right (`-h`) vs top/bottom
+    /// (`-v`) split; `before` (`-b`) places the new pane before the target.
+    /// Returns the control command(s) to send now (empty when not in steady
+    /// state or the pane is unknown). The new pane materialises via the
+    /// subsequent `%layout-change` reconcile, not by mutating any native tree.
+    pub fn split_window(&mut self, pane_id: usize, horizontal: bool, before: bool) -> Vec<Action> {
+        if self.state != State::CommandQueue || !self.panes.iter().any(|p| p.id == pane_id) {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::SplitWindow {
+            pane_id,
+            horizontal,
+            before,
+        })
+    }
+
+    /// Create a new tmux window in the attached session (ADR 006 slice 5e — the
+    /// Cmd-T redirect). Returns the control command to send now (empty when not
+    /// in steady state). The new window materialises via the `%window-add`
+    /// reconcile as a fresh native tab.
+    pub fn new_window(&mut self) -> Vec<Action> {
+        if self.state != State::CommandQueue {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::NewWindow)
+    }
+
+    /// Resize a tmux pane to a target cell size (ADR 006 — native divider drag).
+    /// `width`/`height` are cell extents; at least one should be `Some`. Returns
+    /// the control command to send now (empty when not in steady state, the pane
+    /// is unknown, or neither dimension is given). tmux re-lays-out and the
+    /// follow-up `%layout-change` reflows the panes — the caller must NOT mutate
+    /// the native split tree directly (I3).
+    pub fn resize_pane(
+        &mut self,
+        pane_id: usize,
+        width: Option<usize>,
+        height: Option<usize>,
+    ) -> Vec<Action> {
+        if self.state != State::CommandQueue
+            || (width.is_none() && height.is_none())
+            || !self.panes.iter().any(|p| p.id == pane_id)
+        {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::ResizePane {
+            pane_id,
+            width,
+            height,
+        })
+    }
+
+    /// Kill the tmux pane a native surface renders (ADR 006 slice 5e — the
+    /// Cmd-W redirect). Returns the control command to send now (empty when not
+    /// in steady state or the pane is unknown). The native surface/tab is torn
+    /// down by the subsequent `%layout-change` / `%window-close` reconcile.
+    pub fn kill_pane(&mut self, pane_id: usize) -> Vec<Action> {
+        if self.state != State::CommandQueue || !self.panes.iter().any(|p| p.id == pane_id) {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::KillPane { pane_id })
+    }
+
+    /// Kill the tmux window a native tab mirrors (ADR 006 slice 5e — the
+    /// close-tab redirect / gap 1). Returns the control command(s) to send now
+    /// (empty when not in steady state or the window is unknown). The window
+    /// (and all its panes) is removed by tmux; the native tab is torn down by
+    /// the follow-up `list-windows` refresh queued in
+    /// [`received_command_output`](Self::received_command_output) — the caller
+    /// must NOT close the native tab directly (I3).
+    pub fn kill_window(&mut self, window_id: usize) -> Vec<Action> {
+        if self.state != State::CommandQueue || !self.windows.iter().any(|w| w.id == window_id) {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::KillWindow { window_id })
+    }
+
+    /// Make a tmux pane the active pane (ADR 006 slice 5e — app→tmux focus sync).
+    /// Called when the app's keyboard focus moves to a tmux pane so bare
+    /// `split-window` and the active-pane indicator operate on the pane the user
+    /// is in. Sets [`active_pane`](Self::active_pane) optimistically so tmux's
+    /// echoing `%window-pane-changed` is a no-op (no focus bounce), and returns
+    /// the control command to send now (empty when not in steady state, the pane
+    /// is unknown, or it is already active — nothing to do).
+    pub fn select_pane(&mut self, pane_id: usize) -> Vec<Action> {
+        if self.state != State::CommandQueue
+            || self.active_pane == Some(pane_id)
+            || !self.panes.iter().any(|p| p.id == pane_id)
+        {
+            return Vec::new();
+        }
+        self.active_pane = Some(pane_id);
+        self.enqueue_write(Command::SelectPane { pane_id })
+    }
+
+    /// Detach this `tmux -CC` client (ADR 006 slice 5e — orphan teardown /
+    /// invariant I1). Issued when a reconcile leaves the session with zero
+    /// windows (the user closed every tmux tab): with `detach-on-destroy off`
+    /// tmux keeps the client attached to another session instead of exiting, so
+    /// `tmux -CC` would linger and the restored control surface would show a
+    /// still-attached client rather than a plain shell. `detach-client` makes
+    /// tmux answer `%exit` and the client process exit. Returns the command to
+    /// send now (empty outside steady state). Idempotent enough: a redundant
+    /// detach on an already-exiting client hits a dead pty harmlessly.
+    pub fn detach_client(&mut self) -> Vec<Action> {
+        if self.state != State::CommandQueue {
+            return Vec::new();
+        }
+        self.enqueue_write(Command::DetachClient)
+    }
+
+    /// Queue a *write* control command (send-keys / split-window / new-window /
+    /// kill-pane) onto the in-flight command queue and return the action to send
+    /// it now, if the queue was idle. Threading writes through the same queue as
+    /// reads keeps each `%begin`/`%end` reply correlated with the command that
+    /// triggered it (a stray reply would otherwise be mis-attributed). When a
+    /// command is already in flight the write is emitted by `next_command` once
+    /// that completes. Precondition: caller has verified `State::CommandQueue`.
+    fn enqueue_write(&mut self, cmd: Command) -> Vec<Action> {
+        debug_assert_eq!(self.state, State::CommandQueue);
+        let was_idle = self.command_queue.is_empty();
+        self.command_queue.push_back(cmd);
+        if was_idle {
+            // Nothing in flight: emit now; its %begin/%end will pop it.
+            vec![Action::Command(
+                self.command_queue.front().expect("just pushed").to_bytes(),
+            )]
+        } else {
+            // A command is in flight; next_command emits this once it completes.
+            Vec::new()
+        }
+    }
+
     // ---- command responses -------------------------------------------------
 
     fn received_command_output(&mut self, actions: &mut Vec<Action>, content: &[u8]) {
@@ -486,6 +901,37 @@ impl Viewer {
                 self.received_pane_visible(id, alternate, content)
             }
             Command::TmuxVersion => self.received_tmux_version(content),
+            // A `send-keys` write: tmux's reply carries nothing to apply; the
+            // pop above already advanced the queue. The pane's echo (if any)
+            // arrives separately as `%output`.
+            Command::SendKeys { .. } => {}
+            // Structural writes (split/new-window/select): the reply carries
+            // nothing to apply either. The pop advanced the queue; the layout
+            // effect arrives later as a `%layout-change` / `%window-add` that
+            // drives the reconcile (ADR 006 slice 5e).
+            Command::SplitWindow { .. }
+            | Command::NewWindow
+            | Command::SelectPane { .. }
+            | Command::ResizePane { .. }
+            | Command::RefreshClient { .. } => {}
+            // Window-removing writes (kill-pane / kill-window): tmux signals the
+            // removal of the *last* pane of a window (or a whole window) with
+            // `%window-close` / `%unlinked-window-close`, which the control-mode
+            // decoder does NOT surface as a notification (verified against tmux
+            // 3.7b: a non-last window close emits only `%unlinked-window-close`
+            // + `%session-window-changed`, both undecoded). So a native tab would
+            // linger after its tmux window is gone. Because *we* initiated this
+            // write, we can close the loop app-side: queue a `list-windows`
+            // refresh so the reconcile drops the now-missing window's tab (I1/I3).
+            // A kill-pane that only removed a non-last pane already got a
+            // `%layout-change`; the extra refresh is an idempotent no-op there.
+            Command::KillPane { .. } | Command::KillWindow { .. } => {
+                self.command_queue.push_back(Command::ListWindows);
+            }
+            // `detach-client`: tmux answers this block, then emits `%exit` as it
+            // tears the client down. Nothing to apply from the reply — the
+            // `%exit` drives teardown (`Notification::Exit`).
+            Command::DetachClient => {}
         }
     }
 
@@ -566,17 +1012,52 @@ impl Viewer {
                 alternate_on: bool_at(&values, 7),
             };
             if let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id) {
+                // Apply the cursor state on attach: the capture sets the pane's
+                // content but not its cursor, so without this the cursor sits
+                // wherever the captured text ended (usually the wrong cell) until
+                // live %output refines it. Primary screen only — the alternate
+                // screen isn't populated yet (slice 5b), so leave it be.
+                if !state.alternate_on {
+                    // DECSCUSR shape: block=2, underline=4, bar=6, default=0.
+                    let shape = match state.cursor_shape.as_str() {
+                        "block" => 2,
+                        "underline" => 4,
+                        "bar" => 6,
+                        _ => 0,
+                    };
+                    let vis = if state.cursor_visible {
+                        "\x1b[?25h"
+                    } else {
+                        "\x1b[?25l"
+                    };
+                    let seq = format!(
+                        "\x1b[{};{}H\x1b[{} q{}",
+                        state.cursor_y + 1,
+                        state.cursor_x + 1,
+                        shape,
+                        vis,
+                    );
+                    pane.stream.feed(seq.as_bytes());
+                }
                 pane.state = Some(state);
             }
         }
     }
 
-    fn received_pane_history(&mut self, id: usize, alternate: bool, _content: &[u8]) {
-        // Scrollback / alternate-screen capture application is slice 5b (needs a
-        // screen-history write path not in the engine's public API). We only
-        // consume the response here so the command queue advances. `id`/
-        // `alternate` are retained for that future application.
-        let _ = (id, alternate);
+    fn received_pane_history(&mut self, id: usize, alternate: bool, content: &[u8]) {
+        // Primary-screen scrollback: feed the captured history (the region ABOVE
+        // the visible area — `capture-pane -S - -E -1`) into the pane stream so
+        // it builds the pane's scrollback. It is queued before the visible
+        // capture, so the visible content, fed next, lands as the active area —
+        // no duplication. Without this, attaching to a session shows no
+        // pre-existing scrollback (you could only scroll into %output-fed lines).
+        // The alternate screen has no scrollback; its history is a no-op.
+        if alternate {
+            return;
+        }
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+            pane.stream.feed(content);
+        }
     }
 
     fn received_pane_visible(&mut self, id: usize, alternate: bool, content: &[u8]) {
@@ -650,9 +1131,13 @@ impl Viewer {
         let mut rebuilt: Vec<Pane> = Vec::with_capacity(leaves.len());
         for (id, width, height) in &leaves {
             if let Some(pos) = old.iter().position(|p| p.id == *id) {
-                rebuilt.push(old.remove(pos));
+                // Existing pane: follow its new layout size so a split/close/
+                // window-resize actually reflows its content (not just new panes).
+                let mut pane = old.remove(pos);
+                pane.resize(*width, *height);
+                rebuilt.push(pane);
             } else {
-                let mut pane = Pane::new(*width, *height);
+                let mut pane = Pane::new(*width, *height, &self.colors);
                 pane.id = *id;
                 rebuilt.push(pane);
             }
@@ -691,7 +1176,8 @@ impl Viewer {
     /// `sessionChanged`.
     fn session_changed(&mut self, actions: &mut Vec<Action>, session_id: usize) {
         let version = std::mem::take(&mut self.tmux_version);
-        *self = Viewer::new();
+        let colors = self.colors.clone();
+        *self = Viewer::new(colors);
         self.tmux_version = version;
         self.session_id = session_id;
         self.state = State::CommandQueue;

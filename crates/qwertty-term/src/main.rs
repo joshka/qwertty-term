@@ -130,6 +130,7 @@
 //!   0/1.
 
 fn main() {
+    apply_cli_command_override(std::env::args().skip(1));
     let mode = parse_mode(std::env::args().skip(1));
 
     match mode {
@@ -151,6 +152,31 @@ enum Mode {
     ImportGhosttyConfig {
         path: Option<String>,
     },
+}
+
+/// `--command <cmdline>` / `--command=<cmdline>`: run `cmdline` (via
+/// `/bin/sh -c`) in each pane instead of the default `$SHELL` — e.g.
+/// `qwertty-term --command "tmux -CC"`. Threaded through the existing
+/// `QWERTTY_TERM_COMMAND` mechanism (see `termio::TabIo::spawn`) by setting that
+/// env var early in `main`, before any surface spawns. An explicit
+/// `QWERTTY_TERM_COMMAND` already in the environment is left untouched.
+fn apply_cli_command_override(args: impl Iterator<Item = String>) {
+    if std::env::var_os("QWERTTY_TERM_COMMAND").is_some() {
+        return;
+    }
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        let value = arg
+            .strip_prefix("--command=")
+            .map(str::to_string)
+            .or_else(|| (arg == "--command").then(|| args.next()).flatten());
+        if let Some(value) = value {
+            // Safety: called at the very top of `main`, before any threads or
+            // surface spawns, so there is no concurrent env access.
+            unsafe { std::env::set_var("QWERTTY_TERM_COMMAND", value) };
+            return;
+        }
+    }
 }
 
 /// Parse the CLI args into a mode.

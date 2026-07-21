@@ -2134,6 +2134,16 @@ pub struct TerminalHandler {
     /// `CSI 21 t` reply is suppressed; the 14/16/18 t geometry reports are
     /// unaffected.
     title_reporting: bool,
+    /// When set, ground-state printing (`print`/`print_slice`/`print_repeat`) is
+    /// dropped instead of painting the grid — everything else (control
+    /// sequences, DCS/tmux interception, replies) is unaffected. The app enables
+    /// this on a `tmux -CC` **control surface** while its session is live: tmux's
+    /// control-mode `tmux%` readline prompt and stray `%…` status lines arrive
+    /// *outside* the DCS wrapper and would otherwise paint the control surface's
+    /// real grid, flashing into view whenever that (normally hidden) surface is
+    /// momentarily shown (ADR 006 gap 5 — the exit-flash). Cleared on `%exit` so
+    /// the underlying shell repaints normally.
+    suppress_print: bool,
 }
 
 /// OSC color-query reply format. Port of `configpkg.Config.OSCColorReportFormat`.
@@ -2197,7 +2207,21 @@ impl TerminalHandler {
             osc_color_report_format: OscColorReportFormat::Bit16,
             xtversion: String::from("qwertty-term"),
             title_reporting: true,
+            suppress_print: false,
         }
+    }
+
+    /// Whether ground-state printing is currently suppressed.
+    pub fn suppress_print(&self) -> bool {
+        self.suppress_print
+    }
+
+    /// Enable/disable dropping ground-state printing (see [`suppress_print`]).
+    /// The app toggles this on a `tmux -CC` control surface: `true` on the
+    /// control-mode `Enter`, `false` on `%exit`. Control sequences, DCS/tmux
+    /// interception, and replies are unaffected — only grid painting is dropped.
+    pub fn set_suppress_print(&mut self, suppress: bool) {
+        self.suppress_print = suppress;
     }
 
     /// Provide the cell dimensions in pixels so `CSI 14/16/18 t` XTWINOPS size
@@ -2438,9 +2462,15 @@ impl TerminalHandler {
 
 impl Handler for TerminalHandler {
     fn print(&mut self, cp: u32) {
+        if self.suppress_print {
+            return;
+        }
         self.terminal.print(cp);
     }
     fn print_slice(&mut self, cps: &[u32]) {
+        if self.suppress_print {
+            return;
+        }
         self.terminal.print_slice(cps);
     }
 
@@ -2953,6 +2983,17 @@ impl Handler for TerminalHandler {
         self.write_pty(s.as_bytes());
     }
     fn tmux(&mut self, notification: Notification) {
+        // Control mode ended: stop suppressing grid painting *here*, in the byte
+        // stream, rather than waiting for the app to drain this notification and
+        // clear the flag itself. Whatever launched `tmux -CC` — usually the
+        // user's shell — owns the pty again the moment tmux exits, and the parse
+        // thread runs ahead of the app's drain, so anything it writes in that gap
+        // (classically the shell's first prompt) would be silently dropped: the
+        // "tmux exited but the window shows no prompt" symptom. Clearing it on
+        // the same byte that ends control mode closes that window entirely.
+        if matches!(notification, Notification::Exit) {
+            self.suppress_print = false;
+        }
         // Queue the control-mode notification for the app-tails Viewer (ADR 004
         // slice 5) to drain via `take_tmux_notifications`. Additive event seam
         // mirroring the pending clipboard/notification queues; upstream feeds
@@ -3100,6 +3141,9 @@ impl Handler for TerminalHandler {
 
     // ---- REP ------------------------------------------------------------
     fn print_repeat(&mut self, count: u16) {
+        if self.suppress_print {
+            return;
+        }
         self.terminal.print_repeat(count as usize);
     }
 

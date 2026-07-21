@@ -177,6 +177,36 @@ fn window_add() {
 }
 
 #[test]
+fn window_close_and_unlinked_window_close_decoded() {
+    // Both forms tmux emits for a closed window map to WindowClose (gap 3).
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%window-close @7");
+    assert_eq!(put_newline(&mut c), Notification::WindowClose { id: 7 });
+
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%unlinked-window-close @3");
+    assert_eq!(put_newline(&mut c), Notification::WindowClose { id: 3 });
+
+    // Trailing garbage after the id is not a match.
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%window-close @7 extra");
+    assert_eq!(c.put(b'\n'), Ok(None));
+}
+
+#[test]
+fn exit_notification_decoded() {
+    // Bare `%exit` (session destroyed / client detached) ends control mode.
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%exit");
+    assert_eq!(put_newline(&mut c), Notification::Exit);
+
+    // `%exit <reason>` — the reason is informational; still an exit.
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%exit server-exited");
+    assert_eq!(put_newline(&mut c), Notification::Exit);
+}
+
+#[test]
 fn window_renamed() {
     let mut c = ControlParser::new();
     put_all_none(&mut c, "%window-renamed @42 bar");
@@ -315,4 +345,49 @@ fn carriage_return_stripped_before_parse() {
     let mut c = ControlParser::new();
     put_all_none(&mut c, "%window-add @3\r");
     assert_eq!(put_newline(&mut c), Notification::WindowAdd { id: 3 });
+}
+
+#[test]
+fn output_octal_escapes_are_decoded() {
+    // tmux escapes control/non-printable bytes in %output as `\ooo` (3 octal
+    // digits): ESC=\033, LF=\012, CR=\015, backslash=\134, BEL=\007. The
+    // decoded Output.data must carry the raw bytes so the pane terminal
+    // interprets them (this was the "raw \033[1m on screen" bug).
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%output %1 \\033[1mhi\\033[0m\\134\\007");
+    assert_eq!(
+        put_newline(&mut c),
+        Notification::Output {
+            pane_id: 1,
+            data: b"\x1b[1mhi\x1b[0m\\\x07".to_vec(),
+        }
+    );
+}
+
+#[test]
+fn output_plain_ascii_passes_through() {
+    // No escapes -> verbatim (regression guard for the common case).
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%output %42 foo bar baz");
+    assert_eq!(
+        put_newline(&mut c),
+        Notification::Output {
+            pane_id: 42,
+            data: b"foo bar baz".to_vec(),
+        }
+    );
+}
+
+#[test]
+fn output_lone_backslash_not_octal_is_literal() {
+    // A backslash not followed by 3 octal digits stays literal (defensive).
+    let mut c = ControlParser::new();
+    put_all_none(&mut c, "%output %1 a\\9b\\12");
+    assert_eq!(
+        put_newline(&mut c),
+        Notification::Output {
+            pane_id: 1,
+            data: b"a\\9b\\12".to_vec(),
+        }
+    );
 }
