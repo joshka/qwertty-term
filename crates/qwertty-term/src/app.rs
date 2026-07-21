@@ -2440,6 +2440,13 @@ impl Controller {
                 self.apply_tmux_focus(surface);
             }
         }
+        // With tracing on, dump the whole observable picture after every
+        // reconcile: which tabs exist, whether each mirrors a tmux window, which
+        // are on screen, and what each pane actually shows. That is what turns a
+        // hands-on repro into a diagnosable log.
+        if tmux_trace_enabled() {
+            self.dump_tmux_state("after reconcile");
+        }
     }
 
     /// Apply one tmux reconcile plan's tab create/remove/set-tree ops to the
