@@ -2420,14 +2420,10 @@ impl Controller {
                 match existing {
                     Some(tab) => self.update_tmux_tab(tab, control, tree),
                     None => {
-                        if let Some(tab) = self.spawn_tmux_tab(control, tree) {
-                            self.0
-                                .borrow_mut()
-                                .tmux_tabs
-                                .entry(key)
-                                .or_default()
-                                .insert(*window_id, tab);
-                        }
+                        // `spawn_tmux_tab` registers the tab itself, before the
+                        // window goes live, so it can never be interactable while
+                        // unregistered.
+                        self.spawn_tmux_tab(key, *window_id, control, tree);
                     }
                 }
             }
@@ -2559,7 +2555,13 @@ impl Controller {
     /// surface's window. Returns the new [`TabId`], or `None` if no pane surface
     /// could be built (e.g. no font). The panes are drawn from the Viewer's pane
     /// terminals by [`render_tmux_panes`](Self::render_tmux_panes).
-    fn spawn_tmux_tab(&self, control: DisplaySource, tree: &SplitTree) -> Option<TabId> {
+    fn spawn_tmux_tab(
+        &self,
+        key: (TabId, SurfaceId),
+        window_id: usize,
+        control: DisplaySource,
+        tree: &SplitTree,
+    ) -> Option<TabId> {
         let mtm = self.0.borrow().mtm;
         let controller_ptr: *const Controller = self;
         let scale = 2.0; // provisional; corrected from the real window below.
@@ -2632,6 +2634,18 @@ impl Controller {
         };
         tab.relayout(controller_ptr, id, mtm);
         self.0.borrow_mut().tabs.insert(id, tab);
+        // Register the tab as tmux-managed BEFORE it becomes live/key below.
+        // Every close path (`window_should_close`, `close_tab_confirmed`) decides
+        // "is this a tmux window tab?" by looking here; if the window can take a
+        // Cmd-W while still unregistered, the close falls through to the ordinary
+        // close-window path — which shows the wrong dialog and can tear down the
+        // whole session instead of closing one tab.
+        self.0
+            .borrow_mut()
+            .tmux_tabs
+            .entry(key)
+            .or_default()
+            .insert(window_id, id);
 
         // Group the new tmux-window tab into the control surface's window group
         // so it appears as a native tab (unless tabbing is disallowed).
@@ -3423,6 +3437,13 @@ impl Controller {
                 },
                 window_id,
             );
+            return;
+        }
+        if self.is_tmux_managed_tab(tab) {
+            // tmux-managed but not resolvable to a window id (should not happen
+            // now that registration precedes the tab going live). Do nothing
+            // rather than closing it natively: tmux owns the layout (I3), and a
+            // native close here desyncs or tears down the session.
             return;
         }
         self.close_focused_confirmed(tab);
@@ -4791,6 +4812,22 @@ impl Controller {
     /// window_id)` — everything the window-close delegate needs to redirect a
     /// tab close to `kill-window` (gap 1). `None` for an ordinary tab or the
     /// control tab itself.
+    /// Whether `tab` mirrors a tmux window — derived *structurally* from its
+    /// surfaces (any display-only tmux pane), not from the
+    /// [`tmux_tabs`](ControllerState::tmux_tabs) registry. The close paths use
+    /// this as a backstop: a tmux-managed tab must never fall through to the
+    /// ordinary close-window path, which shows the wrong dialog and can tear the
+    /// whole session down instead of closing one tab. The registry is populated
+    /// before a tab goes live, so this should agree with it — but a structural
+    /// check cannot be defeated by a future ordering regression.
+    fn is_tmux_managed_tab(&self, tab: TabId) -> bool {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .get(&tab)
+            .is_some_and(|t| t.surfaces.values().any(|s| s.display_source().is_some()))
+    }
+
     fn tmux_window_tab(&self, tab: TabId) -> Option<(TabId, SurfaceId, usize)> {
         let state = self.0.borrow();
         for (&(ctrl_tab, ctrl_surface), map) in state.tmux_tabs.iter() {
@@ -7530,6 +7567,12 @@ define_class!(
                     },
                     window_id,
                 );
+                false
+            } else if controller.is_tmux_managed_tab(tab) {
+                // A tmux-window tab we could not resolve to a window id: veto the
+                // close instead of falling through to the window path below,
+                // which would show the close-*window* dialog and can tear down
+                // every mirrored tab.
                 false
             } else {
                 // Gap 4: closing the control window ends the session — tear the
