@@ -75,6 +75,55 @@ use qwertty_term_renderer::engine::{Engine as RenderEngine, FrameOptions};
 use qwertty_term_renderer::snapshot::FullSnapshot;
 
 /// The initial window content size in points.
+/// Whether to run without stealing the user's keyboard focus.
+///
+/// A normal terminal-launched run must claim focus (see the `activate` call in
+/// `applicationDidFinishLaunching`) or hardware keystrokes never reach
+/// `keyDown:`. Smokes don't need that: they drive the app with *synthetic*
+/// events, so activating only yanks focus away from whatever the developer is
+/// doing — which makes the GUI smokes hostile to run locally.
+///
+/// So: any `QWERTTY_TERM_SMOKE_*` run defaults to background (accessory
+/// activation policy, no `activate`). `QWERTTY_TERM_BACKGROUND=0` forces the
+/// normal foreground behaviour, and setting it to anything else forces
+/// background for a non-smoke run.
+fn background_mode() -> bool {
+    match std::env::var("QWERTTY_TERM_BACKGROUND") {
+        Ok(v) => v != "0",
+        Err(_) => {
+            std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with("QWERTTY_TERM_SMOKE"))
+        }
+    }
+}
+
+/// Opt-in tmux control-mode diagnostics: set `QWERTTY_TERM_TMUX_TRACE=1` to log
+/// the tab/session lifecycle (notifications received, reconcile ops, tab
+/// open/close, teardown decisions). Off by default and costs one relaxed atomic
+/// load when off, so it can live in release builds — tmux lifecycle bugs are
+/// timing-dependent and only reproduce through real GUI interaction, where
+/// attaching a debugger or a one-off build is impractical.
+fn tmux_trace_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static ON: AtomicU8 = AtomicU8::new(0);
+    match ON.load(Ordering::Relaxed) {
+        0 => {
+            let on = std::env::var_os("QWERTTY_TERM_TMUX_TRACE").is_some();
+            ON.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+        2 => true,
+        _ => false,
+    }
+}
+
+macro_rules! tmux_trace {
+    ($($arg:tt)*) => {
+        if crate::app::tmux_trace_enabled() {
+            eprintln!("qwertty-term[tmux-trace] {}", format!($($arg)*));
+        }
+    };
+}
+
 const INITIAL_WIDTH: f64 = 800.0;
 const INITIAL_HEIGHT: f64 = 480.0;
 
@@ -2308,6 +2357,7 @@ impl Controller {
     /// the tab bundle under a scoped borrow, drop it, then close the window with
     /// no borrow held, then re-borrow to update the registry.
     pub fn close_tab(&self, tab: TabId) {
+        tmux_trace!("close_tab({:?})", tab.0);
         let removed = self.0.borrow_mut().tabs.remove(&tab);
         if let Some(t) = removed {
             // No controller borrow is held here: the synchronous
@@ -2352,6 +2402,7 @@ impl Controller {
                 // zero-visible-surface state (a zero-surface window self-closes,
                 // which is the "close last pane closed the window" bug). Only
                 // then close every native tab mirroring this control session.
+                tmux_trace!("session EXIT -> tearing down ALL tabs for this control");
                 self.restore_control_tab(event.tab);
                 let tabs: Vec<TabId> = self
                     .0
@@ -2393,9 +2444,19 @@ impl Controller {
         control: DisplaySource,
         plan: &crate::tmux_reconcile::ReconcilePlan,
     ) {
+        tmux_trace!(
+            "plan ops={:?} map={:?}",
+            plan.ops.len(),
+            self.0.borrow().tmux_tabs.get(&key).map(|m| {
+                let mut v: Vec<_> = m.iter().map(|(w, t)| (*w, t.0)).collect();
+                v.sort();
+                v
+            })
+        );
         // 1. Remove native tabs for windows that disappeared.
         for op in &plan.ops {
             if let crate::tmux_reconcile::ReconcileOp::RemoveTab { window_id } = op {
+                tmux_trace!("RemoveTab window={window_id}");
                 let native = self
                     .0
                     .borrow_mut()
@@ -2447,6 +2508,7 @@ impl Controller {
         match map_populated {
             Some(true) => self.hide_control_tab(control.control_tab),
             Some(false) => {
+                tmux_trace!("map empty -> restore control tab + detach-client");
                 self.restore_control_tab(control.control_tab);
                 self.detach_tmux_control(control);
             }
@@ -8016,9 +8078,14 @@ define_class!(
             // the window renders but hardware keystrokes never reach `keyDown:`
             // (the "I can see tabs but can't type" symptom). Forcibly take
             // focus so a terminal-launched build is typable.
-            app.activate();
-            #[allow(deprecated)]
-            app.activateIgnoringOtherApps(true);
+            // Background (smoke) runs drive the app with synthetic events, so
+            // skip claiming focus — otherwise every smoke yanks the developer's
+            // keyboard away mid-run.
+            if !crate::app::background_mode() {
+                app.activate();
+                #[allow(deprecated)]
+                app.activateIgnoringOtherApps(true);
+            }
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -12127,7 +12194,13 @@ pub fn run(
 ) {
     let mtm = MainThreadMarker::new().expect("run() must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Accessory keeps the app out of the Dock and off the foreground, so a smoke
+    // run renders on the windowserver without becoming the active application.
+    app.setActivationPolicy(if background_mode() {
+        NSApplicationActivationPolicy::Accessory
+    } else {
+        NSApplicationActivationPolicy::Regular
+    });
 
     let controller = Controller::new(config, mtm);
     let delegate = AppDelegate::new(
