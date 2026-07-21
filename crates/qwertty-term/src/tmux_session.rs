@@ -197,6 +197,15 @@ impl TmuxSession {
         self.viewer.recolor_panes(colors);
     }
 
+    /// Tell tmux the native window's grid in cells. Call this right after
+    /// constructing the session (before the first `ingest`) so the size is
+    /// declared during startup; later changes go through the same call and are
+    /// deduped. Returns the control-pty bytes to write (empty pre-steady-state,
+    /// where the size is instead folded into the startup command sequence).
+    pub fn set_client_size(&mut self, width: usize, height: usize) -> Vec<Vec<u8>> {
+        commands_of(self.viewer.refresh_client(width, height))
+    }
+
     /// Whether the session has become defunct (tmux exited). Once defunct it
     /// should be dropped along with its native tabs.
     pub fn is_defunct(&self) -> bool {

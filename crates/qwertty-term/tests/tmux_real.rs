@@ -32,6 +32,13 @@ use qwertty_term_vt::terminal::Colors;
 
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
+/// The session is created at a size deliberately *different* from our control
+/// client's, so the test proves we actively drive tmux to our grid rather than
+/// passively lucking into a match. A control client owns the window size; if
+/// tmux keeps the session's own size instead, every pane terminal is sized to a
+/// grid the UI never draws at — which is exactly what renders panes garbled.
+const SESSION_COLS: u16 = 140;
+const SESSION_ROWS: u16 = 40;
 /// Cell pixel size handed to the pty; only the cols/rows matter to tmux.
 const CELL_W: u32 = 10;
 const CELL_H: u32 = 20;
@@ -117,6 +124,25 @@ fn assert_panes_match_layout(session: &TmuxSession, ctx: &str) {
     assert!(checked > 0, "{ctx}: no panes to check");
 }
 
+/// tmux must lay the window out at *our* control client's grid. A control client
+/// drives the window size; if tmux keeps the session's own size, the pane
+/// terminals are sized to a grid the UI doesn't draw at (garbled panes).
+fn assert_layout_matches_client_grid(session: &TmuxSession, ctx: &str) {
+    let viewer = session.viewer();
+    assert!(!viewer.windows().is_empty(), "{ctx}: no windows");
+    for w in viewer.windows() {
+        assert_eq!(
+            (w.width, w.height),
+            (COLS as usize, ROWS as usize),
+            "{ctx}: tmux laid window @{} out at {}x{}, but our control client is \
+             {COLS}x{ROWS} — tmux is not tracking the client size",
+            w.id,
+            w.width,
+            w.height,
+        );
+    }
+}
+
 fn pane_count(session: &TmuxSession) -> usize {
     session.viewer().pane_count()
 }
@@ -137,7 +163,7 @@ fn real_tmux_panes_track_layout_across_split() {
     unsafe {
         std::env::set_var(
             "QWERTTY_TERM_COMMAND",
-            format!("tmux -L {sock} -CC new-session -x {COLS} -y {ROWS}"),
+            format!("tmux -L {sock} -CC new-session -x {SESSION_COLS} -y {SESSION_ROWS}"),
         );
     }
 
@@ -145,6 +171,11 @@ fn real_tmux_panes_track_layout_across_split() {
     let io = TabIo::spawn(Arc::clone(&engine), COLS, ROWS, CELL_W, CELL_H, None)
         .expect("spawn tmux -CC on a pty");
     let mut session = TmuxSession::new(Colors::default());
+    // Declare our grid, exactly as the app does on the control-mode Enter. tmux
+    // must lay out at this size, not the session's own.
+    for cmd in session.set_client_size(COLS as usize, ROWS as usize) {
+        io.write(&cmd);
+    }
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // 1. Come up: control mode must parse against *real* tmux bytes and the
@@ -161,6 +192,7 @@ fn real_tmux_panes_track_layout_across_split() {
             "real tmux -CC never reached a pane with content — the control-mode \
              path is broken against real tmux"
         );
+        assert_layout_matches_client_grid(&session, "initial window");
         assert_panes_match_layout(&session, "initial window");
 
         // 2. Split: tmux re-lays-out, so the *existing* pane must be resized too,

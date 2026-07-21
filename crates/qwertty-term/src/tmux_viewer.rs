@@ -213,6 +213,14 @@ enum Command {
         width: Option<usize>,
         height: Option<usize>,
     },
+    /// `refresh-client -C <w>x<h>`: declare this **control client's** size in
+    /// cells. A control-mode client's size comes from this command, not from the
+    /// pty winsize, so without it tmux lays windows/panes out at the *session's*
+    /// size and every pane terminal ends up sized to a grid the UI never draws
+    /// at — the garbled-pane bug. Sent once during startup (before the first
+    /// `list-windows`, so the very first layout is already at our grid) and again
+    /// whenever the native window's grid changes. A *write* command.
+    RefreshClient { width: usize, height: usize },
 }
 
 impl Command {
@@ -287,6 +295,10 @@ impl Command {
             // `detach-client`: detach this control client (no `-t`, so the
             // current client) → `tmux -CC` exits, control pty returns to the shell.
             Command::DetachClient => b"detach-client\n".to_vec(),
+            // `refresh-client -C <w>x<h>`: declare the control client's cell size.
+            Command::RefreshClient { width, height } => {
+                format!("refresh-client -C {width}x{height}\n").into_bytes()
+            }
             // `resize-pane -t %<id> [-x <w>] [-y <h>]`: set the pane's cell size.
             Command::ResizePane {
                 pane_id,
@@ -445,6 +457,12 @@ pub struct Viewer {
     /// own focus (`viewer.zig:508-510`, TODO `viewer.zig:23`); we track it so the
     /// app's keyboard focus and tmux's active pane stay in sync both ways.
     active_pane: Option<usize>,
+    /// The native window's grid in cells, if the app has told us. Declared to
+    /// tmux via `refresh-client -C` so tmux lays out at the size the UI actually
+    /// draws at. `last_refresh` is the last size pushed, so repeats are dropped
+    /// (avoids redundant traffic and a resize<->%layout-change loop).
+    client_size: Option<(usize, usize)>,
+    last_refresh: Option<(usize, usize)>,
 }
 
 impl Default for Viewer {
@@ -467,6 +485,8 @@ impl Viewer {
             panes: Vec::new(),
             colors,
             active_pane: None,
+            client_size: None,
+            last_refresh: None,
         }
     }
 
@@ -499,6 +519,31 @@ impl Viewer {
     /// The pane with the given id, if tracked.
     pub fn pane(&self, id: usize) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
+    }
+
+    /// Tell the Viewer the native window's grid in cells. Set before startup so
+    /// the size is declared to tmux (`refresh-client -C`) ahead of the first
+    /// `list-windows`; afterwards, call [`refresh_client`](Self::refresh_client)
+    /// to push a change.
+    pub fn set_client_size(&mut self, width: usize, height: usize) {
+        self.client_size = Some((width, height));
+    }
+
+    /// Push a new control-client size to tmux (`refresh-client -C`). Returns the
+    /// command to send now (empty when not in steady state, the size is zero, or
+    /// it is unchanged since the last push — the dedup that keeps a resize from
+    /// ping-ponging with the `%layout-change` it provokes).
+    pub fn refresh_client(&mut self, width: usize, height: usize) -> Vec<Action> {
+        self.client_size = Some((width, height));
+        if self.state != State::CommandQueue
+            || width == 0
+            || height == 0
+            || self.last_refresh == Some((width, height))
+        {
+            return Vec::new();
+        }
+        self.last_refresh = Some((width, height));
+        self.enqueue_write(Command::RefreshClient { width, height })
     }
 
     /// Mutable access to the pane with the given id (for display-pane selection).
@@ -577,7 +622,21 @@ impl Viewer {
             Notification::SessionChanged { id, .. } => {
                 self.session_id = id;
                 // Queue the startup commands and send the first one.
-                self.enter_command_queue(&[Command::TmuxVersion, Command::ListWindows])
+                // Declare our client size *before* `list-windows`, so tmux
+                // re-lays-out first and the very first layout we parse is
+                // already at the native window's grid (control clients size via
+                // `refresh-client`, not the pty winsize).
+                match self.client_size {
+                    Some((width, height)) => {
+                        self.last_refresh = Some((width, height));
+                        self.enter_command_queue(&[
+                            Command::TmuxVersion,
+                            Command::RefreshClient { width, height },
+                            Command::ListWindows,
+                        ])
+                    }
+                    None => self.enter_command_queue(&[Command::TmuxVersion, Command::ListWindows]),
+                }
             }
             _ => Vec::new(),
         }
@@ -853,7 +912,8 @@ impl Viewer {
             Command::SplitWindow { .. }
             | Command::NewWindow
             | Command::SelectPane { .. }
-            | Command::ResizePane { .. } => {}
+            | Command::ResizePane { .. }
+            | Command::RefreshClient { .. } => {}
             // Window-removing writes (kill-pane / kill-window): tmux signals the
             // removal of the *last* pane of a window (or a whole window) with
             // `%window-close` / `%unlinked-window-close`, which the control-mode

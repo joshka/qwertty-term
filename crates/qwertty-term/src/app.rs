@@ -733,9 +733,16 @@ impl Surface {
                 .iter()
                 .any(|n| matches!(n, Notification::Enter))
         {
-            self.tmux = Some(crate::tmux_session::TmuxSession::new(
-                self.startup_colors.clone(),
-            ));
+            let mut session = crate::tmux_session::TmuxSession::new(self.startup_colors.clone());
+            // Declare this control client's grid before the session starts up, so
+            // tmux lays windows/panes out at the size the UI actually draws at.
+            // A control client's size comes from `refresh-client -C`, not the pty
+            // winsize — without this tmux uses the *session's* size and every pane
+            // terminal ends up sized to a grid we never draw at (garbled panes).
+            // The Viewer folds it into its startup sequence, ahead of the first
+            // `list-windows`, so the very first layout is already correct.
+            let _ = session.set_client_size(self.cols, self.rows);
+            self.tmux = Some(session);
             // Control mode is live on this surface: stop painting its grid. tmux's
             // `tmux%` prompt and any stray non-DCS `%…` bytes would otherwise paint
             // this (soon-hidden) control surface's real grid and flash into view
@@ -3178,20 +3185,32 @@ impl Controller {
         })() else {
             return;
         };
-        // Resize the control surface's engine + pty. The pty resize (TIOCSWINSZ)
-        // is what tmux reads as its client size.
         let mut state = self.0.borrow_mut();
         if let Some(cs) = state
             .tabs
             .get_mut(&control.control_tab)
             .and_then(|t| t.surfaces.get_mut(&control.control_surface))
-            && (cs.cols != cols || cs.rows != rows)
         {
-            cs.cols = cols;
-            cs.rows = rows;
-            cs.engine().resize(cols, rows);
-            if let Some(io) = &cs.io {
-                io.resize(cols as u16, rows as u16, cw, ch);
+            // Keep the control surface's own engine + pty in step.
+            if cs.cols != cols || cs.rows != rows {
+                cs.cols = cols;
+                cs.rows = rows;
+                cs.engine().resize(cols, rows);
+                if let Some(io) = &cs.io {
+                    io.resize(cols as u16, rows as u16, cw, ch);
+                }
+            }
+            // Declare the new grid to tmux. This is the load-bearing half: a
+            // control client's size comes from `refresh-client -C`, not the pty
+            // winsize, so this is what makes tmux re-lay-out to the window. The
+            // Viewer dedups repeats, so a steady window sends nothing.
+            let cmds = cs
+                .tmux
+                .as_mut()
+                .map(|sess| sess.set_client_size(cols, rows))
+                .unwrap_or_default();
+            for cmd in &cmds {
+                cs.send_pty(cmd);
             }
         }
     }
