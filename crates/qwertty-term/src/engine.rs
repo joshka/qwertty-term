@@ -312,6 +312,12 @@ impl Engine {
 
     /// A plain-text dump of the **full scrollback + active screen** (soft-wrap
     /// boundaries kept as newlines). Backs the `write_scrollback_file` keybind.
+    /// The visible screen as plain text (no styling). Diagnostic/test helper —
+    /// used by the tmux lifecycle smoke to report what a pane actually shows.
+    pub fn plain_string(&self) -> String {
+        self.terminal().plain_string()
+    }
+
     pub fn scrollback_string(&self) -> String {
         self.terminal()
             .screen()

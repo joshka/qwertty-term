@@ -2567,12 +2567,24 @@ impl Controller {
     fn hide_control_tab(&self, control_tab: TabId) {
         let window = {
             let mut state = self.0.borrow_mut();
-            if !state.tmux_hidden_controls.insert(control_tab) {
-                return; // already hidden
-            }
+            // `tmux_hidden_controls` records our *intent* to keep this control
+            // tab hidden; it is NOT a reliable statement about the window. When a
+            // tabbed window closes, AppKit surfaces a sibling tab — and the
+            // control window is a member of that tab group, so closing a tmux tab
+            // can put the raw `tmux -CC` surface back on screen behind our backs.
+            // Previously this early-returned on "already hidden" and so never
+            // re-hid it: the user was left staring at the control surface (whose
+            // grid painting is suppressed, so it shows stale text and no prompt)
+            // while the surviving tmux tab was fine underneath. Always re-assert.
+            state.tmux_hidden_controls.insert(control_tab);
             state.tabs.get(&control_tab).map(|t| t.window.clone())
         };
         if let Some(window) = window {
+            // Only act when it is really on screen, so the common case stays a
+            // cheap visibility check with no orderOut/render-clock churn.
+            if !window.isVisible() {
+                return;
+            }
             window.orderOut(None);
             // The render display link was bound to this window's view; a link
             // pauses for an occluded view, so re-point it at a visible window
@@ -7247,6 +7259,188 @@ impl Controller {
         }
     }
 
+    /// tmux lifecycle smoke (`QWERTTY_TERM_SMOKE_TMUXLIFE`). Drives the app's
+    /// *own* actions against a real `tmux -CC` — the same entry points Cmd-T and
+    /// a tab close use — dumping observable state between steps.
+    ///
+    /// This exists because the tmux lifecycle bugs only reproduce through real
+    /// GUI interaction: the model-level test (`tests/tmux_real.rs`) drives the
+    /// Viewer/session directly and so cannot see the native tab layer, and an
+    /// external `tmux new-window` doesn't exercise the app's own command queue
+    /// and focus sync the way Cmd-T does. Steps are timer-chained because every
+    /// tmux action round-trips through the control pty asynchronously.
+    fn run_tmuxlife_smoke(&self) -> bool {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        let step = STEP.fetch_add(1, Ordering::Relaxed);
+        match step {
+            0 => {
+                self.dump_tmux_state("1: after `tmux -CC` settled");
+                // Cmd-T equivalent, through the very same entry point.
+                if let Some(active) = self.active_tab() {
+                    eprintln!("TMUXLIFE action: new_tab_in({}) [Cmd-T]", active.0);
+                    self.new_tab_in(active);
+                } else {
+                    eprintln!("TMUXLIFE FAIL: no active tab for Cmd-T");
+                }
+            }
+            1 => {
+                self.dump_tmux_state("2: after Cmd-T");
+                // Close the most recently created tmux-managed tab — what the
+                // user does when they close the tab Cmd-T just opened.
+                let target = {
+                    let state = self.0.borrow();
+                    let mut managed: Vec<TabId> = state
+                        .tabs
+                        .iter()
+                        .filter(|(_, t)| t.surfaces.values().any(|s| s.display_source().is_some()))
+                        .map(|(id, _)| *id)
+                        .collect();
+                    managed.sort_by_key(|t| t.0);
+                    managed.last().copied()
+                };
+                match target {
+                    Some(tab) => {
+                        eprintln!(
+                            "TMUXLIFE action: close_tab_confirmed({}) [close 2nd tab]",
+                            tab.0
+                        );
+                        self.close_tab_confirmed(tab);
+                    }
+                    None => eprintln!("TMUXLIFE FAIL: no tmux-managed tab to close"),
+                }
+            }
+            _ => {
+                self.dump_tmux_state("3: after closing the second tab");
+                // Assert the invariants that were actually broken in the field.
+                let (tmux_tabs, control_visible, survivor_has_text) = {
+                    let state = self.0.borrow();
+                    let managed: Vec<&Tab> = state
+                        .tabs
+                        .values()
+                        .filter(|t| t.surfaces.values().any(|s| s.display_source().is_some()))
+                        .collect();
+                    let control_visible = state.tabs.values().any(|t| {
+                        !t.surfaces.values().any(|s| s.display_source().is_some())
+                            && t.surfaces.values().any(|s| s.tmux_session().is_some())
+                            && t.window.isVisible()
+                    });
+                    let has_text = managed.iter().any(|t| {
+                        t.surfaces.keys().any(|sid| {
+                            state
+                                .tabs
+                                .values()
+                                .filter_map(|c| c.surfaces.values().find_map(|s| s.tmux_session()))
+                                .any(|sess| {
+                                    sess.pane_terminal(*sid)
+                                        .is_some_and(|pt| !pt.plain_string().trim().is_empty())
+                                })
+                        })
+                    });
+                    (managed.len(), control_visible, has_text)
+                };
+                if tmux_tabs != 1 {
+                    tmuxlife_fail(format!(
+                        "expected exactly 1 surviving tmux tab after closing the \
+                         second, found {tmux_tabs} — closing one tab must not tear \
+                         down the others"
+                    ));
+                }
+                if control_visible {
+                    tmuxlife_fail(
+                        "the raw `tmux -CC` control tab is on screen while a tmux \
+                         window tab still exists. AppKit surfaces a sibling tab when \
+                         one closes, so the control tab must be re-hidden — otherwise \
+                         the user is left looking at the control surface (grid \
+                         painting suppressed: stale text, no prompt) instead of their \
+                         shell"
+                            .to_string(),
+                    );
+                }
+                if !survivor_has_text {
+                    tmuxlife_fail(
+                        "the surviving tmux tab's pane terminal is empty — it should \
+                         still show the shell prompt"
+                            .to_string(),
+                    );
+                }
+                eprintln!("TMUXLIFE ok: 1 tmux tab survived, control tab hidden, pane has content");
+                std::process::exit(0);
+            }
+        }
+        // Chain the next step once tmux has round-tripped.
+        true
+    }
+
+    /// Print the observable tmux/tab state: every tab, whether it mirrors a tmux
+    /// window, and the *visible text* of each pane — for a display pane that is
+    /// the Viewer-owned pane `Terminal` it actually renders, not its own (empty)
+    /// engine. Used by the tmux lifecycle smoke so a headless run can see what a
+    /// human would see (e.g. "is there a shell prompt in the surviving tab?"),
+    /// rather than inferring it from tab counts.
+    pub fn dump_tmux_state(&self, label: &str) {
+        let state = self.0.borrow();
+        let active = state.registry.active();
+        eprintln!(
+            "=== TMUXSTATE {label} === tabs={} active={:?}",
+            state.tabs.len(),
+            active.map(|t| t.0)
+        );
+        let mut ids: Vec<TabId> = state.tabs.keys().copied().collect();
+        ids.sort_by_key(|t| t.0);
+        for tid in ids {
+            let Some(t) = state.tabs.get(&tid) else {
+                continue;
+            };
+            let managed = t.surfaces.values().any(|s| s.display_source().is_some());
+            let visible = t.window.isVisible();
+            eprintln!(
+                "  tab {} tmux_managed={} visible={} surfaces={}",
+                tid.0,
+                managed,
+                visible,
+                t.surfaces.len()
+            );
+            let mut sids: Vec<SurfaceId> = t.surfaces.keys().copied().collect();
+            sids.sort_by_key(|s| s.0);
+            for sid in sids {
+                let Some(surface) = t.surfaces.get(&sid) else {
+                    continue;
+                };
+                // A display pane renders a foreign terminal; read *that*, since
+                // its own engine is intentionally empty.
+                let text = match surface.display_source() {
+                    Some(src) => state
+                        .tabs
+                        .get(&src.control_tab)
+                        .and_then(|ct| ct.surfaces.get(&src.control_surface))
+                        .and_then(|cs| cs.tmux_session())
+                        .and_then(|sess| sess.pane_terminal(sid))
+                        .map(|t| t.plain_string())
+                        .unwrap_or_else(|| "<no pane terminal>".to_string()),
+                    None => surface.engine().plain_string(),
+                };
+                let last: Vec<&str> = text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .rev()
+                    .take(2)
+                    .collect();
+                let tail: Vec<String> = last
+                    .into_iter()
+                    .rev()
+                    .map(|l| l.trim_end().to_string())
+                    .collect();
+                eprintln!(
+                    "    surface {} display={} tail={:?}",
+                    sid.0,
+                    surface.display_source().is_some(),
+                    tail
+                );
+            }
+        }
+    }
+
     /// Redirect a native split-divider drag on a tmux tab to a tmux `resize-pane`
     /// (ADR 006 — I3: tmux owns the layout). `pane_surface` is a display pane on
     /// the before-side of the divider; `width`/`height` its target cell extent.
@@ -7985,6 +8179,13 @@ define_class!(
             // 1-tab→2-tab→1-tab transition, then exit. Takes precedence over the
             // other smokes (it exits itself). Then synthetic-input, then the
             // plain auto-exit.
+            // tmux lifecycle smoke (`QWERTTY_TERM_SMOKE_TMUXLIFE`): drive the
+            // app's *own* Cmd-T / close-tab actions against a real `tmux -CC`
+            // and dump observable state at each step. Read from the env directly
+            // rather than threading another bool through `run`'s signature.
+            if std::env::var_os("QWERTTY_TERM_SMOKE_TMUXLIFE").is_some() {
+                self.schedule_selector(3.0, sel!(ghosttyTmuxLifeSmoke:));
+            }
             let has_geometry = self.ivars().smoke_geometry;
             let has_tabkeys = self.ivars().smoke_tabkeys;
             let has_splits = self.ivars().smoke_splits;
@@ -8218,6 +8419,13 @@ define_class!(
         }
 
         /// Splits smoke phase 1: build 3 panes, assert focus walk, write markers.
+        #[unsafe(method(ghosttyTmuxLifeSmoke:))]
+        fn tmuxlife_smoke(&self, _timer: &AnyObject) {
+            if self.ivars().controller.run_tmuxlife_smoke() {
+                self.schedule_selector(2.5, sel!(ghosttyTmuxLifeSmoke:));
+            }
+        }
+
         #[unsafe(method(ghosttySplitsSmoke:))]
         fn splits_smoke(&self, _timer: &AnyObject) {
             self.run_splits_smoke();
@@ -11976,6 +12184,12 @@ fn bell_fail(msg: String) -> ! {
 }
 
 /// Print a mouse-smoke failure and exit non-zero.
+/// Print a tmux-lifecycle-smoke failure and exit non-zero.
+fn tmuxlife_fail(msg: String) -> ! {
+    eprintln!("FAIL: tmux lifecycle smoke — {msg}");
+    std::process::exit(1);
+}
+
 fn mouse_fail(msg: String) -> ! {
     eprintln!("FAIL: mouse smoke — {msg}");
     std::process::exit(1);
