@@ -14,12 +14,21 @@
 //! the session's commands back to the control pty. That is the app's whole pump
 //! loop minus AppKit.
 //!
-//! The invariant it asserts is the one that makes panes render correctly:
-//! **every pane terminal is sized to the pane rect tmux reports in its layout**.
-//! It checks that both for the initial window and *after a split*, which is
-//! where the reflow bug lived (only newly-created panes were being sized).
+//! It asserts the two invariants that make panes render correctly, which is
+//! where both garbling bugs lived:
 //!
-//! Skipped (not failed) when tmux isn't installed, so it stays CI-portable.
+//! 1. **tmux lays out at *our* control client's grid.** The session is created
+//!    at a deliberately different size, so this proves we actively drive tmux
+//!    (via `refresh-client -C`) rather than passively matching it.
+//! 2. **Every pane terminal is sized to the pane rect tmux reports.** Checked
+//!    for the initial window *and after a split*, which is where the reflow bug
+//!    lived (only newly-created panes were being sized).
+//!
+//! It also fails on an unexpected control-session exit — the shape of the
+//! DCS-break class of bug.
+//!
+//! Skipped (not failed) when tmux isn't installed, so it stays CI-portable, and
+//! it cleans up its own socket so a run leaves nothing behind.
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -51,14 +60,24 @@ fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Run a `tmux` CLI command against our private socket.
-fn tmux(sock: &str, args: &[&str]) -> bool {
+/// Run a `tmux` CLI command against our private socket. We use `-S <path>`
+/// rather than `-L <name>` so the socket lives at a path we chose and can
+/// delete — `-L` leaves its socket file behind in tmux's shared tmp dir after
+/// `kill-server`, which would litter one file per CI run.
+fn tmux(sock: &std::path::Path, args: &[&str]) -> bool {
     Command::new("tmux")
-        .args(["-L", sock])
+        .arg("-S")
+        .arg(sock)
         .args(args)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Kill the server and remove its socket file, so a run leaves nothing behind.
+fn cleanup(sock: &std::path::Path) {
+    tmux(sock, &["kill-server"]);
+    let _ = std::fs::remove_file(sock);
 }
 
 /// Pump engine → session → control-pty until `done` holds, or time out.
@@ -153,9 +172,9 @@ fn real_tmux_panes_track_layout_across_split() {
         eprintln!("skipping real-tmux test: tmux not installed");
         return;
     }
-    let sock = format!("qwertty-it-{}", std::process::id());
+    let sock = std::env::temp_dir().join(format!("qwertty-it-{}.sock", std::process::id()));
     // Make sure we start clean and always tear the server down.
-    tmux(&sock, &["kill-server"]);
+    cleanup(&sock);
 
     // Spawn a real `tmux -CC` through the app's own pty spawn path.
     // SAFETY: this test binary is single-threaded at this point (one #[test] in
@@ -163,7 +182,10 @@ fn real_tmux_panes_track_layout_across_split() {
     unsafe {
         std::env::set_var(
             "QWERTTY_TERM_COMMAND",
-            format!("tmux -L {sock} -CC new-session -x {SESSION_COLS} -y {SESSION_ROWS}"),
+            format!(
+                "tmux -S {} -CC new-session -x {SESSION_COLS} -y {SESSION_ROWS}",
+                sock.display()
+            ),
         );
     }
 
@@ -205,7 +227,7 @@ fn real_tmux_panes_track_layout_across_split() {
         assert_panes_match_layout(&session, "after split-window -h");
     }));
 
-    tmux(&sock, &["kill-server"]);
+    cleanup(&sock);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
