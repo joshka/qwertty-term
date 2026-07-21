@@ -174,6 +174,11 @@ impl Engine {
         self.stream.handler.take_tmux_notifications()
     }
 
+    /// Whether grid painting is currently suppressed (diagnostic/test).
+    pub fn tmux_suppress_print(&self) -> bool {
+        self.stream.handler.suppress_print()
+    }
+
     /// Drop ground-state printing into this engine's grid while a `tmux -CC`
     /// control session is live on this surface (ADR 006 gap 5 — exit-flash).
     /// The control-mode `tmux%` prompt and stray `%…` lines arrive outside the

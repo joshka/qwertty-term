@@ -40,44 +40,70 @@ fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
-#[test]
-#[ignore = "needs a GUI (windowserver) session: builds a real NSApplication + Metal renderer + real tmux"]
-fn windowed_tmux_tab_lifecycle() {
+/// Run one lifecycle scenario end to end. `scenario` selects it
+/// (`1` = Cmd-T then close the new tab, `closeall` = close every tmux tab).
+///
+/// `tmux -CC` is launched *from a shell that outlives it* (`; exec /bin/sh -i`),
+/// matching how a user types it: when tmux exits the shell owns the pty again.
+/// Running tmux as the pty command directly would leave nothing behind and hide
+/// the whole post-exit behaviour this asserts.
+fn run_scenario(scenario: &str) {
     if !tmux_available() {
         eprintln!("skipping tmux lifecycle smoke: tmux not installed");
         return;
     }
-    let sock = std::env::temp_dir().join(format!("qwertty-life-{}.sock", std::process::id()));
-    let _ = Command::new("tmux")
-        .arg("-S")
-        .arg(&sock)
-        .arg("kill-server")
-        .output();
+    let sock = std::env::temp_dir().join(format!(
+        "qwertty-life-{}-{scenario}.sock",
+        std::process::id()
+    ));
+    let kill = |s: &std::path::Path| {
+        let _ = Command::new("tmux")
+            .arg("-S")
+            .arg(s)
+            .arg("kill-server")
+            .output();
+    };
+    kill(&sock);
 
     let status = Command::new(BIN)
         .arg("--window")
-        .env("QWERTTY_TERM_SMOKE_TMUXLIFE", "1")
+        .env("QWERTTY_TERM_SMOKE_TMUXLIFE", scenario)
         .env(
             "QWERTTY_TERM_COMMAND",
-            format!("tmux -S {} -CC new-session", sock.display()),
+            format!(
+                "tmux -S {} -CC new-session; exec /bin/sh -i",
+                sock.display()
+            ),
         )
         // Safety net: the smoke exits itself; don't hang the suite if it stalls.
         .env("QWERTTY_TERM_SMOKE_MS", "30000")
         .status()
         .expect("failed to launch qwertty-term binary");
 
-    // Always tear the server down, then report.
-    let _ = Command::new("tmux")
-        .arg("-S")
-        .arg(&sock)
-        .arg("kill-server")
-        .output();
+    kill(&sock);
     let _ = std::fs::remove_file(&sock);
 
     assert!(
         status.success(),
-        "tmux tab lifecycle smoke failed (exit {:?}). See the FAIL line and the \
-         TMUXSTATE dumps in the app's stderr for the full per-tab state.",
+        "tmux lifecycle smoke `{scenario}` failed (exit {:?}). See the FAIL line \
+         and the TMUXSTATE dumps in the app's stderr for the full per-tab state.",
         status.code(),
     );
+}
+
+#[test]
+#[ignore = "needs a GUI (windowserver) session: builds a real NSApplication + Metal renderer + real tmux"]
+fn windowed_tmux_tab_lifecycle() {
+    run_scenario("1");
+}
+
+/// Closing every tmux tab must land the user somewhere usable: the control
+/// surface restored, able to paint, and the shell that launched `tmux -CC`
+/// prompting again. Regression test for "closing the tabs gets back to tmux -CC
+/// with no control" — the control surface came back with grid painting still
+/// suppressed and the shell's prompt swallowed.
+#[test]
+#[ignore = "needs a GUI (windowserver) session: builds a real NSApplication + Metal renderer + real tmux"]
+fn windowed_tmux_close_all_tabs_restores_usable_shell() {
+    run_scenario("closeall");
 }

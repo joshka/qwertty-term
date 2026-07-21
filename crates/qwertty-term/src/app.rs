@@ -812,8 +812,17 @@ impl Surface {
         };
         // Write each command block back to the control pty (already newline-
         // terminated). This is the in-band request half of control mode.
-        for command in &update.commands {
-            self.send_pty(command);
+        //
+        // Not when this batch ended the session: control mode is in-band, so once
+        // tmux is gone the pty belongs to whatever launched it — usually the
+        // user's shell. Any command still queued (a `%window-close` queues a
+        // `list-windows` refresh, for instance) would then be *typed into their
+        // shell*, which is where the stray `sh: list-windows: command not found`
+        // after closing the last tmux tab came from.
+        if !update.exit {
+            for command in &update.commands {
+                self.send_pty(command);
+            }
         }
         let focus = update.focus;
         // On exit (or a defunct session) drop it so a later re-entry starts
@@ -2604,6 +2613,19 @@ impl Controller {
             state.tabs.get(&control_tab).map(|t| t.window.clone())
         };
         if let Some(window) = window {
+            // The control surface's grid painting is suppressed while control mode
+            // is live (so the raw `%…` protocol never flashes into view). We are
+            // about to put it back in front of the user, so it must be able to
+            // draw again — otherwise they get a window that renders nothing as
+            // they type: "back to tmux -CC with no control".
+            {
+                let state = self.0.borrow();
+                if let Some(t) = state.tabs.get(&control_tab) {
+                    for surface in t.surfaces.values() {
+                        surface.engine().set_tmux_suppress_print(false);
+                    }
+                }
+            }
             window.makeKeyAndOrderFront(None);
             self.rebind_render_clock();
         }
@@ -3488,9 +3510,21 @@ impl Controller {
     /// the Close-Tab menu item and the `close_surface`/`close_tab` keybinds.
     fn close_focused_confirmed(&self, tab: TabId) {
         let focused = self.0.borrow().tabs.get(&tab).map(|t| t.tree.focused());
-        if let Some(surface) = focused
-            && self.confirm_close_surface(tab, surface)
-        {
+        let Some(surface) = focused else { return };
+        // A tmux pane close is a *tmux* operation: `close_surface` redirects it to
+        // `kill-pane` and the reconcile removes the surface (I3). Do that before
+        // the confirm, matching `close_tab_confirmed`, which already redirects a
+        // tmux tab close without confirming. Confirming here instead fired the
+        // "Close Terminal? The terminal still has a running process" alert on
+        // every Cmd-W in a tmux pane: the prompt check reads the Viewer's pane
+        // terminal, whose OSC 133 state is only as good as what `%output` has
+        // delivered so far, so it routinely reports "not at a prompt" for a pane
+        // that plainly is.
+        if self.tmux_pane_of(tab, surface).is_some() {
+            self.close_surface(tab, surface);
+            return;
+        }
+        if self.confirm_close_surface(tab, surface) {
             self.close_surface(tab, surface);
         }
     }
@@ -7273,6 +7307,15 @@ impl Controller {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static STEP: AtomicUsize = AtomicUsize::new(0);
         let step = STEP.fetch_add(1, Ordering::Relaxed);
+        // `QWERTTY_TERM_SMOKE_TMUXLIFE=closeall` runs the "close every tmux tab"
+        // scenario instead: the user closed their way out of tmux, so the control
+        // surface must come back *usable* and `tmux -CC` must actually exit.
+        let closeall = std::env::var("QWERTTY_TERM_SMOKE_TMUXLIFE")
+            .map(|v| v == "closeall")
+            .unwrap_or(false);
+        if closeall {
+            return self.run_tmuxlife_closeall(step);
+        }
         match step {
             0 => {
                 self.dump_tmux_state("1: after `tmux -CC` settled");
@@ -7370,6 +7413,118 @@ impl Controller {
         }
         // Chain the next step once tmux has round-tripped.
         true
+    }
+
+    /// The visible text of the control surface (the one that ran `tmux -CC`),
+    /// or of the sole remaining non-display surface once the session is gone.
+    fn control_surface_text(&self) -> String {
+        let state = self.0.borrow();
+        state
+            .tabs
+            .values()
+            .flat_map(|t| t.surfaces.values())
+            .find(|s| s.display_source().is_none())
+            .map(|s| s.engine().plain_string())
+            .unwrap_or_default()
+    }
+
+    /// `closeall` scenario: close every tmux tab and check we land somewhere
+    /// usable. Reported symptom: "closing the tabs gets back to tmux -CC with no
+    /// control — doesn't close out tmux".
+    fn run_tmuxlife_closeall(&self, step: usize) -> bool {
+        match step {
+            0 => {
+                self.dump_tmux_state("1: after `tmux -CC` settled");
+                *CONTROL_TEXT_BEFORE.lock().expect("control text") = self.control_surface_text();
+                let target = {
+                    let state = self.0.borrow();
+                    state
+                        .tabs
+                        .iter()
+                        .find(|(_, t)| t.surfaces.values().any(|s| s.display_source().is_some()))
+                        .map(|(id, _)| *id)
+                };
+                match target {
+                    Some(tab) => {
+                        eprintln!(
+                            "TMUXLIFE action: close_tab_confirmed({}) [close the only tmux tab]",
+                            tab.0
+                        );
+                        self.close_tab_confirmed(tab);
+                    }
+                    None => tmuxlife_fail("no tmux tab to close".to_string()),
+                }
+                true
+            }
+            1 => {
+                // Give tmux time to process the kill + our detach.
+                self.dump_tmux_state("2: just after closing the last tmux tab");
+                true
+            }
+            _ => {
+                self.dump_tmux_state("3: settled after closing every tmux tab");
+                let (control_visible, control_suppressed, tmux_alive) = {
+                    let state = self.0.borrow();
+                    let mut visible = false;
+                    let mut suppressed = false;
+                    let mut alive = false;
+                    for t in state.tabs.values() {
+                        for s in t.surfaces.values() {
+                            if s.tmux_session().is_some() {
+                                alive = true;
+                            }
+                        }
+                        let is_control = t.surfaces.values().any(|s| s.display_source().is_none());
+                        if is_control && t.window.isVisible() {
+                            visible = true;
+                            suppressed = t
+                                .surfaces
+                                .values()
+                                .any(|s| s.engine().tmux_suppress_print());
+                        }
+                    }
+                    (visible, suppressed, alive)
+                };
+                eprintln!(
+                    "TMUXLIFE closeall: control_visible={control_visible} \
+                     control_suppressed={control_suppressed} tmux_session_alive={tmux_alive}"
+                );
+                if !control_visible {
+                    tmuxlife_fail(
+                        "no visible window left after closing every tmux tab — the \
+                         control surface must be restored (I1: never-empty window)"
+                            .to_string(),
+                    );
+                }
+                if control_suppressed {
+                    tmuxlife_fail(
+                        "the restored control surface still has grid painting \
+                         suppressed, so it renders nothing as the user types — \
+                         'back to tmux -CC with no control'"
+                            .to_string(),
+                    );
+                }
+                // The shell that launched `tmux -CC` owns the pty again and
+                // should have prompted. If its output never landed, the user is
+                // staring at a window frozen on pre-tmux text — the reported
+                // "no prompt in the remaining window".
+                let before = CONTROL_TEXT_BEFORE.lock().expect("control text").clone();
+                let after = self.control_surface_text();
+                if after.trim() == before.trim() {
+                    tmuxlife_fail(format!(
+                        "the control surface never repainted after tmux exited — it \
+                         still shows exactly the pre-tmux text, so the shell's prompt \
+                         was swallowed (grid painting must be re-enabled the moment \
+                         control mode ends, not when the app gets round to draining \
+                         the notification). text={after:?}"
+                    ));
+                }
+                eprintln!(
+                    "TMUXLIFE ok: control surface restored, painting, and the shell repainted"
+                );
+                std::process::exit(0);
+            }
+        }
     }
 
     /// Print the observable tmux/tab state: every tab, whether it mirrors a tmux
@@ -12184,6 +12339,10 @@ fn bell_fail(msg: String) -> ! {
 }
 
 /// Print a mouse-smoke failure and exit non-zero.
+/// Control-surface text captured before the tmux session is torn down, so the
+/// lifecycle smoke can tell "the shell repainted" from "the window is frozen".
+static CONTROL_TEXT_BEFORE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
 /// Print a tmux-lifecycle-smoke failure and exit non-zero.
 fn tmuxlife_fail(msg: String) -> ! {
     eprintln!("FAIL: tmux lifecycle smoke — {msg}");

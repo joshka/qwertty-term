@@ -2211,6 +2211,11 @@ impl TerminalHandler {
         }
     }
 
+    /// Whether ground-state printing is currently suppressed.
+    pub fn suppress_print(&self) -> bool {
+        self.suppress_print
+    }
+
     /// Enable/disable dropping ground-state printing (see [`suppress_print`]).
     /// The app toggles this on a `tmux -CC` control surface: `true` on the
     /// control-mode `Enter`, `false` on `%exit`. Control sequences, DCS/tmux
@@ -2978,6 +2983,17 @@ impl Handler for TerminalHandler {
         self.write_pty(s.as_bytes());
     }
     fn tmux(&mut self, notification: Notification) {
+        // Control mode ended: stop suppressing grid painting *here*, in the byte
+        // stream, rather than waiting for the app to drain this notification and
+        // clear the flag itself. Whatever launched `tmux -CC` — usually the
+        // user's shell — owns the pty again the moment tmux exits, and the parse
+        // thread runs ahead of the app's drain, so anything it writes in that gap
+        // (classically the shell's first prompt) would be silently dropped: the
+        // "tmux exited but the window shows no prompt" symptom. Clearing it on
+        // the same byte that ends control mode closes that window entirely.
+        if matches!(notification, Notification::Exit) {
+            self.suppress_print = false;
+        }
         // Queue the control-mode notification for the app-tails Viewer (ADR 004
         // slice 5) to drain via `take_tmux_notifications`. Additive event seam
         // mirroring the pending clipboard/notification queues; upstream feeds
