@@ -728,6 +728,102 @@ impl Terminal {
         snap
     }
 
+    /// Rows of scrollback history above the active area — the maximum a
+    /// viewport can scroll up. Mirrors the app engine's `scrollback_len`;
+    /// cheap (no snapshot). Used by the tmux display-pane wheel path, whose
+    /// surface has no engine of its own to clamp against.
+    pub fn scrollback_len(&self) -> usize {
+        let pages = &self.screen().pages;
+        pages.total_rows().saturating_sub(pages.rows() as usize)
+    }
+
+    // -- tmux display-pane selection --------------------------------------
+    // A tmux `%output` display pane renders this (Viewer-owned) `Terminal` by
+    // reference and has no app `Engine` of its own, so mouse selection is driven
+    // straight against it. These mirror the app engine's selection helpers.
+
+    /// Map a visible-window cell `(col, row)` — row 0 = top of the viewport
+    /// `offset` rows up from the bottom — to an absolute screen point. `None`
+    /// if the cell is outside the grid or lands in the blank top padding of a
+    /// short history. Port of the app engine's `window_to_screen_point`.
+    pub fn window_to_screen_point(
+        &self,
+        col: usize,
+        row: usize,
+        offset: usize,
+    ) -> Option<(usize, usize)> {
+        let pages = &self.screen().pages;
+        let (cols, rows) = (pages.cols() as usize, pages.rows() as usize);
+        if col >= cols || row >= rows {
+            return None;
+        }
+        let total = pages.total_rows();
+        let scrollback_len = total.saturating_sub(rows);
+        let offset = offset.min(scrollback_len);
+        let window_len = rows.min(total - offset);
+        let pad = rows - window_len;
+        if row < pad {
+            return None;
+        }
+        let window_top = total.saturating_sub(offset + rows);
+        Some((col, window_top + (row - pad)))
+    }
+
+    /// Set the selection from two absolute-screen points (inclusive). Returns
+    /// `false` (leaving any existing selection) if either point doesn't resolve
+    /// to a pin. Port of the app engine's `select_screen_points`.
+    pub fn select_screen_points(
+        &mut self,
+        a: (usize, usize),
+        b: (usize, usize),
+        rectangle: bool,
+    ) -> bool {
+        let pin = |p: (usize, usize)| {
+            let point = Point::screen(p.0 as crate::page::size::CellCountInt, p.1 as u32);
+            self.screen().pages.pin(point)
+        };
+        let (Some(start), Some(end)) = (pin(a), pin(b)) else {
+            return false;
+        };
+        let sel = crate::screen::selection::Selection::init(start, end, rectangle);
+        self.screen_mut().select(Some(sel));
+        true
+    }
+
+    /// Clear any active selection.
+    pub fn clear_selection(&mut self) {
+        self.screen_mut().clear_selection();
+    }
+
+    /// The current selection as an ordered absolute-screen rectangle
+    /// `(tl_x, tl_y, br_x, br_y, rectangle)`, or `None` when nothing is
+    /// selected. The tint pass consumes this pin-free geometry.
+    pub fn selection_screen_rect(&self) -> Option<(usize, usize, usize, usize, bool)> {
+        let sel = self.screen().selection.as_ref()?;
+        let pages = &self.screen().pages;
+        let tl = pages
+            .point_from_pin(Tag::Screen, sel.top_left(pages))?
+            .coord();
+        let br = pages
+            .point_from_pin(Tag::Screen, sel.bottom_right(pages))?
+            .coord();
+        Some((
+            tl.x as usize,
+            tl.y as usize,
+            br.x as usize,
+            br.y as usize,
+            sel.rectangle,
+        ))
+    }
+
+    /// The selected text (trailing whitespace trimmed per `trim`), or `None`
+    /// when nothing is selected. Walks the pagelist, so it can reach into
+    /// scrollback above the rendered window.
+    pub fn selection_text(&self, trim: bool) -> Option<String> {
+        let sel = self.screen().selection.as_ref()?;
+        Some(self.screen().selection_string(sel, trim))
+    }
+
     /// Build an owned [`SnapshotWindow`] of just the rows needed to render a
     /// viewport `scrollback_offset` rows up from the bottom. Convenience
     /// wrapper over [`Screen::snapshot_window`] that also reports the real
@@ -1022,6 +1118,27 @@ mod tests {
         // Full reset (RIS) restores the default block style.
         let term = feed(10, 2, b"\x1b[5 q\x1bc");
         assert_eq!(term.snapshot().cursor.style, CursorStyle::Block);
+    }
+
+    #[test]
+    fn display_pane_selection_round_trips() {
+        // Selection helpers for tmux display panes (no app Engine): select a
+        // visible-window span, read back its rect + text.
+        let mut term = feed(5, 3, b"hello\r\nworld\r\nabcde");
+        // Window (0,0)..(4,0) at offset 0 = the top visible row "hello".
+        let a = term.window_to_screen_point(0, 0, 0).unwrap();
+        let b = term.window_to_screen_point(4, 0, 0).unwrap();
+        assert!(term.select_screen_points(a, b, false));
+        assert_eq!(term.selection_text(true).as_deref(), Some("hello"));
+        let rect = term.selection_screen_rect().unwrap();
+        assert_eq!((rect.0, rect.2), (0, 4), "rect spans cols 0..4");
+        assert!(!rect.4, "linear, not rectangular");
+        // Clear removes it.
+        term.clear_selection();
+        assert!(term.selection_text(true).is_none());
+        assert!(term.selection_screen_rect().is_none());
+        // Out-of-grid window point → None (no selection set).
+        assert!(term.window_to_screen_point(5, 0, 0).is_none());
     }
 
     #[test]

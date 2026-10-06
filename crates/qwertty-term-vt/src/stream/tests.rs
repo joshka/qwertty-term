@@ -2160,3 +2160,35 @@ fn apc_vector_boundaries_match_scalar() {
         }
     }
 }
+
+#[test]
+fn suppress_print_drops_ground_text_but_keeps_control_sequences() {
+    // ADR 006 gap 5: on a tmux -CC control surface the `tmux%` prompt / stray
+    // `%…` lines arrive as ground-state text and must not paint the grid, while
+    // control sequences (and the erase used to wipe pre-suppress junk) still run.
+    let mut s = term(20, 3);
+    s.feed(b"before");
+    assert_eq!(s.terminal().plain_string().trim_end(), "before");
+
+    s.handler.set_suppress_print(true);
+    // Ground-state prints are dropped …
+    s.feed(b"tmux%");
+    s.feed(b"%output %1 junk");
+    assert_eq!(
+        s.terminal().plain_string().trim_end(),
+        "before",
+        "ground text must be dropped while suppressed"
+    );
+    // … but a control sequence (erase display + home) still applies.
+    s.feed(b"\x1b[2J\x1b[H");
+    assert_eq!(
+        s.terminal().plain_string().trim_end(),
+        "",
+        "erase-display control sequence must still run while suppressed"
+    );
+
+    // Re-enabling printing paints again (the shell repaints after %exit).
+    s.handler.set_suppress_print(false);
+    s.feed(b"after");
+    assert_eq!(s.terminal().plain_string().trim_end(), "after");
+}

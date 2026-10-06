@@ -29,9 +29,16 @@ impl FrameDump {
     /// `QWERTTY_TERM_DUMP_FRAME` — path prefix (enables dumping).
     /// `QWERTTY_TERM_DUMP_EVERY` — dump every Nth present (default 30, ~0.5s at
     /// 60Hz); clamped to at least 1.
-    pub fn from_env() -> Option<Self> {
-        let prefix = std::env::var("QWERTTY_TERM_DUMP_FRAME").ok()?;
-        if prefix.is_empty() {
+    ///
+    /// `tab`/`surface` are this surface's ids; they are folded into the file
+    /// name (`<prefix>-t<tab>-s<surface>-<seq>.png`) so that when several
+    /// surfaces share the same prefix (e.g. a `tmux -CC` control surface and its
+    /// display-only pane surfaces) their frames land in distinct files instead
+    /// of overwriting each other. This is debug-only output; no tooling parses
+    /// the name.
+    pub fn from_env(tab: u64, surface: u64) -> Option<Self> {
+        let base = std::env::var("QWERTTY_TERM_DUMP_FRAME").ok()?;
+        if base.is_empty() {
             return None;
         }
         let every = std::env::var("QWERTTY_TERM_DUMP_EVERY")
@@ -39,6 +46,7 @@ impl FrameDump {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30)
             .max(1);
+        let prefix = format!("{base}-t{tab}-s{surface}");
         Some(Self {
             prefix,
             every,

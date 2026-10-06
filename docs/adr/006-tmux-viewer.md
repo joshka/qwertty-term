@@ -155,8 +155,8 @@ from the model's `PaneRect`s).
 2. **5b — reconcile logic** (landed): `layout_to_split_tree` + `Reconciler` ->
    `ReconcilePlan` (`CreateTab`/`RemoveTab`/`SetSplitTree`) + `SplitTree::from_node`.
    Unit-tested. The **native application** of a plan (creating `NSWindow` tabs +
-   display-only pane surfaces) is **5b-native**, deferred — see "5c
-   surface-binding" below.
+   display-only pane surfaces) is **5b-native** (landed — see "5c
+   surface-binding" below).
 3. **5c — control-mode lifecycle** (landed, this PR): a new
    `Engine::take_tmux_notifications` drain plus `tmux_session::TmuxSession`.
    `Surface::pump` constructs the session on
@@ -164,7 +164,7 @@ from the model's `PaneRect`s).
    control pty, and tears down on `Exit`; the `ReconcilePlan` rides out on
    `PumpResult`. The "make it live" slice. Headless `--tmux-smoke` verifies it.
    **5b-native** (turning the plan into real native tabs/display-only surfaces)
-   is the remaining follow-up — see "5c surface-binding".
+   landed as a follow-up — see "5c surface-binding".
 4. **5d — input + focus + resize**: route keyboard/mouse to the active pane
    (tmux `send-keys`), track active window/pane focus, propagate native resize to
    tmux.
@@ -204,36 +204,47 @@ tab creation, is recorded here so reviewers see the design decision.
   the native tabs, each window's split tree, and that `%output` reached the
   right pane `Terminal`. No GPU/window, so it runs anywhere.
 
-**The novel piece — display-only pane surfaces (deferred to 5b-native):** a tmux
+**The novel piece — display-only pane surfaces (landed in 5b-native):** a tmux
 pane surface is **not** pty-backed. Its bytes arrive via `%output` from the
 Viewer, and its `Terminal` is owned by the Viewer's `Pane`, not by a
 `Surface { engine: Arc<Mutex<Engine>>, io: TabIo }`. Every existing `Surface`
-field and `build_surface` assume a pty + a private engine, so a Viewer-backed
-pane is a **new construction mode**. The chosen design (to implement in
-5b-native, not blindly here where AppKit behaviour can't be exercised):
+field and `build_surface` assumed a pty + a private engine, so a Viewer-backed
+pane is a **new construction mode**. The implemented design (Option (a)):
 
-- Introduce a `Surface` source seam — the minimal form is a display-only
-  surface that holds **no `TabIo`** and renders a `Terminal` it does **not**
-  own. Two viable shapes: (a) the render path snapshots
-  `controller.tmux_session(control_surface).pane_terminal(surface_id)` by
-  reference each frame (no engine duplication; the Viewer stays the single
-  owner/feeder of pane bytes — preferred, matches upstream's "the Viewer hands
-  out surfaces"); or (b) each pane's engine becomes a shared
-  `Arc<Mutex<Engine>>` that the session feeds instead of an owned `Stream`
-  (simpler render path, but couples the headless Viewer to the app engine and
-  duplicates the ownership). **(a) is preferred.**
-- `Controller::apply_tmux_reconciles` then turns each `ReconcileOp` into native
-  intent: `CreateTab` → spawn a display-only tab, `RemoveTab` → close it,
-  `SetSplitTree` → set the tab's `SplitTree` (already the exact type the
-  Reconciler emits) and bind each leaf to its pane `Terminal`;
-  `dropped_surfaces` frees the renderer surfaces of closed panes. The control
-  surface itself is hidden while its session is live (upstream behaviour).
+- `Surface::io` became `Option<TabIo>` and a new `Surface::display:
+  Option<DisplaySource>` field marks a display-only pane surface. Such a surface
+  has **no `TabIo`** (all pty writes / resizes / focus reports are no-ops until
+  slice 5d) and renders a `Terminal` it does **not** own: the render pass
+  (`Controller::render_tmux_panes`) snapshots
+  `control_surface.tmux_session().pane_terminal(surface_id)` **by reference**
+  each frame (no engine duplication; the Viewer stays the single owner/feeder of
+  pane bytes). Its own engine is built but stays empty/unused. `build_surface`
+  gained a shared body (`build_surface_with`) so `build_display_surface` skips
+  only the pty spawn. `Surface::render` was split into a reusable `render_window`
+  that draws any captured `SnapshotWindow` — the normal path passes the surface's
+  own tracking snapshot, the tmux path passes the foreign pane's snapshot.
+- `Controller::apply_tmux_reconciles` turns each plan into native intent:
+  `SetSplitTree` create-or-updates a native tab (a tmux window → a native tab,
+  grouped with the control surface's window; each pane → a display-only split
+  surface bound to its pane `Terminal`), `RemoveTab` closes a gone window's tab,
+  and control-mode `Exit` tears every tab of that session down. A
+  `ControllerState::tmux_tabs: HashMap<(control tab, control surface), HashMap<
+  window_id, TabId>>` is the single source of truth for which native tabs mirror
+  a session (so creation is driven off `SetSplitTree`, which carries the tree and
+  is emitted for every present window each reconcile). `dropped_surfaces` /
+  vanished leaves free the renderer surfaces of closed panes via the per-tab leaf
+  diff in `update_tmux_tab`.
 
-Until 5b-native lands, `apply_tmux_reconciles` records each reconciliation (so a
-live `tmux -CC` session is observable and the seam is explicit) and the pane
-`Terminal`s are already populated by `%output` and reachable via
-`TmuxSession::pane_terminal`. Focus / resize / input routing stay in 5d, and
-capture-content fidelity in 5e, unchanged.
+Focus / resize / input routing stay in 5d, and capture-content fidelity in 5e,
+unchanged. **Not headlessly verifiable:** the actual on-screen appearance of the
+native tabs/splits needs a macOS window server, so the AppKit application of a
+plan is validated by human visual test (see the PR), while the headless
+`--tmux-smoke` verifies the model + the exact per-pane `pane_terminal` binding
+the render pass depends on. **Known rough edges** (for the human pass): the
+control surface is left visible rather than hidden while its session is live
+(upstream hides it); pane grids are sized by tmux's layout, not the native pane
+rect (native→tmux resize is 5d), so a pane may letterbox/clip if the native tab
+is a different size than tmux's assumed 80×24-ish geometry.
 
 ## Consequences
 
