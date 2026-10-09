@@ -390,21 +390,21 @@ fn load_and_add_image(
     let mut loading: LoadingImage = if terminal.screen().kitty_loading.is_some() {
         // Continue the in-progress transfer.
         let more = t.more_chunks;
-        let display;
         {
             let loading = terminal.screen_mut().kitty_loading.as_mut().unwrap();
             loading.add_data(&cmd.data)?;
-            display = loading.display;
         }
 
-        // If we have more, we're done for now (defer completion).
+        // If we have more, we're done for now (defer completion). The display,
+        // if any, stays deferred too — it is only surfaced on the chunk that
+        // completes the transfer, matching the opening branch below.
         if more {
             let image_id = terminal.screen().kitty_loading.as_ref().unwrap().image.id;
             return Ok(LoadResult {
                 image_id,
                 implicit_id: false,
                 more: true,
-                display,
+                display: None,
             });
         }
 
@@ -606,6 +606,38 @@ mod tests {
 
         let cmd = parse("a=T,f=24,t=d,s=1,v=2,c=10,r=1,i=0,I=0;////////");
         assert!(execute(&mut t, &cmd).is_none());
+    }
+
+    /// Regression for <https://github.com/joshka/qwertty-term/issues/327>: a
+    /// chunked transmit-and-display (`a=T,m=1` with an INTERMEDIATE
+    /// continuation chunk, not just an opening and a final one) must defer
+    /// `display` on every chunk but the last, matching `LoadResult::more`'s
+    /// own contract ("do not respond, do not display"). Before the fix,
+    /// `load_and_add_image`'s continuation branch handed back the deferred
+    /// display on every chunk, tripping `debug_assert!(!load.more)` in
+    /// [`transmit`] as soon as a transfer needed more than two chunks.
+    ///
+    /// A 3x1 RGB image (9 bytes -> 12 base64 chars) split into three 4-char
+    /// chunks, each a multiple of 4 as the protocol requires.
+    #[test]
+    fn chunked_transmit_and_display_defers_display_on_intermediate_chunk() {
+        let mut t = term();
+
+        // Opens the transfer; more chunks follow.
+        let cmd = parse("a=T,f=24,s=3,v=1,t=d,i=1,m=1;AAEC");
+        assert!(execute(&mut t, &cmd).is_none());
+
+        // Intermediate continuation: this is the chunk that panicked pre-fix.
+        let cmd = parse("m=1;AwQF");
+        assert!(execute(&mut t, &cmd).is_none());
+
+        // Final chunk: completes the transfer and performs the display.
+        let cmd = parse("m=0;BgcI");
+        execute(&mut t, &cmd);
+
+        let storage = &t.screen().kitty_images;
+        assert_eq!(storage.images.len(), 1);
+        assert_eq!(storage.placements.len(), 1);
     }
 
     /// Port of `graphics_exec.zig:576-613`, "kittygfx retransmit same id gets
